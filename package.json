@@ -1,0 +1,24 @@
+{
+  "name": "agent-fabric",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AgentFabric — Run any agent, on any model, in any environment.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:server": "npm run dev -w @agentfabric/server",
+    "dev:web": "npm run dev -w @agentfabric/web",
+    "start": "npm run start -w @agentfabric/server",
+    "cli": "npm run cli -w @agentfabric/cli --",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
