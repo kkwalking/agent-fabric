@@ -14,11 +14,16 @@ import {
   SessionService,
   ArtifactService,
   UsageService,
+  HandoffService,
+  RuntimeSessionService,
   seedDefaults,
+  effectiveCapabilities,
   type NewTaskInput,
+  type ContinueTaskInput,
   type Run,
+  type Task,
 } from "@agentfabric/core";
-import { buildRegistry } from "@agentfabric/runtimes";
+import { buildRegistry, createDockerContainerOps } from "@agentfabric/runtimes";
 
 export interface ServerOptions {
   dataDir: string;
@@ -61,7 +66,11 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   const sessions = new SessionService(store);
   const artifacts = new ArtifactService(store);
   const usage = new UsageService(store);
-  const runs = new RunService(store, bus, registry);
+  const handoffs = new HandoffService(store);
+  const runtimeSessions = new RuntimeSessionService(store);
+  const runs = new RunService(store, bus, registry, createDockerContainerOps());
+  // Re-arm keep-alive idle timers from container labels after a restart.
+  await runs.recoverKeepAliveContainers();
 
   const app = express();
   app.use(cors());
@@ -84,6 +93,8 @@ export async function createApp(options: ServerOptions): Promise<Express> {
         artifacts: artifacts.list().length,
         secrets: secrets.list().length,
         agents: profiles.list().length,
+        handoffs: handoffs.list().length,
+        runtimeSessions: runtimeSessions.list().length,
       },
       recentRuns: runs.list().slice(0, 10),
       usage: usage.summary(),
@@ -179,12 +190,28 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     removed ? ok(res, { ok: true }) : fail(res, new Error("Runtime not found"), 404);
   });
 
+  // Effective harness capabilities (spec v1 §17): adapter declarations
+  // overridden by the runtime record.
+  app.get("/api/runtimes/:id/capabilities", (req, res) => {
+    const r = runtimes.get(req.params.id);
+    if (!r) return fail(res, new Error("Runtime not found"), 404);
+    ok(res, effectiveCapabilities(registry.get(r.kind), r));
+  });
+
   /* ---------------- workspaces ---------------- */
 
   app.get("/api/workspaces", (_req, res) => ok(res, workspaces.list()));
   app.post("/api/workspaces", async (req, res) => {
     try {
       ok(res, await workspaces.create(req.body), 201);
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+  // Import an existing working directory or git repository (spec v1 §11).
+  app.post("/api/workspaces/import", async (req, res) => {
+    try {
+      ok(res, await workspaces.import(req.body), 201);
     } catch (e) {
       fail(res, e);
     }
@@ -196,6 +223,21 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   app.put("/api/workspaces/:id", async (req, res) => {
     const w = await workspaces.update(req.params.id, req.body);
     w ? ok(res, w) : fail(res, new Error("Workspace not found"), 404);
+  });
+  // Persist/verify the workspace after a run (spec v1 §11 Save).
+  app.post("/api/workspaces/:id/save", async (req, res) => {
+    try {
+      const runId = typeof req.body?.runId === "string" ? req.body.runId : undefined;
+      ok(res, await workspaces.save(req.params.id, runId));
+    } catch (e) {
+      fail(res, e, 404);
+    }
+  });
+  // Tasks & runs referencing this workspace (runtime-neutral usage).
+  app.get("/api/workspaces/:id/usage", (req, res) => {
+    const w = workspaces.get(req.params.id);
+    if (!w) return fail(res, new Error("Workspace not found"), 404);
+    ok(res, workspaces.usage(req.params.id));
   });
   app.delete("/api/workspaces/:id", async (req, res) => {
     const removed = await workspaces.remove(req.params.id);
@@ -248,6 +290,34 @@ export async function createApp(options: ServerOptions): Promise<Express> {
       ok(res, await tasks.create(req.body as NewTaskInput), 201);
     } catch (e) {
       fail(res, e);
+    }
+  });
+  app.get("/api/tasks/:id", (req, res) => {
+    const t = tasks.get(req.params.id);
+    t ? ok(res, t) : fail(res, new Error("Task not found"), 404);
+  });
+  app.get("/api/tasks/:id/runs", (req, res) => ok(res, runs.forTask(req.params.id)));
+
+  // Preview of the resume-vs-handoff decision (spec v1 §18: make the
+  // continuity explicit before executing).
+  app.get("/api/tasks/:id/continue-options", (req, res) => {
+    try {
+      const runtimeId = typeof req.query.runtimeId === "string" ? req.query.runtimeId : undefined;
+      ok(res, runs.continueOptions(req.params.id, runtimeId));
+    } catch (e) {
+      fail(res, e, 404);
+    }
+  });
+
+  // Continue a task: same harness → native Resume; different harness
+  // (or no native resume) → Handoff (spec v1 §20).
+  app.post("/api/tasks/:id/continue", async (req, res) => {
+    try {
+      const body = req.body as ContinueTaskInput;
+      if (!body?.prompt) throw new Error("prompt is required");
+      ok(res, await runs.continueTask(req.params.id, body), 201);
+    } catch (e) {
+      fail(res, e, 404);
     }
   });
 
@@ -344,6 +414,58 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const removed = await sessions.remove(req.params.id);
     removed ? ok(res, { ok: true }) : fail(res, new Error("Session not found"), 404);
   });
+
+  /* ---------------- handoffs (spec v1 §4–§8) ---------------- */
+
+  app.get("/api/handoffs", (req, res) => {
+    const taskId = typeof req.query.taskId === "string" ? req.query.taskId : undefined;
+    const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
+    ok(res, handoffs.list({ taskId, runId }));
+  });
+  app.get("/api/handoffs/:id", (req, res) => {
+    const h = handoffs.get(req.params.id);
+    h ? ok(res, h) : fail(res, new Error("Handoff not found"), 404);
+  });
+  // Fold user-provided notes into an existing handoff (spec v1 §7).
+  app.post("/api/handoffs/:id/notes", async (req, res) => {
+    const { notes } = (req.body ?? {}) as { notes?: string };
+    if (!notes?.trim()) return fail(res, new Error("notes is required"));
+    try {
+      const h = await handoffs.addUserNotes(req.params.id, notes);
+      h ? ok(res, h) : fail(res, new Error("Handoff not found"), 404);
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+  app.delete("/api/handoffs/:id", async (req, res) => {
+    const removed = await handoffs.remove(req.params.id);
+    removed ? ok(res, { ok: true }) : fail(res, new Error("Handoff not found"), 404);
+  });
+
+  /* ---------------- runtime session references (spec v1 §3/§9) ---------------- */
+
+  app.get("/api/runtime-sessions", (req, res) => {
+    const taskId = typeof req.query.taskId === "string" ? req.query.taskId : undefined;
+    const runtimeKind = typeof req.query.runtimeKind === "string" ? req.query.runtimeKind : undefined;
+    const runtimeId = typeof req.query.runtimeId === "string" ? req.query.runtimeId : undefined;
+    ok(res, runtimeSessions.list({ taskId, runtimeKind, runtimeId }));
+  });
+  app.get("/api/runtime-sessions/:id", (req, res) => {
+    const s = runtimeSessions.get(req.params.id);
+    s ? ok(res, s) : fail(res, new Error("Runtime session not found"), 404);
+  });
+  app.post("/api/runtime-sessions/:id/expire", async (req, res) => {
+    const s = await runtimeSessions.expire(req.params.id);
+    s ? ok(res, s) : fail(res, new Error("Runtime session not found"), 404);
+  });
+  app.delete("/api/runtime-sessions/:id", async (req, res) => {
+    const removed = await runtimeSessions.remove(req.params.id);
+    removed ? ok(res, { ok: true }) : fail(res, new Error("Runtime session not found"), 404);
+  });
+
+  /* ---------------- containers (keep-alive inspection) ---------------- */
+
+  app.get("/api/containers/kept", (_req, res) => ok(res, runs.keptContainers()));
 
   /* ---------------- artifacts ---------------- */
 

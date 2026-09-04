@@ -10,6 +10,7 @@ function NewRunForm({ onCreated }: { onCreated: (runId: string) => void }) {
   const [runtimeId, setRuntimeId] = useState("");
   const [modelId, setModelId] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
+  const [lifecycle, setLifecycle] = useState("");
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
@@ -21,6 +22,7 @@ function NewRunForm({ onCreated }: { onCreated: (runId: string) => void }) {
         runtimeId: runtimeId || undefined,
         modelId: modelId || undefined,
         workspaceId: workspaceId || undefined,
+        lifecycle: lifecycle ? { mode: lifecycle } : undefined,
       });
       setPrompt("");
       onCreated(r.run.id);
@@ -55,6 +57,12 @@ function NewRunForm({ onCreated }: { onCreated: (runId: string) => void }) {
           <option value="">Workspace: none</option>
           {(workspaces.data ?? []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
         </select>
+        <select className="pill" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)} title="Container lifecycle">
+          <option value="">Lifecycle: runtime default</option>
+          <option value="ephemeral">Lifecycle: ephemeral</option>
+          <option value="keep-alive">Lifecycle: keep-alive</option>
+          <option value="persistent">Lifecycle: persistent</option>
+        </select>
         <button className="send" title="Run task" disabled={busy || !prompt.trim()} onClick={submit}>
           <Icon name="arrowUp" size={16} />
         </button>
@@ -75,7 +83,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: string) => void }) {
         {data && data.length > 0 ? (
           <table>
             <thead>
-              <tr><th>Run</th><th>Title</th><th>Status</th><th>Runtime</th><th>Model</th><th>Cost</th><th>Created</th><th></th></tr>
+              <tr><th>Run</th><th>Title</th><th>Status</th><th>Runtime</th><th>Continuity</th><th>Model</th><th>Cost</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
               {data.map((r) => (
@@ -84,6 +92,7 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: string) => void }) {
                   <td>{r.taskTitle}</td>
                   <td><StatusBadge status={r.status} /></td>
                   <td>{r.runtimeName ?? "-"}</td>
+                  <td className="muted">{r.continuity ?? "new"}</td>
                   <td>{r.modelName ?? "-"}</td>
                   <td>{fmtCost(r.cost)}</td>
                   <td className="muted">{fmtTime(r.createdAt)}</td>
@@ -110,11 +119,20 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: string) => void }) {
   );
 }
 
+const CONTINUITY_LABEL: Record<string, string> = {
+  new: "new session",
+  resume: "▶ resume (native session)",
+  handoff: "⇄ handoff (new native session)",
+};
+
 export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => void }) {
   const { data: run, error, reload } = useAsync<any>(() => get(`/api/runs/${runId}`), [runId]);
   const [events, setEvents] = useState<any[]>([]);
-  const [tab, setTab] = useState<"events" | "logs" | "artifacts">("events");
+  const [tab, setTab] = useState<"events" | "logs" | "artifacts" | "continuity">("events");
   const [artifacts, setArtifacts] = useState<any[]>([]);
+  const [previousHandoff, setPreviousHandoff] = useState<any>(null);
+  const [generatedHandoff, setGeneratedHandoff] = useState<any>(null);
+  const [sessionRef, setSessionRef] = useState<any>(null);
 
   useEffect(() => {
     let unsub: () => void = () => {};
@@ -130,6 +148,16 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
     }
     return unsub;
   }, [runId]);
+
+  // Continuity detail: handoffs, native session reference.
+  useEffect(() => {
+    if (run?.previousHandoffId) get<any>(`/api/handoffs/${run.previousHandoffId}`).then(setPreviousHandoff).catch(() => {});
+    else setPreviousHandoff(null);
+    if (run?.generatedHandoffId) get<any>(`/api/handoffs/${run.generatedHandoffId}`).then(setGeneratedHandoff).catch(() => {});
+    else setGeneratedHandoff(null);
+    if (run?.runtimeSessionRefId) get<any>(`/api/runtime-sessions/${run.runtimeSessionRefId}`).then(setSessionRef).catch(() => {});
+    else setSessionRef(null);
+  }, [run?.previousHandoffId, run?.generatedHandoffId, run?.runtimeSessionRefId]);
 
   useEffect(() => {
     if (!run) return;
@@ -172,17 +200,47 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
         <div className="stat"><div className="num"><StatusBadge status={run.status} /></div><div className="lbl">status</div></div>
         <div className="stat"><div className="num">{run.runtimeName ?? "-"}</div><div className="lbl">runtime</div></div>
         <div className="stat"><div className="num">{run.modelName ?? "-"}</div><div className="lbl">model</div></div>
+        <div className="stat"><div className="num">{CONTINUITY_LABEL[run.continuity ?? "new"] ?? run.continuity}</div><div className="lbl">continuity</div></div>
+        <div className="stat"><div className="num">{run.lifecycle?.mode ?? "ephemeral"}</div><div className="lbl">container lifecycle</div></div>
         <div className="stat"><div className="num">{fmtCost(run.cost)}</div><div className="lbl">cost</div></div>
         <div className="stat"><div className="num">{(run.usage?.modelRequests ?? 0)}</div><div className="lbl">model calls</div></div>
         <div className="stat"><div className="num">{(run.usage?.inputTokens ?? 0) + (run.usage?.outputTokens ?? 0)}</div><div className="lbl">tokens</div></div>
       </div>
+
+      {(previousHandoff || generatedHandoff || sessionRef || run.workspaceId) && (
+        <div className="card">
+          <div className="row" style={{ gap: 18, flexWrap: "wrap" }}>
+            {run.workspaceId && (
+              <span>workspace: <span className="mono" title={run.workspaceId}>{shortId(run.workspaceId)}</span></span>
+            )}
+            {previousHandoff && (
+              <span>
+                consumed handoff: <span className="mono">{shortId(previousHandoff.id)}</span>{" "}
+                <span className="muted">({previousHandoff.fromRuntimeName ?? previousHandoff.fromRuntimeKind} → {previousHandoff.toRuntimeName ?? previousHandoff.toRuntimeKind})</span>
+              </span>
+            )}
+            {generatedHandoff && (
+              <span>
+                generated handoff: <span className="mono">{shortId(generatedHandoff.id)}</span>{" "}
+                <span className="muted">({generatedHandoff.source})</span>
+              </span>
+            )}
+            {sessionRef && (
+              <span>
+                native session: <span className="mono" title={sessionRef.nativeSessionRef}>{sessionRef.nativeSessionRef}</span>{" "}
+                <span className="muted">({sessionRef.runtimeKind}{sessionRef.resumeSupported ? ", resumable" : ""})</span>
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {run.error && (
         <div className="card" style={{ borderColor: "var(--red)", color: "var(--red)" }}>Error: {run.error}</div>
       )}
 
       <div className="row" style={{ margin: "16px 0" }}>
-        {(["events", "logs", "artifacts"] as const).map((t) => (
+        {(["events", "logs", "artifacts", "continuity"] as const).map((t) => (
           <button key={t} className={tab === t ? "primary" : ""} onClick={() => setTab(t)}>
             {t} {t === "events" ? `(${events.length})` : t === "artifacts" ? `(${artifacts.length})` : ""}
           </button>
@@ -225,6 +283,47 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {tab === "continuity" && (
+          <div>
+            <p className="sub">
+              How this run continues the task: <strong>{CONTINUITY_LABEL[run.continuity ?? "new"] ?? run.continuity}</strong>.
+              Same harness → native Resume; different harness → Handoff (sessions are never migrated).
+            </p>
+            <details open={Boolean(run.inputInstruction && run.inputInstruction.length < 800)}>
+              <summary>Input instruction given to the agent</summary>
+              <pre style={{ whiteSpace: "pre-wrap" }}>{run.inputInstruction ?? run.taskTitle}</pre>
+            </details>
+            {previousHandoff && (
+              <>
+                <h2 style={{ marginTop: 14 }}>Consumed handoff</h2>
+                <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(previousHandoff.content, null, 2)}</pre>
+              </>
+            )}
+            {generatedHandoff && (
+              <>
+                <h2 style={{ marginTop: 14 }}>Generated handoff (for the next continuation)</h2>
+                <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(generatedHandoff.content, null, 2)}</pre>
+              </>
+            )}
+            {sessionRef && (
+              <>
+                <h2 style={{ marginTop: 14 }}>Runtime-native session reference</h2>
+                <pre style={{ whiteSpace: "pre-wrap" }}>
+{`runtime kind : ${sessionRef.runtimeKind}
+native ref   : ${sessionRef.nativeSessionRef}
+resumable    : ${sessionRef.resumeSupported ? "yes" : "no"}
+status       : ${sessionRef.status}`}
+                </pre>
+                <p className="muted">
+                  AgentFabric stores this reference verbatim; the session's internal structure belongs to the harness.
+                </p>
+              </>
+            )}
+            {!previousHandoff && !generatedHandoff && !sessionRef && (
+              <div className="muted">No handoff or native session reference on this run.</div>
+            )}
           </div>
         )}
       </div>

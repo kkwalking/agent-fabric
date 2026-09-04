@@ -23,6 +23,7 @@ import type {
   RunStatus,
   ExecutionPolicy,
   ResourceLimits,
+  RuntimeSessionRef,
 } from "./types.js";
 
 export function now(): string {
@@ -226,6 +227,8 @@ export interface NewRuntimeInput {
   defaultModelId?: ID;
   enabled?: boolean;
   ephemeral?: boolean;
+  lifecycle?: Runtime["lifecycle"];
+  capabilities?: Runtime["capabilities"];
   resourceLimits?: ResourceLimits;
   env?: Record<string, string>;
   secretIds?: ID[];
@@ -250,6 +253,8 @@ export class RuntimeService {
   }
 
   async create(input: NewRuntimeInput): Promise<Runtime> {
+    // Legacy `ephemeral: false` maps to the persistent lifecycle mode.
+    const lifecycle = input.lifecycle ?? (input.ephemeral === false ? { mode: "persistent" as const } : { mode: "ephemeral" as const });
     const runtime: Runtime = {
       id: newId("rt"),
       name: input.name,
@@ -261,7 +266,9 @@ export class RuntimeService {
       containerized: input.containerized ?? false,
       defaultModelId: input.defaultModelId,
       enabled: input.enabled ?? true,
-      ephemeral: input.ephemeral ?? true,
+      ephemeral: input.ephemeral ?? lifecycle.mode === "ephemeral",
+      lifecycle,
+      capabilities: input.capabilities,
       resourceLimits: input.resourceLimits,
       env: input.env,
       secretIds: input.secretIds,
@@ -301,6 +308,13 @@ export interface NewWorkspaceInput {
   persistent?: boolean;
 }
 
+/**
+ * Workspaces are durable, runtime-neutral working environments
+ * (spec v1 §10–§14). They outlive Tasks, Runs and Runtime Containers:
+ * containers attach to a workspace for the duration of a run and can be
+ * destroyed freely, while the workspace directory — the work itself —
+ * persists on the host.
+ */
 export class WorkspaceService {
   constructor(private store: Store) {}
 
@@ -337,9 +351,76 @@ export class WorkspaceService {
       branch: input.branch,
       mountPath: input.mountPath ?? "/workspace",
       persistent: input.persistent ?? true,
+      source: "create",
+      status: "ready",
       createdAt: now(),
     };
     return this.store.insert("workspaces", workspace);
+  }
+
+  /**
+   * Import an existing working directory or git repository into
+   * AgentFabric as a Workspace (spec v1 §11 Import). The directory is
+   * used in place — AgentFabric does not copy or take ownership of it.
+   */
+  async import(input: NewWorkspaceInput): Promise<Workspace> {
+    if (input.type === "git" && input.repoUrl) {
+      const ws = await this.create(input);
+      await this.store.update<Workspace>("workspaces", ws.id, { source: "import" });
+      return { ...ws, source: "import" };
+    }
+    const rawPath = input.path;
+    if (!rawPath) throw new Error("workspace import requires `path` (local directory) or `repoUrl` (git)");
+    const abs = resolve(rawPath);
+    let st;
+    try {
+      st = await stat(abs);
+    } catch {
+      throw new Error(`Cannot import workspace: path does not exist: ${abs}`);
+    }
+    if (!st.isDirectory()) throw new Error(`Cannot import workspace: not a directory: ${abs}`);
+    const id = newId("ws");
+    const workspace: Workspace = {
+      id,
+      name: input.name,
+      type: input.type === "git" ? "git" : "local",
+      path: abs,
+      repoUrl: input.repoUrl,
+      branch: input.branch,
+      mountPath: input.mountPath ?? "/workspace",
+      persistent: input.persistent ?? true,
+      source: "import",
+      status: "ready",
+      createdAt: now(),
+    };
+    return this.store.insert("workspaces", workspace);
+  }
+
+  /**
+   * Ensure the workspace's contents are persisted after a Run
+   * (spec v1 §11 Save). Local/git workspaces are host directories that
+   * containers mount read-write, so modifications are already durable —
+   * `save` verifies the directory still exists and records the save so
+   * users (and handoffs) can trust the workspace state.
+   */
+  async save(id: ID, runId?: ID): Promise<Workspace> {
+    const ws = this.get(id);
+    if (!ws) throw new Error(`Workspace not found: ${id}`);
+    if (ws.path) {
+      try {
+        const st = await stat(ws.path);
+        if (!st.isDirectory()) throw new Error(`Workspace path is not a directory: ${ws.path}`);
+      } catch {
+        await this.store.update<Workspace>("workspaces", id, { status: "missing" });
+        throw new Error(`Workspace directory is missing: ${ws.path}`);
+      }
+    }
+    const saved = await this.store.update<Workspace>("workspaces", id, {
+      status: "ready",
+      lastSavedAt: now(),
+      lastSavedRunId: runId,
+    });
+    return saved!;
   }
 
   async update(id: ID, patch: Partial<NewWorkspaceInput>): Promise<Workspace | undefined> {
@@ -348,6 +429,14 @@ export class WorkspaceService {
 
   async remove(id: ID): Promise<boolean> {
     return this.store.remove("workspaces", id);
+  }
+
+  /** Tasks and runs currently referencing this workspace. */
+  usage(id: ID): { tasks: ID[]; runs: ID[] } {
+    return {
+      tasks: this.store.list<Task>("tasks").filter((t) => t.workspaceId === id).map((t) => t.id),
+      runs: this.store.list<Run>("runs").filter((r) => r.workspaceId === id).map((r) => r.id),
+    };
   }
 
   async ensureExists(input: NewWorkspaceInput): Promise<Workspace> {
@@ -485,6 +574,8 @@ export interface NewTaskInput {
   resourceLimits?: ResourceLimits;
   timeoutMs?: number;
   policy?: ExecutionPolicy;
+  /** Container lifecycle override for the run (spec v1 §1). */
+  lifecycle?: Runtime["lifecycle"];
   metadata?: Record<string, unknown>;
 }
 
@@ -519,6 +610,14 @@ export class TaskService {
       createdAt: now(),
     };
     return this.store.insert("tasks", task);
+  }
+
+  async update(id: ID, patch: Partial<NewTaskInput>): Promise<Task | undefined> {
+    return this.store.update<Task>("tasks", id, patch);
+  }
+
+  async remove(id: ID): Promise<boolean> {
+    return this.store.remove("tasks", id);
   }
 }
 
@@ -587,6 +686,85 @@ export class SessionService {
     session.updatedAt = now();
     session.status = "idle";
     await this.store.commit();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Runtime Session References (spec v1 §3/§9)                          */
+/* ------------------------------------------------------------------ */
+
+export interface NewRuntimeSessionInput {
+  runtimeId?: ID;
+  runtimeKind: RuntimeSessionRef["runtimeKind"];
+  runtimeName?: string;
+  runtimeVersion?: string;
+  nativeSessionRef: string;
+  resumeSupported: boolean;
+  taskId?: ID;
+  runId: ID;
+  workspaceId?: ID;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Stores opaque references to harness-native sessions. AgentFabric never
+ * inspects or transforms the session payload — the reference is only used
+ * to resume the *same* harness. Cross-harness continuation goes through
+ * Handoff, never through these references.
+ */
+export class RuntimeSessionService {
+  constructor(private store: Store) {}
+
+  list(filter?: { taskId?: ID; runtimeKind?: string; runtimeId?: ID }): RuntimeSessionRef[] {
+    const all = this.store.list<RuntimeSessionRef>("runtimeSessions");
+    return all
+      .filter(
+        (s) =>
+          (!filter?.taskId || s.taskId === filter.taskId) &&
+          (!filter?.runtimeKind || s.runtimeKind === filter.runtimeKind) &&
+          (!filter?.runtimeId || s.runtimeId === filter.runtimeId)
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  get(id: ID): RuntimeSessionRef | undefined {
+    return this.store.get<RuntimeSessionRef>("runtimeSessions", id);
+  }
+
+  async register(input: NewRuntimeSessionInput): Promise<RuntimeSessionRef> {
+    const ref: RuntimeSessionRef = {
+      id: newId("rses"),
+      runtimeId: input.runtimeId,
+      runtimeKind: input.runtimeKind,
+      runtimeName: input.runtimeName,
+      runtimeVersion: input.runtimeVersion,
+      nativeSessionRef: input.nativeSessionRef,
+      resumeSupported: input.resumeSupported,
+      taskId: input.taskId,
+      runId: input.runId,
+      workspaceId: input.workspaceId,
+      status: "active",
+      metadata: input.metadata,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    return this.store.insert("runtimeSessions", ref);
+  }
+
+  /**
+   * The most recent resumable native session for a task on a given
+   * runtime kind — used to decide Resume vs Handoff.
+   */
+  latestResumable(taskId: ID, runtimeKind: string): RuntimeSessionRef | undefined {
+    return this.list({ taskId }).find((s) => s.runtimeKind === runtimeKind && s.resumeSupported && s.status === "active");
+  }
+
+  async expire(id: ID): Promise<RuntimeSessionRef | undefined> {
+    return this.store.update<RuntimeSessionRef>("runtimeSessions", id, { status: "expired", updatedAt: now() });
+  }
+
+  async remove(id: ID): Promise<boolean> {
+    return this.store.remove("runtimeSessions", id);
   }
 }
 

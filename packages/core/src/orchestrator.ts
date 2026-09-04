@@ -6,6 +6,7 @@ import {
   ProfileService,
   ProviderService,
   RuntimeService,
+  RuntimeSessionService,
   SecretService,
   SessionService,
   TaskService,
@@ -13,24 +14,42 @@ import {
   now,
   type NewTaskInput,
 } from "./services.js";
+import { HandoffService, buildAssistedHandoffContent, renderHandoffPrompt } from "./handoff.js";
+import {
+  ContainerLeaseManager,
+  DEFAULT_KEEP_ALIVE_IDLE_MS,
+  normalizeLifecycle,
+  recoverKeepAliveContainers,
+  resolveLifecycle,
+  type ContainerOps,
+} from "./lifecycle.js";
 import { addUsage, emptyUsage, estimateCost } from "./cost.js";
-import type {
-  ArtifactDraft,
-  AgentRuntimeAdapter,
-  RuntimeContext,
-  RuntimeRegistry,
-  RuntimeResult,
+import {
+  effectiveCapabilities,
+  type ArtifactDraft,
+  type AgentRuntimeAdapter,
+  type ReusableContainer,
+  type RuntimeContext,
+  type RuntimeRegistry,
+  type RuntimeResult,
 } from "./runtime.js";
 import type {
   Artifact,
   EventType,
   ExecutionPolicy,
+  Handoff,
+  HandoffContent,
+  ID,
   LogLevel,
   Model,
   Provider,
   Run,
+  RunContinuity,
   RunEvent,
   Runtime,
+  RuntimeCapability,
+  RuntimeLifecycle,
+  RuntimeSessionRef,
   Secret,
   Session,
   Task,
@@ -39,6 +58,29 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 min safety net
+
+/**
+ * Everything needed to materialize one Run under an existing Task
+ * (submit creates its own Task; continuation passes overrides here).
+ */
+interface RunSpec {
+  title?: string;
+  runtimeId?: ID;
+  modelId?: ID;
+  workspaceId?: ID;
+  sessionId?: ID;
+  profileId?: ID;
+  env?: Record<string, string>;
+  secretIds?: ID[];
+  tools?: string[];
+  timeoutMs?: number;
+  policy?: ExecutionPolicy;
+  inputInstruction?: string;
+  continuity?: RunContinuity;
+  previousHandoffId?: ID;
+  runtimeSessionRefId?: ID;
+  lifecycle?: RuntimeLifecycle;
+}
 
 /**
  * Aborts a run when its cumulative usage crosses an ExecutionPolicy
@@ -72,15 +114,76 @@ export interface SubmitResult {
   run: Run;
 }
 
+/** Input for continuing an existing Task (spec v1 §15/§18/§20). */
+export interface ContinueTaskInput {
+  prompt: string;
+  title?: string;
+  /** Target runtime. Defaults to the task's runtime / the latest run's runtime. */
+  runtimeId?: ID;
+  modelId?: ID;
+  /** Force `resume` or `handoff`; default `auto` decides by harness + capability. */
+  mode?: "auto" | "resume" | "handoff";
+  /** Extra user notes folded into the handoff (spec v1 §7 User-provided). */
+  userNotes?: string;
+  lifecycle?: RuntimeLifecycle;
+  workspaceId?: ID;
+  profileId?: ID;
+  sessionId?: ID;
+  env?: Record<string, string>;
+  secretIds?: ID[];
+  tools?: string[];
+  timeoutMs?: number;
+  policy?: ExecutionPolicy;
+}
+
+export interface ContinueResult {
+  task: Task;
+  run: Run;
+  continuity: RunContinuity;
+  /** Handoff created/used for this continuation (handoff continuity only). */
+  handoff?: Handoff;
+  /** Native session resumed by this run (resume continuity only). */
+  runtimeSessionRef?: RuntimeSessionRef;
+  /** Human-readable explanation of the resume-vs-handoff decision. */
+  explanation: string;
+}
+
+/** Preview of what continuing a Task would do (spec v1 §18: clear UX). */
+export interface ContinueOptions {
+  task: Task;
+  latestRun?: Run;
+  currentRuntime?: { id: ID; name: string; kind: string };
+  targetRuntime?: { id: ID; name: string; kind: string; capabilities: RuntimeCapability };
+  resumeAvailable: boolean;
+  suggestedMode: "resume" | "handoff";
+  suggestedContinuity: RunContinuity;
+  resumableSession?: RuntimeSessionRef;
+  /** What the assisted handoff would look like (not persisted). */
+  handoffPreview?: HandoffContent;
+  explanation: string;
+}
+
 export class RunService {
   private controllers = new Map<string, { controller: AbortController; reason: "cancel" | "timeout" | "policy" }>();
   private active = new Map<string, Promise<void>>();
+  private leaseManager: ContainerLeaseManager;
 
   constructor(
     private store: Store,
     private bus: EventBus,
-    private registry: RuntimeRegistry
-  ) {}
+    private registry: RuntimeRegistry,
+    private containerOps: ContainerOps = { destroy: async () => {} }
+  ) {
+    this.leaseManager = new ContainerLeaseManager(containerOps, {
+      onDestroyed: async (lease) => {
+        await this.emitRunEvent(lease.runId, "container.destroyed", {
+          containerId: lease.containerId,
+          reason: "idle-timeout",
+          runtimeId: lease.runtimeId,
+        });
+      },
+    });
+  }
 
   /* ---------------- public API ---------------- */
 
@@ -93,6 +196,13 @@ export class RunService {
 
   get(id: string): Run | undefined {
     return this.store.get<Run>("runs", id);
+  }
+
+  forTask(taskId: string): Run[] {
+    return this.store
+      .list<Run>("runs")
+      .filter((r) => r.taskId === taskId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   events(runId: string): RunEvent[] {
@@ -112,15 +222,190 @@ export class RunService {
       });
   }
 
+  /** Kept keep-alive containers (for API/UI inspection). */
+  keptContainers() {
+    return this.leaseManager.list();
+  }
+
+  /**
+   * Re-arm keep-alive destroy timers from container labels after a
+   * server restart so retained containers never leak.
+   */
+  async recoverKeepAliveContainers(): Promise<void> {
+    if (!this.containerOps.listKeepAlive) return;
+    await recoverKeepAliveContainers(this.leaseManager, await this.containerOps.listKeepAlive());
+  }
+
   async submit(input: NewTaskInput): Promise<SubmitResult> {
     const resolved = await this.resolveTask(input);
     const task = await this.taskService().create(resolved);
-    const run = await this.createRun(task);
+    const run = await this.createRun(task, {
+      continuity: "new",
+      inputInstruction: task.prompt,
+      lifecycle: resolved.lifecycle,
+    });
     void this.execute(run.id);
     return { task, run };
   }
 
-  /** Continue an existing session with a new prompt. */
+  /**
+   * Continue an existing Task (spec v1 §15/§20).
+   *
+   * Same harness → native Resume (when the harness declares the
+   * capability and a resumable session reference exists). Different
+   * harness (or native resume impossible) → Handoff: a semantic work
+   * handoff is generated and injected into the new harness's *new*
+   * native session; the session itself is never migrated.
+   */
+  async continueTask(taskId: string, input: ContinueTaskInput): Promise<ContinueResult> {
+    const task = this.taskService().get(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (!input.prompt?.trim()) throw new Error("prompt is required to continue a task");
+
+    const previousRuns = this.forTask(taskId);
+    const previousRun = previousRuns[previousRuns.length - 1];
+    const target = await this.pickTargetRuntime(task, input.runtimeId);
+    const adapter = this.registry.get(target.kind);
+    const caps = effectiveCapabilities(adapter, target);
+
+    // Apply the agent profile's defaults (env/secrets/policy/model),
+    // overridable by the explicit continuation input.
+    const profile = input.profileId ? this.profileService().get(input.profileId) : undefined;
+    const mergedEnv = { ...(profile?.env ?? {}), ...(input.env ?? {}) };
+    const mergedSecretIds = [...new Set([...(input.secretIds ?? []), ...(profile?.secretIds ?? [])])];
+    const mergedPolicy = input.policy ?? profile?.policy;
+    const modelId = input.modelId ?? profile?.modelId ?? undefined;
+
+    const previousRuntime = previousRun?.runtimeId ? this.runtimeService().get(previousRun.runtimeId) : undefined;
+    const sameHarness = previousRuntime?.kind === target.kind;
+    const resumable = this.runtimeSessionService().latestResumable(taskId, target.kind);
+    const forcedHandoff = input.mode === "handoff";
+    const resumePossible =
+      sameHarness && caps.supportsNativeResume && Boolean(resumable) && input.mode !== "handoff";
+
+    const workspaceId = input.workspaceId ?? task.workspaceId ?? previousRun?.workspaceId;
+
+    if (resumePossible) {
+      /* ---------------- Resume: same harness, native session ---------------- */
+      const ref = resumable!;
+      const run = await this.createRunFromTask(task, {
+        continuity: "resume",
+        inputInstruction: input.prompt,
+        runtimeId: target.id,
+        modelId,
+        workspaceId,
+        runtimeSessionRefId: ref.id,
+        lifecycle: resolveLifecycle(target, input.lifecycle),
+        sessionId: input.sessionId,
+        profileId: input.profileId,
+        env: Object.keys(mergedEnv).length ? mergedEnv : undefined,
+        secretIds: mergedSecretIds.length ? mergedSecretIds : undefined,
+        tools: input.tools,
+        timeoutMs: input.timeoutMs,
+        policy: mergedPolicy,
+      });
+      void this.execute(run.id);
+      return {
+        task,
+        run,
+        continuity: "resume",
+        runtimeSessionRef: ref,
+        explanation:
+          `Resume: ${target.name} (${target.kind}) supports native session resume; ` +
+          `continuing its native session ${ref.nativeSessionRef}. No handoff was created.`,
+      };
+    }
+
+    /* ---------------- Handoff: semantic work handoff, new native session ---------------- */
+    const handoff = await this.prepareHandoff(task, previousRun, previousRuntime, target, input);
+    const rendered = renderHandoffPrompt(handoff, input.prompt);
+    const run = await this.createRunFromTask(task, {
+      continuity: "handoff",
+      inputInstruction: rendered,
+      runtimeId: target.id,
+      modelId,
+      workspaceId,
+      previousHandoffId: handoff.id,
+      lifecycle: resolveLifecycle(target, input.lifecycle),
+      sessionId: input.sessionId,
+      profileId: input.profileId,
+      env: Object.keys(mergedEnv).length ? mergedEnv : undefined,
+      secretIds: mergedSecretIds.length ? mergedSecretIds : undefined,
+      tools: input.tools,
+      timeoutMs: input.timeoutMs,
+      policy: mergedPolicy,
+    });
+    void this.execute(run.id);
+    const reason = forcedHandoff
+      ? `Handoff requested explicitly.`
+      : sameHarness
+        ? `Handoff: ${target.name} cannot natively resume (${caps.supportsNativeResume ? "no resumable session reference found" : "native resume unsupported"}); a new native session is created and continues from the handoff.`
+        : `Handoff: switching harness ${previousRuntime?.name ?? previousRuntime?.kind ?? "(unknown)"} → ${target.name} (${target.kind}); sessions are not migrated across harnesses — the new harness starts its own new native session from the handoff.`;
+    return { task, run, continuity: "handoff", handoff, explanation: reason };
+  }
+
+  /** Preview the resume/handoff decision for a task (used by UI/CLI). */
+  continueOptions(taskId: string, runtimeId?: ID): ContinueOptions {
+    const task = this.taskService().get(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+    const previousRuns = this.forTask(taskId);
+    const previousRun = previousRuns[previousRuns.length - 1];
+    const previousRuntime = previousRun?.runtimeId ? this.runtimeService().get(previousRun.runtimeId) : undefined;
+    // Same fallback order as pickTargetRuntime: explicit > task default >
+    // latest run's runtime > first enabled runtime.
+    const targetId = runtimeId ?? task.runtimeId ?? previousRuntime?.id ?? this.runtimeService().enabled()[0]?.id;
+    const target = targetId ? this.runtimeService().get(targetId) : undefined;
+    const adapter = target ? this.registry.get(target.kind) : undefined;
+    const caps = effectiveCapabilities(adapter, target);
+    const resumable = target ? this.runtimeSessionService().latestResumable(taskId, target.kind) : undefined;
+    const sameHarness = previousRuntime && target && previousRuntime.kind === target.kind;
+    const resumeAvailable = Boolean(sameHarness && caps.supportsNativeResume && resumable);
+    const suggestedMode: "resume" | "handoff" = resumeAvailable ? "resume" : "handoff";
+
+    let handoffPreview: HandoffContent | undefined;
+    if (previousRun && target && !resumeAvailable) {
+      const existing = previousRun.generatedHandoffId ? this.handoffService().get(previousRun.generatedHandoffId) : undefined;
+      if (existing) {
+        handoffPreview = existing.content;
+      } else {
+        handoffPreview = buildAssistedHandoffContent({
+          task,
+          run: previousRun,
+          events: this.events(previousRun.id),
+          artifacts: this.artifactService().list(previousRun.id),
+          workspace: previousRun.workspaceId ? this.workspaceService().get(previousRun.workspaceId) : undefined,
+          runtimeName: previousRuntime?.name,
+        });
+      }
+    }
+
+    const explanation = resumeAvailable
+      ? `Resume: same harness (${target?.name}) with a resumable native session (${resumable?.nativeSessionRef}).`
+      : previousRun
+        ? target && previousRuntime?.kind !== target.kind
+          ? `Handoff: harness changes ${previousRuntime?.name ?? previousRuntime?.kind ?? "(unknown)"} → ${target?.name}; no session migration, the handoff plus the shared workspace carry the context.`
+          : `Handoff: ${target?.name ?? "target runtime"} cannot natively resume; continuing via a handoff into a new native session.`
+        : "New task: no previous run yet — the first run starts a fresh session.";
+    const noAdapter =
+      target != null && !adapter
+        ? " Warning: no runtime adapter is registered for this kind — the run will fail until one is available."
+        : "";
+
+    return {
+      task,
+      latestRun: previousRun,
+      currentRuntime: previousRuntime ? { id: previousRuntime.id, name: previousRuntime.name, kind: previousRuntime.kind } : undefined,
+      targetRuntime: target ? { id: target.id, name: target.name, kind: target.kind, capabilities: caps } : undefined,
+      resumeAvailable,
+      suggestedMode,
+      suggestedContinuity: resumeAvailable ? "resume" : previousRun ? "handoff" : "new",
+      resumableSession: resumable,
+      handoffPreview,
+      explanation: explanation + noAdapter,
+    };
+  }
+
+  /** Continue an existing session with a new prompt (MVP behavior). */
   async resume(sessionId: string, input: Omit<NewTaskInput, "sessionId">): Promise<SubmitResult> {
     const session = this.sessionService().get(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
@@ -154,6 +439,7 @@ export class RunService {
       resourceLimits: task.resourceLimits,
       timeoutMs: task.timeoutMs,
       policy: task.policy,
+      lifecycle: run.lifecycle,
       metadata: task.metadata,
     });
   }
@@ -204,6 +490,34 @@ export class RunService {
   private profileService() {
     return new ProfileService(this.store);
   }
+  private runtimeSessionService() {
+    return new RuntimeSessionService(this.store);
+  }
+  private handoffService() {
+    return new HandoffService(this.store);
+  }
+
+  /** Low-level event write used by lease callbacks (outside a run ctx). */
+  private async emitRunEvent(runId: string, type: EventType, data: Record<string, unknown>): Promise<void> {
+    const run = this.get(runId);
+    const event: RunEvent = {
+      id: newId("evt"),
+      runId,
+      sessionId: run?.sessionId,
+      seq: this.store.nextSeq(),
+      type,
+      timestamp: now(),
+      data,
+      source: "core",
+    };
+    await this.store.insert("events", event);
+    if (run) {
+      run.eventCount += 1;
+      run.updatedAt = now();
+      await this.store.commit();
+    }
+    this.bus.publish(event);
+  }
 
   /** Resolve profile/runtime/model/workspace defaults into a concrete task. */
   private async resolveTask(input: NewTaskInput): Promise<NewTaskInput> {
@@ -253,32 +567,149 @@ export class RunService {
     };
   }
 
-  private async createRun(task: Task): Promise<Run> {
-    const runtime = task.runtimeId ? this.runtimeService().get(task.runtimeId) : undefined;
-    const model = task.modelId ? this.modelService().get(task.modelId) : undefined;
+  private async createRun(task: Task, extra: RunSpec = {}): Promise<Run> {
+    return this.createRunFromTask(task, extra, task.prompt);
+  }
+
+  /** Creates a Run for an existing Task (used by submit & continueTask). */
+  private async createRunFromTask(task: Task, extra: RunSpec = {}, fallbackInstruction?: string): Promise<Run> {
+    const runtimeId = extra.runtimeId ?? task.runtimeId;
+    const modelId = extra.modelId ?? task.modelId;
+    const runtime = runtimeId ? this.runtimeService().get(runtimeId) : undefined;
+    const model = modelId ? this.modelService().get(modelId) : undefined;
     const provider = model ? this.providerService().get(model.providerId) : undefined;
     const run: Run = {
       id: newId("run"),
       taskId: task.id,
-      taskTitle: task.title,
+      taskTitle: extra.title ?? task.title,
       status: "pending",
-      runtimeId: task.runtimeId,
+      runtimeId,
       runtimeName: runtime?.name,
-      modelId: task.modelId,
+      modelId,
       modelName: model?.alias ?? model?.name,
       providerId: provider?.id,
-      workspaceId: task.workspaceId,
-      sessionId: task.sessionId,
+      workspaceId: extra.workspaceId ?? task.workspaceId,
+      sessionId: extra.sessionId ?? task.sessionId,
+      inputInstruction: extra.inputInstruction ?? fallbackInstruction ?? task.prompt,
+      continuity: extra.continuity ?? "new",
+      previousHandoffId: extra.previousHandoffId,
+      runtimeSessionRefId: extra.runtimeSessionRefId,
+      lifecycle: normalizeLifecycle(extra.lifecycle ?? resolveLifecycle(runtime)),
+      profileId: extra.profileId,
+      env: extra.env,
+      secretIds: extra.secretIds,
+      tools: extra.tools,
+      timeoutMs: extra.timeoutMs,
+      policy: extra.policy,
       artifactIds: [],
       eventCount: 0,
       createdAt: now(),
       updatedAt: now(),
     };
     await this.store.insert("runs", run);
-    if (task.sessionId) {
-      await this.sessionService().attachRun(task.sessionId, run.id);
+    if (run.sessionId) {
+      await this.sessionService().attachRun(run.sessionId, run.id);
     }
     return run;
+  }
+
+  /** Target runtime for continuing a task. */
+  private async pickTargetRuntime(task: Task, runtimeId?: ID): Promise<Runtime> {
+    const id = runtimeId ?? task.runtimeId ?? this.forTask(task.id).find((r) => r.runtimeId)?.runtimeId;
+    const runtime = id ? this.runtimeService().get(id) : undefined;
+    if (!runtime) {
+      const fallback = this.runtimeService().enabled()[0];
+      if (!fallback) throw new Error("No enabled runtime available to continue this task");
+      return fallback;
+    }
+    return runtime;
+  }
+
+  /**
+   * Create (or reuse) the Handoff mediating a cross-session continuation:
+   * prefers a harness-generated handoff attached to the previous run,
+   * falls back to an AgentFabric-assisted handoff built from execution
+   * records, and folds in user notes (spec v1 §7).
+   */
+  private async prepareHandoff(
+    task: Task,
+    previousRun: Run | undefined,
+    previousRuntime: Runtime | undefined,
+    target: Runtime,
+    input: ContinueTaskInput
+  ): Promise<Handoff> {
+    const handoffService = this.handoffService();
+
+    if (!previousRun) {
+      // No previous run: still record a handoff so the context trail is explicit.
+      const content: HandoffContent = {
+        originalTask: `#${task.title}: ${task.prompt}`,
+        currentObjective: input.title ?? task.title,
+        notesForNextAgent: "No previous run exists; this is the task's original brief.",
+      };
+      return handoffService.create({
+        taskId: task.id,
+        fromRunId: "none",
+        fromRuntimeName: previousRuntime?.name,
+        fromRuntimeKind: previousRuntime?.kind,
+        toRuntimeId: target.id,
+        toRuntimeName: target.name,
+        toRuntimeKind: target.kind,
+        source: "agentfabric",
+        content,
+        userNotes: input.userNotes,
+        workspaceId: task.workspaceId,
+      });
+    }
+
+    let handoff =
+      previousRun.generatedHandoffId != null ? handoffService.get(previousRun.generatedHandoffId) : undefined;
+
+    if (!handoff) {
+      const artifacts = this.artifactService().list(previousRun.id);
+      const content = buildAssistedHandoffContent({
+        task,
+        run: previousRun,
+        events: this.events(previousRun.id),
+        artifacts,
+        workspace: previousRun.workspaceId ? this.workspaceService().get(previousRun.workspaceId) : undefined,
+        runtimeName: previousRuntime?.name,
+      });
+      handoff = await handoffService.create({
+        taskId: task.id,
+        fromRunId: previousRun.id,
+        fromRuntimeId: previousRuntime?.id,
+        fromRuntimeName: previousRuntime?.name,
+        fromRuntimeKind: previousRuntime?.kind,
+        toRuntimeId: target.id,
+        toRuntimeName: target.name,
+        toRuntimeKind: target.kind,
+        source: "agentfabric",
+        content,
+        workspaceId: previousRun.workspaceId,
+        artifactIds: artifacts.map((a) => a.id),
+      });
+      await this.emitRunEvent(previousRun.id, "handoff.generated", {
+        handoffId: handoff.id,
+        source: "agentfabric",
+        toRuntime: target.name,
+      });
+      if (!previousRun.generatedHandoffId) {
+        await this.store.update<Run>("runs", previousRun.id, { generatedHandoffId: handoff.id, updatedAt: now() });
+      }
+    }
+
+    if (input.userNotes?.trim()) {
+      handoff = (await handoffService.addUserNotes(handoff.id, input.userNotes)) ?? handoff;
+    }
+
+    // Point the handoff at the concrete target runtime.
+    handoff = (await this.store.update<Handoff>("handoffs", handoff.id, {
+      toRuntimeId: target.id,
+      toRuntimeName: target.name,
+      toRuntimeKind: target.kind,
+    })) ?? handoff;
+    return handoff;
   }
 
   private async execute(runId: string): Promise<void> {
@@ -301,9 +732,9 @@ export class RunService {
       return;
     }
 
-    const runtime = task.runtimeId ? this.runtimeService().get(task.runtimeId) : undefined;
+    const runtime = run.runtimeId ? this.runtimeService().get(run.runtimeId) : undefined;
     if (!runtime || !runtime.enabled) {
-      await this.finish(runId, "failed", `Runtime not found or disabled: ${task.runtimeId ?? "(none)"}`, emptyUsage());
+      await this.finish(runId, "failed", `Runtime not found or disabled: ${run.runtimeId ?? "(none)"}`, emptyUsage());
       return;
     }
 
@@ -313,16 +744,32 @@ export class RunService {
       return;
     }
 
-    const model = task.modelId ? this.modelService().get(task.modelId) : undefined;
+    const model = run.modelId ? this.modelService().get(run.modelId) : undefined;
     const provider = model ? this.providerService().get(model.providerId) : undefined;
-    const workspace = task.workspaceId ? this.workspaceService().get(task.workspaceId) : undefined;
-    const session = task.sessionId ? this.sessionService().get(task.sessionId) : undefined;
-    const secrets = this.secretService().resolve(task.secretIds);
+    const workspace = run.workspaceId ? this.workspaceService().get(run.workspaceId) : undefined;
+    const session = run.sessionId ? this.sessionService().get(run.sessionId) : undefined;
+    // Run-level overrides (set at continuation time) take precedence
+    // over the task's defaults.
+    const mergedEnv: Record<string, string> = { ...(task.env ?? {}), ...(run.env ?? {}) };
+    const mergedSecretIds = [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
+    const policy = run.policy ?? task.policy;
+    const secrets = this.secretService().resolve(mergedSecretIds);
+    const lifecycle = normalizeLifecycle(run.lifecycle ?? resolveLifecycle(runtime));
+    const continuity: RunContinuity = run.continuity ?? "new";
+    const runtimeSession = run.runtimeSessionRefId ? this.runtimeSessionService().get(run.runtimeSessionRefId) : undefined;
+    const previousHandoff = run.previousHandoffId ? this.handoffService().get(run.previousHandoffId) : undefined;
+
+    // Keep-alive: reuse a retained container instead of a fresh one.
+    let reusableContainer: ReusableContainer | undefined;
+    if (lifecycle.mode === "keep-alive") {
+      const lease = this.leaseManager.acquire(runtime.id, workspace?.id);
+      if (lease) reusableContainer = { containerId: lease.containerId, name: lease.containerName };
+    }
 
     // Abort controller for cancel/timeout.
     const controller = new AbortController();
     const abortState: { reason: "cancel" | "timeout" | "policy"; policyMessage?: string } = { reason: "cancel" };
-    const timeoutMs = task.timeoutMs ?? task.policy?.maxDurationMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs = run.timeoutMs ?? task.timeoutMs ?? policy?.maxDurationMs ?? DEFAULT_TIMEOUT_MS;
     const timer = setTimeout(() => {
       if (controller.signal.aborted) return;
       abortState.reason = "timeout";
@@ -340,91 +787,262 @@ export class RunService {
       controller.abort();
     };
 
-    // Start.
-    run = (await this.store.update<Run>("runs", runId, {
-      status: "starting",
-      startTime: now(),
-      updatedAt: now(),
-    }))!;
-
+    // Start. Everything below is guarded: an unexpected error must never
+    // leave the run stuck in "running" nor leak the timeout timer.
     const usageAcc = emptyUsage();
-    const ctx: RuntimeContext = this.buildContext(run, task, runtime, model, provider, workspace, session, secrets, controller.signal, usageAcc, abortForPolicy);
-
-    await ctx.emit("run.started", {
-      runId,
-      taskId: task.id,
-      title: task.title,
-      runtime: runtime.name,
-      model: model?.alias ?? model?.name,
-      provider: provider?.name,
-      workspace: workspace?.name,
-      timeoutMs,
-    });
-
-    run = (await this.store.update<Run>("runs", runId, { status: "running", updatedAt: now() }))!;
-
-    let result: RuntimeResult;
     try {
-      result = await adapter.run(ctx);
-    } catch (err) {
-      result = { error: err instanceof Error ? err.message : String(err) };
-    } finally {
-      clearTimeout(timer);
+      run = await this.store.update<Run>("runs", runId, {
+        status: "starting",
+        startTime: now(),
+        updatedAt: now(),
+      });
+      if (!run) return; // record vanished mid-flight; nothing to execute
+
+      const ctx: RuntimeContext = this.buildContext({
+        run,
+        task,
+        runtime,
+        model,
+        provider,
+        workspace,
+        session,
+        secrets,
+        env: mergedEnv,
+        policy,
+        lifecycle,
+        continuity,
+        runtimeSession,
+        previousHandoff,
+        reusableContainer,
+        signal: controller.signal,
+        usageAcc,
+        abortForPolicy,
+      });
+
+      await ctx.emit("run.started", {
+        runId,
+        taskId: task.id,
+        title: task.title,
+        runtime: runtime.name,
+        model: model?.alias ?? model?.name,
+        provider: provider?.name,
+        workspace: workspace?.name,
+        timeoutMs,
+        lifecycle: lifecycle.mode,
+        continuity,
+        resumedSession: continuity === "resume" ? runtimeSession?.nativeSessionRef : undefined,
+        handoffId: previousHandoff?.id,
+      });
+      if (workspace) {
+        await ctx.emit("workspace.attached", {
+          workspaceId: workspace.id,
+          name: workspace.name,
+          path: workspace.path,
+          mountPath: workspace.mountPath,
+          source: workspace.source ?? "create",
+        });
+      }
+      if (reusableContainer) {
+        await ctx.emit("container.reused", {
+          containerId: reusableContainer.containerId,
+          runtimeId: runtime.id,
+          lifecycle: lifecycle.mode,
+        });
+      }
+
+      run = (await this.store.update<Run>("runs", runId, { status: "running", updatedAt: now() })) ?? run;
+
+      let result: RuntimeResult;
       try {
-        await adapter.cleanup?.(ctx);
-      } catch {
-        /* best effort */
+        result = await adapter.run(ctx);
+      } catch (err) {
+        result = { error: err instanceof Error ? err.message : String(err) };
+      }
+      clearTimeout(timer);
+      if (lifecycle.mode === "keep-alive" && result.containerId) {
+        // Keep-alive containers are owned by the lease manager, not the
+        // adapter's cleanup path.
+      } else {
+        try {
+          await adapter.cleanup?.(ctx);
+        } catch {
+          /* best effort */
+        }
       }
       this.controllers.delete(runId);
-    }
 
-    if (result.containerId) {
-      await this.store.update<Run>("runs", runId, { containerId: result.containerId, updatedAt: now() });
-    }
+      if (result.containerId) {
+        await this.store.update<Run>("runs", runId, { containerId: result.containerId, updatedAt: now() });
+      }
 
-    const aborted = controller.signal.aborted;
-    const reason = abortState.reason;
+      // Post-run pipeline: workspace save, session reference, harness
+      // handoff, container retention (spec v1 §11/§3/§7/§1).
+      await this.afterRun(ctx, result, lifecycle);
 
-    if (aborted && reason === "timeout") {
-      await this.finish(runId, "timeout", `Run timed out after ${timeoutMs}ms`, usageAcc);
-    } else if (aborted && reason === "policy") {
-      const message = abortState.policyMessage ?? "Execution policy limit exceeded";
-      await ctx.emit("run.failed", { error: message });
-      await this.finish(runId, "failed", message, usageAcc);
-    } else if (aborted) {
-      await this.finish(runId, "cancelled", "Cancelled by user", usageAcc);
-    } else if (result.error) {
-      await ctx.emit("run.failed", { error: result.error });
-      await this.finish(runId, "failed", result.error, addUsage(usageAcc, result.usage));
-    } else {
-      await ctx.emit("run.completed", { exitCode: result.exitCode });
-      await this.finish(runId, "completed", undefined, addUsage(usageAcc, result.usage));
+      const aborted = controller.signal.aborted;
+      const reason = abortState.reason;
+
+      if (aborted && reason === "timeout") {
+        await this.finish(runId, "timeout", `Run timed out after ${timeoutMs}ms`, usageAcc);
+      } else if (aborted && reason === "policy") {
+        const message = abortState.policyMessage ?? "Execution policy limit exceeded";
+        await ctx.emit("run.failed", { error: message });
+        await this.finish(runId, "failed", message, usageAcc);
+      } else if (aborted) {
+        await this.finish(runId, "cancelled", "Cancelled by user", usageAcc);
+      } else if (result.error) {
+        await ctx.emit("run.failed", { error: result.error });
+        await this.finish(runId, "failed", result.error, addUsage(usageAcc, result.usage));
+      } else {
+        await ctx.emit("run.completed", { exitCode: result.exitCode });
+        await this.finish(runId, "completed", undefined, addUsage(usageAcc, result.usage));
+      }
+    } catch (err) {
+      // Safety net: fail the run instead of leaving it running forever
+      // and release the timeout timer (spec v1 §2: runs are records, not
+      // container state — a crashed execution must stay inspectable).
+      clearTimeout(timer);
+      this.controllers.delete(runId);
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        await this.finish(runId, "failed", `Internal error: ${message}`, usageAcc);
+      } catch {
+        /* run record may be gone; nothing else to do */
+      }
     }
   }
 
-  private buildContext(
-    run: Run,
-    task: Task,
-    runtime: Runtime,
-    model: Model | undefined,
-    provider: Provider | undefined,
-    workspace: Workspace | undefined,
-    session: Session | undefined,
-    secrets: Secret[],
-    signal: AbortSignal,
-    usageAcc: Usage,
-    abortForPolicy: (message: string) => void
-  ): RuntimeContext {
+  /**
+   * Runs after the adapter returns, before the run is marked finished:
+   * 1. Save the workspace so container destruction can never lose work.
+   * 2. Persist the harness-native session reference (verbatim).
+   * 3. Store a harness-generated handoff when the harness produced one.
+   * 4. Apply the container lifecycle policy (keep-alive retention).
+   */
+  private async afterRun(ctx: RuntimeContext, result: RuntimeResult, lifecycle: RuntimeLifecycle): Promise<void> {
+    const caps = effectiveCapabilities(this.registry.get(ctx.runtime.kind), ctx.runtime);
+
+    // 1. Workspace save.
+    try {
+      const saved = await ctx.saveWorkspace();
+      if (saved) {
+        await ctx.emit("workspace.saved", {
+          workspaceId: saved.id,
+          name: saved.name,
+          path: saved.path,
+          lastSavedAt: saved.lastSavedAt,
+        });
+      }
+    } catch (err) {
+      await ctx.log(`Workspace save failed: ${err instanceof Error ? err.message : String(err)}`, "warn");
+    }
+
+    // 2. Runtime-native session reference.
+    if (result.nativeSessionRef) {
+      const previousRefId = ctx.run.runtimeSessionRefId;
+      const ref = await this.runtimeSessionService().register({
+        runtimeId: ctx.runtime.id,
+        runtimeKind: ctx.runtime.kind,
+        runtimeName: ctx.runtime.name,
+        runtimeVersion: result.runtimeVersion,
+        nativeSessionRef: result.nativeSessionRef,
+        resumeSupported: caps.supportsNativeResume,
+        taskId: ctx.task.id,
+        runId: ctx.run.id,
+        workspaceId: ctx.workspace?.id,
+        metadata: result.nativeSessionMetadata,
+      });
+      await this.store.update<Run>("runs", ctx.run.id, { runtimeSessionRefId: ref.id, updatedAt: now() });
+      await ctx.emit(ctx.continuity === "resume" ? "runtime.session.resumed" : "runtime.session.created", {
+        runtimeSessionRefId: ref.id,
+        nativeSessionRef: ref.nativeSessionRef,
+        runtimeKind: ref.runtimeKind,
+        previousRefId,
+        resumeSupported: ref.resumeSupported,
+      });
+    }
+
+    // 3. Harness-generated handoff.
+    if (result.handoffContent && caps.supportsHandoffGeneration) {
+      const handoff = await this.handoffService().create({
+        taskId: ctx.task.id,
+        fromRunId: ctx.run.id,
+        fromRuntimeId: ctx.runtime.id,
+        fromRuntimeName: ctx.runtime.name,
+        fromRuntimeKind: ctx.runtime.kind,
+        source: "harness",
+        content: result.handoffContent,
+        workspaceId: ctx.workspace?.id,
+        artifactIds: ctx.run.artifactIds,
+      });
+      await this.store.update<Run>("runs", ctx.run.id, { generatedHandoffId: handoff.id, updatedAt: now() });
+      await ctx.emit("handoff.generated", {
+        handoffId: handoff.id,
+        source: "harness",
+        readyForNextAgent: true,
+      });
+    }
+
+    // 4. Container lifecycle policy.
+    const containerId = result.containerId;
+    if (lifecycle.mode === "keep-alive" && containerId) {
+      const lease = await this.leaseManager.retain({
+        containerId,
+        containerName: `af-keep-${ctx.runtime.id}`,
+        runtimeId: ctx.runtime.id,
+        runtimeKind: ctx.runtime.kind,
+        workspaceId: ctx.workspace?.id,
+        taskId: ctx.task.id,
+        runId: ctx.run.id,
+        idleTimeoutMs: lifecycle.idleTimeoutMs ?? DEFAULT_KEEP_ALIVE_IDLE_MS,
+      });
+      await ctx.emit("container.retained", {
+        containerId,
+        runtimeId: ctx.runtime.id,
+        expiresAt: lease.expiresAt,
+        idleTimeoutMs: lease.idleTimeoutMs,
+      });
+    } else if (lifecycle.mode === "ephemeral" && containerId) {
+      await ctx.emit("container.destroyed", { containerId, reason: "ephemeral-lifecycle" });
+    }
+    // persistent: intentionally kept; no destroy, no expiry.
+  }
+
+  private buildContext(opts: {
+    run: Run;
+    task: Task;
+    runtime: Runtime;
+    model?: Model;
+    provider?: Provider;
+    workspace?: Workspace;
+    session?: Session;
+    secrets: Secret[];
+    env: Record<string, string>;
+    policy?: ExecutionPolicy;
+    lifecycle: RuntimeLifecycle;
+    continuity: RunContinuity;
+    runtimeSession?: RuntimeSessionRef;
+    previousHandoff?: Handoff;
+    reusableContainer?: ReusableContainer;
+    signal: AbortSignal;
+    usageAcc: Usage;
+    abortForPolicy: (message: string) => void;
+  }): RuntimeContext {
+    const { run, task, runtime, model, provider, workspace, session, secrets, signal, usageAcc } = opts;
     const store = this.store;
     const bus = this.bus;
     const artifactService = this.artifactService();
+    const workspaceService = this.workspaceService();
 
     const env: Record<string, string> = {
-      ...(task.env ?? {}),
+      ...opts.env,
       ...(runtime.env ?? {}),
       ...Object.fromEntries(secrets.map((s) => [s.name, s.value ?? ""])),
       AGENTFABRIC_RUN_ID: run.id,
       AGENTFABRIC_TASK_ID: task.id,
+      AGENTFABRIC_WORKSPACE_ID: workspace?.id ?? "",
+      AGENTFABRIC_CONTINUITY: opts.continuity,
+      AGENTFABRIC_LIFECYCLE: opts.lifecycle.mode,
       AGENTFABRIC_MODEL: model?.name ?? "",
       AGENTFABRIC_PROVIDER: provider?.name ?? "",
     };
@@ -432,7 +1050,7 @@ export class RunService {
     const emit = async (
       type: EventType,
       data: Record<string, unknown> = {},
-      opts?: { level?: LogLevel; source?: string }
+      eventOpts?: { level?: LogLevel; source?: string }
     ): Promise<void> => {
       const event: RunEvent = {
         id: newId("evt"),
@@ -442,8 +1060,8 @@ export class RunService {
         type,
         timestamp: now(),
         data,
-        level: opts?.level,
-        source: opts?.source ?? "core",
+        level: eventOpts?.level,
+        source: eventOpts?.source ?? "core",
       };
       await store.insert("events", event);
       const r = store.get<Run>("runs", run.id);
@@ -466,6 +1084,11 @@ export class RunService {
       secrets,
       env,
       signal,
+      lifecycle: opts.lifecycle,
+      continuity: opts.continuity,
+      runtimeSession: opts.runtimeSession,
+      previousHandoff: opts.previousHandoff,
+      reusableContainer: opts.reusableContainer,
       workspacePath: workspace?.path,
       emit,
       log: async (line, level = "info") => {
@@ -477,12 +1100,16 @@ export class RunService {
           const cost = u.estimatedCost ?? estimateCost(model.name, u.inputTokens, u.outputTokens, u.cachedTokens ?? 0);
           usageAcc.estimatedCost = (usageAcc.estimatedCost ?? 0) + cost;
         }
-        enforcePolicyLimits(task.policy, usageAcc, abortForPolicy);
+        enforcePolicyLimits(opts.policy, usageAcc, opts.abortForPolicy);
       },
       addArtifact: async (draft: ArtifactDraft): Promise<Artifact> => {
         const artifact = await artifactService.create({ runId: run.id, ...draft });
         await emit("artifact.created", { artifactId: artifact.id, name: artifact.name, kind: artifact.kind });
         return artifact;
+      },
+      saveWorkspace: async (): Promise<Workspace | undefined> => {
+        if (!workspace) return undefined;
+        return workspaceService.save(workspace.id, run.id);
       },
     };
   }

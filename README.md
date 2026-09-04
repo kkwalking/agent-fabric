@@ -75,7 +75,79 @@ npm run dev:server
 npm run dev:web
 ```
 
-打开 http://localhost:7377 查看 Web UI（Dashboard / Runs / Run Detail 实时事件流 / Providers / Models / Runtimes / Agents / Workspaces / Sessions / Artifacts / Usage / Settings）。
+打开 http://localhost:7377 查看 Web UI（Dashboard / Tasks / Runs / Run Detail 实时事件流 / Providers / Models / Runtimes / Agents / Workspaces / Sessions / Handoffs / Artifacts / Usage / Settings）。
+
+## 长期任务执行模型（v1）
+
+在 MVP 之上，v1（`v1.md`）建立了更稳定的长期任务执行模型：
+
+> **Task 可以跨多个 Run 持续存在，Workspace 保存工作成果，同 Harness 使用 Native Resume，不同 Harness 通过 Handoff 完成交接，而 Runtime Container 根据执行需要动态创建和销毁。**
+
+核心抽象：`Provider · Model · Runtime · Task · Run · Workspace · Handoff · Artifact`。
+设计原则：Containers are disposable；Workspace is durable；Harness sessions stay native；**Same Harness → Resume，Different Harness → Handoff**；Workspace + Handoff 提供跨 Runtime 连续性；AgentFabric 只编排执行，不统一 Agent 认知。
+
+### Runtime Container 生命周期
+
+| 模式 | 行为 |
+| --- | --- |
+| `ephemeral`（默认） | 每个 Run 新建容器，Run 结束/失败/取消/超时后销毁 |
+| `keep-alive` | Run 结束后容器保留 `idleTimeoutMs`（默认 10 分钟），期间同 Runtime+Workspace 的下一个 Run 通过 `docker exec` 复用；空闲超时自动销毁（重启后由容器 label 恢复定时器，不泄漏） |
+| `persistent` | 模型上预留（长期 Agent / Daemon 场景），容器不被销毁 |
+
+生命周期可在 Runtime 上配置，也可按 Run 覆盖（`POST /api/runs` / `POST /api/tasks/:id/continue` 传 `lifecycle`）。
+
+### Workspace
+
+Workspace 是持久、Runtime-neutral 的一等资源：Task 引用（而非拥有）Workspace，容器可随意销毁重建而 Workspace 独立存在。基础能力：**Create / Import**（导入已有本地目录或 Git 仓库）/ **Attach**（Run 时挂载）/ **Save**（Run 结束后校验并记录 `lastSavedAt`）。Snapshot / Fork / Diff / Lock 等高级能力按规划留待后续版本。
+
+### Resume 与 Handoff
+
+* **Runtime Session Reference**：AgentFabric 只保存 Harness 原生 Session 的不透明引用（Runtime 类型/版本、native ref、是否可 Resume、metadata），不理解更不转换其内部结构。
+* **Resume**（同 Harness）：`continueTask` 优先用存储的 native ref 恢复 Harness 自己的 Session。
+* **Handoff**（跨 Harness 或无法 Resume）：生成语义化的工作交接（不迁移 Session，新 Harness 创建全新 Native Session），并以渲染后的 Handoff + 用户补充说明作为新 Run 的输入指令。
+* **Handoff 来源**：Harness 自产（adapter 声明 `supportsHandoffGeneration` 并在结果中返回内容）/ AgentFabric 辅助生成（基于 Task、Run 结果、Agent 消息、文件变化、Artifacts、日志）/ 用户补充说明（`userNotes`）。所有 Handoff 记录 from/to Runtime、来源 Run、Workspace 与 Artifacts，可查询可追踪。
+* **Runtime Capability**：adapter 声明 `supportsNativeSession / supportsNativeResume / supportsStreamingEvents / supportsHandoffGeneration / supportsWorkspace / supportsInteractiveExecution`，AgentFabric 据此决定 Resume 或 Handoff；`GET /api/tasks/:id/continue-options` 让用户在执行前明确看到即将发生的是 Resume 还是 Handoff。
+
+### CLI
+
+```bash
+# 长期任务
+af tasks list | show <id> | options <id>
+af tasks continue <task-id> "继续修剩下的两个测试" --mode auto --notes "不要修改现有 API"
+af tasks continue <task-id> "switch harness" --runtime <other-rt>   # 跨 Harness → Handoff
+
+# Handoff / 原生 Session 引用
+af handoffs list [--task <id>]
+af handoffs show <id>
+af handoffs notes <id> "补充约束"
+af runtime-sessions [--task <id>]
+
+# Workspace
+af workspaces add repo --path /path/to/code
+af workspaces import legacy --path /existing/project     # 导入已有目录
+af workspaces save <ws-id> --run <run-id>
+af workspaces usage <ws-id>
+
+# 容器生命周期
+af run "..." --lifecycle keep-alive --idle-timeout 600000
+af containers kept
+```
+
+### API 新增（v1）
+
+| Method | Path | 说明 |
+| --- | --- | --- |
+| GET | `/api/tasks/:id` `/api/tasks/:id/runs` | Task 详情 / Run 链 |
+| GET | `/api/tasks/:id/continue-options` | Resume vs Handoff 决策预览（含 Handoff 内容预览） |
+| POST | `/api/tasks/:id/continue` | 继续任务（自动/强制 Resume 或 Handoff） |
+| GET | `/api/handoffs?taskId=&runId=` `/api/handoffs/:id` | Handoff 查询 |
+| POST | `/api/handoffs/:id/notes` | 追加用户说明 |
+| GET | `/api/runtime-sessions` `/api/runtime-sessions/:id` | 原生 Session 引用 |
+| POST | `/api/runtime-sessions/:id/expire` | 标记引用失效 |
+| POST | `/api/workspaces/import` `/api/workspaces/:id/save` | Workspace 导入 / 保存 |
+| GET | `/api/workspaces/:id/usage` | Workspace 被哪些 Task/Run 引用 |
+| GET | `/api/runtimes/:id/capabilities` | 生效的 Harness 能力 |
+| GET | `/api/containers/kept` | keep-alive 保留中的容器 |
 
 ### CLI
 
@@ -205,5 +277,7 @@ packages/
 ## 测试
 
 ```bash
-npm test          # core 单元测试（store/secret/mock run/cost/event bus/policy/git workspace）
+npm test          # core 单元测试：store/secret/mock run/cost/event bus/policy/git workspace
+                  # + v1：生命周期策略、keep-alive 租约（超时销毁/复用/重启恢复）、workspace 导入与保存、
+                  #        同 Harness Native Resume、跨 Harness Handoff、Handoff 生成与渲染、能力声明
 ```

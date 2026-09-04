@@ -15,6 +15,8 @@ import type {
   Secret,
   AgentProfile,
   AppConfig,
+  Handoff,
+  RuntimeSessionRef,
 } from "./types.js";
 
 export type CollectionName =
@@ -29,6 +31,8 @@ export type CollectionName =
   | "artifacts"
   | "secrets"
   | "profiles"
+  | "handoffs"
+  | "runtimeSessions"
   | "config";
 
 export interface Database {
@@ -43,6 +47,8 @@ export interface Database {
   artifacts: Artifact[];
   secrets: Secret[];
   profiles: AgentProfile[];
+  handoffs: Handoff[];
+  runtimeSessions: RuntimeSessionRef[];
   config: AppConfig;
 }
 
@@ -64,6 +70,8 @@ export function emptyDatabase(): Database {
     artifacts: [],
     secrets: [],
     profiles: [],
+    handoffs: [],
+    runtimeSessions: [],
     config: {},
   };
 }
@@ -111,6 +119,8 @@ export class Store {
       if (!Array.isArray(this.db.artifacts)) this.db.artifacts = [];
       if (!Array.isArray(this.db.secrets)) this.db.secrets = [];
       if (!Array.isArray(this.db.profiles)) this.db.profiles = [];
+      if (!Array.isArray(this.db.handoffs)) this.db.handoffs = [];
+      if (!Array.isArray(this.db.runtimeSessions)) this.db.runtimeSessions = [];
       if (!this.db.config) this.db.config = {};
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {

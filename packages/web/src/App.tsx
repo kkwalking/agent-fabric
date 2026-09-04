@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Dashboard } from "./views/Dashboard";
 import { ResourceView } from "./views/ResourceView";
 import { RunsView, RunDetailView } from "./views/Runs";
+import { TasksView } from "./views/Tasks";
+import { HandoffsView } from "./views/Handoffs";
 import { SessionsView } from "./views/Sessions";
 import { ArtifactsView } from "./views/Artifacts";
 import { UsageView } from "./views/Usage";
@@ -16,9 +18,11 @@ export type ViewKey =
   | "agents"
   | "workspaces"
   | "secrets"
+  | "tasks"
   | "runs"
   | "run"
   | "sessions"
+  | "handoffs"
   | "artifacts"
   | "usage"
   | "settings";
@@ -36,8 +40,8 @@ interface NavEntry {
 
 const primaryNav: NavEntry[] = [
   { key: "runs", label: "New run", icon: "compose" },
+  { key: "tasks", label: "Tasks", icon: "history" },
   { key: "dashboard", label: "Dashboard", icon: "grid" },
-  { key: "sessions", label: "Sessions", icon: "history" },
 ];
 
 const resourceNav: NavEntry[] = [
@@ -50,6 +54,7 @@ const resourceNav: NavEntry[] = [
 ];
 
 const systemNav: NavEntry[] = [
+  { key: "handoffs", label: "Handoffs", icon: "archive" },
   { key: "artifacts", label: "Artifacts", icon: "archive" },
   { key: "usage", label: "Usage", icon: "chart" },
   { key: "settings", label: "Settings", icon: "gear" },
@@ -125,7 +130,9 @@ export function App() {
         {nav.view === "secrets" && <ResourceView kind="secrets" />}
         {nav.view === "runs" && <RunsView onOpenRun={(id) => navigate("run", id)} />}
         {nav.view === "run" && <RunDetailView runId={nav.runId ?? ""} onBack={() => navigate("runs")} />}
+        {nav.view === "tasks" && <TasksView onOpenRun={(id) => navigate("run", id)} />}
         {nav.view === "sessions" && <SessionsView onOpenRun={(id) => navigate("run", id)} />}
+        {nav.view === "handoffs" && <HandoffsView />}
         {nav.view === "artifacts" && <ArtifactsView />}
         {nav.view === "usage" && <UsageView />}
         {nav.view === "settings" && <SettingsView />}

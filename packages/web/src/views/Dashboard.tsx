@@ -26,8 +26,11 @@ export function Dashboard({ onOpenRun }: { onOpenRun: (id: string) => void }) {
     ["Providers", data.counts.providers],
     ["Models", data.counts.models],
     ["Runtimes", data.counts.runtimes],
+    ["Tasks", data.counts.tasks],
     ["Runs", data.counts.runs],
-    ["Sessions", data.counts.sessions],
+    ["Workspaces", data.counts.workspaces],
+    ["Handoffs", data.counts.handoffs],
+    ["Native sessions", data.counts.runtimeSessions],
     ["Artifacts", data.counts.artifacts],
   ];
 

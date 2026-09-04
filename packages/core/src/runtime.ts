@@ -2,12 +2,19 @@ import type {
   Artifact,
   ArtifactKind,
   EventType,
+  Handoff,
+  HandoffContent,
   LogLevel,
   Model,
   Provider,
   Run,
+  RunContinuity,
   Runtime,
+  RuntimeCapability,
   RuntimeKind,
+  RuntimeLifecycle,
+  RuntimeLifecycleMode,
+  RuntimeSessionRef,
   Secret,
   Session,
   Task,
@@ -29,6 +36,15 @@ export interface ArtifactDraft {
 }
 
 /**
+ * A kept container (keep-alive lifecycle) offered to the adapter for
+ * reuse instead of creating a fresh one.
+ */
+export interface ReusableContainer {
+  containerId: string;
+  name?: string;
+}
+
+/**
  * Everything a runtime adapter needs to execute one Run. Adapters are
  * passive: they emit events/logs through `ctx`, produce artifacts through
  * `ctx.addArtifact`, report usage through `ctx.recordUsage`, and must
@@ -47,6 +63,16 @@ export interface RuntimeContext {
   env: Record<string, string>;
   /** Aborted when the run is cancelled or times out. */
   signal: AbortSignal;
+  /** Resolved container lifecycle policy for this run (spec v1 §1). */
+  lifecycle: RuntimeLifecycle;
+  /** How this run continues the task: new / resume / handoff. */
+  continuity: RunContinuity;
+  /** Harness-native session to resume (only when continuity === "resume"). */
+  runtimeSession?: RuntimeSessionRef;
+  /** Handoff consumed by this run (only when continuity === "handoff"). */
+  previousHandoff?: Handoff;
+  /** A kept container that may be reused (keep-alive lifecycle). */
+  reusableContainer?: ReusableContainer;
   emit(
     type: EventType,
     data?: Record<string, unknown>,
@@ -55,6 +81,8 @@ export interface RuntimeContext {
   log(line: string, level?: LogLevel): Promise<void>;
   recordUsage(usage: Usage): void;
   addArtifact(draft: ArtifactDraft): Promise<Artifact>;
+  /** Persist the workspace after the run (spec v1 §11 Save). */
+  saveWorkspace(): Promise<Workspace | undefined>;
   /** Resolved absolute workspace path on the host (if any). */
   workspacePath?: string;
 }
@@ -65,6 +93,20 @@ export interface RuntimeResult {
   error?: string;
   /** Docker container id, when the adapter ran a container. */
   containerId?: string;
+  /**
+   * Opaque reference to the harness-native session this run created or
+   * resumed. AgentFabric stores it verbatim; it is never interpreted.
+   */
+  nativeSessionRef?: string;
+  /** Harness version, when the adapter knows it. */
+  runtimeVersion?: string;
+  /** Runtime-specific metadata to keep alongside the session reference. */
+  nativeSessionMetadata?: Record<string, unknown>;
+  /**
+   * Harness-generated handoff: a high-quality work summary produced by
+   * the harness itself (spec v1 §7), stored for the next continuation.
+   */
+  handoffContent?: HandoffContent;
 }
 
 /**
@@ -76,12 +118,36 @@ export interface RuntimeResult {
 export interface AgentRuntimeAdapter {
   readonly kind: RuntimeKind;
   readonly name: string;
+  /** Capabilities declared by this harness (spec v1 §17). */
+  readonly capabilities?: Partial<RuntimeCapability>;
   run(ctx: RuntimeContext): Promise<RuntimeResult>;
   /** Best-effort cancellation of the currently running task. */
   cancel?(ctx: RuntimeContext): Promise<void>;
   /** Best-effort cleanup of the underlying container/process. */
   cleanup?(ctx: RuntimeContext): Promise<void>;
   describe?(): Record<string, unknown>;
+}
+
+/** Fallback capability set when an adapter declares nothing. */
+export const DEFAULT_ADAPTER_CAPABILITIES: RuntimeCapability = {
+  supportsNativeSession: false,
+  supportsNativeResume: false,
+  supportsStreamingEvents: false,
+  supportsHandoffGeneration: false,
+  supportsWorkspace: false,
+  supportsInteractiveExecution: false,
+};
+
+/** Effective capabilities: runtime record overrides adapter defaults. */
+export function effectiveCapabilities(
+  adapter: AgentRuntimeAdapter | undefined,
+  runtime?: Runtime
+): RuntimeCapability {
+  return {
+    ...DEFAULT_ADAPTER_CAPABILITIES,
+    ...(adapter?.capabilities ?? {}),
+    ...(runtime?.capabilities ?? {}),
+  };
 }
 
 export type AdapterFactory = (kind: string) => AgentRuntimeAdapter | undefined;

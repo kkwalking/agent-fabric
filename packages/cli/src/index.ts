@@ -229,19 +229,28 @@ function buildProgram(): Command {
 
   program
     .command("workspaces")
-    .description("manage workspaces")
-    .argument("<action>", "list | add | remove")
+    .description("manage workspaces (durable, runtime-neutral working environments)")
+    .argument("<action>", "list | add | import | save | usage | remove")
     .argument("[name]", "workspace name or id")
     .option("--path <dir>", "local directory path")
     .option("--type <type>", "local | git | volume", "local")
     .option("--repo <url>", "git repository URL")
     .option("--branch <branch>", "git branch")
+    .option("--run <id>", "run id to attribute a save to")
     .action(async (action: string, name: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
       if (action === "list") {
         const rows = await c.get<Record<string, unknown>[]>("/api/workspaces");
         if (json(cmd)) return console.log(pretty(rows));
-        console.log(table(rows.map((w) => ({ id: w.id, name: w.name, type: w.type, path: w.path ?? w.repoUrl ?? "-" }))));
+        console.log(table(rows.map((w) => ({
+          id: w.id,
+          name: w.name,
+          type: w.type,
+          source: w.source ?? "create",
+          status: w.status ?? "ready",
+          path: w.path ?? w.repoUrl ?? "-",
+          lastSavedAt: w.lastSavedAt ?? "-",
+        }))));
         return;
       }
       if (action === "add") {
@@ -254,6 +263,30 @@ function buildProgram(): Command {
           branch: cmd.opts().branch,
         });
         console.log(json(cmd) ? pretty(w) : `workspace created: ${(w as { id: string }).id}`);
+        return;
+      }
+      if (action === "import") {
+        if (!name) throw new Error("usage: af workspaces import <name> --path <dir> (or --repo <url>)");
+        const w = await c.post<unknown>("/api/workspaces/import", {
+          name,
+          type: cmd.opts().type,
+          path: cmd.opts().path,
+          repoUrl: cmd.opts().repo,
+          branch: cmd.opts().branch,
+        });
+        console.log(json(cmd) ? pretty(w) : `workspace imported: ${(w as { id: string }).id} (${(w as { path?: string }).path ?? "-"})`);
+        return;
+      }
+      if (action === "save") {
+        if (!name) throw new Error("usage: af workspaces save <id> [--run <runId>]");
+        const w = await c.post<unknown>(`/api/workspaces/${name}/save`, { runId: cmd.opts().run });
+        console.log(json(cmd) ? pretty(w) : `workspace saved: ${name} at ${(w as { lastSavedAt?: string }).lastSavedAt}`);
+        return;
+      }
+      if (action === "usage") {
+        if (!name) throw new Error("usage: af workspaces usage <id>");
+        const u = await c.get<Record<string, unknown>>(`/api/workspaces/${name}/usage`);
+        console.log(json(cmd) ? pretty(u) : pretty(u));
         return;
       }
       if (action === "remove") {
@@ -358,6 +391,8 @@ function buildProgram(): Command {
     .option("--profile <id>", "agent profile id")
     .option("--tool <tool>", "tool allowed for this task (repeatable)")
     .option("--timeout <ms>", "task timeout in ms")
+    .option("--lifecycle <mode>", "container lifecycle: ephemeral | keep-alive | persistent")
+    .option("--idle-timeout <ms>", "keep-alive idle timeout in ms")
     .option("--from-repo", "use the current directory as the workspace")
     .option("--follow", "stream events live until the run finishes")
     .option("--no-wait", "submit and return immediately")
@@ -382,6 +417,12 @@ function buildProgram(): Command {
         console.error(`workspace: ${ws.id} (${abs})`);
       }
 
+      const lifecycle = opts.lifecycle
+        ? { mode: opts.lifecycle, idleTimeoutMs: opts.idleTimeout ? Number(opts.idleTimeout) : undefined }
+        : opts.idleTimeout
+          ? { mode: "keep-alive", idleTimeoutMs: Number(opts.idleTimeout) }
+          : undefined;
+
       const result = await c.post<{ task: { id: string }; run: Record<string, unknown> }>("/api/runs", {
         prompt: text,
         title: opts.title,
@@ -392,6 +433,7 @@ function buildProgram(): Command {
         profileId: opts.profile,
         tools: (opts.tool as string[] | undefined)?.length ? opts.tool : undefined,
         timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
+        lifecycle,
       });
       const runId = result.run.id as string;
       console.log(json(cmd) ? pretty(result) : `task ${result.task.id} -> run ${runId} (${result.run.status})`);
@@ -405,12 +447,156 @@ function buildProgram(): Command {
 
   program
     .command("tasks")
-    .description("list submitted tasks")
-    .action(async (_opts: unknown, cmd: Command) => {
+    .description("manage tasks (a task is the long-term goal; runs execute it)")
+    .argument("<action>", "list | show | continue | options")
+    .argument("[id]", "task id")
+    .argument("[prompt]", "prompt (for continue)")
+    .option("--runtime <id>", "target runtime id (for continue)")
+    .option("--model <id>", "model id (for continue)")
+    .option("--mode <mode>", "resume | handoff | auto (default auto)")
+    .option("--notes <text>", "user notes folded into the handoff")
+    .option("--lifecycle <mode>", "container lifecycle: ephemeral | keep-alive | persistent")
+    .option("--idle-timeout <ms>", "keep-alive idle timeout in ms")
+    .action(async (action: string, id: string | undefined, prompt: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
-      const rows = await c.get<Record<string, unknown>[]>("/api/tasks");
+      if (action === "list") {
+        const rows = await c.get<Record<string, unknown>[]>("/api/tasks");
+        if (json(cmd)) return console.log(pretty(rows));
+        console.log(table(rows.map((t) => ({ id: t.id, title: t.title, runtime: t.runtimeId ?? "-", workspace: t.workspaceId ?? "-", createdAt: t.createdAt }))));
+        return;
+      }
+      if (!id) throw new Error(`usage: af tasks ${action} <id>`);
+      if (action === "show") {
+        const [task, taskRuns, taskHandoffs] = await Promise.all([
+          c.get<Record<string, unknown>>(`/api/tasks/${id}`),
+          c.get<Record<string, unknown>[]>(`/api/tasks/${id}/runs`),
+          c.get<Record<string, unknown>[]>(`/api/handoffs?taskId=${id}`),
+        ]);
+        if (json(cmd)) return console.log(pretty({ task, runs: taskRuns, handoffs: taskHandoffs }));
+        console.log(pretty(task));
+        console.log("\nruns:");
+        console.log(table(taskRuns.map((r) => ({
+          id: r.id,
+          status: r.status,
+          continuity: r.continuity ?? "new",
+          runtime: r.runtimeName ?? "-",
+          lifecycle: (r.lifecycle as { mode?: string } | undefined)?.mode ?? "-",
+          handoff: r.previousHandoffId ? "<-" : (r.generatedHandoffId ? "->" : ""),
+          createdAt: r.createdAt,
+        }))));
+        console.log("\nhandoffs:");
+        console.log(table(taskHandoffs.map((h) => ({
+          id: h.id,
+          from: h.fromRuntimeName ?? h.fromRuntimeKind ?? "-",
+          to: h.toRuntimeName ?? h.toRuntimeKind ?? "-",
+          source: h.source,
+          createdAt: h.createdAt,
+        }))));
+        return;
+      }
+      if (action === "options") {
+        const o = await c.get<Record<string, unknown>>(`/api/tasks/${id}/continue-options`);
+        console.log(json(cmd) ? pretty(o) : pretty(o));
+        return;
+      }
+      if (action === "continue") {
+        if (!prompt) throw new Error('usage: af tasks continue <id> "<prompt>" [--runtime] [--mode] [--notes]');
+        const opts = cmd.opts();
+        const result = await c.post<Record<string, unknown>>(`/api/tasks/${id}/continue`, {
+          prompt,
+          runtimeId: opts.runtime,
+          modelId: opts.model,
+          mode: opts.mode,
+          userNotes: opts.notes,
+          lifecycle: opts.lifecycle
+            ? { mode: opts.lifecycle, idleTimeoutMs: opts.idleTimeout ? Number(opts.idleTimeout) : undefined }
+            : opts.idleTimeout
+              ? { mode: "keep-alive", idleTimeoutMs: Number(opts.idleTimeout) }
+              : undefined,
+        });
+        if (json(cmd)) return console.log(pretty(result));
+        const run = result.run as Record<string, unknown>;
+        console.log(`continuity : ${result.continuity}`);
+        console.log(`${result.explanation}`);
+        console.log(`run        : ${run.id} (${run.status})`);
+        if (result.handoff) console.log(`handoff    : ${(result.handoff as { id: string }).id}`);
+        if (result.runtimeSessionRef) console.log(`session ref: ${(result.runtimeSessionRef as { nativeSessionRef: string }).nativeSessionRef}`);
+        return;
+      }
+      throw new Error(`unknown action: ${action}`);
+    });
+
+  /* ---------------- handoffs ---------------- */
+
+  program
+    .command("handoffs")
+    .description("inspect handoffs between agent harnesses")
+    .argument("<action>", "list | show | notes")
+    .argument("[id]", "handoff id (for show/notes)")
+    .argument("[notes]", "notes text (for notes)")
+    .option("--task <id>", "filter by task id (for list)")
+    .action(async (action: string, id: string | undefined, notes: string | undefined, _opts: unknown, cmd: Command) => {
+      const c = client(cmd);
+      if (action === "list") {
+        const qs = cmd.opts().task ? `?taskId=${cmd.opts().task}` : "";
+        const rows = await c.get<Record<string, unknown>[]>(`/api/handoffs${qs}`);
+        if (json(cmd)) return console.log(pretty(rows));
+        console.log(table(rows.map((h) => ({
+          id: h.id,
+          task: h.taskId,
+          from: h.fromRuntimeName ?? h.fromRuntimeKind ?? "-",
+          to: h.toRuntimeName ?? h.toRuntimeKind ?? "-",
+          source: h.source,
+          createdAt: h.createdAt,
+        }))));
+        return;
+      }
+      if (!id) throw new Error(`usage: af handoffs ${action} <id>`);
+      if (action === "show") {
+        const h = await c.get<Record<string, unknown>>(`/api/handoffs/${id}`);
+        console.log(json(cmd) ? pretty(h) : pretty(h));
+        return;
+      }
+      if (action === "notes") {
+        if (!notes) throw new Error('usage: af handoffs notes <id> "<notes>"');
+        const h = await c.post<unknown>(`/api/handoffs/${id}/notes`, { notes });
+        console.log(json(cmd) ? pretty(h) : `notes added to handoff ${id}`);
+        return;
+      }
+      throw new Error(`unknown action: ${action}`);
+    });
+
+  /* ---------------- runtime session references ---------------- */
+
+  program
+    .command("runtime-sessions")
+    .description("list harness-native session references (opaque, harness-specific)")
+    .argument("[task]", "filter by task id")
+    .action(async (task: string | undefined, _opts: unknown, cmd: Command) => {
+      const c = client(cmd);
+      const qs = task ? `?taskId=${task}` : "";
+      const rows = await c.get<Record<string, unknown>[]>(`/api/runtime-sessions${qs}`);
       if (json(cmd)) return console.log(pretty(rows));
-      console.log(table(rows.map((t) => ({ id: t.id, title: t.title, runtime: t.runtimeId ?? "-", createdAt: t.createdAt }))));
+      console.log(table(rows.map((s) => ({
+        id: s.id,
+        runtime: s.runtimeName ?? s.runtimeKind,
+        kind: s.runtimeKind,
+        nativeSessionRef: s.nativeSessionRef,
+        resume: s.resumeSupported ? "yes" : "no",
+        status: s.status,
+        createdAt: s.createdAt,
+      }))));
+    });
+
+  program
+    .command("containers")
+    .description("inspect containers kept alive by the keep-alive lifecycle")
+    .argument("<action>", "kept")
+    .action(async (action: string, _opts: unknown, cmd: Command) => {
+      if (action !== "kept") throw new Error(`unknown action: ${action}`);
+      const c = client(cmd);
+      const rows = await c.get<Record<string, unknown>[]>("/api/containers/kept");
+      console.log(json(cmd) ? pretty(rows) : pretty(rows));
     });
 
   program

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import type { AgentRuntimeAdapter, RuntimeContext, RuntimeResult, RunEvent } from "@agentfabric/core";
-import { runDockerContainer, mergedResourceLimits } from "./docker.js";
+import type { AgentRuntimeAdapter, RuntimeCapability, RuntimeContext, RuntimeResult, RunEvent } from "@agentfabric/core";
+import { runDockerWithLifecycle, mergedResourceLimits } from "./docker.js";
 
 interface OpenCodeEvent {
   type: string;
@@ -13,6 +13,21 @@ interface OpenCodeEvent {
 function opencodeBin(): string {
   return process.env.AGENTFABRIC_OPENCODE_BIN ?? "opencode";
 }
+
+/**
+ * OpenCode harness capabilities (spec v1 §17): it owns native sessions
+ * and can resume them, streams events, and works inside a workspace.
+ * It does not generate handoff summaries itself — AgentFabric-assisted
+ * handoff covers that case.
+ */
+export const opencodeCapabilities: Partial<RuntimeCapability> = {
+  supportsNativeSession: true,
+  supportsNativeResume: true,
+  supportsStreamingEvents: true,
+  supportsHandoffGeneration: false,
+  supportsWorkspace: true,
+  supportsInteractiveExecution: false,
+};
 
 /**
  * Maps an opencode JSONL event to an AgentFabric standard event.
@@ -87,7 +102,8 @@ function buildArgs(ctx: RuntimeContext): string[] {
   if (ctx.runtime.config?.agent) args.push("--agent", String(ctx.runtime.config.agent));
   if (ctx.runtime.config?.variant) args.push("--variant", String(ctx.runtime.config.variant));
   if (ctx.task.policy?.autoApprove) args.push("--auto");
-  if (ctx.session) args.push("--session", ctx.session.id);
+  // Native resume: pass the harness's own session reference (spec v1 §3).
+  if (ctx.runtimeSession?.nativeSessionRef) args.push("--session", ctx.runtimeSession.nativeSessionRef);
   if (ctx.runtime.config?.logLevel) args.push("--log-level", String(ctx.runtime.config.logLevel));
   return args;
 }
@@ -96,7 +112,8 @@ function buildArgs(ctx: RuntimeContext): string[] {
  * OpenCode Runtime adapter.
  *
  * Default: spawns the local `opencode run --format json` CLI, streaming
- * its JSONL events as AgentFabric standard events.
+ * its JSONL events as AgentFabric standard events. When a native session
+ * reference was stored for this harness it is resumed via `--session`.
  *
  * `containerized: true`: runs `opencode run` inside a Docker image via the
  * shared Docker helper (runtime.image, e.g. `ghcr.io/sst/opencode`).
@@ -104,15 +121,18 @@ function buildArgs(ctx: RuntimeContext): string[] {
 export const opencodeAdapter: AgentRuntimeAdapter = {
   kind: "opencode",
   name: "OpenCode",
+  capabilities: opencodeCapabilities,
 
   async run(ctx: RuntimeContext): Promise<RuntimeResult> {
     const args = buildArgs(ctx);
-    const prompt = ctx.task.prompt;
+    // This run's instruction: the rendered handoff for continuity runs,
+    // otherwise the task's original prompt (spec v1 §20 Inject Handoff).
+    const prompt = ctx.run.inputInstruction ?? ctx.task.prompt;
     const cwd = ctx.workspacePath ?? ctx.runtime.cwd ?? process.cwd();
 
     if (ctx.runtime.containerized) {
       const image = ctx.runtime.image ?? "ghcr.io/sst/opencode";
-      const outcome = await runDockerContainer(ctx, {
+      const outcome = await runDockerWithLifecycle(ctx, {
         image,
         command: [...args, prompt],
         env: ctx.env,
@@ -120,7 +140,12 @@ export const opencodeAdapter: AgentRuntimeAdapter = {
         resourceLimits: mergedResourceLimits(ctx),
         networkPolicy: ctx.task.policy?.network ?? ctx.runtime.networkPolicy,
       });
-      return outcome.exitCode === 0 ? { exitCode: 0 } : { exitCode: outcome.exitCode ?? 1, error: `OpenCode container exited with code ${outcome.exitCode}` };
+      if (outcome.error) return { exitCode: outcome.exitCode ?? 1, error: outcome.error, containerId: outcome.containerId };
+      return {
+        exitCode: outcome.exitCode === 0 ? 0 : outcome.exitCode ?? 1,
+        error: outcome.exitCode === 0 ? undefined : `OpenCode container exited with code ${outcome.exitCode}`,
+        containerId: outcome.containerId,
+      };
     }
 
     await ctx.emit("shell.command", { command: `${opencodeBin()} ${args.join(" ")} <prompt>`, cwd });
@@ -132,8 +157,18 @@ export const opencodeAdapter: AgentRuntimeAdapter = {
       });
       const rl = createInterface({ input: child.stdout });
       let seq = 0;
+      let nativeSessionRef: string | undefined;
       rl.on("line", (line) => {
         if (!line.trim()) return;
+        // Capture the harness's own session id (opaque to AgentFabric).
+        try {
+          const raw = JSON.parse(line) as OpenCodeEvent;
+          if (!nativeSessionRef && typeof raw.sessionID === "string" && raw.sessionID) {
+            nativeSessionRef = raw.sessionID;
+          }
+        } catch {
+          /* non-JSON line */
+        }
         const mapped = mapOpenCodeEvent(line, ctx.run.id, () => ++seq);
         if (mapped) {
           void ctx.emit(mapped.type, mapped.data, { level: mapped.level, source: "opencode" });
@@ -154,14 +189,14 @@ export const opencodeAdapter: AgentRuntimeAdapter = {
       child.on("close", (code) => {
         ctx.signal.removeEventListener("abort", onAbort);
         if (ctx.signal.aborted) {
-          resolve({ exitCode: code ?? 1, error: "OpenCode run aborted" });
+          resolve({ exitCode: code ?? 1, error: "OpenCode run aborted", nativeSessionRef });
           return;
         }
         if (code !== 0) {
-          resolve({ exitCode: code ?? 1, error: `OpenCode exited with code ${code}` });
+          resolve({ exitCode: code ?? 1, error: `OpenCode exited with code ${code}`, nativeSessionRef });
           return;
         }
-        resolve({ exitCode: 0 });
+        resolve({ exitCode: 0, nativeSessionRef });
       });
     });
   },

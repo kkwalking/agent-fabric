@@ -74,6 +74,45 @@ export interface FilesystemPolicy {
   deniedPaths?: string[];
 }
 
+/**
+ * Runtime Container lifecycle policies (spec v1 §1).
+ *
+ * - `ephemeral` (default): a fresh container per Run, destroyed when the
+ *   Run completes, fails, is cancelled or times out.
+ * - `keep-alive`: the container is retained for a short idle window after
+ *   the Run finishes so a follow-up Run on the same harness/workspace can
+ *   reuse it; it is destroyed automatically after `idleTimeoutMs`.
+ * - `persistent`: long-lived container (daemon agents etc.). Reserved in
+ *   the model — not a core implementation goal of this phase — but the
+ *   lifecycle model and cleanup paths already honor it.
+ */
+export type RuntimeLifecycleMode = "ephemeral" | "keep-alive" | "persistent";
+
+export interface RuntimeLifecycle {
+  mode: RuntimeLifecycleMode;
+  /** Keep-alive only: destroy the container after this much idle time. */
+  idleTimeoutMs?: number;
+}
+
+/**
+ * Capabilities a Runtime can declare (spec v1 §17). AgentFabric uses them
+ * to decide which behaviors are available (e.g. native resume vs handoff).
+ */
+export interface RuntimeCapability {
+  /** Harness has its own native session concept. */
+  supportsNativeSession: boolean;
+  /** Harness can resume a previously stored native session reference. */
+  supportsNativeResume: boolean;
+  /** Harness streams progress events while executing. */
+  supportsStreamingEvents: boolean;
+  /** Harness can produce a high-quality handoff summary itself. */
+  supportsHandoffGeneration: boolean;
+  /** Harness can attach to (work inside) a Workspace directory. */
+  supportsWorkspace: boolean;
+  /** Harness supports interactive (multi-turn) execution. */
+  supportsInteractiveExecution: boolean;
+}
+
 export interface Runtime {
   id: ID;
   name: string;
@@ -87,10 +126,17 @@ export interface Runtime {
   cwd?: string;
   /** If true, the adapter runs inside a Docker container. */
   containerized?: boolean;
-  defaultModelId?: string;
+  defaultModelId?: ID;
   enabled: boolean;
-  /** Ephemeral runtime: container destroyed after the run. */
+  /**
+   * Ephemeral runtime: container destroyed after the run.
+   * Superseded by `lifecycle.mode`; kept for backward compatibility —
+   * `ephemeral: false` maps to `lifecycle.mode: "persistent"`.
+   */
   ephemeral?: boolean;
+  lifecycle?: RuntimeLifecycle;
+  /** Declared capabilities; falls back to the adapter's declared set. */
+  capabilities?: Partial<RuntimeCapability>;
   resourceLimits?: ResourceLimits;
   env?: Record<string, string>;
   secretIds?: string[];
@@ -118,6 +164,14 @@ export interface Workspace {
   /** Mount target inside the container. */
   mountPath?: string;
   persistent: boolean;
+  /** How the workspace came into being: created empty or imported. */
+  source?: "create" | "import";
+  /** Liveness of the backing directory ("missing" means the path vanished). */
+  status?: "ready" | "missing";
+  /** Last time the workspace was saved/verified after a Run. */
+  lastSavedAt?: string;
+  /** Run that last saved the workspace. */
+  lastSavedRunId?: ID;
   createdAt: string;
 }
 
@@ -176,6 +230,15 @@ export type RunStatus =
   | "cancelled"
   | "timeout";
 
+/**
+ * How this Run continues the Task's work (spec v1 §4/§18):
+ * - `new`: first run of the task (or an explicit fresh start).
+ * - `resume`: same harness, continued via its native session.
+ * - `handoff`: different harness, continued via a Handoff — the new
+ *   harness creates its own new native session (no session migration).
+ */
+export type RunContinuity = "new" | "resume" | "handoff";
+
 export interface Run {
   id: ID;
   taskId: ID;
@@ -189,6 +252,25 @@ export interface Run {
   workspaceId?: ID;
   sessionId?: ID;
   containerId?: string;
+  /** The concrete instruction this Run executed (may include handoff context). */
+  inputInstruction?: string;
+  /** Resume / handoff / new — how this run relates to previous runs. */
+  continuity?: RunContinuity;
+  /** Handoff consumed by this run (cross-harness continuation). */
+  previousHandoffId?: ID;
+  /** Handoff this run produced for a future continuation. */
+  generatedHandoffId?: ID;
+  /** Runtime-native session reference used/created by this run. */
+  runtimeSessionRefId?: ID;
+  /** Container lifecycle policy applied to this run. */
+  lifecycle?: RuntimeLifecycle;
+  /** Per-run execution parameters (override the task's defaults). */
+  profileId?: ID;
+  env?: Record<string, string>;
+  secretIds?: string[];
+  tools?: string[];
+  timeoutMs?: number;
+  policy?: ExecutionPolicy;
   error?: string;
   startTime?: string;
   endTime?: string;
@@ -221,6 +303,99 @@ export interface Session {
 }
 
 /* ------------------------------------------------------------------ */
+/* Runtime Session Reference (spec v1 §3/§9)                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A reference to a harness's *native* session. AgentFabric never
+ * understands (or unifies) the session's internal structure — it only
+ * records enough to resume the same harness later:
+ * runtime type/version, the opaque native reference, resume capability
+ * and runtime-specific metadata.
+ *
+ * Same Harness → Resume. Different Harness → Handoff.
+ */
+export interface RuntimeSessionRef {
+  id: ID;
+  runtimeId?: ID;
+  /** Runtime kind (harness type) the native session belongs to. */
+  runtimeKind: RuntimeKind;
+  runtimeName?: string;
+  /** Harness version, when known. */
+  runtimeVersion?: string;
+  /** Opaque reference into the harness's own session store. */
+  nativeSessionRef: string;
+  /** Whether this harness can resume from this reference. */
+  resumeSupported: boolean;
+  taskId?: ID;
+  runId: ID;
+  workspaceId?: ID;
+  status: "active" | "expired";
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Handoff (spec v1 §4–§8)                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Where a handoff's content came from:
+ * - `harness`: the previous agent harness produced the summary itself.
+ * - `agentfabric`: AgentFabric generated it from task/run/messages/
+ *   workspace/files/artifacts/logs (assisted handoff).
+ * - `user`: notes supplied by the user when switching harnesses.
+ * A stored handoff records which sources contributed (`sources`).
+ */
+export type HandoffSource = "harness" | "agentfabric" | "user";
+
+/**
+ * Semantic work handoff between two agent harnesses. All fields are
+ * optional — different tasks justify different content (spec v1 §6).
+ * This is a *semantic* handoff, not a session-state migration.
+ */
+export interface HandoffContent {
+  originalTask?: string;
+  currentObjective?: string;
+  progressSummary?: string;
+  completedWork?: string[];
+  remainingWork?: string[];
+  importantDecisions?: string[];
+  userConstraints?: string[];
+  relevantFiles?: string[];
+  workspaceStatus?: string;
+  artifacts?: string[];
+  testBuildStatus?: string;
+  previousRunResult?: string;
+  notesForNextAgent?: string;
+}
+
+export interface Handoff {
+  id: ID;
+  taskId: ID;
+  /** Run the work was handed over from. */
+  fromRunId: ID;
+  fromRuntimeId?: ID;
+  fromRuntimeName?: string;
+  fromRuntimeKind?: RuntimeKind;
+  /** Target runtime (known at creation time when the switch is explicit). */
+  toRuntimeId?: ID;
+  toRuntimeName?: string;
+  toRuntimeKind?: RuntimeKind;
+  /** Primary generator of the content. */
+  source: HandoffSource;
+  /** All generators that contributed (e.g. agentfabric + user). */
+  sources?: HandoffSource[];
+  content: HandoffContent;
+  /** Raw user-provided notes, kept verbatim. */
+  userNotes?: string;
+  workspaceId?: ID;
+  artifactIds: ID[];
+  createdAt: string;
+}
+
+/* ------------------------------------------------------------------ */
 /* Events & Logs                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -242,6 +417,14 @@ export type EventType =
   | "file.modified"
   | "artifact.created"
   | "runtime.error"
+  | "handoff.generated"
+  | "runtime.session.resumed"
+  | "runtime.session.created"
+  | "workspace.attached"
+  | "workspace.saved"
+  | "container.reused"
+  | "container.retained"
+  | "container.destroyed"
   | "log";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";

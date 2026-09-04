@@ -79,6 +79,7 @@ const configs: Record<string, Config> = {
       { key: "kind", label: "Kind" },
       { key: "image", label: "Image", render: (r) => <span className="mono">{r.image ?? "-"}</span> },
       { key: "containerized", label: "Container", render: (r) => String(Boolean(r.containerized)) },
+      { key: "lifecycle", label: "Lifecycle", render: (r) => r.lifecycle?.mode ?? (r.ephemeral === false ? "persistent" : "ephemeral") },
       { key: "enabled", label: "Enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
     ],
     createFields: [
@@ -86,6 +87,7 @@ const configs: Record<string, Config> = {
       { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "docker", "mock", "custom"] },
       { key: "image", label: "Docker image", placeholder: "node:22-alpine" },
       { key: "command", label: "Container command (docker kind)", placeholder: "sh -c echo hello" },
+      { key: "lifecycle", label: "Container lifecycle", type: "select", options: ["ephemeral", "keep-alive", "persistent"] },
       { key: "description", label: "Description" },
     ],
     rowActions: (row, reload) => (
@@ -123,8 +125,10 @@ const configs: Record<string, Config> = {
       { key: "id", label: "ID", render: (r) => <span className="mono">{r.id}</span> },
       { key: "name", label: "Name" },
       { key: "type", label: "Type" },
+      { key: "source", label: "Source", render: (r) => r.source ?? "create" },
       { key: "path", label: "Path / Repo", render: (r) => <span className="mono">{r.path ?? r.repoUrl ?? "-"}</span> },
-      { key: "mountPath", label: "Mount", render: (r) => <span className="mono">{r.mountPath}</span> },
+      { key: "status", label: "Status", render: (r) => <StatusBadge status={r.status === "missing" ? "failed" : "completed"} /> },
+      { key: "lastSavedAt", label: "Last saved", render: (r) => r.lastSavedAt ?? "-" },
     ],
     createFields: [
       { key: "name", label: "Name", required: true },
@@ -134,7 +138,19 @@ const configs: Record<string, Config> = {
       { key: "branch", label: "Branch" },
     ],
     rowActions: (row, reload) => (
-      <button className="small danger" onClick={() => removeItem("/api/workspaces", row.id, reload)}>delete</button>
+      <>
+        <button
+          className="small"
+          onClick={async () => {
+            await post(`/api/workspaces/${row.id}/save`);
+            reload();
+          }}
+          title="Persist/verify the workspace (containers are disposable, workspaces are durable)"
+        >
+          save
+        </button>{" "}
+        <button className="small danger" onClick={() => removeItem("/api/workspaces", row.id, reload)}>delete</button>
+      </>
     ),
   },
   secrets: {
@@ -188,8 +204,11 @@ export function ResourceView({ kind }: { kind: string }) {
     setSaveError(null);
     try {
       const body: Record<string, unknown> = { ...form };
-      if (cfg.path === "/api/runtimes" && body.command) body.command = String(body.command).split(" ");
-      if (cfg.path === "/api/runtimes") body.ephemeral = true;
+      if (cfg.path === "/api/runtimes") {
+        if (body.command) body.command = String(body.command).split(" ");
+        if (body.lifecycle) body.lifecycle = { mode: body.lifecycle };
+        delete body.ephemeral;
+      }
       await post(cfg.path, body);
       setForm({});
       setShowCreate(false);
