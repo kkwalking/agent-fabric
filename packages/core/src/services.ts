@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
@@ -12,7 +12,6 @@ import type {
   Workspace,
   Task,
   Run,
-  Session,
   RunEvent,
   Artifact,
   Secret,
@@ -24,6 +23,7 @@ import type {
   ExecutionPolicy,
   ResourceLimits,
   RuntimeSessionRef,
+  RuntimeNativeState,
 } from "./types.js";
 
 export function now(): string {
@@ -574,7 +574,6 @@ export interface NewTaskInput {
   runtimeId?: ID;
   modelId?: ID;
   workspaceId?: ID;
-  sessionId?: ID;
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: ID[];
@@ -606,7 +605,6 @@ export class TaskService {
       runtimeId: input.runtimeId,
       modelId: input.modelId,
       workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
       profileId: input.profileId,
       env: input.env,
       secretIds: input.secretIds,
@@ -630,75 +628,83 @@ export class TaskService {
 }
 
 /* ------------------------------------------------------------------ */
-/* Session                                                            */
+/* Runtime Native State (v2 §13–§15)                                   */
 /* ------------------------------------------------------------------ */
 
-export interface NewSessionInput {
-  name?: string;
-  runtimeId?: ID;
-  workspaceId?: ID;
-  modelId?: ID;
-}
-
-export class SessionService {
+/**
+ * Manages the opaque, per-runtime state directories harnesses need for
+ * native resume. AgentFabric creates, mounts, preserves, reattaches and
+ * deletes these directories — it never inspects their contents
+ * (v2: "Runtime native state is opaque").
+ *
+ * The state is distinct from a Workspace: it holds harness plumbing
+ * (native session stores, internal databases), not user work.
+ */
+export class NativeStateService {
   constructor(private store: Store) {}
 
-  list(): Session[] {
-    return this.store.list<Session>("sessions");
+  list(filter?: { runtimeId?: ID }): RuntimeNativeState[] {
+    return this.store
+      .list<RuntimeNativeState>("nativeStates")
+      .filter((s) => !filter?.runtimeId || s.runtimeId === filter.runtimeId);
   }
 
-  get(id: ID): Session | undefined {
-    return this.store.get<Session>("sessions", id);
+  get(id: ID): RuntimeNativeState | undefined {
+    return this.store.get<RuntimeNativeState>("nativeStates", id);
   }
 
-  async create(input: NewSessionInput): Promise<Session> {
-    const session: Session = {
-      id: newId("ses"),
-      name: input.name,
-      runtimeId: input.runtimeId,
-      workspaceId: input.workspaceId,
-      modelId: input.modelId,
-      status: "active",
-      runIds: [],
-      usage: emptyUsage(),
-      cost: 0,
+  /**
+   * Create (or reattach) the native state directory for a runtime. The
+   * same runtime always maps to the same directory, so an ephemeral
+   * container's harness state survives container destruction and the
+   * next run reattaches it (v2 §15).
+   */
+  async ensureForRuntime(runtime: Runtime, mountPath: string): Promise<RuntimeNativeState> {
+    const existing = this.list({ runtimeId: runtime.id })[0];
+    if (existing) {
+      await mkdir(existing.path, { recursive: true });
+      if (existing.mountPath !== mountPath) {
+        return (await this.store.update<RuntimeNativeState>("nativeStates", existing.id, {
+          mountPath,
+          updatedAt: now(),
+        }))!;
+      }
+      return existing;
+    }
+    const id = newId("nstate");
+    const path = join(this.store.dataDir, "native-state", runtime.id);
+    await mkdir(path, { recursive: true });
+    return this.store.insert<RuntimeNativeState>("nativeStates", {
+      id,
+      runtimeId: runtime.id,
+      runtimeKind: runtime.kind,
+      path,
+      mountPath,
       createdAt: now(),
       updatedAt: now(),
-    };
-    return this.store.insert("sessions", session);
+    });
   }
 
-  async close(id: ID): Promise<Session | undefined> {
-    return this.store.update<Session>("sessions", id, { status: "closed", updatedAt: now() });
+  /** Record which run last attached this state (v2 §15 Preserve). */
+  async markUsed(id: ID, runId: ID): Promise<RuntimeNativeState | undefined> {
+    return this.store.update<RuntimeNativeState>("nativeStates", id, {
+      lastUsedRunId: runId,
+      lastUsedAt: now(),
+      updatedAt: now(),
+    });
   }
 
+  /** Delete the record and its on-disk directory (v2 §14 Delete). */
   async remove(id: ID): Promise<boolean> {
-    return this.store.remove("sessions", id);
-  }
-
-  async attachRun(id: ID, runId: ID): Promise<void> {
-    const session = this.get(id);
-    if (!session) return;
-    if (!session.runIds.includes(runId)) {
-      session.runIds = [...session.runIds, runId];
-      session.updatedAt = now();
-      await this.store.commit();
-    }
-  }
-
-  async recordUsage(id: ID, usage: Usage | undefined, cost?: number): Promise<void> {
-    const session = this.get(id);
-    if (!session) return;
-    session.usage = addUsage(session.usage, usage);
-    session.cost = (session.cost ?? 0) + (cost ?? usage?.estimatedCost ?? 0);
-    session.updatedAt = now();
-    session.status = "idle";
-    await this.store.commit();
+    const state = this.get(id);
+    if (!state) return false;
+    await rm(state.path, { recursive: true, force: true });
+    return this.store.remove("nativeStates", id);
   }
 }
 
 /* ------------------------------------------------------------------ */
-/* Runtime Session References (spec v1 §3/§9)                          */
+/* Runtime Session References (spec v1 §3/§9, v2 §2/§6)                */
 /* ------------------------------------------------------------------ */
 
 export interface NewRuntimeSessionInput {
@@ -711,6 +717,10 @@ export interface NewRuntimeSessionInput {
   taskId?: ID;
   runId: ID;
   workspaceId?: ID;
+  /** Native state the session depends on (reattached on resume). */
+  nativeStateId?: ID;
+  /** Execution backend the session was created under. */
+  executionBackend?: "local" | "docker";
   metadata?: Record<string, unknown>;
 }
 
@@ -751,6 +761,8 @@ export class RuntimeSessionService {
       taskId: input.taskId,
       runId: input.runId,
       workspaceId: input.workspaceId,
+      nativeStateId: input.nativeStateId,
+      executionBackend: input.executionBackend,
       status: "active",
       metadata: input.metadata,
       createdAt: now(),

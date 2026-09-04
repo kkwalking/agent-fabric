@@ -11,11 +11,11 @@ import {
   SecretService,
   ProfileService,
   TaskService,
-  SessionService,
   ArtifactService,
   UsageService,
   HandoffService,
   RuntimeSessionService,
+  NativeStateService,
   seedDefaults,
   effectiveCapabilities,
   type NewTaskInput,
@@ -63,11 +63,11 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   const secrets = new SecretService(store);
   const profiles = new ProfileService(store);
   const tasks = new TaskService(store);
-  const sessions = new SessionService(store);
   const artifacts = new ArtifactService(store);
   const usage = new UsageService(store);
   const handoffs = new HandoffService(store);
   const runtimeSessions = new RuntimeSessionService(store);
+  const nativeStates = new NativeStateService(store);
   const runs = new RunService(store, bus, registry, createDockerContainerOps());
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();
@@ -89,12 +89,12 @@ export async function createApp(options: ServerOptions): Promise<Express> {
         workspaces: workspaces.list().length,
         tasks: tasks.list().length,
         runs: runs.list().length,
-        sessions: sessions.list().length,
         artifacts: artifacts.list().length,
         secrets: secrets.list().length,
         agents: profiles.list().length,
         handoffs: handoffs.list().length,
         runtimeSessions: runtimeSessions.list().length,
+        nativeStates: nativeStates.list().length,
       },
       recentRuns: runs.list().slice(0, 10),
       usage: usage.summary(),
@@ -383,38 +383,6 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     });
   });
 
-  /* ---------------- sessions ---------------- */
-
-  app.get("/api/sessions", (_req, res) => ok(res, sessions.list()));
-  app.post("/api/sessions", async (req, res) => {
-    try {
-      ok(res, await sessions.create(req.body), 201);
-    } catch (e) {
-      fail(res, e);
-    }
-  });
-  app.get("/api/sessions/:id", (req, res) => {
-    const s = sessions.get(req.params.id);
-    s ? ok(res, s) : fail(res, new Error("Session not found"), 404);
-  });
-  app.post("/api/sessions/:id/resume", async (req, res) => {
-    try {
-      const { prompt, ...rest } = (req.body ?? {}) as { prompt: string } & Omit<NewTaskInput, "prompt" | "sessionId">;
-      if (!prompt) throw new Error("prompt is required");
-      ok(res, await runs.resume(req.params.id, { ...rest, prompt }), 201);
-    } catch (e) {
-      fail(res, e, 404);
-    }
-  });
-  app.post("/api/sessions/:id/close", async (req, res) => {
-    const s = await sessions.close(req.params.id);
-    s ? ok(res, s) : fail(res, new Error("Session not found"), 404);
-  });
-  app.delete("/api/sessions/:id", async (req, res) => {
-    const removed = await sessions.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Session not found"), 404);
-  });
-
   /* ---------------- handoffs (spec v1 §4–§8) ---------------- */
 
   app.get("/api/handoffs", (req, res) => {
@@ -461,6 +429,25 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   app.delete("/api/runtime-sessions/:id", async (req, res) => {
     const removed = await runtimeSessions.remove(req.params.id);
     removed ? ok(res, { ok: true }) : fail(res, new Error("Runtime session not found"), 404);
+  });
+
+  /* ---------------- runtime native states (v2 §13–§15) ---------------- */
+  // Opaque per-runtime state directories harnesses need for native
+  // resume. Not a first-class user resource: surfaced for inspection
+  // and lifecycle management only (create/mount/preserve happen inside
+  // the orchestrator; delete is explicit).
+
+  app.get("/api/native-states", (req, res) => {
+    const runtimeId = typeof req.query.runtimeId === "string" ? req.query.runtimeId : undefined;
+    ok(res, nativeStates.list({ runtimeId }));
+  });
+  app.get("/api/native-states/:id", (req, res) => {
+    const s = nativeStates.get(req.params.id);
+    s ? ok(res, s) : fail(res, new Error("Native state not found"), 404);
+  });
+  app.delete("/api/native-states/:id", async (req, res) => {
+    const removed = await nativeStates.remove(req.params.id);
+    removed ? ok(res, { ok: true }) : fail(res, new Error("Native state not found"), 404);
   });
 
   /* ---------------- containers (keep-alive inspection) ---------------- */

@@ -5,7 +5,6 @@ import { LlmView } from "./views/Llm";
 import { RunsView, RunDetailView } from "./views/Runs";
 import { TasksView } from "./views/Tasks";
 import { HandoffsView } from "./views/Handoffs";
-import { SessionsView } from "./views/Sessions";
 import { ArtifactsView } from "./views/Artifacts";
 import { UsageView } from "./views/Usage";
 import { SettingsView } from "./views/Settings";
@@ -21,7 +20,6 @@ export type ViewKey =
   | "tasks"
   | "runs"
   | "run"
-  | "sessions"
   | "handoffs"
   | "artifacts"
   | "usage"
@@ -129,7 +127,6 @@ export function App() {
         {nav.view === "runs" && <RunsView onOpenRun={(id) => navigate("run", id)} />}
         {nav.view === "run" && <RunDetailView runId={nav.runId ?? ""} onBack={() => navigate("runs")} />}
         {nav.view === "tasks" && <TasksView onOpenRun={(id) => navigate("run", id)} />}
-        {nav.view === "sessions" && <SessionsView onOpenRun={(id) => navigate("run", id)} />}
         {nav.view === "handoffs" && <HandoffsView />}
         {nav.view === "artifacts" && <ArtifactsView />}
         {nav.view === "usage" && <UsageView />}

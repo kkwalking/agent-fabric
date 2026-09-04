@@ -9,7 +9,6 @@ import type {
   Workspace,
   Task,
   Run,
-  Session,
   RunEvent,
   Artifact,
   Secret,
@@ -17,6 +16,7 @@ import type {
   AppConfig,
   Handoff,
   RuntimeSessionRef,
+  RuntimeNativeState,
 } from "./types.js";
 
 export type CollectionName =
@@ -26,13 +26,13 @@ export type CollectionName =
   | "workspaces"
   | "tasks"
   | "runs"
-  | "sessions"
   | "events"
   | "artifacts"
   | "secrets"
   | "profiles"
   | "handoffs"
   | "runtimeSessions"
+  | "nativeStates"
   | "config";
 
 export interface Database {
@@ -42,13 +42,13 @@ export interface Database {
   workspaces: Workspace[];
   tasks: Task[];
   runs: Run[];
-  sessions: Session[];
   events: RunEvent[];
   artifacts: Artifact[];
   secrets: Secret[];
   profiles: AgentProfile[];
   handoffs: Handoff[];
   runtimeSessions: RuntimeSessionRef[];
+  nativeStates: RuntimeNativeState[];
   config: AppConfig;
 }
 
@@ -65,13 +65,13 @@ export function emptyDatabase(): Database {
     workspaces: [],
     tasks: [],
     runs: [],
-    sessions: [],
     events: [],
     artifacts: [],
     secrets: [],
     profiles: [],
     handoffs: [],
     runtimeSessions: [],
+    nativeStates: [],
     config: {},
   };
 }
@@ -106,7 +106,11 @@ export class Store {
   private async load(): Promise<void> {
     try {
       const raw = await readFile(this.file, "utf8");
-      const parsed = JSON.parse(raw) as Partial<Database>;
+      const parsed = JSON.parse(raw) as Partial<Database> & {
+        /** Legacy unified sessions (v2 §1–§5): dropped on load. */
+        sessions?: unknown;
+      };
+      delete parsed.sessions;
       this.db = { ...emptyDatabase(), ...parsed };
       if (!Array.isArray(this.db.providers)) this.db.providers = [];
       if (!Array.isArray(this.db.models)) this.db.models = [];
@@ -114,14 +118,19 @@ export class Store {
       if (!Array.isArray(this.db.workspaces)) this.db.workspaces = [];
       if (!Array.isArray(this.db.tasks)) this.db.tasks = [];
       if (!Array.isArray(this.db.runs)) this.db.runs = [];
-      if (!Array.isArray(this.db.sessions)) this.db.sessions = [];
       if (!Array.isArray(this.db.events)) this.db.events = [];
       if (!Array.isArray(this.db.artifacts)) this.db.artifacts = [];
       if (!Array.isArray(this.db.secrets)) this.db.secrets = [];
       if (!Array.isArray(this.db.profiles)) this.db.profiles = [];
       if (!Array.isArray(this.db.handoffs)) this.db.handoffs = [];
       if (!Array.isArray(this.db.runtimeSessions)) this.db.runtimeSessions = [];
+      if (!Array.isArray(this.db.nativeStates)) this.db.nativeStates = [];
       if (!this.db.config) this.db.config = {};
+      // v2 §3: strip legacy unified-session fields so old databases stop
+      // referencing the removed AgentFabric Session abstraction.
+      for (const t of this.db.tasks) delete (t as { sessionId?: unknown }).sessionId;
+      for (const r of this.db.runs) delete (r as { sessionId?: unknown }).sessionId;
+      for (const e of this.db.events) delete (e as { sessionId?: unknown }).sessionId;
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         this.db = emptyDatabase();

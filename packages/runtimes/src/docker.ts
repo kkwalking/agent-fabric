@@ -18,6 +18,8 @@ export interface DockerRunOptions {
   command: string[];
   env?: Record<string, string>;
   workspaceMount?: { hostPath: string; containerPath: string };
+  /** Opaque harness-native state mount (v2 §13–§15). */
+  nativeStateMount?: { hostPath: string; containerPath: string };
   resourceLimits?: ResourceLimits;
   networkPolicy?: NetworkPolicy;
   entrypoint?: string[];
@@ -31,11 +33,11 @@ export interface DockerRunOutcome {
   error?: string;
 }
 
-function dockerBin(): string {
+export function dockerBin(): string {
   return process.env.AGENTFABRIC_DOCKER_BIN ?? "docker";
 }
 
-function execDocker(args: string[], timeoutMs = 60_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
+export function execDocker(args: string[], timeoutMs = 60_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
     const child = spawn(dockerBin(), args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -90,15 +92,20 @@ export function createDockerContainerOps(): ContainerOps {
   };
 }
 
-function commonRunArgs(
+export function commonRunArgs(
   ctx: RuntimeContext,
-  opts: DockerRunOptions,
+  opts: Pick<DockerRunOptions, "workspaceMount" | "nativeStateMount" | "env" | "resourceLimits" | "networkPolicy">,
   extraLabels: Record<string, string> = {}
 ): string[] {
   const args: string[] = [];
   if (opts.workspaceMount) {
     const mode = ctx.runtime.filesystemPolicy?.readOnly ? "ro" : "rw";
     args.push("-v", `${opts.workspaceMount.hostPath}:${opts.workspaceMount.containerPath}:${mode}`);
+  }
+  // The harness's private state is always mounted read-write: the harness
+  // must be able to persist its native session store here (v2 §13).
+  if (opts.nativeStateMount) {
+    args.push("-v", `${opts.nativeStateMount.hostPath}:${opts.nativeStateMount.containerPath}:rw`);
   }
   for (const [k, v] of Object.entries(opts.env ?? {})) {
     args.push("-e", `${k}=${v}`);
@@ -219,6 +226,27 @@ export async function runDockerWithLifecycle(
     return runDockerContainer(ctx, opts);
   }
 
+  const created = await ensureKeepAliveContainer(ctx, opts);
+  if (created.error) {
+    return { exitCode: -1, error: created.error };
+  }
+  const { containerId, containerName } = created;
+
+  // Run the actual command inside the (existing or fresh) container.
+  const outcome = await execDockerInContainer(ctx, containerId!, containerName!, opts.command);
+  return { containerId, containerName, exitCode: outcome.exitCode, error: outcome.error };
+}
+
+/**
+ * Returns the keep-alive container for this run: the reusable one from
+ * `ctx.reusableContainer` when the orchestrator leased one, otherwise a
+ * freshly created long-lived `sleep infinity` container labelled for
+ * restart recovery.
+ */
+export async function ensureKeepAliveContainer(
+  ctx: RuntimeContext,
+  opts: Pick<DockerRunOptions, "image" | "env" | "workspaceMount" | "nativeStateMount" | "resourceLimits" | "networkPolicy" | "name">
+): Promise<{ containerId?: string; containerName?: string; error?: string }> {
   const reuseName = ctx.reusableContainer?.name ?? `af-keep-${ctx.runtime.id}`;
   let containerName = reuseName;
   let containerId = ctx.reusableContainer?.containerId;
@@ -236,22 +264,19 @@ export async function runDockerWithLifecycle(
         "agentfabric.runtime": ctx.runtime.id,
         "agentfabric.workspace": wsLabel,
       }),
-      opts.image,
+      opts.image!,
       ...KEEP_ALIVE_COMMAND,
     ];
     await ctx.emit("shell.command", { command: `docker ${args.join(" ")}`, cwd: ctx.workspacePath ?? ".", container: containerName });
     const created = await execDocker(args);
     const id = created.stdout.trim().split("\n")[0];
     if (!id) {
-      return { exitCode: created.code ?? -1, error: `Failed to create keep-alive container: ${created.stderr || "no container id returned"}` };
+      return { error: `Failed to create keep-alive container: ${created.stderr || "no container id returned"}` };
     }
     containerId = id;
     await ctx.emit("shell.output", { line: `keep-alive container ${containerId} created (${containerName})`, stream: "docker" });
   }
-
-  // Run the actual command inside the (existing or fresh) container.
-  const outcome = await execDockerInContainer(ctx, containerId, containerName, opts.command);
-  return { containerId, containerName, exitCode: outcome.exitCode, error: outcome.error };
+  return { containerId, containerName };
 }
 
 export async function execDockerInContainer(

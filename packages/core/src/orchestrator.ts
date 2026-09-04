@@ -3,12 +3,12 @@ import { EventBus } from "./eventbus.js";
 import {
   ArtifactService,
   ModelService,
+  NativeStateService,
   ProfileService,
   ProviderService,
   RuntimeService,
   RuntimeSessionService,
   SecretService,
-  SessionService,
   TaskService,
   WorkspaceService,
   now,
@@ -49,9 +49,9 @@ import type {
   Runtime,
   RuntimeCapability,
   RuntimeLifecycle,
+  RuntimeNativeState,
   RuntimeSessionRef,
   Secret,
-  Session,
   Task,
   Usage,
   Workspace,
@@ -68,7 +68,6 @@ interface RunSpec {
   runtimeId?: ID;
   modelId?: ID;
   workspaceId?: ID;
-  sessionId?: ID;
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: ID[];
@@ -128,7 +127,6 @@ export interface ContinueTaskInput {
   lifecycle?: RuntimeLifecycle;
   workspaceId?: ID;
   profileId?: ID;
-  sessionId?: ID;
   env?: Record<string, string>;
   secretIds?: ID[];
   tools?: string[];
@@ -296,7 +294,6 @@ export class RunService {
         workspaceId,
         runtimeSessionRefId: ref.id,
         lifecycle: resolveLifecycle(target, input.lifecycle),
-        sessionId: input.sessionId,
         profileId: input.profileId,
         env: Object.keys(mergedEnv).length ? mergedEnv : undefined,
         secretIds: mergedSecretIds.length ? mergedSecretIds : undefined,
@@ -327,7 +324,6 @@ export class RunService {
       workspaceId,
       previousHandoffId: handoff.id,
       lifecycle: resolveLifecycle(target, input.lifecycle),
-      sessionId: input.sessionId,
       profileId: input.profileId,
       env: Object.keys(mergedEnv).length ? mergedEnv : undefined,
       secretIds: mergedSecretIds.length ? mergedSecretIds : undefined,
@@ -405,20 +401,6 @@ export class RunService {
     };
   }
 
-  /** Continue an existing session with a new prompt (MVP behavior). */
-  async resume(sessionId: string, input: Omit<NewTaskInput, "sessionId">): Promise<SubmitResult> {
-    const session = this.sessionService().get(sessionId);
-    if (!session) throw new Error(`Session not found: ${sessionId}`);
-    const merged: NewTaskInput = {
-      ...input,
-      sessionId,
-      runtimeId: input.runtimeId ?? session.runtimeId,
-      modelId: input.modelId ?? session.modelId,
-      workspaceId: input.workspaceId ?? session.workspaceId,
-    };
-    return this.submit(merged);
-  }
-
   /** Re-run a finished run by cloning its task. */
   async rerun(runId: string): Promise<SubmitResult> {
     const run = this.get(runId);
@@ -431,7 +413,6 @@ export class RunService {
       runtimeId: task.runtimeId,
       modelId: task.modelId,
       workspaceId: task.workspaceId,
-      sessionId: task.sessionId,
       profileId: task.profileId,
       env: task.env,
       secretIds: task.secretIds,
@@ -466,9 +447,6 @@ export class RunService {
   private taskService() {
     return new TaskService(this.store);
   }
-  private sessionService() {
-    return new SessionService(this.store);
-  }
   private artifactService() {
     return new ArtifactService(this.store);
   }
@@ -493,6 +471,9 @@ export class RunService {
   private runtimeSessionService() {
     return new RuntimeSessionService(this.store);
   }
+  private nativeStateService() {
+    return new NativeStateService(this.store);
+  }
   private handoffService() {
     return new HandoffService(this.store);
   }
@@ -503,7 +484,6 @@ export class RunService {
     const event: RunEvent = {
       id: newId("evt"),
       runId,
-      sessionId: run?.sessionId,
       seq: this.store.nextSeq(),
       type,
       timestamp: now(),
@@ -589,7 +569,6 @@ export class RunService {
       modelName: model?.alias ?? model?.name,
       providerId: provider?.id,
       workspaceId: extra.workspaceId ?? task.workspaceId,
-      sessionId: extra.sessionId ?? task.sessionId,
       inputInstruction: extra.inputInstruction ?? fallbackInstruction ?? task.prompt,
       continuity: extra.continuity ?? "new",
       previousHandoffId: extra.previousHandoffId,
@@ -607,9 +586,6 @@ export class RunService {
       updatedAt: now(),
     };
     await this.store.insert("runs", run);
-    if (run.sessionId) {
-      await this.sessionService().attachRun(run.sessionId, run.id);
-    }
     return run;
   }
 
@@ -747,7 +723,6 @@ export class RunService {
     const model = run.modelId ? this.modelService().get(run.modelId) : undefined;
     const provider = model ? this.providerService().get(model.providerId) : undefined;
     const workspace = run.workspaceId ? this.workspaceService().get(run.workspaceId) : undefined;
-    const session = run.sessionId ? this.sessionService().get(run.sessionId) : undefined;
     // Run-level overrides (set at continuation time) take precedence
     // over the task's defaults.
     const mergedEnv: Record<string, string> = { ...(task.env ?? {}), ...(run.env ?? {}) };
@@ -758,6 +733,24 @@ export class RunService {
     const continuity: RunContinuity = run.continuity ?? "new";
     const runtimeSession = run.runtimeSessionRefId ? this.runtimeSessionService().get(run.runtimeSessionRefId) : undefined;
     const previousHandoff = run.previousHandoffId ? this.handoffService().get(run.previousHandoffId) : undefined;
+    const caps = effectiveCapabilities(adapter, runtime);
+
+    // Containerized harness runs attach the runtime's opaque native-state
+    // directory so the harness's own session store survives container
+    // destruction (v2 §12–§15). Resuming reattaches the exact state the
+    // resumable reference was created with.
+    let nativeState: RuntimeNativeState | undefined;
+    let nativeStateReattached = false;
+    if (runtime.containerized && caps.supportsNativeSession) {
+      const mountPath = String(
+        runtime.config?.nativeStateMountPath ?? adapter.nativeStateMountPath ?? "/root/.agentfabric-state"
+      );
+      nativeState =
+        (runtimeSession?.nativeStateId ? this.nativeStateService().get(runtimeSession.nativeStateId) : undefined) ??
+        (await this.nativeStateService().ensureForRuntime(runtime, mountPath));
+      nativeStateReattached = Boolean(runtimeSession?.nativeStateId);
+      await this.store.update<Run>("runs", runId, { nativeStateId: nativeState.id, updatedAt: now() });
+    }
 
     // Keep-alive: reuse a retained container instead of a fresh one.
     let reusableContainer: ReusableContainer | undefined;
@@ -805,7 +798,6 @@ export class RunService {
         model,
         provider,
         workspace,
-        session,
         secrets,
         env: mergedEnv,
         policy,
@@ -814,6 +806,7 @@ export class RunService {
         runtimeSession,
         previousHandoff,
         reusableContainer,
+        nativeState,
         signal: controller.signal,
         usageAcc,
         abortForPolicy,
@@ -840,6 +833,15 @@ export class RunService {
           path: workspace.path,
           mountPath: workspace.mountPath,
           source: workspace.source ?? "create",
+        });
+      }
+      if (nativeState) {
+        await ctx.emit("native.state.attached", {
+          nativeStateId: nativeState.id,
+          mountPath: nativeState.mountPath,
+          runtimeId: runtime.id,
+          runtimeKind: runtime.kind,
+          reattached: nativeStateReattached,
         });
       }
       if (reusableContainer) {
@@ -950,6 +952,8 @@ export class RunService {
         taskId: ctx.task.id,
         runId: ctx.run.id,
         workspaceId: ctx.workspace?.id,
+        nativeStateId: ctx.nativeState?.id,
+        executionBackend: ctx.runtime.containerized ? "docker" : "local",
         metadata: result.nativeSessionMetadata,
       });
       await this.store.update<Run>("runs", ctx.run.id, { runtimeSessionRefId: ref.id, updatedAt: now() });
@@ -959,6 +963,21 @@ export class RunService {
         runtimeKind: ref.runtimeKind,
         previousRefId,
         resumeSupported: ref.resumeSupported,
+        nativeStateId: ref.nativeStateId,
+        executionBackend: ref.executionBackend,
+      });
+    }
+
+    // 2b. Native state preservation: the host-mounted directory already
+    // persisted everything the harness wrote during the run; record the
+    // usage so the next run reattaches this exact state (v2 §15).
+    if (ctx.nativeState) {
+      await this.nativeStateService().markUsed(ctx.nativeState.id, ctx.run.id);
+      await ctx.emit("native.state.persisted", {
+        nativeStateId: ctx.nativeState.id,
+        runtimeId: ctx.runtime.id,
+        runtimeKind: ctx.runtime.kind,
+        lastUsedRunId: ctx.run.id,
       });
     }
 
@@ -1015,7 +1034,6 @@ export class RunService {
     model?: Model;
     provider?: Provider;
     workspace?: Workspace;
-    session?: Session;
     secrets: Secret[];
     env: Record<string, string>;
     policy?: ExecutionPolicy;
@@ -1024,11 +1042,12 @@ export class RunService {
     runtimeSession?: RuntimeSessionRef;
     previousHandoff?: Handoff;
     reusableContainer?: ReusableContainer;
+    nativeState?: RuntimeNativeState;
     signal: AbortSignal;
     usageAcc: Usage;
     abortForPolicy: (message: string) => void;
   }): RuntimeContext {
-    const { run, task, runtime, model, provider, workspace, session, secrets, signal, usageAcc } = opts;
+    const { run, task, runtime, model, provider, workspace, secrets, signal, usageAcc } = opts;
     const store = this.store;
     const bus = this.bus;
     const artifactService = this.artifactService();
@@ -1055,7 +1074,6 @@ export class RunService {
       const event: RunEvent = {
         id: newId("evt"),
         runId: run.id,
-        sessionId: run.sessionId,
         seq: store.nextSeq(),
         type,
         timestamp: now(),
@@ -1080,7 +1098,6 @@ export class RunService {
       model,
       provider,
       workspace,
-      session,
       secrets,
       env,
       signal,
@@ -1089,6 +1106,7 @@ export class RunService {
       runtimeSession: opts.runtimeSession,
       previousHandoff: opts.previousHandoff,
       reusableContainer: opts.reusableContainer,
+      nativeState: opts.nativeState,
       workspacePath: workspace?.path,
       emit,
       log: async (line, level = "info") => {
@@ -1141,8 +1159,5 @@ export class RunService {
       endTime,
       updatedAt: endTime,
     });
-    if (run.sessionId) {
-      await this.sessionService().recordUsage(run.sessionId, usage, cost);
-    }
   }
 }

@@ -1,5 +1,5 @@
 import { ReactNode, useState } from "react";
-import { del, get, post, put } from "../api";
+import { del, get, post, put, fmtTime, shortId } from "../api";
 import { StatusBadge, useAsync, ErrorBox, Field } from "../components";
 
 interface Column {
@@ -140,6 +140,74 @@ async function toggleRuntime(row: any, reload: () => void) {
   reload();
 }
 
+/**
+ * Harness-native session references and opaque native states, shown as
+ * runtime metadata (v2 §5): these belong to each harness — they are not
+ * a unified AgentFabric session resource.
+ */
+function RuntimeNativeSessionsCard() {
+  const refs = useAsync<any[]>(() => get("/api/runtime-sessions"), []);
+  const states = useAsync<any[]>(() => get("/api/native-states"), []);
+  const allRefs = refs.data ?? [];
+  const allStates = states.data ?? [];
+
+  return (
+    <div className="card">
+      <h2>Native sessions (per harness)</h2>
+      <p className="sub">
+        Opaque references into each harness's own session store. Pi sessions and OpenCode sessions are different
+        things — AgentFabric never converts between them. Same harness → Resume; different harness → Handoff.
+      </p>
+      {allRefs.length > 0 ? (
+        <table>
+          <thead>
+            <tr><th>Runtime</th><th>Harness</th><th>Native reference</th><th>Version</th><th>Resume</th><th>Backend</th><th>Last used run</th><th>Created</th></tr>
+          </thead>
+          <tbody>
+            {allRefs.slice(0, 20).map((s) => (
+              <tr key={s.id}>
+                <td>{s.runtimeName ?? "-"}</td>
+                <td>{s.runtimeKind}</td>
+                <td className="mono" title={s.nativeSessionRef}>{s.nativeSessionRef}</td>
+                <td className="muted">{s.runtimeVersion ?? "-"}</td>
+                <td>{s.resumeSupported ? "yes" : "no"}</td>
+                <td className="muted">{s.executionBackend ?? "-"}</td>
+                <td className="mono">{shortId(s.runId)}</td>
+                <td className="muted">{fmtTime(s.createdAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="muted">No native session references yet.</div>
+      )}
+
+      <h2 style={{ marginTop: 18 }}>Native state storage (opaque)</h2>
+      <p className="sub">Harness-private state directories mounted into containers so native sessions survive container destruction.</p>
+      {allStates.length > 0 ? (
+        <table>
+          <thead>
+            <tr><th>Runtime</th><th>Harness</th><th>Mounted at</th><th>Last used run</th><th>Host path</th></tr>
+          </thead>
+          <tbody>
+            {allStates.map((s) => (
+              <tr key={s.id}>
+                <td className="mono">{shortId(s.runtimeId)}</td>
+                <td>{s.runtimeKind}</td>
+                <td className="mono">{s.mountPath}</td>
+                <td className="mono">{s.lastUsedRunId ? shortId(s.lastUsedRunId) : "-"}</td>
+                <td className="mono muted" title={s.path}>{s.path}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="muted">No native state yet (created automatically for containerized harness runs).</div>
+      )}
+    </div>
+  );
+}
+
 export function ResourceView({ kind }: { kind: string }) {
   const cfg = configs[kind];
   const { data, error, loading, reload } = useAsync<any[]>(() => get(cfg.path), [cfg.path]);
@@ -228,6 +296,8 @@ export function ResourceView({ kind }: { kind: string }) {
           <div className="muted">{loading ? "Loading…" : "No items yet."}</div>
         )}
       </div>
+
+      {kind === "runtimes" && <RuntimeNativeSessionsCard />}
     </div>
   );
 }

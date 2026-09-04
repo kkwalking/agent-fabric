@@ -133,6 +133,7 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
   const [previousHandoff, setPreviousHandoff] = useState<any>(null);
   const [generatedHandoff, setGeneratedHandoff] = useState<any>(null);
   const [sessionRef, setSessionRef] = useState<any>(null);
+  const [nativeState, setNativeState] = useState<any>(null);
 
   useEffect(() => {
     let unsub: () => void = () => {};
@@ -149,7 +150,7 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
     return unsub;
   }, [runId]);
 
-  // Continuity detail: handoffs, native session reference.
+  // Continuity detail: handoffs, native session reference, native state.
   useEffect(() => {
     if (run?.previousHandoffId) get<any>(`/api/handoffs/${run.previousHandoffId}`).then(setPreviousHandoff).catch(() => {});
     else setPreviousHandoff(null);
@@ -157,7 +158,9 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
     else setGeneratedHandoff(null);
     if (run?.runtimeSessionRefId) get<any>(`/api/runtime-sessions/${run.runtimeSessionRefId}`).then(setSessionRef).catch(() => {});
     else setSessionRef(null);
-  }, [run?.previousHandoffId, run?.generatedHandoffId, run?.runtimeSessionRefId]);
+    if (run?.nativeStateId) get<any>(`/api/native-states/${run.nativeStateId}`).then(setNativeState).catch(() => {});
+    else setNativeState(null);
+  }, [run?.previousHandoffId, run?.generatedHandoffId, run?.runtimeSessionRefId, run?.nativeStateId]);
 
   useEffect(() => {
     if (!run) return;
@@ -207,7 +210,7 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
         <div className="stat"><div className="num">{(run.usage?.inputTokens ?? 0) + (run.usage?.outputTokens ?? 0)}</div><div className="lbl">tokens</div></div>
       </div>
 
-      {(previousHandoff || generatedHandoff || sessionRef || run.workspaceId) && (
+      {(previousHandoff || generatedHandoff || sessionRef || nativeState || run.workspaceId) && (
         <div className="card">
           <div className="row" style={{ gap: 18, flexWrap: "wrap" }}>
             {run.workspaceId && (
@@ -228,7 +231,18 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
             {sessionRef && (
               <span>
                 native session: <span className="mono" title={sessionRef.nativeSessionRef}>{sessionRef.nativeSessionRef}</span>{" "}
-                <span className="muted">({sessionRef.runtimeKind}{sessionRef.resumeSupported ? ", resumable" : ""})</span>
+                <span className="muted">
+                  ({sessionRef.runtimeKind}
+                  {sessionRef.runtimeVersion ? ` ${sessionRef.runtimeVersion}` : ""}
+                  {sessionRef.executionBackend ? `, ${sessionRef.executionBackend}` : ""}
+                  {sessionRef.resumeSupported ? ", resumable" : ""})
+                </span>
+              </span>
+            )}
+            {nativeState && (
+              <span>
+                native state: <span className="mono" title={nativeState.path}>{shortId(nativeState.id)}</span>{" "}
+                <span className="muted">(mounted at {nativeState.mountPath})</span>
               </span>
             )}
           </div>
@@ -311,9 +325,12 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
               <>
                 <h2 style={{ marginTop: 14 }}>Runtime-native session reference</h2>
                 <pre style={{ whiteSpace: "pre-wrap" }}>
-{`runtime kind : ${sessionRef.runtimeKind}
+{`harness type : ${sessionRef.runtimeKind}
 native ref   : ${sessionRef.nativeSessionRef}
-resumable    : ${sessionRef.resumeSupported ? "yes" : "no"}
+runtime ver. : ${sessionRef.runtimeVersion ?? "-"}
+resume       : ${sessionRef.resumeSupported ? "supported" : "not supported"}
+backend      : ${sessionRef.executionBackend ?? "-"}
+created by   : ${sessionRef.runId}
 status       : ${sessionRef.status}`}
                 </pre>
                 <p className="muted">
@@ -321,7 +338,24 @@ status       : ${sessionRef.status}`}
                 </p>
               </>
             )}
-            {!previousHandoff && !generatedHandoff && !sessionRef && (
+            {nativeState && (
+              <>
+                <h2 style={{ marginTop: 14 }}>Runtime native state</h2>
+                <pre style={{ whiteSpace: "pre-wrap" }}>
+{`state id     : ${nativeState.id}
+runtime      : ${nativeState.runtimeKind} (${nativeState.runtimeId})
+host path    : ${nativeState.path}
+mounted at   : ${nativeState.mountPath}
+last used by : ${nativeState.lastUsedRunId ?? "-"}
+last used at : ${nativeState.lastUsedAt ?? "-"}`}
+                </pre>
+                <p className="muted">
+                  Opaque harness-private storage (native session store, internal files). AgentFabric only creates,
+                  mounts, preserves, reattaches and deletes it — never reads it.
+                </p>
+              </>
+            )}
+            {!previousHandoff && !generatedHandoff && !sessionRef && !nativeState && (
               <div className="muted">No handoff or native session reference on this run.</div>
             )}
           </div>

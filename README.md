@@ -2,7 +2,7 @@
 
 > **Run any agent, on any model, in any environment.**
 
-AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Agent 应该如何思考，而是提供统一的基础设施来管理 **LLM Provider、Model、Agent Runtime、Workspace、Task、Run、Session、Artifacts 与 Observability**。
+AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Agent 应该如何思考，而是提供统一的基础设施来管理 **LLM Provider、Model、Agent Runtime、Workspace、Task、Run、RuntimeSessionRef、Runtime Native State、Artifacts 与 Observability**。
 
 用户可自由选择模型 Provider、Model 与 Agent Runtime，并通过隔离的容器环境执行 Agent Task。
 
@@ -21,16 +21,18 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
                         │  AgentFabric Core               │
                         │  Provider · Model · Runtime     │
                         │  Workspace · Task · Run         │
-                        │  Session · Event · Artifact     │
-                        │  Secret · Profile · Usage/Cost  │
+                        │  RuntimeSessionRef · NativeState│
+                        │  Event · Artifact · Secret      │
+                        │  Profile · Usage/Cost           │
                         │  Orchestrator (Run lifecycle)   │
                         └───────┬─────────────────────────┘
-                                │ Runtime Adapter Protocol (RuntimeRegistry)
+                                │ Harness Adapter (RuntimeRegistry)
+                                │ + Execution Backend (local / docker)
                   ┌─────────────┼──────────────┬──────────────┐
                   ▼             ▼              ▼              ▼
              OpenCode       Pi Agent        Docker        Mock
              Adapter        Adapter         Adapter        Adapter
-             (本地 CLI)     (本地 CLI)      (容器)         (模拟)
+             (本地+容器)    (本地+容器)     (容器)         (模拟)
 ```
 
 设计原则（来自 `mvp-spec.md`）：
@@ -50,7 +52,8 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Workspace | 本地目录 / Git / Volume，持久化，与 Run 关联 |
 | Task | 指定 Runtime / Model / Workspace / Env / Secrets / 资源限制 / 超时 / Policy |
 | Run | Pending→Starting→Running→Completed/Failed/Cancelled/Timeout，查看/取消/重跑 |
-| Session | 创建/恢复/查看/继续提交，无状态一次性 Run 也支持 |
+| Runtime Native Session | 只保存 Harness 原生 Session 的不透明引用（RuntimeSessionRef），同 Harness Native Resume，跨 Harness 走 Handoff；不存在统一的 AgentFabric Session |
+| Runtime Native State | Harness 私有状态的持久化目录（Opaque），容器销毁后仍可恢复 Native Session |
 | Events & Logs | 统一标准事件，REST 查询 + SSE 实时流 |
 | Artifacts | 代码、Diff、Report、Test Result、Build Output、最终结果 |
 | Usage & Cost | Input/Output/Cached Token、请求数、时长、估算成本，按 Model/Provider/日期聚合 |
@@ -75,7 +78,7 @@ npm run dev:server
 npm run dev:web
 ```
 
-打开 http://localhost:7377 查看 Web UI（Dashboard / Tasks / Runs / Run Detail 实时事件流 / Providers / Models / Runtimes / Agents / Workspaces / Sessions / Handoffs / Artifacts / Usage / Settings）。
+打开 http://localhost:7377 查看 Web UI（Dashboard / Tasks / Runs / Run Detail 实时事件流与原生 Session 状态 / Providers / Models / Runtimes / Agents / Workspaces / Handoffs / Artifacts / Usage / Settings）。
 
 ## 长期任务执行模型（v1）
 
@@ -102,11 +105,33 @@ Workspace 是持久、Runtime-neutral 的一等资源：Task 引用（而非拥�
 
 ### Resume 与 Handoff
 
-* **Runtime Session Reference**：AgentFabric 只保存 Harness 原生 Session 的不透明引用（Runtime 类型/版本、native ref、是否可 Resume、metadata），不理解更不转换其内部结构。
-* **Resume**（同 Harness）：`continueTask` 优先用存储的 native ref 恢复 Harness 自己的 Session。
+* **Runtime Session Reference**：AgentFabric 只保存 Harness 原生 Session 的不透明引用（Runtime 类型/版本、native ref、是否可 Resume、执行后端、metadata），不理解更不转换其内部结构。
+* **Runtime Native State**：Harness 用于 Native Resume 的私有状态（Session 存储、内部数据库等）由 AgentFabric 以 Opaque 目录持久化（Create / Mount / Preserve / Reattach / Delete），与 Workspace 严格区分——Workspace 是用户的工作内容，Native State 是 Harness 的私有数据。
+* **Resume**（同 Harness）：`continueTask` 优先用存储的 native ref 恢复 Harness 自己的 Session（本地与容器化执行语义一致）。
 * **Handoff**（跨 Harness 或无法 Resume）：生成语义化的工作交接（不迁移 Session，新 Harness 创建全新 Native Session），并以渲染后的 Handoff + 用户补充说明作为新 Run 的输入指令。
 * **Handoff 来源**：Harness 自产（adapter 声明 `supportsHandoffGeneration` 并在结果中返回内容）/ AgentFabric 辅助生成（基于 Task、Run 结果、Agent 消息、文件变化、Artifacts、日志）/ 用户补充说明（`userNotes`）。所有 Handoff 记录 from/to Runtime、来源 Run、Workspace 与 Artifacts，可查询可追踪。
-* **Runtime Capability**：adapter 声明 `supportsNativeSession / supportsNativeResume / supportsStreamingEvents / supportsHandoffGeneration / supportsWorkspace / supportsInteractiveExecution`，AgentFabric 据此决定 Resume 或 Handoff；`GET /api/tasks/:id/continue-options` 让用户在执行前明确看到即将发生的是 Resume 还是 Handoff。
+* **Runtime Capability**：adapter 声明 `supportsNativeSession / supportsNativeResume / supportsStreamingEvents / supportsHandoffGeneration / supportsWorkspace / supportsInteractiveExecution`，并可通过 `containerizedCapabilities` 按执行后端收窄——声明的能力必须在当前 Execution Backend 下真实可用；AgentFabric 据此决定 Resume 或 Handoff，`GET /api/tasks/:id/continue-options` 让用户在执行前明确看到即将发生的是 Resume 还是 Handoff。
+
+
+## 容器化 Native Resume（v2）
+
+v2（`v2.md`）移除了旧的统一 AgentFabric Session 抽象，并打通了 Containerized Runtime 下的 Native Resume 闭环：
+
+> **Task → Run → Runtime → RuntimeSessionRef**，其中 `RuntimeSessionRef` 是 Harness 原生 Session 的不透明引用，而不是一个新的 AgentFabric Session。
+
+* **统一 Session 模型已删除**：顶层 `Session` 实体、`Task.sessionId`、Session 生命周期与 Session Usage 聚合、`/api/sessions*` 接口与 `af sessions` 命令均已移除；旧数据在 Store 加载时自动迁移清理。原生 Session 状态通过 Task/Run/Runtime 详情与 `/api/runtime-sessions` 了解。
+* **执行后端（Execution Backend）**：`Harness Adapter → Execution Backend → (本地进程 | Docker 容器)`。Docker 只是执行载体，不再把 OpenCode/Pi 的结构化输出降级成 Shell Log——容器的 stdout/stderr 以原始行流交给对应 Harness Adapter，本地与容器化复用同一套输出解析器（事件解析、Native Session 提取、Usage/错误解析）。
+* **Ephemeral Container 下的闭环**：Run #1 创建临时容器 → 挂载 Workspace + Native State → 捕获 Native Session Ref → 容器销毁；Run #2 新建容器 → 挂载同一 Workspace 与同一 Native State → 用 Native Session Ref Resume。Native State 是 Host 上的 Opaque 目录（默认 `data/native-state/<runtimeId>`），按 Harness 挂载到容器内对应路径（OpenCode `/root/.local/share/opencode`，Pi `/root/.pi`，可用 `runtime.config.nativeStateMountPath` 覆盖）。
+* **Handoff 行为不变**：Pi → OpenCode 等跨 Harness 场景仍然保存 Workspace、生成 Handoff、创建全新 Native Session，不做任何 Session 转换。
+
+### API 新增（v2）
+
+| Method | Path | 说明 |
+| --- | --- | --- |
+| GET | `/api/native-states?runtimeId=` `/api/native-states/:id` | Runtime Native State 查询 |
+| DELETE | `/api/native-states/:id` | 删除 Native State（目录 + 记录） |
+
+> `/api/sessions` 系列接口已移除；Resume 通过 `POST /api/tasks/:id/continue` 完成。
 
 ### CLI
 
@@ -121,6 +146,8 @@ af handoffs list [--task <id>]
 af handoffs show <id>
 af handoffs notes <id> "补充约束"
 af runtime-sessions [--task <id>]
+af native-states list [--runtime <rt-id>]
+af native-states remove <state-id>
 
 # Workspace
 af workspaces add repo --path /path/to/code
@@ -144,6 +171,7 @@ af containers kept
 | POST | `/api/handoffs/:id/notes` | 追加用户说明 |
 | GET | `/api/runtime-sessions` `/api/runtime-sessions/:id` | 原生 Session 引用 |
 | POST | `/api/runtime-sessions/:id/expire` | 标记引用失效 |
+| GET/DELETE | `/api/native-states` `/api/native-states/:id` | Runtime Native State（v2） |
 | POST | `/api/workspaces/import` `/api/workspaces/:id/save` | Workspace 导入 / 保存 |
 | GET | `/api/workspaces/:id/usage` | Workspace 被哪些 Task/Run 引用 |
 | GET | `/api/runtimes/:id/capabilities` | 生效的 Harness 能力 |
@@ -172,18 +200,16 @@ af agents add "Senior Engineer" --runtime <rt> --model <model> --system-prompt "
 # 从当前代码仓库直接启动 Coding Agent Task（MVP 重点体验）
 af run "分析当前代码库并修复所有 failing tests" --from-repo --follow
 
-# 指定 Runtime / Model / Workspace / Session / 超时
+# 指定 Runtime / Model / Workspace / 超时
 af run "给 README 补充用法" --runtime <rt> --model <model> --workspace <ws> --timeout 600000
-af run "继续上次讨论" --session <session-id> --follow
+af run "继续上次讨论" --runtime <rt> --follow
 
-# Runs / Sessions / Artifacts / Usage
+# Runs / Artifacts / Usage
 af runs list
 af runs show <run-id> --follow
 af runs logs <run-id>
 af runs cancel <run-id>
 af runs rerun <run-id>
-af sessions create --name my-session
-af sessions resume <session-id> "下一步做什么"
 af artifacts list --run <run-id>
 af artifacts get <artifact-id> --output report.md
 af usage  # 或 af config / af secrets / af tasks
@@ -206,7 +232,7 @@ af usage  # 或 af config / af secrets / af tasks
 | GET | `/api/runs/:id/events` `/logs` | 事件 / 日志 |
 | GET | `/api/runs/:id/events/stream` | **SSE**：单 Run 实时事件流 |
 | GET | `/api/events/stream` | **SSE**：全局事件流 |
-| CRUD | `/api/sessions`；POST `/api/sessions/:id/resume` `/close` | Session |
+| GET | `/api/runtime-sessions` `/api/native-states` | 原生 Session 引用 / Native State |
 | GET | `/api/artifacts` `/api/artifacts/:id/content` | Artifacts |
 | GET | `/api/usage` | Usage & Cost 聚合 |
 | GET/PUT | `/api/config` | 配置 |
@@ -271,7 +297,7 @@ packages/
 * 成本为内置价格表的估算值，可通过未来定价 API 覆盖。
 * 持久化使用 JSON 文件，适合单机 MVP；生产可替换为数据库。
 * OpenCode / Pi 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` 可覆盖）。
-* 容器化 OpenCode / Pi 需要包含对应 CLI 的镜像（`runtime.image`）。
+* 容器化 OpenCode / Pi 需要包含对应 CLI 的镜像（`runtime.image`，默认以镜像 ENTRYPOINT 为 harness；无 entrypoint 的镜像可设 `runtime.config.containerCommand`，如 `["node", "/pi.js"]`）。
 * Network `allowedHosts/blockedHosts` 与 Filesystem `allowedPaths/deniedPaths` 暂未做细粒度强制（仅支持整体开关与只读挂载）。
 
 ## 测试
@@ -280,4 +306,6 @@ packages/
 npm test          # core 单元测试：store/secret/mock run/cost/event bus/policy/git workspace
                   # + v1：生命周期策略、keep-alive 租约（超时销毁/复用/重启恢复）、workspace 导入与保存、
                   #        同 Harness Native Resume、跨 Harness Handoff、Handoff 生成与渲染、能力声明
+                  # + v2：统一 Session 数据迁移清理、Native State 服务、能力随执行后端收窄、
+                  #        容器化 OpenCode/Pi 跨临时容器 Native Resume 闭环（fake docker shim）、Handoff 行为不变
 ```

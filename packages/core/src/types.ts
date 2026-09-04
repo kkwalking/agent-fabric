@@ -222,7 +222,6 @@ export interface Task {
   runtimeId?: ID;
   modelId?: ID;
   workspaceId?: ID;
-  sessionId?: ID;
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: string[];
@@ -267,8 +266,9 @@ export interface Run {
   modelName?: string;
   providerId?: ID;
   workspaceId?: ID;
-  sessionId?: ID;
   containerId?: string;
+  /** Runtime Native State attached to this run (containerized runs). */
+  nativeStateId?: ID;
   /** The concrete instruction this Run executed (may include handoff context). */
   inputInstruction?: string;
   /** Resume / handoff / new — how this run relates to previous runs. */
@@ -300,27 +300,40 @@ export interface Run {
 }
 
 /* ------------------------------------------------------------------ */
-/* Session                                                            */
+/* Runtime Native State (v2 §13–§14)                                   */
 /* ------------------------------------------------------------------ */
 
-export type SessionStatus = "active" | "idle" | "closed";
-
-export interface Session {
+/**
+ * AgentFabric-managed persistent storage for a harness's *private* state
+ * — the data the harness needs to resume its own native sessions
+ * (native session store, internal databases, config/cache files, …).
+ *
+ * This is deliberately distinct from a Workspace:
+ * - Workspace = the user's actual work (source code, project files).
+ * - Runtime Native State = harness-internal plumbing, opaque to
+ *   AgentFabric (v2: "Runtime native state is opaque").
+ *
+ * AgentFabric only Create / Mount / Preserve / Reattach / Delete this
+ * directory; it never reads or transforms its contents.
+ */
+export interface RuntimeNativeState {
   id: ID;
-  name?: string;
-  runtimeId?: ID;
-  workspaceId?: ID;
-  modelId?: ID;
-  status: SessionStatus;
-  runIds: ID[];
-  usage?: Usage;
-  cost?: number;
+  /** Runtime (harness instance) this state belongs to. */
+  runtimeId: ID;
+  runtimeKind: RuntimeKind;
+  /** Host directory managed opaquely by AgentFabric. */
+  path: string;
+  /** Mount target inside the container (the harness's own state dir). */
+  mountPath: string;
+  /** Last run that attached this state. */
+  lastUsedRunId?: ID;
+  lastUsedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
 /* ------------------------------------------------------------------ */
-/* Runtime Session Reference (spec v1 §3/§9)                           */
+/* Runtime Session Reference (spec v1 §3/§9, v2 §2/§6)                 */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -347,6 +360,14 @@ export interface RuntimeSessionRef {
   taskId?: ID;
   runId: ID;
   workspaceId?: ID;
+  /**
+   * Runtime Native State the session depends on. Resuming reattaches
+   * this state so an ephemeral container can still restore the session
+   * (v2 §12/§15).
+   */
+  nativeStateId?: ID;
+  /** Execution backend the session was created under. */
+  executionBackend?: "local" | "docker";
   status: "active" | "expired";
   metadata?: Record<string, unknown>;
   createdAt: string;
@@ -437,6 +458,8 @@ export type EventType =
   | "handoff.generated"
   | "runtime.session.resumed"
   | "runtime.session.created"
+  | "native.state.attached"
+  | "native.state.persisted"
   | "workspace.attached"
   | "workspace.saved"
   | "container.reused"
@@ -449,7 +472,6 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 export interface RunEvent {
   id: ID;
   runId: ID;
-  sessionId?: ID;
   seq: number;
   type: EventType;
   timestamp: string;

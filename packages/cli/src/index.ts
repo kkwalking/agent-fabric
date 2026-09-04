@@ -387,7 +387,6 @@ function buildProgram(): Command {
     .option("--runtime <id>", "runtime id")
     .option("--model <id>", "model id or alias")
     .option("--workspace <id>", "workspace id")
-    .option("--session <id>", "session id to continue")
     .option("--profile <id>", "agent profile id")
     .option("--tool <tool>", "tool allowed for this task (repeatable)")
     .option("--timeout <ms>", "task timeout in ms")
@@ -429,7 +428,6 @@ function buildProgram(): Command {
         runtimeId: opts.runtime,
         modelId: opts.model,
         workspaceId,
-        sessionId: opts.session,
         profileId: opts.profile,
         tools: (opts.tool as string[] | undefined)?.length ? opts.tool : undefined,
         timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
@@ -688,46 +686,34 @@ function buildProgram(): Command {
       throw new Error(`unknown action: ${action}`);
     });
 
-  /* ---------------- sessions ---------------- */
+  /* ---------------- runtime native states (v2 §13–§15) ---------------- */
 
   program
-    .command("sessions")
-    .description("manage sessions")
-    .argument("<action>", "list | create | resume | close")
-    .argument("[id]", "session id (for resume/close)")
-    .argument("[prompt]", "prompt (for resume)")
-    .option("--name <name>", "session name")
-    .option("--runtime <id>", "runtime id")
-    .option("--model <id>", "model id")
-    .option("--workspace <id>", "workspace id")
-    .action(async (action: string, id: string | undefined, prompt: string | undefined, _opts: unknown, cmd: Command) => {
+    .command("native-states")
+    .description("inspect harness-native state storage (opaque, per-runtime)")
+    .argument("<action>", "list | remove")
+    .argument("[id]", "native state id (for remove)")
+    .option("--runtime <id>", "filter by runtime id (for list)")
+    .action(async (action: string, id: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
       if (action === "list") {
-        const rows = await c.get<Record<string, unknown>[]>("/api/sessions");
+        const qs = cmd.opts().runtime ? `?runtimeId=${cmd.opts().runtime}` : "";
+        const rows = await c.get<Record<string, unknown>[]>(`/api/native-states${qs}`);
         if (json(cmd)) return console.log(pretty(rows));
-        console.log(table(rows.map((s) => ({ id: s.id, name: s.name ?? "-", status: s.status, runs: (s.runIds as string[]).length, cost: s.cost ?? 0 }))));
+        console.log(table(rows.map((s) => ({
+          id: s.id,
+          runtime: s.runtimeId,
+          kind: s.runtimeKind,
+          mountPath: s.mountPath,
+          lastUsedRun: s.lastUsedRunId ?? "-",
+          path: s.path,
+        }))));
         return;
       }
-      if (action === "create") {
-        const s = await c.post<unknown>("/api/sessions", {
-          name: cmd.opts().name,
-          runtimeId: cmd.opts().runtime,
-          modelId: cmd.opts().model,
-          workspaceId: cmd.opts().workspace,
-        });
-        console.log(json(cmd) ? pretty(s) : `session created: ${(s as { id: string }).id}`);
-        return;
-      }
-      if (action === "resume") {
-        if (!id || !prompt) throw new Error("usage: af sessions resume <id> \"<prompt>\"");
-        const r = await c.post<unknown>(`/api/sessions/${id}/resume`, { prompt });
-        console.log(json(cmd) ? pretty(r) : `run created: ${(r as { run: { id: string } }).run.id} on session ${id}`);
-        return;
-      }
-      if (action === "close") {
-        if (!id) throw new Error("usage: af sessions close <id>");
-        const s = await c.post<unknown>(`/api/sessions/${id}/close`);
-        console.log(json(cmd) ? pretty(s) : `session ${id} closed`);
+      if (action === "remove") {
+        if (!id) throw new Error("usage: af native-states remove <id>");
+        const r = await c.delete<unknown>(`/api/native-states/${id}`);
+        console.log(json(cmd) ? pretty(r) : "native state removed");
         return;
       }
       throw new Error(`unknown action: ${action}`);

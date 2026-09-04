@@ -8,7 +8,7 @@ import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { RuntimeRegistry } from "./runtime.js";
 import { RunService } from "./orchestrator.js";
-import { ProviderService, ModelService, RuntimeService, WorkspaceService, SessionService, SecretService, seedDefaults } from "./services.js";
+import { ProviderService, ModelService, RuntimeService, WorkspaceService, SecretService, seedDefaults } from "./services.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import { addUsage, estimateCost } from "./cost.js";
 

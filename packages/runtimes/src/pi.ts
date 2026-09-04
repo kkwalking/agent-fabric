@@ -1,14 +1,12 @@
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import type { AgentRuntimeAdapter, RuntimeCapability, RuntimeContext, RuntimeResult, RunEvent } from "@agentfabric/core";
-import { runDockerWithLifecycle, mergedResourceLimits } from "./docker.js";
+import { runHarnessCommand } from "./harness.js";
 
 interface PiEvent {
   type: string;
   [key: string]: unknown;
 }
 
-function piBin(): string {
+export function piBin(): string {
   return process.env.AGENTFABRIC_PI_BIN ?? "pi";
 }
 
@@ -24,6 +22,16 @@ export const piCapabilities: Partial<RuntimeCapability> = {
   supportsHandoffGeneration: false,
   supportsWorkspace: true,
   supportsInteractiveExecution: false,
+};
+
+/**
+ * Containerized capabilities (v2 §11): with the execution-backend path
+ * streaming pi's JSON output to this adapter and the native-state
+ * directory mounted into the container, containerized pi has the same
+ * native-session semantics as local pi (v2 §10).
+ */
+export const piContainerizedCapabilities: Partial<RuntimeCapability> = {
+  ...piCapabilities,
 };
 
 /**
@@ -132,85 +140,36 @@ function buildArgs(ctx: RuntimeContext): string[] {
 /**
  * Pi Agent Runtime adapter.
  *
- * Default: spawns the local `pi --print --mode json` CLI, streaming its
- * JSONL output as AgentFabric standard events. When a native session
- * reference was stored for this harness it is resumed via `--session`.
+ * One execution loop for both backends (v2 §7/§8/§10): the adapter
+ * builds the `pi --print --mode json` command and hands it to the
+ * execution backend — a local process or a Docker container. Either
+ * way, the JSONL stdout is parsed here with the same mapper, the native
+ * session id is extracted, and a stored native session reference is
+ * resumed via `--session`.
  *
- * `containerized: true`: runs `pi` inside a Docker image via the shared
- * Docker helper (runtime.image must contain the pi CLI).
+ * Containerized runs mount the runtime's opaque native-state directory
+ * at pi's home path so native sessions survive container destruction.
  */
 export const piAdapter: AgentRuntimeAdapter = {
   kind: "pi",
   name: "Pi Agent",
   capabilities: piCapabilities,
+  containerizedCapabilities: piContainerizedCapabilities,
+  nativeStateMountPath: "/root/.pi",
 
   async run(ctx: RuntimeContext): Promise<RuntimeResult> {
-    const args = buildArgs(ctx);
     // This run's instruction: the rendered handoff for continuity runs,
     // otherwise the task's original prompt (spec v1 §20 Inject Handoff).
     const prompt = ctx.run.inputInstruction ?? ctx.task.prompt;
-    const cwd = ctx.workspacePath ?? ctx.runtime.cwd ?? process.cwd();
-
-    if (ctx.runtime.containerized) {
-      const image = ctx.runtime.image ?? "node:22-alpine";
-      const outcome = await runDockerWithLifecycle(ctx, {
-        image,
-        command: [...args, prompt],
-        env: ctx.env,
-        workspaceMount: ctx.workspacePath ? { hostPath: ctx.workspacePath, containerPath: "/workspace" } : undefined,
-        resourceLimits: mergedResourceLimits(ctx),
-        networkPolicy: ctx.task.policy?.network ?? ctx.runtime.networkPolicy,
-      });
-      if (outcome.error) return { exitCode: outcome.exitCode ?? 1, error: outcome.error, containerId: outcome.containerId };
-      return {
-        exitCode: outcome.exitCode === 0 ? 0 : outcome.exitCode ?? 1,
-        error: outcome.exitCode === 0 ? undefined : `Pi container exited with code ${outcome.exitCode}`,
-        containerId: outcome.containerId,
-      };
-    }
-
-    await ctx.emit("shell.command", { command: `${piBin()} ${args.join(" ")} <prompt>`, cwd });
-    return new Promise<RuntimeResult>((resolve) => {
-      const child = spawn(piBin(), [...args, prompt], {
-        cwd,
-        env: { ...process.env, ...ctx.env },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const rl = createInterface({ input: child.stdout });
-      let seq = 0;
-      let nativeSessionRef: string | undefined;
-      rl.on("line", (line) => {
-        if (!line.trim()) return;
-        if (!nativeSessionRef) nativeSessionRef = extractPiSessionRef(line);
-        const mapped = mapPiEvent(line, ctx.run.id, () => ++seq);
-        if (mapped) {
-          void ctx.emit(mapped.type, mapped.data, { level: mapped.level, source: "pi" });
-        }
-      });
-      child.stderr.on("data", (chunk: Buffer) => {
-        const text = chunk.toString().trim();
-        if (text) void ctx.log(text, "warn");
-      });
-
-      const onAbort = () => child.kill("SIGTERM");
-      ctx.signal.addEventListener("abort", onAbort, { once: true });
-
-      child.on("error", (err) => {
-        ctx.signal.removeEventListener("abort", onAbort);
-        resolve({ error: `Failed to start pi: ${err.message}` });
-      });
-      child.on("close", (code) => {
-        ctx.signal.removeEventListener("abort", onAbort);
-        if (ctx.signal.aborted) {
-          resolve({ exitCode: code ?? 1, error: "Pi run aborted", nativeSessionRef });
-          return;
-        }
-        if (code !== 0) {
-          resolve({ exitCode: code ?? 1, error: `Pi exited with code ${code}`, nativeSessionRef });
-          return;
-        }
-        resolve({ exitCode: 0, nativeSessionRef });
-      });
+    return runHarnessCommand(ctx, {
+      bin: piBin(),
+      args: buildArgs(ctx),
+      prompt,
+      source: "pi",
+      image: ctx.runtime.image ?? "node:22-alpine",
+      workspaceContainerPath: "/workspace",
+      mapLine: mapPiEvent,
+      extractSessionRef: extractPiSessionRef,
     });
   },
 
