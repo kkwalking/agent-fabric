@@ -26,50 +26,6 @@ interface Config {
 }
 
 const configs: Record<string, Config> = {
-  providers: {
-    title: "Providers",
-    path: "/api/providers",
-    columns: [
-      { key: "id", label: "ID", render: (r) => <span className="mono">{r.id}</span> },
-      { key: "name", label: "Name" },
-      { key: "type", label: "Type" },
-      { key: "baseUrl", label: "Base URL", render: (r) => <span className="mono">{r.baseUrl ?? "-"}</span> },
-      { key: "apiKeyMasked", label: "API Key", render: (r) => <span className="mono">{r.apiKeyMasked ?? "-"}</span> },
-      { key: "enabled", label: "Enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
-    ],
-    createFields: [
-      { key: "name", label: "Name", required: true },
-      { key: "type", label: "Type", type: "select", options: ["openai", "openai-compatible", "anthropic", "custom"] },
-      { key: "baseUrl", label: "Base URL / API Endpoint", placeholder: "https://api.openai.com/v1" },
-      { key: "apiKey", label: "API Key (stored as Secret)", type: "password" },
-    ],
-    rowActions: (row, reload) => (
-      <>
-        <button className="small" onClick={() => toggleEnabled(row, reload)}>{row.enabled ? "disable" : "enable"}</button>{" "}
-        <button className="small danger" onClick={() => removeItem("/api/providers", row.id, reload)}>delete</button>
-      </>
-    ),
-  },
-  models: {
-    title: "Models",
-    path: "/api/models",
-    columns: [
-      { key: "id", label: "ID", render: (r) => <span className="mono">{r.id}</span> },
-      { key: "name", label: "Model" },
-      { key: "alias", label: "Alias", render: (r) => r.alias ?? "-" },
-      { key: "providerId", label: "Provider", render: (r) => <span className="mono">{r.providerId}</span> },
-      { key: "capabilities", label: "Capabilities", render: (r) => (r.capabilities ?? []).join(", ") || "-" },
-      { key: "enabled", label: "Enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
-    ],
-    createFields: [
-      { key: "name", label: "Model name / id", required: true, placeholder: "gpt-4o" },
-      { key: "providerId", label: "Provider id", required: true, placeholder: "prov_…" },
-      { key: "alias", label: "Alias", placeholder: "my-gpt" },
-    ],
-    rowActions: (row, reload) => (
-      <button className="small danger" onClick={() => removeItem("/api/models", row.id, reload)}>delete</button>
-    ),
-  },
   runtimes: {
     title: "Runtimes",
     path: "/api/runtimes",
@@ -176,11 +132,6 @@ const configs: Record<string, Config> = {
 async function removeItem(path: string, id: string, reload: () => void) {
   if (!confirm(`Delete ${id}?`)) return;
   await del(path + "/" + id);
-  reload();
-}
-
-async function toggleEnabled(row: any, reload: () => void) {
-  await post(`/api/providers/${row.id}/${row.enabled ? "disable" : "enable"}`);
   reload();
 }
 

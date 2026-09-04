@@ -62,6 +62,8 @@ export async function cloneGitRepo(repoUrl: string, dest: string, branch?: strin
 export interface NewProviderInput {
   name: string;
   type: Provider["type"];
+  remark?: string;
+  website?: string;
   baseUrl?: string;
   apiKey?: string;
   headers?: Record<string, string>;
@@ -100,6 +102,8 @@ export class ProviderService {
       id,
       name: input.name,
       type: input.type,
+      remark: input.remark,
+      website: input.website,
       baseUrl: input.baseUrl,
       apiKeySecretId,
       apiKeyMasked,
@@ -116,6 +120,10 @@ export class ProviderService {
     if (!provider) return undefined;
     const { apiKey: _newKey, ...rest } = patch;
     const next: Partial<Provider> = { ...rest, updatedAt: now() };
+    // Empty strings mean "cleared in the UI" — persist as absent.
+    if (next.remark === "") next.remark = undefined;
+    if (next.website === "") next.website = undefined;
+    if (next.baseUrl === "") next.baseUrl = undefined;
     if (patch.apiKey) {
       const secret: Secret = {
         id: provider.apiKeySecretId ?? newId("sec"),
@@ -909,7 +917,7 @@ export async function seedDefaults(store: Store): Promise<void> {
   // A generic OpenAI-compatible provider with no key; users fill in their own.
   const provider = await providerService.create({
     name: "OpenAI",
-    type: "openai",
+    type: "openai-completions",
     baseUrl: "https://api.openai.com/v1",
   });
   await modelService.create({ providerId: provider.id, name: "gpt-4o", alias: "gpt-4o", capabilities: ["chat", "vision"] });

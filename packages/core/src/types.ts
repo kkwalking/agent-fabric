@@ -12,12 +12,29 @@ export type ID = string;
 /* Provider                                                           */
 /* ------------------------------------------------------------------ */
 
-export type ProviderType = "openai" | "openai-compatible" | "anthropic" | "custom";
+/**
+ * API wire format spoken by the provider ("接口格式").
+ * `openai` / `openai-compatible` are legacy values kept for backward
+ * compatibility; new providers should use `openai-responses`,
+ * `openai-completions` or `anthropic`.
+ */
+export type ProviderType =
+  | "openai-responses"
+  | "openai-completions"
+  | "openai"
+  | "openai-compatible"
+  | "anthropic"
+  | "custom";
 
 export interface Provider {
   id: ID;
   name: string;
+  /** API wire format (OpenAI Responses / OpenAI Completions / Anthropic / …). */
   type: ProviderType;
+  /** Free-form note shown next to the provider. */
+  remark?: string;
+  /** Vendor website (informational). */
+  website?: string;
   /** Custom API endpoint / base URL. */
   baseUrl?: string;
   /** Reference to a Secret id holding the API key. */
@@ -40,7 +57,7 @@ export interface Model {
   providerId: ID;
   /** Model name / id as understood by the provider, e.g. `gpt-4o`. */
   name: string;
-  /** Convenient alias used when submitting tasks. */
+  /** Display name shown in the UI; also usable as a submission alias. */
   alias?: string;
   /** Model parameters (temperature, maxTokens, ...). */
   parameters?: Record<string, unknown>;

@@ -582,6 +582,170 @@ a:hover {
   color: var(--dim);
 }
 
+/* ---------- LLM（供应商 + 模型统一配置） ---------- */
+
+.provider-card .provider-summary {
+  min-width: 0;
+  cursor: pointer;
+}
+.provider-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  flex-wrap: wrap;
+}
+.provider-name .badge {
+  font-weight: 500;
+}
+.provider-meta {
+  margin-top: 3px;
+  font-size: 12px;
+  display: flex;
+  gap: 0;
+  flex-wrap: wrap;
+}
+
+.editor-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.editor-head h1 {
+  margin: 0;
+}
+.back-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 20px;
+}
+@media (max-width: 860px) {
+  .form-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hint {
+  color: var(--dim);
+  font-size: 11.5px;
+  margin-top: -6px;
+}
+
+.key-wrap {
+  position: relative;
+  display: block;
+}
+.key-wrap input {
+  padding-right: 42px;
+}
+.key-wrap .eye {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 0;
+  background: transparent;
+  padding: 5px;
+  color: var(--dim);
+  display: grid;
+  place-items: center;
+}
+.key-wrap .eye:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.section-head strong {
+  font-size: 14px;
+  font-weight: 650;
+}
+.section-head .right {
+  display: flex;
+  gap: 8px;
+}
+.section-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.model-grid {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) minmax(0, 1fr) 26px;
+  gap: 12px;
+  align-items: center;
+}
+.model-grid-head {
+  padding: 0 6px 6px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.model-item {
+  border-bottom: 1px solid var(--border-soft);
+}
+.model-item:last-child {
+  border-bottom: 0;
+}
+.model-row input {
+  margin: 6px 0;
+}
+.chev,
+.trash {
+  border: 0;
+  background: transparent;
+  padding: 4px;
+  display: grid;
+  place-items: center;
+  color: var(--dim);
+}
+.chev {
+  transition: transform 0.15s ease;
+}
+.chev.open {
+  transform: rotate(90deg);
+}
+.chev:hover,
+.trash:hover {
+  background: transparent;
+  color: var(--text);
+}
+.trash:hover {
+  color: var(--red);
+}
+.model-detail {
+  padding: 0 6px 12px 38px;
+}
+.model-detail textarea {
+  margin-top: 4px;
+}
+.model-detail .check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+.model-detail .check input {
+  width: auto;
+  margin: 0;
+}
+
 /* ---------- Scrollbars ---------- */
 
 ::-webkit-scrollbar {

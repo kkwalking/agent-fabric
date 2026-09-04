@@ -17,6 +17,11 @@ export type IconName =
   | "bell"
   | "compose"
   | "arrowUp"
+  | "arrowLeft"
+  | "chevron"
+  | "eye"
+  | "eyeOff"
+  | "trash"
   | "plus";
 
 const iconPaths: Record<IconName, ReactNode> = {
@@ -117,6 +122,35 @@ const iconPaths: Record<IconName, ReactNode> = {
     <>
       <path d="M12 19V5" />
       <path d="m5 12 7-7 7 7" />
+    </>
+  ),
+  arrowLeft: (
+    <>
+      <path d="M19 12H5" />
+      <path d="m11 18-6-6 6-6" />
+    </>
+  ),
+  chevron: <path d="m9 6 6 6-6 6" />,
+  eye: (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  eyeOff: (
+    <>
+      <path d="m4 4 16 16" />
+      <path d="M10.3 5.7A10 10 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17.4 17.4 0 0 1-2.9 3.8" />
+      <path d="M6.3 6.9C3.9 8.7 2.5 12 2.5 12S6 18.5 12 18.5a9.4 9.4 0 0 0 3.2-.6" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M3 6h18" />
+      <path d="M8 6V4.5A1.5 1.5 0 0 1 9.5 3h5A1.5 1.5 0 0 1 16 4.5V6" />
+      <path d="m19 6-.9 13.1a2 2 0 0 1-2 1.9H7.9a2 2 0 0 1-2-1.9L5 6" />
+      <path d="M10 10.5v6M14 10.5v6" />
     </>
   ),
   plus: <path d="M12 5v14M5 12h14" />,

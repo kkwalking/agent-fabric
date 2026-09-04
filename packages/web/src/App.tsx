@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Dashboard } from "./views/Dashboard";
 import { ResourceView } from "./views/ResourceView";
+import { LlmView } from "./views/Llm";
 import { RunsView, RunDetailView } from "./views/Runs";
 import { TasksView } from "./views/Tasks";
 import { HandoffsView } from "./views/Handoffs";
@@ -12,8 +13,7 @@ import { Icon, IconName } from "./components";
 
 export type ViewKey =
   | "dashboard"
-  | "providers"
-  | "models"
+  | "llm"
   | "runtimes"
   | "agents"
   | "workspaces"
@@ -45,8 +45,7 @@ const primaryNav: NavEntry[] = [
 ];
 
 const resourceNav: NavEntry[] = [
-  { key: "providers", label: "Providers", icon: "cloud" },
-  { key: "models", label: "Models", icon: "cpu" },
+  { key: "llm", label: "LLM", icon: "cloud" },
   { key: "runtimes", label: "Runtimes", icon: "box" },
   { key: "agents", label: "Agents", icon: "bot" },
   { key: "workspaces", label: "Workspaces", icon: "folder" },
@@ -122,8 +121,7 @@ export function App() {
       </aside>
       <main className="main">
         {nav.view === "dashboard" && <Dashboard onOpenRun={(id) => navigate("run", id)} />}
-        {nav.view === "providers" && <ResourceView kind="providers" />}
-        {nav.view === "models" && <ResourceView kind="models" />}
+        {nav.view === "llm" && <LlmView />}
         {nav.view === "runtimes" && <ResourceView kind="runtimes" />}
         {nav.view === "agents" && <ResourceView kind="agents" />}
         {nav.view === "workspaces" && <ResourceView kind="workspaces" />}
