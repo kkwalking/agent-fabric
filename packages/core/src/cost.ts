@@ -67,6 +67,7 @@ export function addUsage(a: Usage | undefined, b: Usage | undefined): Usage {
     inputTokens: x.inputTokens + y.inputTokens,
     outputTokens: x.outputTokens + y.outputTokens,
     cachedTokens: (x.cachedTokens ?? 0) + (y.cachedTokens ?? 0),
+    reasoningTokens: (x.reasoningTokens ?? 0) + (y.reasoningTokens ?? 0),
     modelRequests: x.modelRequests + y.modelRequests,
     durationMs: Math.max(x.durationMs ?? 0, y.durationMs ?? 0),
     estimatedCost: (x.estimatedCost ?? 0) + (y.estimatedCost ?? 0),
@@ -103,6 +104,7 @@ function mergeByModel(
       inputTokens: prev.inputTokens + mu.inputTokens,
       outputTokens: prev.outputTokens + mu.outputTokens,
       cachedTokens: prev.cachedTokens + mu.cachedTokens,
+      reasoningTokens: (prev.reasoningTokens ?? 0) + (mu.reasoningTokens ?? 0),
       requests: prev.requests + mu.requests,
       cost: prev.cost + mu.cost,
     };

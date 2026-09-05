@@ -1,5 +1,6 @@
 import type {
   Artifact,
+  ExecutionPolicy,
   ArtifactKind,
   EventType,
   Handoff,
@@ -60,6 +61,12 @@ export interface RuntimeContext {
   secrets: Secret[];
   /** Merged environment: runtime env + task env + profile env + secrets. */
   env: Record<string, string>;
+  /**
+   * Effective execution policy for this run (run-level override merged
+   * over the task's policy). Adapters must read this, not `task.policy`
+   * — continuations override the policy at the run level.
+   */
+  policy?: ExecutionPolicy;
   /** Aborted when the run is cancelled or times out. */
   signal: AbortSignal;
   /** Resolved container lifecycle policy for this run (spec v1 §1). */
@@ -199,6 +206,14 @@ export interface AgentRuntimeAdapter {
    * Overridable per runtime via `runtime.config.nativeStateMountPath`.
    */
   readonly nativeStateMountPath?: string;
+  /**
+   * Container image the harness executes in when the runtime record has
+   * no `image` configured (v3 §10/§11). Only harnesses with an official,
+   * maintained runtime image may declare one; adapters without a real
+   * default image must leave this undefined and refuse to start
+   * containerized until the user configures an image.
+   */
+  readonly defaultImage?: string;
   run(ctx: RuntimeContext): Promise<RuntimeResult>;
   /** Best-effort cancellation of the currently running task. */
   cancel?(ctx: RuntimeContext): Promise<void>;
@@ -218,10 +233,19 @@ export const DEFAULT_ADAPTER_CAPABILITIES: RuntimeCapability = {
 };
 
 /**
- * Effective capabilities: adapter declaration, narrowed for the real
- * execution backend when the runtime is containerized, then overridden
- * by the runtime record (v2 §11 — declared capabilities must be true
- * under the backend actually in use).
+ * Effective capabilities (v2 §11, v3 §16/§17): the *combined* real
+ * ability of
+ *
+ *   harness capability × execution backend × runtime configuration
+ *
+ * layered in that order, with explicit runtime-record overrides last:
+ * 1. the adapter's declared harness capabilities,
+ * 2. narrowing for the containerized backend when the runtime runs
+ *    behind Docker (the harness may behave differently in a container),
+ * 3. narrowing from the runtime configuration — a containerized runtime
+ *    without a usable image cannot execute at all, so it certainly
+ *    cannot keep or resume native sessions (v3 §16: declared
+ *    capabilities must hold under the execution mode actually in use).
  */
 export function effectiveCapabilities(
   adapter: AgentRuntimeAdapter | undefined,
@@ -232,9 +256,15 @@ export function effectiveCapabilities(
     runtime?.containerized && adapter?.containerizedCapabilities
       ? adapter.containerizedCapabilities
       : undefined;
+  const containerImage = runtime?.containerized ? runtime.image ?? adapter?.defaultImage : undefined;
+  const config: Partial<RuntimeCapability> | undefined =
+    runtime?.containerized && !containerImage
+      ? { supportsNativeSession: false, supportsNativeResume: false, supportsStreamingEvents: false }
+      : undefined;
   return {
     ...base,
     ...(backend ?? {}),
+    ...(config ?? {}),
     ...(runtime?.capabilities ?? {}),
   };
 }

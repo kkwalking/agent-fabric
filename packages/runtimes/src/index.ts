@@ -9,15 +9,23 @@ export {
   opencodeAdapter,
   mapOpenCodeEvent,
   extractOpenCodeSessionRef,
+  parseOpenCodeUsage,
   opencodeCapabilities,
   opencodeContainerizedCapabilities,
+  opencodeBin,
+  opencodeImage,
+  OPENCODE_DEFAULT_IMAGE,
 } from "./opencode.js";
 export {
   piAdapter,
   mapPiEvent,
   extractPiSessionRef,
+  parsePiUsage,
   piCapabilities,
   piContainerizedCapabilities,
+  piBin,
+  piImage,
+  PI_IMAGE_CONTRACT_HINT,
 } from "./pi.js";
 export {
   dockerAdapter,

@@ -1,14 +1,54 @@
-import type { AgentRuntimeAdapter, RuntimeCapability, RuntimeContext, RuntimeResult, RunEvent } from "@agentfabric/core";
+import type {
+  AgentRuntimeAdapter,
+  RuntimeCapability,
+  RuntimeContext,
+  RuntimeResult,
+  RunEvent,
+  Usage,
+} from "@agentfabric/core";
 import { runHarnessCommand } from "./harness.js";
 
+/**
+ * Pi harness adapter — protocol shapes verified against the current pi
+ * coding agent (`@earendil-works/pi-coding-agent`, JSON mode `--mode json`):
+ *
+ * - First stdout line is the session header:
+ *     {"type":"session","version":3,"id":"<uuid>","timestamp":"…","cwd":"…"}
+ * - Agent/turn/message events: agent_start, agent_end, turn_start,
+ *   turn_end, message_start, message_update, message_end
+ * - Tool events: tool_execution_start, tool_execution_update,
+ *   tool_execution_end {toolCallId, toolName, args|partialResult|result,
+ *   isError}
+ * - message_update carries {usage, assistantMessageEvent} where usage is
+ *   *cumulative* for the current message; message_end.message.usage is
+ *   the authoritative per-message usage (input, output, cacheRead,
+ *   cacheWrite, reasoning, totalTokens, cost{…,total}).
+ * - Sessions are stored under ~/.pi/agent/sessions (overridable via
+ *   PI_CODING_AGENT_DIR) and resumed with `--session <id|path>`.
+ *   `--no-session` makes a run ephemeral — AgentFabric never uses it,
+ *   because every run must persist a resumable native session (v3 §1/§2).
+ */
+
 interface PiEvent {
-  type: string;
+  type?: string;
   [key: string]: unknown;
 }
 
 export function piBin(): string {
   return process.env.AGENTFABRIC_PI_BIN ?? "pi";
 }
+
+/** Container image override for containerized pi (v3 §10, plan A). */
+export function piImage(): string | undefined {
+  return process.env.AGENTFABRIC_PI_IMAGE;
+}
+
+/** Where the pi Dockerfile reference lives (see docs/harness-image-contract.md). */
+export const PI_IMAGE_CONTRACT_HINT =
+  "Containerized Pi requires a Pi Runtime Image (a container whose entrypoint is the pi CLI with sessions " +
+  "persisted under /root/.pi). Configure `image` on the runtime or set AGENTFABRIC_PI_IMAGE. " +
+  "A reference Dockerfile is provided at docker/pi.Dockerfile in the AgentFabric repository " +
+  "( Harness Execution Contract: docs/harness-image-contract.md ).";
 
 /**
  * Pi harness capabilities (spec v1 §17): native sessions with resume,
@@ -25,19 +65,73 @@ export const piCapabilities: Partial<RuntimeCapability> = {
 };
 
 /**
- * Containerized capabilities (v2 §11): with the execution-backend path
- * streaming pi's JSON output to this adapter and the native-state
- * directory mounted into the container, containerized pi has the same
- * native-session semantics as local pi (v2 §10).
+ * Containerized capabilities (v2 §11, v3 §16/§17): with the
+ * execution-backend path streaming pi's JSON output to this adapter and
+ * the native-state directory (~/.pi) mounted into the container,
+ * containerized pi has the same native-session semantics as local pi —
+ * *provided* a real pi runtime image is configured; without an image the
+ * run is refused (see piImage / PI_IMAGE_CONTRACT_HINT) and the
+ * effective-capability computation narrows these declarations.
  */
 export const piContainerizedCapabilities: Partial<RuntimeCapability> = {
   ...piCapabilities,
 };
 
+/* ------------------------------------------------------------------ */
+/* Event mapping (v3 §4/§5)                                            */
+/* ------------------------------------------------------------------ */
+
+interface PiContentPart {
+  type?: string;
+  text?: string;
+  thinking?: string;
+  [key: string]: unknown;
+}
+
+interface PiMessage {
+  role?: string;
+  content?: PiContentPart[];
+  model?: string;
+  usage?: PiUsage;
+  errorMessage?: string;
+  [key: string]: unknown;
+}
+
+/** pi's native usage object (packages/ai Usage). */
+interface PiUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cacheWrite1h?: number;
+  reasoning?: number;
+  totalTokens?: number;
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
+}
+
+function messageText(message: PiMessage): string {
+  return (message.content ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("");
+}
+
+function messageThinking(message: PiMessage): string {
+  return (message.content ?? [])
+    .filter((part) => part.type === "thinking" && typeof part.thinking === "string")
+    .map((part) => part.thinking as string)
+    .join("");
+}
+
 /**
- * Maps a pi JSONL event to an AgentFabric standard event.
- * Pi's JSON mode is less structured than opencode's, so we use a tolerant
- * mapping and never drop a line — unknown types become log lines.
+ * Maps a pi JSONL event to an AgentFabric standard event (v3 §4/§5).
+ *
+ * Recognized pi events are mapped to the unified events (agent.message,
+ * agent.thinking, tool.started/progress/completed, run.progress,
+ * runtime.error); valuable-but-unmapped events (session bookkeeping,
+ * compaction, retries, deltas) are preserved as raw debug events so
+ * nothing is lost — on local *and* containerized execution alike, since
+ * both stream through this same mapper (v3 §5/§7).
  */
 export function mapPiEvent(raw: string, runId: string, seq: () => number): RunEvent | null {
   let evt: PiEvent;
@@ -48,68 +142,202 @@ export function mapPiEvent(raw: string, runId: string, seq: () => number): RunEv
   }
   const type = evt.type ?? "unknown";
   const timestamp = (evt.timestamp as string) ?? new Date().toISOString();
-  const data = { ...(evt as Record<string, unknown>) };
-  delete data.type;
-  const base = { id: `evt_${runId}_${seq()}`, runId, seq: seq(), timestamp, data };
+  const base = { id: `evt_${runId}_${seq()}`, runId, seq: seq(), timestamp };
 
-  const text =
-    (evt as Record<string, any>).text ??
-    (evt as Record<string, any>).content ??
-    (evt as Record<string, any>).message?.content ??
-    (evt as Record<string, any>).output;
-
-  if (type === "message") {
-    const role = (evt as Record<string, any>).role ?? "assistant";
-    return { ...base, type: "agent.message", level: "info", source: "pi", data: { content: text ?? "", role, raw: data } };
-  }
-  if (type === "tool" || type === "tool_call") {
-    const tool = (evt as Record<string, any>).tool?.name ?? (evt as Record<string, any>).tool ?? (evt as Record<string, any>).name ?? "unknown";
-    const state = (evt as Record<string, any>).state ?? (evt as Record<string, any>).status;
-    const isStart = state === "started" || state === "start" || state === "running" || !state;
-    return {
-      ...base,
-      type: isStart ? "tool.started" : "tool.completed",
-      level: "info",
-      source: "pi",
-      data: { tool, state, ...data },
-    };
-  }
-  if (type === "bash" || type === "shell" || type === "command") {
-    const command = (evt as Record<string, any>).command ?? (evt as Record<string, any>).cmd ?? text;
-    const state = (evt as Record<string, any>).state;
-    if (state === "started" || state === "running") {
-      return { ...base, type: "shell.command", level: "info", source: "pi", data: { command, ...data } };
+  switch (type) {
+    /* ---- session header: first line of every run ---- */
+    case "session": {
+      return {
+        ...base,
+        type: "run.progress",
+        level: "info",
+        source: "pi",
+        data: {
+          phase: "session",
+          sessionId: evt.id,
+          version: evt.version,
+          cwd: evt.cwd,
+          parentSession: evt.parentSession,
+        },
+      };
     }
-    return { ...base, type: "shell.output", level: "info", source: "pi", data: { line: text ?? command ?? "", ...data } };
+
+    /* ---- agent / turn lifecycle → run progress ---- */
+    case "agent_start":
+      return { ...base, type: "run.progress", level: "debug", source: "pi", data: { phase: "agent_start" } };
+    case "agent_end":
+      return {
+        ...base,
+        type: "run.progress",
+        level: "debug",
+        source: "pi",
+        data: { phase: "agent_end", messageCount: Array.isArray(evt.messages) ? evt.messages.length : 0, raw: { willRetry: evt.willRetry } },
+      };
+    case "turn_start":
+      return { ...base, type: "run.progress", level: "debug", source: "pi", data: { phase: "turn_start" } };
+    case "turn_end":
+      return {
+        ...base,
+        type: "run.progress",
+        level: "debug",
+        source: "pi",
+        data: {
+          phase: "turn_end",
+          toolResultCount: Array.isArray(evt.toolResults) ? evt.toolResults.length : 0,
+        },
+      };
+
+    /* ---- message lifecycle ---- */
+    case "message_start":
+      // The user/toolResult echoes are recognized but only kept as raw
+      // debug (the authoritative copies arrive via message_end).
+      return { ...base, type: "log", level: "debug", source: "pi", data: { line: raw } };
+    case "message_update": {
+      const delta = evt.assistantMessageEvent as PiEvent | undefined;
+      if (delta?.type === "error") {
+        return {
+          ...base,
+          type: "runtime.error",
+          level: "error",
+          source: "pi",
+          data: { error: String(delta.error ?? "pi stream error"), phase: "message_update" },
+        };
+      }
+      // text/thinking deltas stream through here; the full text is
+      // emitted once from message_end, so per-delta events would only
+      // flood the event store. Recognized → intentionally not emitted.
+      return null;
+    }
+    case "message_end": {
+      const message = evt.message as PiMessage | undefined;
+      if (!message) return { ...base, type: "log", level: "debug", source: "pi", data: { line: raw } };
+      if (message.role === "assistant") {
+        const thinking = messageThinking(message);
+        const text = messageText(message);
+        if (message.errorMessage || message.stopReason === "error") {
+          return {
+            ...base,
+            type: "runtime.error",
+            level: "error",
+            source: "pi",
+            data: {
+              error: String(message.errorMessage ?? "pi message ended with error"),
+              stopReason: message.stopReason,
+            },
+          };
+        }
+        if (text) {
+          return {
+            ...base,
+            type: "agent.message",
+            level: "info",
+            source: "pi",
+            data: { content: text, role: "assistant", model: message.model, thinking: thinking || undefined },
+          };
+        }
+        if (thinking) {
+          return { ...base, type: "agent.thinking", level: "debug", source: "pi", data: { content: thinking } };
+        }
+        return { ...base, type: "log", level: "debug", source: "pi", data: { line: raw } };
+      }
+      return { ...base, type: "log", level: "debug", source: "pi", data: { line: raw } };
+    }
+
+    /* ---- tool execution lifecycle ---- */
+    case "tool_execution_start":
+      return {
+        ...base,
+        type: "tool.started",
+        level: "info",
+        source: "pi",
+        data: { tool: evt.toolName, toolCallId: evt.toolCallId, args: evt.args },
+      };
+    case "tool_execution_update":
+      return {
+        ...base,
+        type: "tool.progress",
+        level: "debug",
+        source: "pi",
+        data: { tool: evt.toolName, toolCallId: evt.toolCallId, partialResult: evt.partialResult },
+      };
+    case "tool_execution_end":
+      return {
+        ...base,
+        type: "tool.completed",
+        level: evt.isError ? "warn" : "info",
+        source: "pi",
+        data: { tool: evt.toolName, toolCallId: evt.toolCallId, result: evt.result, isError: Boolean(evt.isError) },
+      };
+
+    /* ---- errors ---- */
+    case "error":
+      return { ...base, type: "runtime.error", level: "error", source: "pi", data: { error: raw } };
+
+    default:
+      // Recognized-but-unmapped session bookkeeping (agent_settled,
+      // queue_update, compaction_*, entry_appended, auto_retry_*,
+      // bash_execution_update, …) and anything unknown stay visible as
+      // raw debug events (v3 §5: valuable pi events are preserved).
+      return { ...base, type: "log", level: "debug", source: "pi", data: { line: raw } };
   }
-  if (type === "error") {
-    return { ...base, type: "runtime.error", level: "error", source: "pi", data };
-  }
-  if (type === "usage") {
-    return { ...base, type: "model.response", level: "debug", source: "pi", data };
-  }
-  if (type === "session" || type === "info") {
-    return { ...base, type: "log", level: "info", source: "pi", data: { line: `pi: ${JSON.stringify(data)}` } };
-  }
-  return { ...base, type: "log", level: "debug", source: "pi", data: { line: raw } };
 }
 
 /**
  * Extracts pi's own session identifier from a raw JSONL line, if any.
- * The value stays opaque — AgentFabric only stores it for resume.
+ * Only the session header (`{"type":"session","id":…}`) carries it; the
+ * value stays opaque — AgentFabric only stores it for resume.
  */
 export function extractPiSessionRef(raw: string): string | undefined {
   try {
-    const evt = JSON.parse(raw) as Record<string, any>;
-    const type = evt.type ?? "";
-    const candidate =
-      evt.sessionId ?? evt.session_id ?? evt.sessionID ??
-      (type === "session" ? (evt.id ?? evt.session?.id ?? evt.session) : undefined) ??
-      evt.session?.id;
-    return typeof candidate === "string" && candidate ? candidate : undefined;
+    const evt = JSON.parse(raw) as PiEvent;
+    if (evt.type === "session" && typeof evt.id === "string" && evt.id) return evt.id;
+    return undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Extracts the authoritative per-message usage from a pi `message_end`
+ * event (v3 §8): each completed assistant message reports exactly one
+ * model request with its tokens and cost. Cumulative sources
+ * (`message_update.usage`) are deliberately ignored to avoid double
+ * counting.
+ */
+export function parsePiUsage(raw: string): Usage | undefined {
+  let evt: PiEvent;
+  try {
+    evt = JSON.parse(raw) as PiEvent;
+  } catch {
+    return undefined;
+  }
+  if (evt.type !== "message_end") return undefined;
+  const message = evt.message as PiMessage | undefined;
+  if (!message || message.role !== "assistant") return undefined;
+  const u = message.usage;
+  if (!u) return undefined;
+  const model = typeof message.model === "string" ? message.model : undefined;
+  const usage: Usage = {
+    inputTokens: u.input ?? 0,
+    outputTokens: u.output ?? 0,
+    cachedTokens: (u.cacheRead ?? 0) + (u.cacheWrite ?? 0),
+    reasoningTokens: u.reasoning ?? 0,
+    modelRequests: 1,
+    estimatedCost: u.cost?.total,
+  };
+  if (model) {
+    usage.byModel = {
+      [model]: {
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cachedTokens: usage.cachedTokens ?? 0,
+        reasoningTokens: usage.reasoningTokens,
+        requests: 1,
+        cost: u.cost?.total ?? 0,
+      },
+    };
+  }
+  return usage;
 }
 
 function buildArgs(ctx: RuntimeContext): string[] {
@@ -121,16 +349,19 @@ function buildArgs(ctx: RuntimeContext): string[] {
     args.push("--model", ctx.model.name);
   }
   // Native resume: pass the harness's own session reference (spec v1 §3).
+  // A *new* run gets no session flag at all — pi then runs in normal
+  // session mode, creates a native session and persists it into the
+  // mounted native-state directory. `--no-session` would make the run
+  // ephemeral and break Containerized Native Resume, so it is never
+  // passed (v3 §1/§2).
   if (ctx.runtimeSession?.nativeSessionRef) {
     args.push("--session", ctx.runtimeSession.nativeSessionRef);
-  } else {
-    args.push("--no-session");
   }
-  const tools = ctx.task.policy?.toolPermissions;
+  const tools = (ctx.policy ?? ctx.task.policy)?.toolPermissions;
   if (tools && tools.length > 0) {
     args.push("--tools", tools.join(","));
   }
-  if (ctx.task.policy?.shell === "deny") {
+  if ((ctx.policy ?? ctx.task.policy)?.shell === "deny") {
     args.push("--no-tools");
   }
   if (ctx.runtime.config?.thinking) args.push("--thinking", String(ctx.runtime.config.thinking));
@@ -144,11 +375,15 @@ function buildArgs(ctx: RuntimeContext): string[] {
  * builds the `pi --print --mode json` command and hands it to the
  * execution backend — a local process or a Docker container. Either
  * way, the JSONL stdout is parsed here with the same mapper, the native
- * session id is extracted, and a stored native session reference is
- * resumed via `--session`.
+ * session id is extracted from the session header, and a stored native
+ * session reference is resumed via `--session`.
  *
  * Containerized runs mount the runtime's opaque native-state directory
- * at pi's home path so native sessions survive container destruction.
+ * at pi's home path (~/.pi, which contains agent/sessions) so native
+ * sessions survive container destruction. Containerized pi *requires* a
+ * real pi runtime image (v3 §10): there is no official published image,
+ * so instead of silently falling back to a plain Node image that has no
+ * pi CLI, the run is refused with the Harness Execution Contract hint.
  */
 export const piAdapter: AgentRuntimeAdapter = {
   kind: "pi",
@@ -156,8 +391,17 @@ export const piAdapter: AgentRuntimeAdapter = {
   capabilities: piCapabilities,
   containerizedCapabilities: piContainerizedCapabilities,
   nativeStateMountPath: "/root/.pi",
+  // No defaultImage on purpose (v3 §10 plan A): no official pi image
+  // exists; a plain node image would silently break native resume.
 
   async run(ctx: RuntimeContext): Promise<RuntimeResult> {
+    if (ctx.runtime.containerized) {
+      const image = ctx.runtime.image ?? piImage();
+      if (!image) {
+        await ctx.emit("runtime.error", { error: PI_IMAGE_CONTRACT_HINT, backend: "docker", source: "pi" }, { level: "error" });
+        return { error: `Containerized Pi refused to start: ${PI_IMAGE_CONTRACT_HINT}` };
+      }
+    }
     // This run's instruction: the rendered handoff for continuity runs,
     // otherwise the task's original prompt (spec v1 §20 Inject Handoff).
     const prompt = ctx.run.inputInstruction ?? ctx.task.prompt;
@@ -166,10 +410,11 @@ export const piAdapter: AgentRuntimeAdapter = {
       args: buildArgs(ctx),
       prompt,
       source: "pi",
-      image: ctx.runtime.image ?? "node:22-alpine",
+      image: ctx.runtime.image ?? piImage(),
       workspaceContainerPath: "/workspace",
       mapLine: mapPiEvent,
       extractSessionRef: extractPiSessionRef,
+      parseUsage: parsePiUsage,
     });
   },
 
@@ -178,6 +423,6 @@ export const piAdapter: AgentRuntimeAdapter = {
   },
 
   describe() {
-    return { needsDocker: false, needsModel: false, cli: piBin() };
+    return { needsDocker: false, needsModel: false, cli: piBin(), requiresImageWhenContainerized: true };
   },
 };

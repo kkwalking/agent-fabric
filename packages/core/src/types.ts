@@ -443,12 +443,15 @@ export type EventType =
   | "run.failed"
   | "run.cancelled"
   | "run.timeout"
+  | "run.progress"
   | "agent.message"
   | "agent.thinking"
   | "model.request"
   | "model.response"
   | "tool.started"
+  | "tool.progress"
   | "tool.completed"
+  | "usage.updated"
   | "shell.command"
   | "shell.output"
   | "file.created"
@@ -518,6 +521,8 @@ export interface ModelUsage {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  /** Reasoning/thinking tokens (subset of output when reported). */
+  reasoningTokens?: number;
   requests: number;
   cost: number;
 }
@@ -526,6 +531,8 @@ export interface Usage {
   inputTokens: number;
   outputTokens: number;
   cachedTokens?: number;
+  /** Reasoning/thinking tokens (subset of output when reported). */
+  reasoningTokens?: number;
   modelRequests: number;
   durationMs?: number;
   estimatedCost?: number;

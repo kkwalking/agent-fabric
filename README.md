@@ -124,6 +124,41 @@ v2（`v2.md`）移除了旧的统一 AgentFabric Session 抽象，并打通了 C
 * **Ephemeral Container 下的闭环**：Run #1 创建临时容器 → 挂载 Workspace + Native State → 捕获 Native Session Ref → 容器销毁；Run #2 新建容器 → 挂载同一 Workspace 与同一 Native State → 用 Native Session Ref Resume。Native State 是 Host 上的 Opaque 目录（默认 `data/native-state/<runtimeId>`），按 Harness 挂载到容器内对应路径（OpenCode `/root/.local/share/opencode`，Pi `/root/.pi`，可用 `runtime.config.nativeStateMountPath` 覆盖）。
 * **Handoff 行为不变**：Pi → OpenCode 等跨 Harness 场景仍然保存 Workspace、生成 Handoff、创建全新 Native Session，不做任何 Session 转换。
 
+## 真实 Harness 协议适配与 Resume 正确性（v3）
+
+v3（`v3.md`）在不新增核心抽象的前提下，让现有抽象**真正正确地适配真实 Pi / OpenCode CLI**：
+
+* **Pi 新 Run 永远不用 `--no-session`**：新 Run 走正常 Session 模式，创建并把 Native Session 持久化到 Runtime Native State（`~/.pi`，容器内挂载 `/root/.pi`），随后任意容器销毁后都能用 `--session <id>` 真实恢复。
+* **Event Mapping 按真实协议重做**：
+  * Pi（`pi --print --mode json`）：`session` 头、`agent_start/end`、`turn_start/end`、`message_start/update/end`、`tool_execution_start/update/end` → `run.progress` / `agent.message` / `agent.thinking` / `tool.started` / `tool.progress` / `tool.completed` / `runtime.error`；无法识别但有价值的事件保留为 raw debug 事件，不丢失。
+  * OpenCode（`opencode run --format json`）：`step_start` / `text` / `reasoning` / `tool_use` / `step_finish` / `error`（每行携带 `sessionID`）→ 同一套 AgentFabric 标准事件；不再假设 OpenCode 输出 AgentFabric 风格事件名。
+  * Local 与 Docker 共用同一个 Harness Parser（事件 / Session Ref / Usage / 错误），Execution Backend 只做传输。
+* **真实 Usage / Cost 进入 Run Usage**：Harness Adapter 从权威事件（Pi `message_end.message.usage`、OpenCode `step_finish` 的 `tokens`+`cost`）解析 Input/Output/Reasoning/Cache tokens 与真实成本，写入 Run Usage（`reasoningTokens` 新增），并产生 `usage.updated` 事件；不再把 Usage 只当普通事件。
+* **容器镜像策略（Harness Execution Contract）**：见 `docs/harness-image-contract.md`。容器化 OpenCode 默认使用当前官方维护镜像 `ghcr.io/anomalyco/opencode`；容器化 Pi 没有官方镜像，未配置镜像（`runtime.image` 或 `AGENTFABRIC_PI_IMAGE`）时**拒绝启动**并提示契约，绝不静默回退到不含 Pi CLI 的普通 Node 镜像——参考镜像见 `docker/pi.Dockerfile`。
+* **Native Resume 条件收紧**：自动 Resume 需要 **Same Harness × Same Workspace × 有效 RuntimeSessionRef × Native State 真实存在（目录在磁盘上）× 当前执行方式下能力成立**。不同 Workspace 不复用旧 Native Session（走 Handoff / 新 Session）；本地与容器化会话不互串。判定集中在一个可扩展的 Resume Gate，为未来（Runtime/Harness/Native State 版本、模型等维度）预留空间。
+* **Capability = Harness × Backend × Runtime Config**：容器化 Runtime 未配置可用镜像时，`supportsNativeSession/Resume/StreamingEvents` 自动收窄为 false——声明的能力必须在当前实际执行方式下成立。
+* **Run 级 Policy 生效**：continuation 传入的 `policy`（如 `autoApprove` → OpenCode `--auto`）现在真正传递给 Harness Adapter。
+
+### 测试（v3）
+
+```bash
+npm test          # 在 v1/v2 基础上：
+                  # + v3 单元/集成：真实协议事件映射、Usage 解析、Pi 持久化会话与 Resume、
+                  #   Native State 丢失时 Resume 真实失败（fake 不再假装成功）、
+                  #   Workspace/跨后端 Resume 兼容、镜像策略、Local 与 Docker 同 Parser
+                  # + v3.real：真实 Harness 集成测试（默认 skip）
+```
+
+真实 Harness 集成测试（Pi/OpenCode × Local/Docker + 跨 Harness Handoff）使用真实 CLI、真实模型调用与真实容器，验证"Run #1 建会话/落盘/销毁容器 → Run #2 新容器挂载同一 Workspace + Native State → Resume 明确延续上一轮上下文"：
+
+```bash
+AGENTFABRIC_REAL_INTEGRATION=1 npm test -w @agentfabric/core
+# 可选：AGENTFABRIC_PI_IMAGE=<镜像>（否则自动从 docker/pi.Dockerfile 构建）
+#       AGENTFABRIC_REAL_DEEPSEEK_KEY / DEEPSEEK_API_KEY（Pi 模型调用）
+#       AGENTFABRIC_OPENCODE_AUTH_JSON（OpenCode 容器认证，缺省复用本机 auth.json）
+```
+
+
 ### API 新增（v2）
 
 | Method | Path | 说明 |
@@ -297,7 +332,7 @@ packages/
 * 成本为内置价格表的估算值，可通过未来定价 API 覆盖。
 * 持久化使用 JSON 文件，适合单机 MVP；生产可替换为数据库。
 * OpenCode / Pi 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` 可覆盖）。
-* 容器化 OpenCode / Pi 需要包含对应 CLI 的镜像（`runtime.image`，默认以镜像 ENTRYPOINT 为 harness；无 entrypoint 的镜像可设 `runtime.config.containerCommand`，如 `["node", "/pi.js"]`）。
+* 容器化 OpenCode 默认使用官方镜像 `ghcr.io/anomalyco/opencode`；容器化 Pi 无官方镜像，必须配置满足 Harness Execution Contract 的镜像（`runtime.image` / `AGENTFABRIC_PI_IMAGE`，参考 `docker/pi.Dockerfile`），否则拒绝启动。镜像默认以 ENTRYPOINT 为 harness；无 entrypoint 的镜像可设 `runtime.config.containerCommand`。
 * Network `allowedHosts/blockedHosts` 与 Filesystem `allowedPaths/deniedPaths` 暂未做细粒度强制（仅支持整体开关与只读挂载）。
 
 ## 测试

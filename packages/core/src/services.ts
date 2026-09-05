@@ -730,6 +730,19 @@ export interface NewRuntimeSessionInput {
  * to resume the *same* harness. Cross-harness continuation goes through
  * Handoff, never through these references.
  */
+
+/**
+ * Workspace compatibility for native resume (v3 §14): a native session
+ * is bound to the working context (working directory / project state)
+ * it was created in, so a session is only resumable in the workspace it
+ * belongs to. Two `undefined` workspaces (no workspace at all, on both
+ * sides) are compatible; anything else requires the same workspace id.
+ */
+export function sameResumeWorkspace(refWorkspace: ID | undefined, runWorkspace: ID | undefined): boolean {
+  if (refWorkspace === undefined && runWorkspace === undefined) return true;
+  return refWorkspace !== undefined && runWorkspace !== undefined && refWorkspace === runWorkspace;
+}
+
 export class RuntimeSessionService {
   constructor(private store: Store) {}
 
@@ -773,10 +786,14 @@ export class RuntimeSessionService {
 
   /**
    * The most recent resumable native session for a task on a given
-   * runtime kind — used to decide Resume vs Handoff.
+   * runtime kind — the *candidate* for Resume vs Handoff. The full
+   * compatibility decision (capability, native state, workspace —
+   * v3 §13–§15) is made by the orchestrator's resume gate.
    */
   latestResumable(taskId: ID, runtimeKind: string): RuntimeSessionRef | undefined {
-    return this.list({ taskId }).find((s) => s.runtimeKind === runtimeKind && s.resumeSupported && s.status === "active");
+    return this.list({ taskId }).find(
+      (s) => s.runtimeKind === runtimeKind && s.resumeSupported && s.status === "active"
+    );
   }
 
   async expire(id: ID): Promise<RuntimeSessionRef | undefined> {

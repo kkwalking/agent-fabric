@@ -1,5 +1,6 @@
 import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
+import { existsSync } from "node:fs";
 import {
   ArtifactService,
   ModelService,
@@ -12,6 +13,7 @@ import {
   TaskService,
   WorkspaceService,
   now,
+  sameResumeWorkspace,
   type NewTaskInput,
 } from "./services.js";
 import { HandoffService, buildAssistedHandoffContent, renderHandoffPrompt } from "./handoff.js";
@@ -58,6 +60,77 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 min safety net
+
+/* ------------------------------------------------------------------ */
+/* Resume compatibility (v3 §13–§15)                                    */
+/* ------------------------------------------------------------------ */
+
+export interface ResumeCompatibility {
+  compatible: boolean;
+  /** Human-readable explanation, used verbatim in continuation results. */
+  reason: string;
+}
+
+/**
+ * Native resume requires *all* of (v3 §13):
+ * 1. same harness,
+ * 2. runtime capability supports native resume under the execution
+ *    backend actually in use (v3 §16/§17),
+ * 3. a valid, active RuntimeSessionRef,
+ * 4. the corresponding Runtime Native State — for a containerized target
+ *    the session's state record must exist and its directory must be on
+ *    disk; a session created on the other backend cannot be attached
+ *    (its state lives where the target run cannot read it),
+ * 5. the same workspace (v3 §14: native sessions are bound to their
+ *    working context).
+ *
+ * The checks are named and ordered so future dimensions (runtime
+ * version, harness version, native-state version, model, runtime
+ * configuration — v3 §15) slot in without changing the contract.
+ */
+function evaluateResumeCompatibility(
+  ref: RuntimeSessionRef,
+  target: Runtime,
+  caps: RuntimeCapability,
+  workspaceId: ID | undefined,
+  nativeStates: NativeStateService
+): ResumeCompatibility {
+  // 1. Same harness.
+  if (ref.runtimeKind !== target.kind) {
+    return { compatible: false, reason: `different harness (${ref.runtimeKind} → ${target.kind})` };
+  }
+  // 2. Capability under the backend actually in use.
+  if (!caps.supportsNativeResume) {
+    return { compatible: false, reason: `${target.name} does not support native resume under the current execution mode` };
+  }
+  // 3. Valid reference.
+  if (ref.status !== "active" || !ref.resumeSupported) {
+    return { compatible: false, reason: `native session reference ${ref.nativeSessionRef} is not resumable` };
+  }
+  // 4. Corresponding runtime native state.
+  if (target.containerized) {
+    const state = ref.nativeStateId ? nativeStates.get(ref.nativeStateId) : undefined;
+    if (!state || !existsSync(state.path)) {
+      return {
+        compatible: false,
+        reason: `no runtime native state behind session ${ref.nativeSessionRef} — it cannot survive a container`,
+      };
+    }
+  } else if (ref.nativeStateId || ref.executionBackend === "docker") {
+    return {
+      compatible: false,
+      reason: `session ${ref.nativeSessionRef} lives in containerized native state; resume it with a containerized runtime`,
+    };
+  }
+  // 5. Same workspace.
+  if (!sameResumeWorkspace(ref.workspaceId, workspaceId)) {
+    return {
+      compatible: false,
+      reason: `workspace changed (${ref.workspaceId ?? "none"} → ${workspaceId ?? "none"}); native sessions stay bound to their workspace`,
+    };
+  }
+  return { compatible: true, reason: `same harness (${target.kind}) + same workspace + native state available` };
+}
 
 /**
  * Everything needed to materialize one Run under an existing Task
@@ -276,12 +349,17 @@ export class RunService {
 
     const previousRuntime = previousRun?.runtimeId ? this.runtimeService().get(previousRun.runtimeId) : undefined;
     const sameHarness = previousRuntime?.kind === target.kind;
+    const workspaceId = input.workspaceId ?? task.workspaceId ?? previousRun?.workspaceId;
+    // The candidate lookup filters by harness; every other dimension
+    // (capability, state, workspace) is decided by the compatibility
+    // gate so the blocking reason is always available for the result.
     const resumable = this.runtimeSessionService().latestResumable(taskId, target.kind);
+    const resumeGate = resumable
+      ? evaluateResumeCompatibility(resumable, target, caps, workspaceId, this.nativeStateService())
+      : undefined;
     const forcedHandoff = input.mode === "handoff";
     const resumePossible =
-      sameHarness && caps.supportsNativeResume && Boolean(resumable) && input.mode !== "handoff";
-
-    const workspaceId = input.workspaceId ?? task.workspaceId ?? previousRun?.workspaceId;
+      sameHarness && Boolean(resumable && resumeGate?.compatible) && input.mode !== "handoff";
 
     if (resumePossible) {
       /* ---------------- Resume: same harness, native session ---------------- */
@@ -335,7 +413,7 @@ export class RunService {
     const reason = forcedHandoff
       ? `Handoff requested explicitly.`
       : sameHarness
-        ? `Handoff: ${target.name} cannot natively resume (${caps.supportsNativeResume ? "no resumable session reference found" : "native resume unsupported"}); a new native session is created and continues from the handoff.`
+        ? `Handoff: ${target.name} cannot natively resume (${resumeGate && !resumeGate.compatible ? resumeGate.reason : resumable ? "native resume not permitted" : "no resumable session reference found"}); a new native session is created and continues from the handoff.`
         : `Handoff: switching harness ${previousRuntime?.name ?? previousRuntime?.kind ?? "(unknown)"} → ${target.name} (${target.kind}); sessions are not migrated across harnesses — the new harness starts its own new native session from the handoff.`;
     return { task, run, continuity: "handoff", handoff, explanation: reason };
   }
@@ -353,9 +431,13 @@ export class RunService {
     const target = targetId ? this.runtimeService().get(targetId) : undefined;
     const adapter = target ? this.registry.get(target.kind) : undefined;
     const caps = effectiveCapabilities(adapter, target);
+    const workspaceId = task.workspaceId ?? previousRun?.workspaceId;
     const resumable = target ? this.runtimeSessionService().latestResumable(taskId, target.kind) : undefined;
+    const resumeGate = resumable && target
+      ? evaluateResumeCompatibility(resumable, target, caps, workspaceId, this.nativeStateService())
+      : undefined;
     const sameHarness = previousRuntime && target && previousRuntime.kind === target.kind;
-    const resumeAvailable = Boolean(sameHarness && caps.supportsNativeResume && resumable);
+    const resumeAvailable = Boolean(sameHarness && resumable && resumeGate?.compatible);
     const suggestedMode: "resume" | "handoff" = resumeAvailable ? "resume" : "handoff";
 
     let handoffPreview: HandoffContent | undefined;
@@ -380,7 +462,7 @@ export class RunService {
       : previousRun
         ? target && previousRuntime?.kind !== target.kind
           ? `Handoff: harness changes ${previousRuntime?.name ?? previousRuntime?.kind ?? "(unknown)"} → ${target?.name}; no session migration, the handoff plus the shared workspace carry the context.`
-          : `Handoff: ${target?.name ?? "target runtime"} cannot natively resume; continuing via a handoff into a new native session.`
+          : `Handoff: ${target?.name ?? "target runtime"} cannot natively resume${resumeGate && !resumeGate.compatible ? ` (${resumeGate.reason})` : ""}; continuing via a handoff into a new native session.`
         : "New task: no previous run yet — the first run starts a fresh session.";
     const noAdapter =
       target != null && !adapter
@@ -1100,6 +1182,7 @@ export class RunService {
       workspace,
       secrets,
       env,
+      policy: opts.policy,
       signal,
       lifecycle: opts.lifecycle,
       continuity: opts.continuity,
@@ -1113,11 +1196,14 @@ export class RunService {
         await emit("log", { line }, { level, source: runtime.kind });
       },
       recordUsage: (u) => {
-        Object.assign(usageAcc, addUsage(usageAcc, u));
-        if (model) {
-          const cost = u.estimatedCost ?? estimateCost(model.name, u.inputTokens, u.outputTokens, u.cachedTokens ?? 0);
-          usageAcc.estimatedCost = (usageAcc.estimatedCost ?? 0) + cost;
-        }
+        // Harness-reported cost is authoritative; only estimate when the
+        // harness did not report one (addUsage merges u into the
+        // accumulator, so estimating here must not add cost twice).
+        const withCost =
+          u.estimatedCost === undefined && model
+            ? { ...u, estimatedCost: estimateCost(model.name, u.inputTokens, u.outputTokens, u.cachedTokens ?? 0) }
+            : u;
+        Object.assign(usageAcc, addUsage(usageAcc, withCost));
         enforcePolicyLimits(opts.policy, usageAcc, opts.abortForPolicy);
       },
       addArtifact: async (draft: ArtifactDraft): Promise<Artifact> => {
