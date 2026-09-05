@@ -6,4 +6,5 @@ export * from "./lifecycle.js";
 export * from "./handoff.js";
 export * from "./runtime.js";
 export * from "./services.js";
+export * from "./policy.js";
 export * from "./orchestrator.js";

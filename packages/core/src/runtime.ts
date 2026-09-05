@@ -8,6 +8,7 @@ import type {
   LogLevel,
   Model,
   Provider,
+  ResourceLimits,
   Run,
   RunContinuity,
   Runtime,
@@ -57,16 +58,45 @@ export interface RuntimeContext {
   runtime: Runtime;
   model?: Model;
   provider?: Provider;
+  /** All enabled models of the run's provider (harness config injection). */
+  providerModels?: Model[];
   workspace?: Workspace;
   secrets: Secret[];
   /** Merged environment: runtime env + task env + profile env + secrets. */
   env: Record<string, string>;
   /**
-   * Effective execution policy for this run (run-level override merged
-   * over the task's policy). Adapters must read this, not `task.policy`
-   * — continuations override the policy at the run level.
+   * Effective execution policy for this run — the single resolved result
+   * of runtime defaults < agent profile < task < run continuation override
+   * (v4 §13/§14). Adapters and backends must read this, not `task.policy`
+   * or the raw runtime fields.
    */
   policy?: ExecutionPolicy;
+  /**
+   * Resolved resource limits (CPU/memory/pids) for this run (v4 §19) —
+   * same precedence as `policy`. Backends consume this instead of
+   * re-reading task/profile/runtime limits.
+   */
+  resourceLimits?: ResourceLimits;
+  /**
+   * System instructions snapshotted from the agent profile (v4 §10).
+   * Adapters must deliver these to the harness (native system-prompt flag
+   * or equivalent) — never silently drop them.
+   */
+  systemInstructions?: string;
+  /**
+   * AgentFabric data directory — the sanctioned place for adapters to
+   * write generated harness configuration (v4 §1: provider config is
+   * injected by AgentFabric, not configured by hand inside the harness).
+   */
+  dataDir: string;
+  /**
+   * The provider's API key plaintext, resolved from the provider's secret
+   * (v4 §2). Present only when the run's model has a keyed provider. It
+   * is also exported as the `AGENTFABRIC_PROVIDER_API_KEY` env var; use
+   * the env var inside generated config so the key never appears in
+   * argv. Never log or emit this value.
+   */
+  providerApiKey?: string;
   /** Aborted when the run is cancelled or times out. */
   signal: AbortSignal;
   /** Resolved container lifecycle policy for this run (spec v1 §1). */
@@ -118,6 +148,11 @@ export interface BackendSpawnOptions {
    * the remaining args (harness images use the harness as entrypoint).
    */
   containerCommand?: string[];
+  /**
+   * Additional read-only bind mounts (e.g. AgentFabric-generated harness
+   * config, v4 §1) for containerized backends.
+   */
+  extraMounts?: Array<{ hostPath: string; containerPath: string }>;
 }
 
 /** How a backend process finished. */
@@ -182,6 +217,23 @@ export interface RuntimeResult {
 }
 
 /**
+ * What a harness adapter can actually honor from an AgentFabric Provider
+ * configuration (v4 §4): capabilities the harness cannot support are
+ * declared here so the platform can warn instead of silently dropping
+ * user configuration.
+ */
+export interface ProviderCompatibility {
+  /** Harness accepts providers defined by AgentFabric (base URL + key). */
+  customProvider: boolean;
+  /** The configured base URL reaches the harness's real endpoint. */
+  baseUrl: boolean;
+  /** Custom HTTP headers reach the model requests. */
+  customHeaders: boolean;
+  /** Model parameter keys the harness genuinely applies. */
+  supportedModelParameters: string[];
+}
+
+/**
  * The one interface every AgentFabric Runtime must implement.
  *
  * New community runtimes plug in by implementing this adapter and
@@ -206,6 +258,11 @@ export interface AgentRuntimeAdapter {
    * Overridable per runtime via `runtime.config.nativeStateMountPath`.
    */
   readonly nativeStateMountPath?: string;
+  /**
+   * Which parts of an AgentFabric Provider configuration this harness can
+   * actually honor (v4 §4). Absent means "no provider support at all".
+   */
+  readonly providerCompatibility?: ProviderCompatibility;
   /**
    * Container image the harness executes in when the runtime record has
    * no `image` configured (v3 §10/§11). Only harnesses with an official,

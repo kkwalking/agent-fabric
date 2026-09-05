@@ -3,7 +3,7 @@ import type { Readable } from "node:stream";
 import { createInterface } from "node:readline";
 import { readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type {
   BackendExit,
   BackendProcess,
@@ -15,6 +15,7 @@ import {
   commonRunArgs,
   dockerBin,
   ensureKeepAliveContainer,
+  killContainerProcesses,
   mergedResourceLimits,
 } from "./docker.js";
 
@@ -97,6 +98,9 @@ export const localExecutionBackend: ExecutionBackend = {
     const exited = childExited(child);
     const onAbort = () => child.kill("SIGTERM");
     ctx.signal.addEventListener("abort", onAbort, { once: true });
+    // Race guard: the run may have been aborted while this spawn was being
+    // prepared — the listener above would never fire.
+    if (ctx.signal.aborted) onAbort();
     exited.then(() => ctx.signal.removeEventListener("abort", onAbort));
     return {
       stdout: streamLines(child.stdout),
@@ -143,8 +147,11 @@ export const dockerExecutionBackend: ExecutionBackend = {
       env: opts.env,
       workspaceMount: dockerWorkspaceMount(ctx, opts),
       nativeStateMount: dockerNativeStateMount(ctx),
+      extraMounts: opts.extraMounts,
       resourceLimits: mergedResourceLimits(ctx),
-      networkPolicy: ctx.task.policy?.network ?? ctx.runtime.networkPolicy,
+      // Network mode comes from the resolved execution policy (v4 §18);
+      // the runtime field remains a fallback for direct invocations.
+      networkPolicy: ctx.policy?.network ?? ctx.runtime.networkPolicy,
     };
     const workdir = mounts.workspaceMount?.containerPath ?? "/";
 
@@ -159,14 +166,33 @@ export const dockerExecutionBackend: ExecutionBackend = {
       args.push(kept.containerName, ...(opts.containerCommand ?? command.slice(1)));
       const child = spawn(dockerBin(), args, { stdio: ["ignore", "pipe", "pipe"] });
       const exited = childExited(child).then((exit) => ({ ...exit, containerId: kept.containerId }));
-      const onAbort = () => child.kill("SIGKILL");
+      // Killing the local docker CLI is not enough: the harness process
+      // keeps running inside the container (v4 §23) — pkill it there.
+      // Harness images expose the harness binary as the entrypoint, so
+      // the in-container process matches the local binary's basename
+      // (unless an explicit containerCommand leads with something else).
+      const inContainerBin = opts.containerCommand?.[0] ?? basename(command[0]);
+      const stopHarnessProcess = () => {
+        if (!inContainerBin) return Promise.resolve();
+        return killContainerProcesses(kept.containerName!, inContainerBin).catch(() => {
+          /* best effort — the orchestrator destroys the container (v4 §24) */
+        });
+      };
+      const onAbort = () => {
+        void stopHarnessProcess().finally(() => child.kill("SIGKILL"));
+      };
       ctx.signal.addEventListener("abort", onAbort, { once: true });
+      // Race guard: abort may have landed while the keep-alive container
+      // was being prepared, before this exec child existed.
+      if (ctx.signal.aborted) onAbort();
       exited.then(() => ctx.signal.removeEventListener("abort", onAbort));
       return {
         stdout: streamLines(child.stdout),
         stderr: streamLines(child.stderr),
         exited,
-        kill: () => child.kill("SIGKILL"),
+        kill: () => {
+          void stopHarnessProcess().finally(() => child.kill("SIGKILL"));
+        },
       };
     }
 
@@ -205,6 +231,8 @@ export const dockerExecutionBackend: ExecutionBackend = {
       killer.on("close", () => child.kill("SIGKILL"));
     };
     ctx.signal.addEventListener("abort", onAbort, { once: true });
+    // Race guard: see the local backend.
+    if (ctx.signal.aborted) onAbort();
     exited.then(() => ctx.signal.removeEventListener("abort", onAbort));
 
     return {

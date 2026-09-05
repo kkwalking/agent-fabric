@@ -33,6 +33,11 @@ export interface HarnessExecutionOptions {
   image?: string;
   /** Container-side path the workspace is mounted at. */
   workspaceContainerPath?: string;
+  /**
+   * Additional read-only bind mounts for containerized runs — e.g. the
+   * AgentFabric-generated harness config (v4 §1).
+   */
+  extraMounts?: Array<{ hostPath: string; containerPath: string }>;
   /** Maps one raw stdout line to a standard event (null = not JSON). */
   mapLine: (raw: string, runId: string, seq: () => number) => RunEvent | null;
   /** Extracts the harness's opaque native session reference from a line. */
@@ -70,6 +75,7 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
       cwd,
       env: ctx.env,
       workspaceContainerPath: opts.workspaceContainerPath,
+      extraMounts: opts.extraMounts,
       // Explicit in-container command prefix (e.g. ["node", "/pi.js"] for
       // images without a harness entrypoint). Default: the harness image's
       // entrypoint is the harness, so only the args run inside.

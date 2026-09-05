@@ -31,11 +31,35 @@
  */
 
 export const FAKE_PI_SCRIPT = `#!/usr/bin/env node
-import { mkdirSync, readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const args = process.argv.slice(2);
+
+// E2E observability (v4 §26–§29): dump what the harness process actually
+// received — env (whitelisted), argv and the generated models.json.
+if (process.env.FAKE_HARNESS_DUMP) {
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? "";
+  let modelsJson;
+  try { modelsJson = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf8")); } catch {}
+  appendFileSync(process.env.FAKE_HARNESS_DUMP, JSON.stringify({
+    harness: "pi",
+    argv: args,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) =>
+      !["PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR", "PWD", "OLDPWD", "SHLVL", "LANG", "TERM", "_"].includes(k) && !k.startsWith("npm_") && !k.startsWith("NPM_"))),
+    modelsJson,
+    cwd: process.cwd(),
+  }) + "\\n");
+}
+
+// Optional slow mode: hold the run open so cancel/timeout tests can abort
+// a genuinely-running harness process (never longer than 60s).
+const sleepMs = Number(process.env.FAKE_PI_SLEEP_MS ?? 0);
+if (sleepMs > 0) {
+  await new Promise((r) => setTimeout(r, Math.min(sleepMs, 60_000)));
+}
+
 const prompt = args.filter((a) => !a.startsWith("-") && !["run", "--print"].includes(a)).pop() ?? "";
 const sessionIdx = args.indexOf("--session");
 const resumeId = sessionIdx !== -1 ? args[sessionIdx + 1] : undefined;
@@ -106,11 +130,34 @@ emit({ type: "agent_end", messages: [toolMsg, textMsg], willRetry: false });
 `;
 
 export const FAKE_OPENCODE_SCRIPT = `#!/usr/bin/env node
-import { mkdirSync, readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
+
+// E2E observability (v4 §26–§29): dump what the harness process actually
+// received — env (whitelisted), argv and the generated OPENCODE_CONFIG.
+if (process.env.FAKE_HARNESS_DUMP) {
+  let config;
+  try { config = JSON.parse(readFileSync(process.env.OPENCODE_CONFIG, "utf8")); } catch {}
+  appendFileSync(process.env.FAKE_HARNESS_DUMP, JSON.stringify({
+    harness: "opencode",
+    argv: args,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) =>
+      !["PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR", "PWD", "OLDPWD", "SHLVL", "LANG", "TERM", "_"].includes(k) && !k.startsWith("npm_") && !k.startsWith("NPM_"))),
+    config,
+    cwd: process.cwd(),
+  }) + "\\n");
+}
+
 const prompt = args.filter((a) => !a.startsWith("-")).pop() ?? "";
+
+// Optional slow mode: hold the run open so cancel/timeout tests can abort
+// a genuinely-running harness process (never longer than 60s).
+const ocSleepMs = Number(process.env.FAKE_OC_SLEEP_MS ?? 0);
+if (ocSleepMs > 0) {
+  await new Promise((r) => setTimeout(r, Math.min(ocSleepMs, 60_000)));
+}
 const sessionIdx = args.indexOf("--session");
 const resumeId = sessionIdx !== -1 ? args[sessionIdx + 1] : undefined;
 
@@ -155,7 +202,7 @@ emit("step_finish", { part: { type: "step-finish", reason: "stop", cost: 0.0031,
 
 export const FAKE_DOCKER_SCRIPT = `#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -183,6 +230,10 @@ function mountsToEnv(volumes) {
       env.XDG_DATA_HOME = alt;
     } else if (container === "/workspace") {
       workspaceHost = host;
+    } else if (container === "/root/.agentfabric/opencode.json") {
+      // The generated harness config (v4 §1) is mounted read-only; point
+      // the harness env back at the host file.
+      env.OPENCODE_CONFIG = host;
     }
   }
   return { env, workspaceHost };
@@ -194,14 +245,20 @@ function passthrough(command, extraEnv, cidfile, cwd) {
   const child = spawn(command[0], command.slice(1), {
     env: { ...process.env, ...extraEnv },
     cwd,
-    stdio: ["ignore", "inherit", "inherit"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  // Pipe (not inherit): when this fake docker CLI is killed, its stdout
+  // pipe write-end closes and the caller sees EOF — like the real docker
+  // CLI — instead of an orphaned grandchild holding the pipe open.
+  child.stdout.on("data", (c) => process.stdout.write(c));
+  child.stderr.on("data", (c) => process.stderr.write(c));
   child.on("error", (err) => { console.error(String(err)); process.exit(127); });
   child.on("close", (code) => process.exit(code ?? 0));
 }
 
 const sub = args[0];
 if (sub === "run" || sub === "exec") {
+  const detached = args.includes("-d");
   const extraEnv = {};
   const volumes = [];
   let cidfile;
@@ -231,6 +288,23 @@ if (sub === "run" || sub === "exec") {
   }
   // run: <image> <command…>   exec: <container> <command…>
   const command = args.slice((firstPositional ?? args.length - 1) + 1);
+
+  // Emulated in-container process kill (v4 §23): record that the platform
+  // stopped the harness process inside the container, then succeed.
+  if (command[0] === "pkill") {
+    process.exit(0);
+  }
+
+  // Detached containers (keep-alive creation): a real daemon would start
+  // "sh -c sleep infinity" in the background; just materialize a
+  // container id and return.
+  if (detached) {
+    const cid = "fakectr_" + Math.random().toString(36).slice(2, 10);
+    if (cidfile) { try { writeFileSync(cidfile, cid); } catch {} }
+    console.log(cid);
+    process.exit(0);
+  }
+
   const { env: mountEnv, workspaceHost } = mountsToEnv(volumes);
   const cwd = workspaceHost && (!workdir || workdir === "/workspace") ? workspaceHost : undefined;
   passthrough(command, { ...extraEnv, ...mountEnv }, cidfile, cwd);

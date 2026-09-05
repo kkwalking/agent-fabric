@@ -78,6 +78,16 @@ export const mockAdapter: AgentRuntimeAdapter = {
 
     await ctx.emit("agent.message", { role: "user", content: instruction }, { level: "info" });
 
+    // Profile system instructions (v4 §10) are part of the runtime input,
+    // not just stored metadata — surface them so the wiring is observable.
+    if (ctx.systemInstructions?.trim()) {
+      await ctx.emit("agent.message", {
+        role: "system",
+        content: ctx.systemInstructions,
+        source: "agent-profile",
+      }, { level: "info" });
+    }
+
     for (let i = 0; i < modelCalls; i++) {
       await sleep(delayMs, ctx.signal);
       const inTokens = 120 + i * 37;

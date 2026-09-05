@@ -87,9 +87,12 @@ export async function recoverKeepAliveContainers(manager: ContainerLeaseManager,
  * Tracks containers retained after a Run under the `keep-alive` lifecycle
  * and destroys them once their idle timeout expires (spec v1 §1).
  *
- * A subsequent Run on the same (runtime, workspace) can `acquire()` the
- * kept container before the timeout — the lease is then consumed and the
- * container is reused instead of being recreated.
+ * A subsequent Run can `acquire()` the kept container before the timeout
+ * — but only within the *same logical execution context*: runtime +
+ * workspace + task (v4 §21/§22). Keep-alive preserves the current task's
+ * running environment for a short follow-up; it is not a warm pool, so a
+ * retained container is never handed to an unrelated task even on the
+ * same runtime and workspace.
  *
  * Leases can be persisted by the caller and re-armed with `recover()`
  * after a restart so idle containers do not leak.
@@ -119,8 +122,13 @@ export class ContainerLeaseManager {
     } = {}
   ) {}
 
-  private key(runtimeId: ID, workspaceId?: ID): string {
-    return `${runtimeId}::${workspaceId ?? "-"}`;
+  /**
+   * Lease identity = the logical execution context (v4 §21): runtime +
+   * workspace + task. Task A's harness state must never be inherited by
+   * task B, so the task id participates in the key.
+   */
+  private key(runtimeId: ID, workspaceId?: ID, taskId?: ID): string {
+    return `${runtimeId}::${workspaceId ?? "-"}::${taskId ?? "-"}`;
   }
 
   /**
@@ -129,7 +137,7 @@ export class ContainerLeaseManager {
    * per key is meaningful.
    */
   async retain(lease: Omit<ContainerLease, "retainedAt" | "expiresAt"> & { retainedAt?: string }): Promise<ContainerLease> {
-    const key = this.key(lease.runtimeId, lease.workspaceId);
+    const key = this.key(lease.runtimeId, lease.workspaceId, lease.taskId);
     const previous = this.leases.get(key);
     if (previous && previous.containerId !== lease.containerId) {
       await this.evict(key);
@@ -143,12 +151,12 @@ export class ContainerLeaseManager {
   }
 
   /**
-   * Acquire a kept container for a new Run on the same runtime+workspace,
-   * before its idle timeout. Consumes the lease (the container becomes the
-   * new Run's execution environment).
+   * Acquire a kept container for a new Run in the same execution context
+   * (runtime + workspace + task), before its idle timeout. Consumes the
+   * lease (the container becomes the new Run's execution environment).
    */
-  acquire(runtimeId: ID, workspaceId?: ID): ContainerLease | undefined {
-    const key = this.key(runtimeId, workspaceId);
+  acquire(runtimeId: ID, workspaceId?: ID, taskId?: ID): ContainerLease | undefined {
+    const key = this.key(runtimeId, workspaceId, taskId);
     const lease = this.leases.get(key);
     if (!lease) return undefined;
     this.clearTimer(key);
@@ -156,8 +164,8 @@ export class ContainerLeaseManager {
     return lease;
   }
 
-  peek(runtimeId: ID, workspaceId?: ID): ContainerLease | undefined {
-    return this.leases.get(this.key(runtimeId, workspaceId));
+  peek(runtimeId: ID, workspaceId?: ID, taskId?: ID): ContainerLease | undefined {
+    return this.leases.get(this.key(runtimeId, workspaceId, taskId));
   }
 
   list(): ContainerLease[] {
@@ -209,7 +217,7 @@ export class ContainerLeaseManager {
    */
   async recover(leases: ContainerLease[]): Promise<void> {
     for (const lease of leases) {
-      const key = this.key(lease.runtimeId, lease.workspaceId);
+      const key = this.key(lease.runtimeId, lease.workspaceId, lease.taskId);
       if (Date.parse(lease.expiresAt) <= Date.now()) {
         this.leases.set(key, lease);
         await this.evict(key);

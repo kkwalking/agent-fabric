@@ -1,5 +1,8 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type {
   AgentRuntimeAdapter,
+  ProviderCompatibility,
   RuntimeCapability,
   RuntimeContext,
   RuntimeResult,
@@ -7,6 +10,13 @@ import type {
   Usage,
 } from "@agentfabric/core";
 import { runHarnessCommand } from "./harness.js";
+import {
+  buildOpenCodeConfig,
+  OPENCODE_KNOWN_PROVIDER_IDS,
+  providerSlug,
+  splitModelParameters,
+  writeOpenCodeConfig,
+} from "./provider-config.js";
 
 /**
  * OpenCode harness adapter — protocol shapes verified against the
@@ -264,17 +274,191 @@ export function parseOpenCodeUsage(raw: string): Usage | undefined {
   };
 }
 
-function buildArgs(ctx: RuntimeContext): string[] {
+/** Model parameter keys opencode genuinely applies (v4 §7/§8). */
+const OPENCODE_SUPPORTED_MODEL_PARAMETERS = ["maxTokens", "contextWindow", "reasoningEffort"] as const;
+
+/** opencode built-in tools an agent tools map can toggle. */
+const OPENCODE_TOOLS = [
+  "bash",
+  "edit",
+  "write",
+  "read",
+  "grep",
+  "glob",
+  "list",
+  "patch",
+  "todowrite",
+  "todoread",
+  "webfetch",
+  "task",
+] as const;
+
+/** Where the generated config is mounted inside a container. */
+const OPENCODE_CONFIG_CONTAINER_PATH = "/root/.agentfabric/opencode.json";
+
+/**
+ * Provider compatibility (v4 §4): the generated opencode.json carries the
+ * full AgentFabric provider definition — npm adapter, base URL, env-
+ * templated API key and custom headers all reach the real requests.
+ */
+export const opencodeProviderCompatibility: ProviderCompatibility = {
+  customProvider: true,
+  baseUrl: true,
+  customHeaders: true,
+  supportedModelParameters: [...OPENCODE_SUPPORTED_MODEL_PARAMETERS],
+};
+
+/**
+ * Builds the opencode CLI args for a run. Policy comes only from the
+ * resolved run policy (v4 §13); the model selector uses the AgentFabric
+ * provider slug registered in the generated config. When AgentFabric
+ * injected an `agentfabric` agent (system instructions / tool policy),
+ * that agent wins over a user-configured `runtime.config.agent` — the
+ * profile's configuration must reach the harness (v4 §10).
+ */
+function buildArgs(ctx: RuntimeContext, useAgentfabricAgent: boolean): string[] {
+  const policy = ctx.policy;
   const args = ["run", "--format", "json"];
-  const model = ctx.model ? `${ctx.provider?.name ?? "provider"}/${ctx.model.name}` : undefined;
-  if (model) args.push("-m", model);
-  if (ctx.runtime.config?.agent) args.push("--agent", String(ctx.runtime.config.agent));
+  if (ctx.provider && ctx.model) {
+    args.push("-m", `${providerSlug(ctx.provider)}/${ctx.model.name}`);
+  } else if (ctx.model) {
+    args.push("-m", ctx.model.name);
+  }
+  if (useAgentfabricAgent) {
+    args.push("--agent", "agentfabric");
+  } else if (ctx.runtime.config?.agent) {
+    args.push("--agent", String(ctx.runtime.config.agent));
+  }
   if (ctx.runtime.config?.variant) args.push("--variant", String(ctx.runtime.config.variant));
-  if ((ctx.policy ?? ctx.task.policy)?.autoApprove) args.push("--auto");
+  const reasoningEffort = ctx.model?.parameters?.reasoningEffort;
+  if (typeof reasoningEffort === "string") args.push("--variant", reasoningEffort);
+  if (policy?.autoApprove) args.push("--auto");
   // Native resume: pass the harness's own session reference (spec v1 §3).
   if (ctx.runtimeSession?.nativeSessionRef) args.push("--session", ctx.runtimeSession.nativeSessionRef);
   if (ctx.runtime.config?.logLevel) args.push("--log-level", String(ctx.runtime.config.logLevel));
   return args;
+}
+
+/**
+ * Emits explicit warnings for model parameters opencode cannot honor
+ * (v4 §8) — configuration is never silently dropped.
+ */
+function warnUnsupportedParameters(ctx: RuntimeContext): void {
+  if (!ctx.model?.parameters) return;
+  const { unsupported } = splitModelParameters(ctx.model.parameters, OPENCODE_SUPPORTED_MODEL_PARAMETERS);
+  const keys = Object.keys(unsupported);
+  if (keys.length === 0) return;
+  void ctx.emit(
+    "log",
+    {
+      line: `opencode ignores unsupported model parameters: ${keys.join(", ")} (supported: ${OPENCODE_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
+      kind: "config-warning",
+      scope: "model-parameters",
+      unsupported: keys,
+      supported: [...OPENCODE_SUPPORTED_MODEL_PARAMETERS],
+    },
+    { level: "warn", source: "opencode" }
+  );
+}
+
+/**
+ * Generates the run's `opencode.json` (v4 §1/§3/§4/§10/§15/§16) and
+ * wires `OPENCODE_CONFIG` to it:
+ *
+ * - provider entry from the AgentFabric provider (npm package per type,
+ *   baseURL, `{env:…}` API key, custom headers);
+ * - `permission` from the resolved policy (shell deny → bash deny);
+ * - an `agentfabric` agent carrying the profile's system instructions
+ *   and the tool allowlist whenever either is configured.
+ *
+ * Local runs point at the host file directly; containerized runs mount
+ * it read-only and point at the container path.
+ */
+async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
+  if (!ctx.provider) return false;
+  const policy = ctx.policy;
+  const permission: Record<string, unknown> = {};
+  if (policy?.shell === "deny") permission.bash = "deny";
+
+  const toolAllow = policy?.toolPermissions;
+  const unknownTools = (toolAllow ?? []).filter((t) => !(OPENCODE_TOOLS as readonly string[]).includes(t));
+  const needAgent = Boolean(ctx.systemInstructions?.trim()) || Boolean(toolAllow?.length) || policy?.shell === "deny";
+  const agent = needAgent
+    ? {
+        ...(ctx.systemInstructions?.trim() ? { prompt: ctx.systemInstructions } : {}),
+        ...(ctx.model ? { model: `${providerSlug(ctx.provider)}/${ctx.model.name}` } : {}),
+        ...(toolAllow?.length
+          ? {
+              tools: Object.fromEntries(
+                OPENCODE_TOOLS.map((tool) => [
+                  tool,
+                  (policy?.shell === "deny" && tool === "bash") ? false : toolAllow.includes(tool),
+                ])
+              ),
+            }
+          : policy?.shell === "deny"
+            ? { tools: { bash: false } }
+            : {}),
+      }
+    : undefined;
+
+  if (unknownTools.length > 0) {
+    await ctx.emit(
+      "log",
+      {
+        line: `opencode does not know these tools (ignored): ${unknownTools.join(", ")} (known: ${OPENCODE_TOOLS.join(", ")})`,
+        kind: "config-warning",
+        scope: "tools",
+        unsupported: unknownTools,
+      },
+      { level: "warn", source: "opencode" }
+    );
+  }
+
+  const hostDir = join(ctx.dataDir, "harness-state", ctx.runtime.id);
+  mkdirSync(hostDir, { recursive: true });
+  const hostPath = join(hostDir, "opencode.json");
+  // Built-in passthrough (v4 §3): a provider with neither a base URL nor
+  // an AgentFabric key whose slug opencode knows natively is served by
+  // the harness's own registry + auth instead of an overriding entry.
+  const slug = providerSlug(ctx.provider);
+  const builtinPassthrough =
+    !ctx.provider.baseUrl &&
+    !ctx.provider.apiKeySecretId &&
+    OPENCODE_KNOWN_PROVIDER_IDS.has(slug);
+  writeOpenCodeConfig(
+    hostPath,
+    buildOpenCodeConfig({
+      provider: ctx.provider,
+      models: ctx.providerModels ?? (ctx.model ? [ctx.model] : []),
+      permission: Object.keys(permission).length > 0 ? permission : undefined,
+      agent,
+      builtinPassthrough,
+    })
+  );
+
+  if (ctx.runtime.containerized) {
+    ctx.env.OPENCODE_CONFIG = OPENCODE_CONFIG_CONTAINER_PATH;
+  } else {
+    ctx.env.OPENCODE_CONFIG = hostPath;
+  }
+  await ctx.emit(
+    "log",
+    {
+      line: `opencode provider config injected: ${slug}${builtinPassthrough ? " (built-in passthrough — harness-native auth applies)" : ""} (OPENCODE_CONFIG=${ctx.env.OPENCODE_CONFIG})`,
+      kind: "config-injected",
+      scope: "provider",
+      provider: ctx.provider.name,
+      slug,
+      baseUrl: ctx.provider.baseUrl,
+      hasCustomHeaders: Boolean(ctx.provider.headers && Object.keys(ctx.provider.headers).length > 0),
+      builtinPassthrough,
+      shellDenied: policy?.shell === "deny",
+      agentInjected: Boolean(agent),
+    },
+    { level: "info", source: "opencode" }
+  );
+  return Boolean(agent);
 }
 
 /**
@@ -300,18 +484,27 @@ export const opencodeAdapter: AgentRuntimeAdapter = {
   containerizedCapabilities: opencodeContainerizedCapabilities,
   nativeStateMountPath: "/root/.local/share/opencode",
   defaultImage: OPENCODE_DEFAULT_IMAGE,
+  providerCompatibility: opencodeProviderCompatibility,
 
   async run(ctx: RuntimeContext): Promise<RuntimeResult> {
+    // Provider configuration first: OPENCODE_CONFIG must exist before
+    // opencode resolves -m <provider>/<model> (v4 §1).
+    const useAgentfabricAgent = await prepareProviderConfig(ctx);
+    warnUnsupportedParameters(ctx);
     // This run's instruction: the rendered handoff for continuity runs,
     // otherwise the task's original prompt (spec v1 §20 Inject Handoff).
     const prompt = ctx.run.inputInstruction ?? ctx.task.prompt;
+    const hostConfig = join(ctx.dataDir, "harness-state", ctx.runtime.id, "opencode.json");
     return runHarnessCommand(ctx, {
       bin: opencodeBin(),
-      args: buildArgs(ctx),
+      args: buildArgs(ctx, useAgentfabricAgent),
       prompt,
       source: "opencode",
       image: ctx.runtime.image ?? opencodeImage(),
       workspaceContainerPath: "/workspace",
+      extraMounts: ctx.runtime.containerized
+        ? [{ hostPath: hostConfig, containerPath: OPENCODE_CONFIG_CONTAINER_PATH }]
+        : undefined,
       mapLine: mapOpenCodeEvent,
       extractSessionRef: extractOpenCodeSessionRef,
       parseUsage: parseOpenCodeUsage,

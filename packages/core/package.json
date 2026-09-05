@@ -11,6 +11,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 src/core.test.ts src/v1.test.ts src/v2.test.ts src/v3.test.ts src/v3.real.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 src/core.test.ts src/v1.test.ts src/v2.test.ts src/v3.test.ts src/v4.test.ts src/v4.real.test.ts"
   }
 }

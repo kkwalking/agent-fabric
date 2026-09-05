@@ -20,6 +20,8 @@ export interface DockerRunOptions {
   workspaceMount?: { hostPath: string; containerPath: string };
   /** Opaque harness-native state mount (v2 §13–§15). */
   nativeStateMount?: { hostPath: string; containerPath: string };
+  /** Extra read-only mounts, e.g. generated harness config (v4 §1). */
+  extraMounts?: Array<{ hostPath: string; containerPath: string }>;
   resourceLimits?: ResourceLimits;
   networkPolicy?: NetworkPolicy;
   entrypoint?: string[];
@@ -61,6 +63,17 @@ export function execDocker(args: string[], timeoutMs = 60_000): Promise<{ code: 
 const KEEP_ALIVE_COMMAND = ["-c", "sleep infinity"];
 
 /**
+ * Best-effort termination of harness processes inside a running
+ * container (v4 §23): killing the local `docker exec` client alone
+ * leaves the remote process running — explicitly pkill it first. The
+ * caller's container destroy (`docker rm -f`) remains the hard
+ * guarantee; this just stops the process promptly.
+ */
+export async function killContainerProcesses(container: string, pattern: string): Promise<void> {
+  await execDocker(["exec", container, "pkill", "-9", "-f", pattern], 20_000);
+}
+
+/**
  * Container operations backed by the Docker CLI: destroys containers and
  * lists keep-alive containers so their idle timers survive restarts.
  */
@@ -94,12 +107,15 @@ export function createDockerContainerOps(): ContainerOps {
 
 export function commonRunArgs(
   ctx: RuntimeContext,
-  opts: Pick<DockerRunOptions, "workspaceMount" | "nativeStateMount" | "env" | "resourceLimits" | "networkPolicy">,
+  opts: Pick<DockerRunOptions, "workspaceMount" | "nativeStateMount" | "extraMounts" | "env" | "resourceLimits" | "networkPolicy">,
   extraLabels: Record<string, string> = {}
 ): string[] {
   const args: string[] = [];
   if (opts.workspaceMount) {
-    const mode = ctx.runtime.filesystemPolicy?.readOnly ? "ro" : "rw";
+    // Read-only vs read-write comes from the resolved execution policy
+    // (v4 §17) — never from a runtime-specific bypass.
+    const readOnly = ctx.policy?.filesystem?.readOnly ?? ctx.runtime.filesystemPolicy?.readOnly;
+    const mode = readOnly ? "ro" : "rw";
     args.push("-v", `${opts.workspaceMount.hostPath}:${opts.workspaceMount.containerPath}:${mode}`);
   }
   // The harness's private state is always mounted read-write: the harness
@@ -107,14 +123,21 @@ export function commonRunArgs(
   if (opts.nativeStateMount) {
     args.push("-v", `${opts.nativeStateMount.hostPath}:${opts.nativeStateMount.containerPath}:rw`);
   }
+  // AgentFabric-generated harness config is mounted read-only (v4 §1).
+  for (const mount of opts.extraMounts ?? []) {
+    args.push("-v", `${mount.hostPath}:${mount.containerPath}:ro`);
+  }
   for (const [k, v] of Object.entries(opts.env ?? {})) {
     args.push("-e", `${k}=${v}`);
   }
-  const limits = opts.resourceLimits ?? ctx.runtime.resourceLimits;
+  // Resource limits and network mode come from the resolved run
+  // configuration (v4 §18/§19) — falls back to explicit options/runtime
+  // fields for direct adapter invocations outside RunService.
+  const limits = opts.resourceLimits ?? ctx.resourceLimits ?? ctx.runtime.resourceLimits;
   if (limits?.cpu) args.push("--cpus", limits.cpu);
   if (limits?.memory) args.push("--memory", limits.memory);
   if (limits?.pids) args.push("--pids-limit", String(limits.pids));
-  const net = opts.networkPolicy ?? ctx.runtime.networkPolicy;
+  const net = opts.networkPolicy ?? ctx.policy?.network ?? ctx.runtime.networkPolicy;
   if (net && net.enabled === false) args.push("--network", "none");
   args.push("--label", `agentfabric.run=${ctx.run.id}`);
   args.push("--label", `agentfabric.task=${ctx.task.id}`);
@@ -241,20 +264,23 @@ export async function runDockerWithLifecycle(
  * Returns the keep-alive container for this run: the reusable one from
  * `ctx.reusableContainer` when the orchestrator leased one, otherwise a
  * freshly created long-lived `sleep infinity` container labelled for
- * restart recovery.
+ * restart recovery. The container is scoped to the run's logical
+ * execution context (runtime + workspace + task, v4 §21) — its name and
+ * labels carry the task id so one task's state is never inherited by
+ * another.
  */
 export async function ensureKeepAliveContainer(
   ctx: RuntimeContext,
-  opts: Pick<DockerRunOptions, "image" | "env" | "workspaceMount" | "nativeStateMount" | "resourceLimits" | "networkPolicy" | "name">
+  opts: Pick<DockerRunOptions, "image" | "env" | "workspaceMount" | "nativeStateMount" | "extraMounts" | "resourceLimits" | "networkPolicy" | "name">
 ): Promise<{ containerId?: string; containerName?: string; error?: string }> {
-  const reuseName = ctx.reusableContainer?.name ?? `af-keep-${ctx.runtime.id}`;
+  const defaultName = `af-keep-${ctx.runtime.id}-${ctx.task.id}`;
+  const reuseName = ctx.reusableContainer?.name ?? defaultName;
   let containerName = reuseName;
   let containerId = ctx.reusableContainer?.containerId;
 
   if (!containerId) {
     // Create a long-lived keep-alive container, labelled for recovery.
-    containerName = opts.name ?? `af-keep-${ctx.runtime.id}`;
-    const wsLabel = ctx.workspace?.id ?? "";
+    containerName = opts.name ?? defaultName;
     const args = [
       "run", "-d",
       "--name", containerName,
@@ -262,7 +288,8 @@ export async function ensureKeepAliveContainer(
       ...commonRunArgs(ctx, opts, {
         "agentfabric.keepalive": "true",
         "agentfabric.runtime": ctx.runtime.id,
-        "agentfabric.workspace": wsLabel,
+        "agentfabric.workspace": ctx.workspace?.id ?? "",
+        "agentfabric.task": ctx.task.id,
       }),
       opts.image!,
       ...KEEP_ALIVE_COMMAND,
@@ -298,12 +325,29 @@ export async function execDockerInContainer(
     await execDocker(["start", containerId], 60_000);
   }
 
+  // Killing only the local `docker exec` client leaves the harness
+  // process running inside the container (v4 §23). On abort, pkill the
+  // in-container process (its binary leads the command) first, then kill
+  // the client. The orchestrator destroys the container afterwards when
+  // the run was aborted (v4 §24).
+  const inContainerBin = command[0];
+  const stopContainerProcess = () => {
+    if (!inContainerBin) return Promise.resolve();
+    return killContainerProcesses(containerName, inContainerBin).catch(() => {
+      /* best effort — the container destroy is the hard guarantee */
+    });
+  };
+
   return new Promise((resolve) => {
     const child = spawn(dockerBin(), ["exec", containerName, ...command], { stdio: ["ignore", "pipe", "pipe"] });
     let stdoutBuf = "";
     let stderrBuf = "";
-    const onAbort = () => child.kill("SIGKILL");
+    const onAbort = () => {
+      void stopContainerProcess().finally(() => child.kill("SIGKILL"));
+    };
     ctx.signal.addEventListener("abort", onAbort, { once: true });
+    // Race guard: the abort may predate this child (v4 §23).
+    if (ctx.signal.aborted) onAbort();
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBuf += chunk.toString();
@@ -331,13 +375,15 @@ export async function execDockerInContainer(
 }
 
 /**
- * Merges resource limits from the task, its execution policy and the
- * runtime (in that order of precedence). Policy cpu/memory act as
- * defaults that can be overridden by task.resourceLimits.
+ * Resource limits as consumed by the docker backends: the resolved run
+ * configuration wins (v4 §19 — task/profile/run-override updates must
+ * reach the container); the legacy task/runtime merge remains as a
+ * fallback for direct adapter invocations outside RunService.
  */
 export function mergedResourceLimits(ctx: RuntimeContext): ResourceLimits | undefined {
+  if (ctx.resourceLimits) return ctx.resourceLimits;
   const base = ctx.task.resourceLimits ?? ctx.runtime.resourceLimits;
-  const policy = ctx.task.policy;
+  const policy = ctx.policy ?? ctx.task.policy;
   if (!policy?.cpu && !policy?.memory) return base;
   return {
     ...(base ?? {}),
@@ -374,7 +420,7 @@ export const dockerAdapter: AgentRuntimeAdapter = {
           ? { hostPath: ctx.workspacePath, containerPath: String(ctx.runtime.config?.mountPath ?? "/workspace") }
           : undefined,
         resourceLimits: mergedResourceLimits(ctx),
-        networkPolicy: ctx.task.policy?.network ?? ctx.runtime.networkPolicy,
+        networkPolicy: ctx.policy?.network ?? ctx.runtime.networkPolicy,
       });
 
       if (ctx.signal.aborted) {

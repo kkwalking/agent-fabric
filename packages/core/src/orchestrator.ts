@@ -26,6 +26,7 @@ import {
   type ContainerOps,
 } from "./lifecycle.js";
 import { addUsage, emptyUsage, estimateCost } from "./cost.js";
+import { resolveRunConfig, type ResolvedRunConfig } from "./policy.js";
 import {
   effectiveCapabilities,
   type ArtifactDraft,
@@ -148,6 +149,8 @@ interface RunSpec {
   timeoutMs?: number;
   policy?: ExecutionPolicy;
   inputInstruction?: string;
+  /** System instructions snapshotted from the agent profile (v4 §10). */
+  systemInstructions?: string;
   continuity?: RunContinuity;
   previousHandoffId?: ID;
   runtimeSessionRefId?: ID;
@@ -251,6 +254,7 @@ export class RunService {
           containerId: lease.containerId,
           reason: "idle-timeout",
           runtimeId: lease.runtimeId,
+          taskId: lease.taskId,
         });
       },
     });
@@ -309,14 +313,38 @@ export class RunService {
 
   async submit(input: NewTaskInput): Promise<SubmitResult> {
     const resolved = await this.resolveTask(input);
+    this.assertProviderUsable(resolved.modelId);
     const task = await this.taskService().create(resolved);
+    const profile = resolved.profileId ? this.profileService().get(resolved.profileId) : undefined;
     const run = await this.createRun(task, {
       continuity: "new",
       inputInstruction: task.prompt,
       lifecycle: resolved.lifecycle,
+      profileId: resolved.profileId,
+      systemInstructions: profile?.systemInstructions,
     });
     void this.execute(run.id);
     return { task, run };
+  }
+
+  /**
+   * A disabled provider must block new runs at creation time with a clear
+   * error — never surface later as an auth/connection failure inside the
+   * harness (v4 §5).
+   */
+  private assertProviderUsable(modelId: ID | undefined): void {
+    if (!modelId) return;
+    const model = this.modelService().get(modelId);
+    if (!model) return;
+    const provider = this.providerService().get(model.providerId);
+    if (!provider) {
+      throw new Error(`Model "${model.alias ?? model.name}" points at a missing provider — reconfigure the model before running`);
+    }
+    if (!provider.enabled) {
+      throw new Error(
+        `Provider "${provider.name}" is disabled — enable it before starting runs with model "${model.alias ?? model.name}"`
+      );
+    }
   }
 
   /**
@@ -350,6 +378,7 @@ export class RunService {
     const previousRuntime = previousRun?.runtimeId ? this.runtimeService().get(previousRun.runtimeId) : undefined;
     const sameHarness = previousRuntime?.kind === target.kind;
     const workspaceId = input.workspaceId ?? task.workspaceId ?? previousRun?.workspaceId;
+    this.assertProviderUsable(input.modelId ?? profile?.modelId ?? task.modelId ?? previousRun?.modelId);
     // The candidate lookup filters by harness; every other dimension
     // (capability, state, workspace) is decided by the compatibility
     // gate so the blocking reason is always available for the result.
@@ -378,6 +407,7 @@ export class RunService {
         tools: input.tools,
         timeoutMs: input.timeoutMs,
         policy: mergedPolicy,
+        systemInstructions: profile?.systemInstructions,
       });
       void this.execute(run.id);
       return {
@@ -408,6 +438,7 @@ export class RunService {
       tools: input.tools,
       timeoutMs: input.timeoutMs,
       policy: mergedPolicy,
+      systemInstructions: profile?.systemInstructions,
     });
     void this.execute(run.id);
     const reason = forcedHandoff
@@ -609,9 +640,9 @@ export class RunService {
     const secretIds = [...new Set([...(input.secretIds ?? []), ...(profile?.secretIds ?? []), ...(runtime?.secretIds ?? [])])];
     const resourceLimits = input.resourceLimits ?? profile?.resourceLimits ?? runtime?.resourceLimits;
     const policy = input.policy ?? profile?.policy;
-    // Task-level tools are merged into the policy's tool permissions so
-    // runtime adapters can enforce them uniformly.
-    const tools = [...new Set([...(policy?.toolPermissions ?? []), ...(input.tools ?? [])])];
+    // Tool allowlist is the union of policy permissions, profile tools and
+    // task tools (v4 §11) — runtime adapters enforce it uniformly.
+    const tools = [...new Set([...(policy?.toolPermissions ?? []), ...(profile?.tools ?? []), ...(input.tools ?? [])])];
     const mergedPolicy: ExecutionPolicy | undefined = tools.length
       ? { ...(policy ?? {}), toolPermissions: tools }
       : policy;
@@ -652,6 +683,7 @@ export class RunService {
       providerId: provider?.id,
       workspaceId: extra.workspaceId ?? task.workspaceId,
       inputInstruction: extra.inputInstruction ?? fallbackInstruction ?? task.prompt,
+      systemInstructions: extra.systemInstructions,
       continuity: extra.continuity ?? "new",
       previousHandoffId: extra.previousHandoffId,
       runtimeSessionRefId: extra.runtimeSessionRefId,
@@ -804,18 +836,55 @@ export class RunService {
 
     const model = run.modelId ? this.modelService().get(run.modelId) : undefined;
     const provider = model ? this.providerService().get(model.providerId) : undefined;
+    // Defensive provider gate: the provider may have been disabled between
+    // run creation and execution (v4 §5) — fail now, not inside the harness.
+    if (provider && !provider.enabled) {
+      const message = `Provider "${provider.name}" is disabled — enable it before running model "${model?.alias ?? model?.name}"`;
+      await this.finish(runId, "failed", message, emptyUsage());
+      return;
+    }
     const workspace = run.workspaceId ? this.workspaceService().get(run.workspaceId) : undefined;
+
+    // Provider API key secret → runtime environment (v4 §2): resolved from
+    // the model's provider automatically, so users never re-add the same
+    // secret on Task/Runtime. Exported as an env var referenced by the
+    // generated harness config — the plaintext never appears in argv.
+    let providerApiKey: string | undefined;
+    if (provider?.apiKeySecretId) {
+      const secret = this.secretService().getWithValue(provider.apiKeySecretId);
+      if (!secret || secret.value === undefined) {
+        const message = `Provider "${provider.name}" API key secret is missing (secret ${provider.apiKeySecretId}) — re-save the provider's API key`;
+        await this.finish(runId, "failed", message, emptyUsage());
+        return;
+      }
+      providerApiKey = secret.value;
+    }
+
     // Run-level overrides (set at continuation time) take precedence
     // over the task's defaults.
     const mergedEnv: Record<string, string> = { ...(task.env ?? {}), ...(run.env ?? {}) };
     const mergedSecretIds = [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
-    const policy = run.policy ?? task.policy;
     const secrets = this.secretService().resolve(mergedSecretIds);
     const lifecycle = normalizeLifecycle(run.lifecycle ?? resolveLifecycle(runtime));
     const continuity: RunContinuity = run.continuity ?? "new";
     const runtimeSession = run.runtimeSessionRefId ? this.runtimeSessionService().get(run.runtimeSessionRefId) : undefined;
     const previousHandoff = run.previousHandoffId ? this.handoffService().get(run.previousHandoffId) : undefined;
     const caps = effectiveCapabilities(adapter, runtime);
+
+    // The single resolved configuration every executor consumes (v4 §13):
+    // runtime defaults < agent profile < task < run continuation override.
+    const profile = run.profileId ? this.profileService().get(run.profileId) : undefined;
+    const resolved: ResolvedRunConfig = resolveRunConfig({
+      task,
+      run,
+      profile,
+      runtime: {
+        networkPolicy: runtime.networkPolicy,
+        filesystemPolicy: runtime.filesystemPolicy,
+        resourceLimits: runtime.resourceLimits,
+      },
+      defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
+    });
 
     // Containerized harness runs attach the runtime's opaque native-state
     // directory so the harness's own session store survives container
@@ -834,17 +903,20 @@ export class RunService {
       await this.store.update<Run>("runs", runId, { nativeStateId: nativeState.id, updatedAt: now() });
     }
 
-    // Keep-alive: reuse a retained container instead of a fresh one.
+    // Keep-alive: reuse a retained container instead of a fresh one. The
+    // lease is scoped to the same logical execution context — runtime +
+    // workspace + *task* — so one task's harness state is never silently
+    // inherited by an unrelated task (v4 §21/§22).
     let reusableContainer: ReusableContainer | undefined;
     if (lifecycle.mode === "keep-alive") {
-      const lease = this.leaseManager.acquire(runtime.id, workspace?.id);
+      const lease = this.leaseManager.acquire(runtime.id, workspace?.id, task.id);
       if (lease) reusableContainer = { containerId: lease.containerId, name: lease.containerName };
     }
 
     // Abort controller for cancel/timeout.
     const controller = new AbortController();
     const abortState: { reason: "cancel" | "timeout" | "policy"; policyMessage?: string } = { reason: "cancel" };
-    const timeoutMs = run.timeoutMs ?? task.timeoutMs ?? policy?.maxDurationMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs = resolved.timeoutMs;
     const timer = setTimeout(() => {
       if (controller.signal.aborted) return;
       abortState.reason = "timeout";
@@ -879,10 +951,14 @@ export class RunService {
         runtime,
         model,
         provider,
+        providerModels: provider
+          ? this.modelService().list().filter((m) => m.providerId === provider.id && m.enabled)
+          : undefined,
         workspace,
         secrets,
         env: mergedEnv,
-        policy,
+        resolved,
+        providerApiKey,
         lifecycle,
         continuity,
         runtimeSession,
@@ -908,6 +984,21 @@ export class RunService {
         resumedSession: continuity === "resume" ? runtimeSession?.nativeSessionRef : undefined,
         handoffId: previousHandoff?.id,
       });
+      // Provider compatibility is explicit, never silent (v4 §4): if the
+      // harness cannot consume AgentFabric provider configuration, say so
+      // instead of letting it fall back to hidden local credentials.
+      if (provider && !adapter.providerCompatibility) {
+        await ctx.emit(
+          "log",
+          {
+            line: `${runtime.name} (${runtime.kind}) does not consume AgentFabric provider configuration — provider "${provider.name}" settings (base URL / API key / headers) will not reach this harness`,
+            kind: "config-warning",
+            scope: "provider-compatibility",
+            provider: provider.name,
+          },
+          { level: "warn", source: runtime.kind }
+        );
+      }
       if (workspace) {
         await ctx.emit("workspace.attached", {
           workspaceId: workspace.id,
@@ -961,7 +1052,7 @@ export class RunService {
 
       // Post-run pipeline: workspace save, session reference, harness
       // handoff, container retention (spec v1 §11/§3/§7/§1).
-      await this.afterRun(ctx, result, lifecycle);
+      await this.afterRun(ctx, result, lifecycle, controller.signal.aborted);
 
       const aborted = controller.signal.aborted;
       const reason = abortState.reason;
@@ -1002,8 +1093,13 @@ export class RunService {
    * 2. Persist the harness-native session reference (verbatim).
    * 3. Store a harness-generated handoff when the harness produced one.
    * 4. Apply the container lifecycle policy (keep-alive retention).
+   *
+   * An *aborted* keep-alive run (cancel/timeout/policy) never retains its
+   * container: the in-container harness process was killed and its state
+   * is uncertain, so the container is destroyed instead of being marked
+   * reusable (v4 §23/§24).
    */
-  private async afterRun(ctx: RuntimeContext, result: RuntimeResult, lifecycle: RuntimeLifecycle): Promise<void> {
+  private async afterRun(ctx: RuntimeContext, result: RuntimeResult, lifecycle: RuntimeLifecycle, aborted: boolean): Promise<void> {
     const caps = effectiveCapabilities(this.registry.get(ctx.runtime.kind), ctx.runtime);
 
     // 1. Workspace save.
@@ -1087,22 +1183,35 @@ export class RunService {
     // 4. Container lifecycle policy.
     const containerId = result.containerId;
     if (lifecycle.mode === "keep-alive" && containerId) {
-      const lease = await this.leaseManager.retain({
-        containerId,
-        containerName: `af-keep-${ctx.runtime.id}`,
-        runtimeId: ctx.runtime.id,
-        runtimeKind: ctx.runtime.kind,
-        workspaceId: ctx.workspace?.id,
-        taskId: ctx.task.id,
-        runId: ctx.run.id,
-        idleTimeoutMs: lifecycle.idleTimeoutMs ?? DEFAULT_KEEP_ALIVE_IDLE_MS,
-      });
-      await ctx.emit("container.retained", {
-        containerId,
-        runtimeId: ctx.runtime.id,
-        expiresAt: lease.expiresAt,
-        idleTimeoutMs: lease.idleTimeoutMs,
-      });
+      if (aborted) {
+        // Correctness over reuse (v4 §24): destroy the container whose
+        // harness process was just killed mid-flight — it must never be
+        // handed to a follow-up run as safely reusable state.
+        await this.containerOps.destroy(containerId);
+        await ctx.emit("container.destroyed", {
+          containerId,
+          runtimeId: ctx.runtime.id,
+          reason: "aborted-run",
+        });
+      } else {
+        const lease = await this.leaseManager.retain({
+          containerId,
+          containerName: `af-keep-${ctx.runtime.id}-${ctx.task.id}`,
+          runtimeId: ctx.runtime.id,
+          runtimeKind: ctx.runtime.kind,
+          workspaceId: ctx.workspace?.id,
+          taskId: ctx.task.id,
+          runId: ctx.run.id,
+          idleTimeoutMs: lifecycle.idleTimeoutMs ?? DEFAULT_KEEP_ALIVE_IDLE_MS,
+        });
+        await ctx.emit("container.retained", {
+          containerId,
+          runtimeId: ctx.runtime.id,
+          taskId: ctx.task.id,
+          expiresAt: lease.expiresAt,
+          idleTimeoutMs: lease.idleTimeoutMs,
+        });
+      }
     } else if (lifecycle.mode === "ephemeral" && containerId) {
       await ctx.emit("container.destroyed", { containerId, reason: "ephemeral-lifecycle" });
     }
@@ -1115,10 +1224,12 @@ export class RunService {
     runtime: Runtime;
     model?: Model;
     provider?: Provider;
+    providerModels?: Model[];
     workspace?: Workspace;
     secrets: Secret[];
     env: Record<string, string>;
-    policy?: ExecutionPolicy;
+    resolved: ResolvedRunConfig;
+    providerApiKey?: string;
     lifecycle: RuntimeLifecycle;
     continuity: RunContinuity;
     runtimeSession?: RuntimeSessionRef;
@@ -1129,7 +1240,8 @@ export class RunService {
     usageAcc: Usage;
     abortForPolicy: (message: string) => void;
   }): RuntimeContext {
-    const { run, task, runtime, model, provider, workspace, secrets, signal, usageAcc } = opts;
+    const { run, task, runtime, model, provider, providerModels, workspace, secrets, signal, usageAcc } = opts;
+    const resolved = opts.resolved;
     const store = this.store;
     const bus = this.bus;
     const artifactService = this.artifactService();
@@ -1139,6 +1251,7 @@ export class RunService {
       ...opts.env,
       ...(runtime.env ?? {}),
       ...Object.fromEntries(secrets.map((s) => [s.name, s.value ?? ""])),
+      ...(opts.providerApiKey !== undefined ? { AGENTFABRIC_PROVIDER_API_KEY: opts.providerApiKey } : {}),
       AGENTFABRIC_RUN_ID: run.id,
       AGENTFABRIC_TASK_ID: task.id,
       AGENTFABRIC_WORKSPACE_ID: workspace?.id ?? "",
@@ -1179,10 +1292,15 @@ export class RunService {
       runtime,
       model,
       provider,
+      providerModels,
       workspace,
       secrets,
       env,
-      policy: opts.policy,
+      policy: resolved.policy,
+      resourceLimits: resolved.resourceLimits,
+      systemInstructions: resolved.systemInstructions,
+      dataDir: store.dataDir,
+      providerApiKey: opts.providerApiKey,
       signal,
       lifecycle: opts.lifecycle,
       continuity: opts.continuity,
@@ -1204,7 +1322,7 @@ export class RunService {
             ? { ...u, estimatedCost: estimateCost(model.name, u.inputTokens, u.outputTokens, u.cachedTokens ?? 0) }
             : u;
         Object.assign(usageAcc, addUsage(usageAcc, withCost));
-        enforcePolicyLimits(opts.policy, usageAcc, opts.abortForPolicy);
+        enforcePolicyLimits(resolved.policy, usageAcc, opts.abortForPolicy);
       },
       addArtifact: async (draft: ArtifactDraft): Promise<Artifact> => {
         const artifact = await artifactService.create({ runId: run.id, ...draft });

@@ -17,6 +17,16 @@ export {
   OPENCODE_DEFAULT_IMAGE,
 } from "./opencode.js";
 export {
+  providerSlug,
+  piApiForType,
+  npmPackageForType,
+  effectiveBaseUrl,
+  writePiModelsJson,
+  buildOpenCodeConfig,
+  writeOpenCodeConfig,
+  PROVIDER_API_KEY_ENV,
+} from "./provider-config.js";
+export {
   piAdapter,
   mapPiEvent,
   extractPiSessionRef,
@@ -34,6 +44,7 @@ export {
   ensureKeepAliveContainer,
   execDockerInContainer,
   createDockerContainerOps,
+  killContainerProcesses,
   mergedResourceLimits,
   dockerBin,
   execDocker,

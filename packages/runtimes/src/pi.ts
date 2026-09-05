@@ -1,5 +1,9 @@
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   AgentRuntimeAdapter,
+  ProviderCompatibility,
   RuntimeCapability,
   RuntimeContext,
   RuntimeResult,
@@ -7,6 +11,12 @@ import type {
   Usage,
 } from "@agentfabric/core";
 import { runHarnessCommand } from "./harness.js";
+import {
+  piAgentDir,
+  providerSlug,
+  splitModelParameters,
+  writePiModelsJson,
+} from "./provider-config.js";
 
 /**
  * Pi harness adapter — protocol shapes verified against the current pi
@@ -340,10 +350,34 @@ export function parsePiUsage(raw: string): Usage | undefined {
   return usage;
 }
 
+/** Model parameter keys pi genuinely applies (v4 §7/§8). */
+const PI_SUPPORTED_MODEL_PARAMETERS = ["maxTokens", "contextWindow", "thinking"] as const;
+
+/**
+ * Provider compatibility (v4 §4): pi consumes the full AgentFabric
+ * provider definition through its models.json — custom base URLs, custom
+ * headers and env-interpolated API keys all reach the real requests.
+ */
+export const piProviderCompatibility: ProviderCompatibility = {
+  customProvider: true,
+  baseUrl: true,
+  customHeaders: true,
+  supportedModelParameters: [...PI_SUPPORTED_MODEL_PARAMETERS],
+};
+
+/**
+ * Builds the pi CLI args for a run.
+ *
+ * Provider/model selection always uses the AgentFabric provider slug —
+ * the matching models.json entry (written by `prepareProviderConfig`)
+ * carries the base URL, API key reference and custom headers (v4 §1/§3).
+ * Policy is read *only* from the resolved run policy (v4 §13).
+ */
 function buildArgs(ctx: RuntimeContext): string[] {
+  const policy = ctx.policy;
   const args = ["--print", "--mode", "json"];
   if (ctx.provider && ctx.model) {
-    args.push("--provider", ctx.provider.name);
+    args.push("--provider", providerSlug(ctx.provider));
     args.push("--model", ctx.model.name);
   } else if (ctx.model) {
     args.push("--model", ctx.model.name);
@@ -357,15 +391,104 @@ function buildArgs(ctx: RuntimeContext): string[] {
   if (ctx.runtimeSession?.nativeSessionRef) {
     args.push("--session", ctx.runtimeSession.nativeSessionRef);
   }
-  const tools = (ctx.policy ?? ctx.task.policy)?.toolPermissions;
+  // System instructions from the agent profile (v4 §10) enter the
+  // harness as an appended system prompt.
+  if (ctx.systemInstructions?.trim()) {
+    args.push("--append-system-prompt", ctx.systemInstructions);
+  }
+  const tools = policy?.toolPermissions;
+  const shellDenied = policy?.shell === "deny";
+  if (shellDenied) {
+    // Shell deny is enforced by excluding pi's command-execution tool
+    // (v4 §15) — even when a tool allowlist names it, deny wins.
+    args.push("--exclude-tools", "bash");
+  }
   if (tools && tools.length > 0) {
-    args.push("--tools", tools.join(","));
+    const allowed = shellDenied ? tools.filter((t) => t !== "bash") : tools;
+    if (allowed.length > 0) args.push("--tools", allowed.join(","));
   }
-  if ((ctx.policy ?? ctx.task.policy)?.shell === "deny") {
-    args.push("--no-tools");
-  }
-  if (ctx.runtime.config?.thinking) args.push("--thinking", String(ctx.runtime.config.thinking));
+  const thinking = ctx.model?.parameters?.thinking ?? ctx.runtime.config?.thinking;
+  if (thinking !== undefined) args.push("--thinking", String(thinking));
   return args;
+}
+
+/**
+ * Emits explicit warnings for model parameters pi cannot honor (v4 §8) —
+ * configuration is never silently dropped.
+ */
+function warnUnsupportedParameters(ctx: RuntimeContext): void {
+  if (!ctx.model?.parameters) return;
+  const { unsupported } = splitModelParameters(ctx.model.parameters, PI_SUPPORTED_MODEL_PARAMETERS);
+  const keys = Object.keys(unsupported);
+  if (keys.length === 0) return;
+  void ctx.emit(
+    "log",
+    {
+      line: `pi ignores unsupported model parameters: ${keys.join(", ")} (supported: ${PI_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
+      kind: "config-warning",
+      scope: "model-parameters",
+      unsupported: keys,
+      supported: [...PI_SUPPORTED_MODEL_PARAMETERS],
+    },
+    { level: "warn", source: "pi" }
+  );
+}
+
+/**
+ * Writes the AgentFabric provider into pi's models.json so the run's
+ * provider configuration (base URL, API key, headers) genuinely reaches
+ * pi's model requests (v4 §1–§4).
+ *
+ * - Containerized runs: the native-state directory is mounted at pi's
+ *   home (`/root/.pi`), so the entry goes into `<state>/agent` — the
+ *   container reads it at its default agent path.
+ * - Local runs with an explicit `PI_CODING_AGENT_DIR` (runtime env):
+ *   that directory, merged non-destructively — the user owns it.
+ * - Local runs without one: an AgentFabric-managed agent dir under the
+ *   data dir. The user's personal `~/.pi` is never modified, and pi
+ *   sessions for provider-configured runs land in a place AgentFabric
+ *   controls (stable across runs of the same runtime, so native resume
+ *   keeps working).
+ */
+async function prepareProviderConfig(ctx: RuntimeContext): Promise<void> {
+  if (!ctx.provider) return;
+  let agentDir: string;
+  if (ctx.runtime.containerized && ctx.nativeState) {
+    // An explicit PI_CODING_AGENT_DIR points somewhere else inside the
+    // container — we cannot map it back to the host, so the user owns it.
+    if (ctx.env.PI_CODING_AGENT_DIR) {
+      await ctx.log(
+        "pi: PI_CODING_AGENT_DIR is set explicitly — AgentFabric provider injection is skipped; configure the provider inside that directory",
+        "warn"
+      );
+      return;
+    }
+    agentDir = join(ctx.nativeState.path, "agent");
+  } else if (ctx.env.PI_CODING_AGENT_DIR) {
+    agentDir = ctx.env.PI_CODING_AGENT_DIR;
+  } else {
+    agentDir = piAgentDir(ctx.env, homedir());
+    if (agentDir === join(homedir(), ".pi", "agent")) {
+      // Never write into the user's personal pi directory implicitly.
+      agentDir = join(ctx.dataDir, "harness-state", ctx.runtime.id);
+      ctx.env.PI_CODING_AGENT_DIR = agentDir;
+    }
+  }
+  mkdirSync(agentDir, { recursive: true });
+  writePiModelsJson(agentDir, ctx.provider, ctx.providerModels ?? (ctx.model ? [ctx.model] : []));
+  await ctx.emit(
+    "log",
+    {
+      line: `pi provider config injected: ${providerSlug(ctx.provider)} (models.json in ${agentDir})`,
+      kind: "config-injected",
+      scope: "provider",
+      provider: ctx.provider.name,
+      slug: providerSlug(ctx.provider),
+      baseUrl: ctx.provider.baseUrl,
+      hasCustomHeaders: Boolean(ctx.provider.headers && Object.keys(ctx.provider.headers).length > 0),
+    },
+    { level: "info", source: "pi" }
+  );
 }
 
 /**
@@ -391,6 +514,7 @@ export const piAdapter: AgentRuntimeAdapter = {
   capabilities: piCapabilities,
   containerizedCapabilities: piContainerizedCapabilities,
   nativeStateMountPath: "/root/.pi",
+  providerCompatibility: piProviderCompatibility,
   // No defaultImage on purpose (v3 §10 plan A): no official pi image
   // exists; a plain node image would silently break native resume.
 
@@ -402,6 +526,10 @@ export const piAdapter: AgentRuntimeAdapter = {
         return { error: `Containerized Pi refused to start: ${PI_IMAGE_CONTRACT_HINT}` };
       }
     }
+    // Provider configuration first: models.json must exist before pi
+    // resolves --provider (v4 §1).
+    await prepareProviderConfig(ctx);
+    warnUnsupportedParameters(ctx);
     // This run's instruction: the rendered handoff for continuity runs,
     // otherwise the task's original prompt (spec v1 §20 Inject Handoff).
     const prompt = ctx.run.inputInstruction ?? ctx.task.prompt;

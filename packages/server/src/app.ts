@@ -198,6 +198,15 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     ok(res, effectiveCapabilities(registry.get(r.kind), r));
   });
 
+  // Provider compatibility (v4 §4): which parts of an AgentFabric
+  // Provider configuration this harness can genuinely honor.
+  app.get("/api/runtimes/:id/provider-compatibility", (req, res) => {
+    const r = runtimes.get(req.params.id);
+    if (!r) return fail(res, new Error("Runtime not found"), 404);
+    const adapter = registry.get(r.kind);
+    ok(res, adapter?.providerCompatibility ?? null);
+  });
+
   /* ---------------- workspaces ---------------- */
 
   app.get("/api/workspaces", (_req, res) => ok(res, workspaces.list()));

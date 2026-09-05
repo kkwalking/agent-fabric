@@ -10,6 +10,7 @@ interface ProviderRow {
   website?: string;
   baseUrl?: string;
   apiKeyMasked?: string;
+  headers?: Record<string, string>;
   enabled: boolean;
 }
 
@@ -153,6 +154,7 @@ function ProviderEditor({
     type: "openai-responses",
     baseUrl: "",
     apiKey: "",
+    headers: "",
   });
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -175,6 +177,7 @@ function ProviderEditor({
         type: p.type ?? "openai-responses",
         baseUrl: p.baseUrl ?? "",
         apiKey: "",
+        headers: p.headers && Object.keys(p.headers).length > 0 ? JSON.stringify(p.headers, null, 2) : "",
       });
     }
   }, [existing.data]);
@@ -189,6 +192,18 @@ function ProviderEditor({
       setError("请填写供应商名称");
       return;
     }
+    let headers: Record<string, string> | undefined;
+    if (form.headers.trim()) {
+      try {
+        const parsed = JSON.parse(form.headers) as Record<string, unknown>;
+        headers = Object.fromEntries(
+          Object.entries(parsed).map(([k, v]) => [k, String(v)])
+        );
+      } catch {
+        setError("自定义 Headers 不是合法的 JSON 对象");
+        return;
+      }
+    }
     setSaving(true);
     setError(null);
     setSavedMsg(false);
@@ -199,6 +214,7 @@ function ProviderEditor({
         remark: form.remark,
         website: form.website,
         baseUrl: form.baseUrl,
+        headers,
       };
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
       if (providerId) {
@@ -276,6 +292,20 @@ function ProviderEditor({
           Base URL
           <input className="mono" value={form.baseUrl} onChange={setField("baseUrl")} placeholder="https://api.example.com/v1" />
           <div className="hint">自定义 API 端点地址</div>
+        </label>
+        <label>
+          自定义 Headers
+          <textarea
+            className="mono"
+            rows={3}
+            value={form.headers}
+            onChange={(e) => {
+              setForm((f) => ({ ...f, headers: e.target.value }));
+              setSavedMsg(false);
+            }}
+            placeholder={'{"X-Org-Tag": "value"}（可选，JSON 对象）'}
+          />
+          <div className="hint">随每个模型请求附加的 HTTP 头（支持的 Harness 会原样传递）</div>
         </label>
         <div className="row" style={{ marginTop: 6 }}>
           <button className="primary" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存"}</button>

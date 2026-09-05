@@ -271,6 +271,11 @@ export interface Run {
   nativeStateId?: ID;
   /** The concrete instruction this Run executed (may include handoff context). */
   inputInstruction?: string;
+  /**
+   * System instructions snapshotted from the agent profile when the run
+   * was created (v4 §10) — delivered to the harness as its system prompt.
+   */
+  systemInstructions?: string;
   /** Resume / handoff / new — how this run relates to previous runs. */
   continuity?: RunContinuity;
   /** Handoff consumed by this run (cross-harness continuation). */

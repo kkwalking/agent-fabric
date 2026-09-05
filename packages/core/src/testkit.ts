@@ -20,6 +20,7 @@ import {
 import { opencodeAdapter } from "../../runtimes/src/opencode.js";
 import { piAdapter } from "../../runtimes/src/pi.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
+import { createDockerContainerOps } from "../../runtimes/src/docker.js";
 import { FAKE_DOCKER_SCRIPT, FAKE_OPENCODE_SCRIPT, FAKE_PI_SCRIPT } from "./fakes.js";
 import type { Run } from "./types.js";
 
@@ -104,7 +105,9 @@ export async function freshHarness(): Promise<Harness> {
   registry.register(opencodeAdapter);
   registry.register(piAdapter);
   await seedDefaults(store);
-  const runService = new RunService(store, bus, registry);
+  // Real docker ops (routed at the fake docker binary by useBins) so
+  // keep-alive abort destroys are observable in the docker call log.
+  const runService = new RunService(store, bus, registry, createDockerContainerOps());
   return {
     store,
     runService,
