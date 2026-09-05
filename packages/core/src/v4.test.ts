@@ -400,6 +400,64 @@ test("v4 §28/§15/§16: agent profile drives the opencode config (agent, permis
   }
 });
 
+test("v4 §15/§16: headless opencode permission mapping follows the resolved shell policy", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const dumpPath = join(fx.dir, "oc-permission-dump.jsonl");
+  try {
+    const h = await freshHarness();
+    const providers = new ProviderService(h.store);
+    const models = new ModelService(h.store);
+    const provider = await providers.create({
+      name: "OC Perm Prov",
+      type: "openai-completions",
+      baseUrl: "https://ocperm.example/v1",
+      apiKey: "sk-ocperm-1",
+    });
+    const model = await models.create({ providerId: provider.id, name: "m1" });
+    const ws = await h.workspaces.create({
+      name: "oc-perm-ws",
+      type: "local",
+      path: mkdtempSync(join(tmpdir(), "af-v4-ocperm-")),
+    });
+    const runtime = await h.runtimes.create({
+      name: `v4-oc-perm-${Date.now()}`,
+      kind: "opencode",
+      env: { XDG_DATA_HOME: join(fx.dir, "oc-perm-xdg"), FAKE_HARNESS_DUMP: dumpPath },
+    });
+
+    // Default policy (shell allow): the generated config must explicitly
+    // allow bash *and* external_directory — opencode gates bash's
+    // `workdir` parameter behind its external_directory permission
+    // (built-in default "ask"), and a headless run auto-rejects asks.
+    const first = await h.runService.submit({
+      prompt: "Explore the workspace.",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+    });
+    await waitCompleted(h, first.run.id);
+
+    // shell=ask is translated faithfully (and warned about).
+    const second = await h.runService.submit({
+      prompt: "Explore again.",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+      policy: { shell: "ask" },
+    });
+    await waitCompleted(h, second.run.id);
+
+    const dumps = readDumps(dumpPath);
+    assert.equal(dumps.length, 2);
+    assert.deepEqual(dumps[0].config?.permission, { bash: "allow", external_directory: "allow" });
+    assert.equal(dumps[0].argv.includes("--auto"), false, "no --auto without policy.autoApprove");
+    assert.deepEqual(dumps[1].config?.permission, { bash: "ask" });
+  } finally {
+    restore();
+  }
+});
+
 test("v4 §17/§18/§19: resolved policy drives docker mounts, network and resource limits", async () => {
   const fx = makeFixtures();
   const restore = useBins(fx);

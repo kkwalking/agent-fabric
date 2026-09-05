@@ -377,12 +377,24 @@ function warnUnsupportedParameters(ctx: RuntimeContext): void {
 async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
   if (!ctx.provider) return false;
   const policy = ctx.policy;
-  const permission: Record<string, unknown> = {};
-  if (policy?.shell === "deny") permission.bash = "deny";
+  // Shell policy → opencode's native permission system (v4 §15/§16).
+  // Headless `opencode run` cannot answer "ask" prompts — the harness
+  // logs "permission requested: …; auto-rejecting" and the tool call
+  // fails. opencode gates bash's `workdir` parameter behind its
+  // external_directory permission (built-in default "ask"), so a plain
+  // allow policy must allow it too, or any workdir-using call is
+  // auto-rejected even when it points inside the workspace.
+  const shell = policy?.shell ?? "allow";
+  const permission: Record<string, unknown> =
+    shell === "deny"
+      ? { bash: "deny" }
+      : shell === "ask"
+        ? { bash: "ask" }
+        : { bash: "allow", external_directory: "allow" };
 
   const toolAllow = policy?.toolPermissions;
   const unknownTools = (toolAllow ?? []).filter((t) => !(OPENCODE_TOOLS as readonly string[]).includes(t));
-  const needAgent = Boolean(ctx.systemInstructions?.trim()) || Boolean(toolAllow?.length) || policy?.shell === "deny";
+  const needAgent = Boolean(ctx.systemInstructions?.trim()) || Boolean(toolAllow?.length) || shell === "deny";
   const agent = needAgent
     ? {
         ...(ctx.systemInstructions?.trim() ? { prompt: ctx.systemInstructions } : {}),
@@ -392,11 +404,11 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
               tools: Object.fromEntries(
                 OPENCODE_TOOLS.map((tool) => [
                   tool,
-                  (policy?.shell === "deny" && tool === "bash") ? false : toolAllow.includes(tool),
+                  (shell === "deny" && tool === "bash") ? false : toolAllow.includes(tool),
                 ])
               ),
             }
-          : policy?.shell === "deny"
+          : shell === "deny"
             ? { tools: { bash: false } }
             : {}),
       }
@@ -410,6 +422,18 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
         kind: "config-warning",
         scope: "tools",
         unsupported: unknownTools,
+      },
+      { level: "warn", source: "opencode" }
+    );
+  }
+  if (shell === "ask") {
+    await ctx.emit(
+      "log",
+      {
+        line: "opencode runs headless and cannot answer 'ask' permission prompts — bash tool calls will be auto-rejected (set policy.shell to allow/deny, or policy.autoApprove)",
+        kind: "config-warning",
+        scope: "permission",
+        shell,
       },
       { level: "warn", source: "opencode" }
     );
@@ -453,7 +477,8 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
       baseUrl: ctx.provider.baseUrl,
       hasCustomHeaders: Boolean(ctx.provider.headers && Object.keys(ctx.provider.headers).length > 0),
       builtinPassthrough,
-      shellDenied: policy?.shell === "deny",
+      shellPolicy: shell,
+      permission,
       agentInjected: Boolean(agent),
     },
     { level: "info", source: "opencode" }
