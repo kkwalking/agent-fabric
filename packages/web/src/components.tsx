@@ -22,7 +22,10 @@ export type IconName =
   | "eye"
   | "eyeOff"
   | "trash"
-  | "plus";
+  | "plus"
+  | "terminal"
+  | "refresh"
+  | "stop";
 
 const iconPaths: Record<IconName, ReactNode> = {
   grid: (
@@ -154,6 +157,23 @@ const iconPaths: Record<IconName, ReactNode> = {
     </>
   ),
   plus: <path d="M12 5v14M5 12h14" />,
+  terminal: (
+    <>
+      <path d="m5 7 4 4-4 4" />
+      <path d="M13 17h6" />
+    </>
+  ),
+  refresh: (
+    <>
+      <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
+      <path d="M21 3v5h-5" />
+    </>
+  ),
+  stop: (
+    <>
+      <rect x="7" y="7" width="10" height="10" rx="1.5" />
+    </>
+  ),
 };
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {

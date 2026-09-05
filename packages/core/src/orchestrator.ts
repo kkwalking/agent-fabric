@@ -149,6 +149,8 @@ interface RunSpec {
   timeoutMs?: number;
   policy?: ExecutionPolicy;
   inputInstruction?: string;
+  /** The user's actual input (bare prompt, no handoff/system context — v5 §5). */
+  userPrompt?: string;
   /** System instructions snapshotted from the agent profile (v4 §10). */
   systemInstructions?: string;
   continuity?: RunContinuity;
@@ -319,6 +321,7 @@ export class RunService {
     const run = await this.createRun(task, {
       continuity: "new",
       inputInstruction: task.prompt,
+      userPrompt: task.prompt,
       lifecycle: resolved.lifecycle,
       profileId: resolved.profileId,
       systemInstructions: profile?.systemInstructions,
@@ -396,6 +399,7 @@ export class RunService {
       const run = await this.createRunFromTask(task, {
         continuity: "resume",
         inputInstruction: input.prompt,
+        userPrompt: input.prompt,
         runtimeId: target.id,
         modelId,
         workspaceId,
@@ -427,6 +431,7 @@ export class RunService {
     const run = await this.createRunFromTask(task, {
       continuity: "handoff",
       inputInstruction: rendered,
+      userPrompt: input.prompt,
       runtimeId: target.id,
       modelId,
       workspaceId,
@@ -683,6 +688,7 @@ export class RunService {
       providerId: provider?.id,
       workspaceId: extra.workspaceId ?? task.workspaceId,
       inputInstruction: extra.inputInstruction ?? fallbackInstruction ?? task.prompt,
+      userPrompt: extra.userPrompt ?? (extra.inputInstruction ? undefined : fallbackInstruction ?? task.prompt),
       systemInstructions: extra.systemInstructions,
       continuity: extra.continuity ?? "new",
       previousHandoffId: extra.previousHandoffId,

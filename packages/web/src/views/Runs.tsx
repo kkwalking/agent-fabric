@@ -1,95 +1,37 @@
 import { useEffect, useState } from "react";
-import { del, get, post, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
-import { StatusBadge, useAsync, ErrorBox, Icon } from "../components";
+import { get, post, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
+import { StatusBadge, useAsync, ErrorBox } from "../components";
+import { navigate } from "../router";
 
-function NewRunForm({ onCreated }: { onCreated: (runId: string) => void }) {
-  const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
-  const models = useAsync<any[]>(() => get("/api/models"), []);
-  const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
-  const [prompt, setPrompt] = useState("");
-  const [runtimeId, setRuntimeId] = useState("");
-  const [modelId, setModelId] = useState("");
-  const [workspaceId, setWorkspaceId] = useState("");
-  const [lifecycle, setLifecycle] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const submit = async () => {
-    if (!prompt.trim()) return;
-    setBusy(true);
-    try {
-      const r = await post<any>("/api/runs", {
-        prompt: prompt.trim(),
-        runtimeId: runtimeId || undefined,
-        modelId: modelId || undefined,
-        workspaceId: workspaceId || undefined,
-        lifecycle: lifecycle ? { mode: lifecycle } : undefined,
-      });
-      setPrompt("");
-      onCreated(r.run.id);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="composer">
-      <textarea
-        rows={3}
-        placeholder="Describe the task for the agent…"
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
-        }}
-      />
-      <div className="composer-bar">
-        <select className="pill" value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)}>
-          <option value="">Runtime: default</option>
-          {(runtimes.data ?? []).map((r) => <option key={r.id} value={r.id}>{r.name} ({r.kind})</option>)}
-        </select>
-        <select className="pill" value={modelId} onChange={(e) => setModelId(e.target.value)}>
-          <option value="">Model: default</option>
-          {(models.data ?? []).map((m) => <option key={m.id} value={m.id}>{m.alias ?? m.name}</option>)}
-        </select>
-        <select className="pill" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
-          <option value="">Workspace: none</option>
-          {(workspaces.data ?? []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-        </select>
-        <select className="pill" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)} title="Container lifecycle">
-          <option value="">Lifecycle: runtime default</option>
-          <option value="ephemeral">Lifecycle: ephemeral</option>
-          <option value="keep-alive">Lifecycle: keep-alive</option>
-          <option value="persistent">Lifecycle: persistent</option>
-        </select>
-        <button className="send" title="Run task" disabled={busy || !prompt.trim()} onClick={submit}>
-          <Icon name="arrowUp" size={16} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-export function RunsView({ onOpenRun }: { onOpenRun: (id: string) => void }) {
+/**
+ * Runs (v5 §33): the operations / run-history view. Users create Tasks,
+ * not Runs — creation lives in New task; this page lists every execution
+ * for inspection and operations (cancel / rerun / open inspector).
+ */
+export function RunsView() {
   const { data, error, loading, reload } = useAsync<any[]>(() => get("/api/runs"), []);
   return (
     <div>
-      <h1>Runs</h1>
-      <p className="sub">Every task execution produces an independent Run with its own lifecycle, events, usage and artifacts.</p>
+      <div className="row" style={{ marginBottom: 4 }}>
+        <h1>Runs</h1>
+        <span className="right"><button className="small" onClick={reload}>refresh</button></span>
+      </div>
+      <p className="sub">
+        Every task execution produces an independent Run. This is the operations view — the conversation
+        lives in the <a onClick={() => navigate("/tasks")}>task thread</a>.
+      </p>
       <ErrorBox message={error} />
-      <NewRunForm onCreated={onOpenRun} />
       <div className="card">
         {data && data.length > 0 ? (
           <table>
             <thead>
-              <tr><th>Run</th><th>Title</th><th>Status</th><th>Runtime</th><th>Continuity</th><th>Model</th><th>Cost</th><th>Created</th><th></th></tr>
+              <tr><th>Run</th><th>Task</th><th>Status</th><th>Runtime</th><th>Continuity</th><th>Model</th><th>Cost</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
               {data.map((r) => (
                 <tr key={r.id}>
-                  <td className="mono"><a onClick={() => onOpenRun(r.id)}>{shortId(r.id)}</a></td>
-                  <td>{r.taskTitle}</td>
+                  <td className="mono"><a onClick={() => navigate(`/runs/${r.id}`)}>{shortId(r.id)}</a></td>
+                  <td><a onClick={() => navigate(`/tasks/${r.taskId}`)}>{r.taskTitle}</a></td>
                   <td><StatusBadge status={r.status} /></td>
                   <td>{r.runtimeName ?? "-"}</td>
                   <td className="muted">{r.continuity ?? "new"}</td>
@@ -109,11 +51,8 @@ export function RunsView({ onOpenRun }: { onOpenRun: (id: string) => void }) {
             </tbody>
           </table>
         ) : (
-          <div className="muted">{loading ? "Loading…" : "No runs yet."}</div>
+          <div className="muted">{loading ? "Loading…" : "No runs yet — create a task first."}</div>
         )}
-        <div className="row" style={{ marginTop: 10 }}>
-          <button className="small" onClick={reload}>refresh</button>
-        </div>
       </div>
     </div>
   );
@@ -125,7 +64,13 @@ const CONTINUITY_LABEL: Record<string, string> = {
   handoff: "⇄ handoff (new native session)",
 };
 
-export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => void }) {
+/**
+ * Run Inspector (v5 §12/§13): the advanced execution-detail, debugging
+ * and audit page for a single Run — raw events, logs, artifacts, usage,
+ * runtime session, native state, handoff and the full input instruction.
+ * It is deliberately NOT the user's primary interaction surface.
+ */
+export function RunDetailView({ runId }: { runId: string }) {
   const { data: run, error, reload } = useAsync<any>(() => get(`/api/runs/${runId}`), [runId]);
   const [events, setEvents] = useState<any[]>([]);
   const [tab, setTab] = useState<"events" | "logs" | "artifacts" | "continuity">("events");
@@ -189,7 +134,8 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
   return (
     <div>
       <div className="row">
-        <a onClick={onBack}>← back to runs</a>
+        <a onClick={() => navigate("/runs")}>← runs</a>
+        <a onClick={() => navigate(`/tasks/${run.taskId}`)}>task thread ↗</a>
         <span className="right">
           {isLive && <button className="danger" onClick={async () => { await post(`/api/runs/${runId}/cancel`); reload(); }}>cancel</button>}
           {" "}
@@ -197,7 +143,10 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
         </span>
       </div>
       <h1 className="mono">{runId}</h1>
-      <p className="sub">{run.taskTitle}</p>
+      <p className="sub">
+        <strong>Run Inspector</strong> — advanced execution details, debugging and audit for this run.
+        For the conversation view open the <a onClick={() => navigate(`/tasks/${run.taskId}`)}>task thread</a>.
+      </p>
 
       <div className="grid">
         <div className="stat"><div className="num"><StatusBadge status={run.status} /></div><div className="lbl">status</div></div>
@@ -209,6 +158,19 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
         <div className="stat"><div className="num">{(run.usage?.modelRequests ?? 0)}</div><div className="lbl">model calls</div></div>
         <div className="stat"><div className="num">{(run.usage?.inputTokens ?? 0) + (run.usage?.outputTokens ?? 0)}</div><div className="lbl">tokens</div></div>
       </div>
+
+      {/* Full harness instruction — inspector-only (v5 §5/§12). */}
+      <details className="card instruction-details">
+        <summary>Full input instruction sent to the harness ({(run.inputInstruction ?? "").length} chars)</summary>
+        <p className="muted" style={{ margin: "8px 0" }}>
+          The Task Thread shows only the user's message (<code>{run.userPrompt ? "run.userPrompt" : "not recorded (legacy run)"}</code>);
+          this is the complete <code>inputInstruction</code> including handoff and internal context.
+        </p>
+        {run.userPrompt && (
+          <p style={{ margin: "0 0 8px" }}><span className="muted">userPrompt: </span>{run.userPrompt}</p>
+        )}
+        <pre style={{ whiteSpace: "pre-wrap" }}>{run.inputInstruction ?? run.taskTitle}</pre>
+      </details>
 
       {(previousHandoff || generatedHandoff || sessionRef || nativeState || run.workspaceId) && (
         <div className="card">
@@ -305,10 +267,6 @@ export function RunDetailView({ runId, onBack }: { runId: string; onBack: () => 
               How this run continues the task: <strong>{CONTINUITY_LABEL[run.continuity ?? "new"] ?? run.continuity}</strong>.
               Same harness → native Resume; different harness → Handoff (sessions are never migrated).
             </p>
-            <details open={Boolean(run.inputInstruction && run.inputInstruction.length < 800)}>
-              <summary>Input instruction given to the agent</summary>
-              <pre style={{ whiteSpace: "pre-wrap" }}>{run.inputInstruction ?? run.taskTitle}</pre>
-            </details>
             {previousHandoff && (
               <>
                 <h2 style={{ marginTop: 14 }}>Consumed handoff</h2>

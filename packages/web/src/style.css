@@ -761,3 +761,530 @@ a:hover {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ================================================================== */
+/* v5: Task Thread / conversation layout                               */
+/* ================================================================== */
+
+.main.fullbleed {
+  max-width: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.page-pad {
+  padding: 30px 40px;
+}
+
+.task-thread {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* ---------- Thread header ---------- */
+
+.thread-header {
+  padding: 14px 28px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+.thread-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.thread-title {
+  font-size: 16px;
+  font-weight: 650;
+  margin: 0;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.thread-actions .icon-btn {
+  color: var(--dim);
+}
+.thread-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+  flex-wrap: wrap;
+}
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 2.5px 10px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.switch-link {
+  font-size: 12px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.switch-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* ---------- Timeline ---------- */
+
+.thread-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.thread-list {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 26px 24px 18px;
+}
+
+.turn {
+  margin-bottom: 34px;
+}
+
+.who {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.who.user {
+  justify-content: flex-end;
+}
+
+.user-msg {
+  margin-bottom: 20px;
+}
+.user-bubble {
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 14px 14px 4px 14px;
+  padding: 10px 14px;
+  margin-left: 12%;
+  white-space: pre-wrap;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.agent-turn {
+  display: flex;
+  flex-direction: column;
+}
+.agent-body {
+  min-width: 0;
+}
+.who.agent::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+}
+
+.resume-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--green);
+  background: rgba(26, 127, 55, 0.07);
+  border: 1px solid rgba(26, 127, 55, 0.2);
+  border-radius: 999px;
+  padding: 2px 10px;
+  margin-bottom: 10px;
+}
+
+.live-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dim);
+  font-size: 12.5px;
+  padding: 4px 0;
+}
+
+/* ---------- Activity rows (collapsed by default — v5 §8) ---------- */
+
+.activity {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 3.5px 8px;
+  border-radius: 8px;
+  position: relative;
+  flex-wrap: wrap;
+}
+.activity + .activity {
+  margin-top: 1px;
+}
+.activity.clickable {
+  cursor: pointer;
+}
+.activity.clickable:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.activity .act-icon {
+  width: 16px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  color: var(--dim);
+  transform: translateY(1px);
+}
+.activity.error .act-icon,
+.activity.error .act-label {
+  color: var(--red);
+}
+.activity .act-label code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+.activity .act-detail-hint {
+  font-size: 11px;
+  color: var(--dim);
+  margin-left: auto;
+}
+.activity .chev {
+  margin-left: 4px;
+  color: var(--dim);
+  transform: translateY(2px);
+  transition: transform 0.15s ease;
+}
+.activity .chev.open {
+  transform: translateY(2px) rotate(90deg);
+}
+.activity .act-detail {
+  width: 100%;
+  margin-top: 6px;
+}
+.activity .act-detail .detail-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--dim);
+  margin: 8px 0 4px;
+}
+.activity .act-detail pre {
+  max-height: 300px;
+  font-size: 11.5px;
+  padding: 10px 12px;
+  margin: 0;
+}
+.activity .act-detail pre.err {
+  color: var(--red);
+}
+.cmd-summary {
+  font-size: 11.5px;
+  margin-left: 4px;
+}
+.cmd-summary.good {
+  color: var(--green);
+}
+.cmd-summary.bad {
+  color: var(--red);
+}
+
+/* ---------- Agent message (primary content — v5 §6/§36) ---------- */
+
+.agent-message {
+  margin: 12px 0 6px;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--border);
+}
+.agent-message-text {
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent-message-model {
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+/* ---------- Failure / cancelled (v5 §29/§30) ---------- */
+
+.fail-box {
+  border: 1px solid rgba(209, 36, 47, 0.35);
+  background: rgba(209, 36, 47, 0.05);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 12px 0;
+}
+.fail-title {
+  color: var(--red);
+  font-weight: 650;
+  font-size: 13px;
+}
+.fail-reason {
+  color: var(--red);
+  font-size: 12.5px;
+  margin: 6px 0 10px;
+  white-space: pre-wrap;
+}
+.fail-actions {
+  gap: 6px;
+}
+.cancelled-note {
+  color: var(--dim);
+  font-size: 12.5px;
+  margin: 10px 0;
+}
+
+/* ---------- Artifacts (v5 §31) ---------- */
+
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 10px 0 4px;
+}
+.artifact-label {
+  font-size: 12px;
+}
+.artifact-chip-wrap {
+  display: inline-block;
+  max-width: 100%;
+}
+.artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  color: var(--cyan);
+  background: rgba(9, 105, 218, 0.06);
+  border-color: rgba(9, 105, 218, 0.25);
+}
+.artifact-chip:hover {
+  background: rgba(9, 105, 218, 0.12);
+  border-color: rgba(9, 105, 218, 0.4);
+}
+.artifact-chip code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.artifact-detail {
+  margin: 6px 0;
+  max-height: 280px;
+}
+
+/* ---------- Turn metadata (v5 §11/§23/§28) ---------- */
+
+.turn-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--dim);
+  font-size: 11.5px;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-soft);
+}
+.turn-meta a {
+  font-size: 11.5px;
+}
+.stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---------- Handoff divider (v5 §20/§21) ---------- */
+
+.handoff-banner {
+  margin: 0 0 18px;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 8px 0;
+}
+.handoff-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.handoff-mark {
+  font-weight: 650;
+  color: var(--yellow);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.handoff-detail {
+  margin-top: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--panel-2);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px 20px;
+}
+.handoff-section {
+  font-size: 12.5px;
+  min-width: 0;
+}
+.handoff-section-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--dim);
+  margin-bottom: 4px;
+}
+.handoff-section code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  display: inline-block;
+  margin: 1px 6px 1px 0;
+}
+
+/* ---------- Thread composer (v5 §17/§18) ---------- */
+
+.thread-composer-wrap {
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg);
+  padding: 10px 24px 14px;
+  flex-shrink: 0;
+}
+.thread-composer {
+  max-width: 860px;
+  margin: 0 auto;
+  box-shadow: var(--shadow-card);
+}
+.thread-composer textarea {
+  min-height: 44px;
+}
+.continuity {
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+  border: 1px solid;
+}
+.continuity.resume {
+  color: var(--green);
+  border-color: rgba(26, 127, 55, 0.35);
+  background: rgba(26, 127, 55, 0.07);
+}
+.continuity.handoff {
+  color: var(--yellow);
+  border-color: rgba(154, 103, 0, 0.35);
+  background: rgba(154, 103, 0, 0.08);
+}
+
+/* ---------- Spinner ---------- */
+
+.spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid rgba(32, 31, 28, 0.15);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  animation: af-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes af-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- Task list (v5 §16) ---------- */
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.task-item {
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  margin-bottom: 0;
+}
+.task-item:hover {
+  border-color: #d8d5cd;
+  box-shadow: var(--shadow-pop);
+}
+.task-item-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.task-item-title {
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- New task ---------- */
+
+.new-task {
+  max-width: 760px;
+}
+.new-task-composer textarea {
+  min-height: 110px;
+}
+.new-task-composer input {
+  margin: 8px 0 10px;
+}
+
+/* ---------- Run inspector ---------- */
+
+.instruction-details summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.instruction-details pre {
+  max-height: 300px;
+}

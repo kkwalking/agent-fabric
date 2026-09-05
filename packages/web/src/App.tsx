@@ -4,61 +4,54 @@ import { ResourceView } from "./views/ResourceView";
 import { LlmView } from "./views/Llm";
 import { RunsView, RunDetailView } from "./views/Runs";
 import { TasksView } from "./views/Tasks";
+import { NewTaskView } from "./views/NewTask";
+import { TaskThreadView } from "./views/TaskThread";
 import { HandoffsView } from "./views/Handoffs";
 import { ArtifactsView } from "./views/Artifacts";
 import { UsageView } from "./views/Usage";
 import { SettingsView } from "./views/Settings";
 import { Icon, IconName } from "./components";
+import { navigate, parsePath, usePath, type Route } from "./router";
 
-export type ViewKey =
-  | "dashboard"
-  | "llm"
-  | "runtimes"
-  | "agents"
-  | "workspaces"
-  | "secrets"
-  | "tasks"
-  | "runs"
-  | "run"
-  | "handoffs"
-  | "artifacts"
-  | "usage"
-  | "settings";
-
-interface NavState {
-  view: ViewKey;
-  runId?: string;
-}
+/**
+ * Navigation (v5 §15/§33): users operate Tasks; Runs are execution
+ * details. Primary nav = New task / Tasks / Dashboard; Runs stay
+ * reachable as the operations/run-history view under System.
+ */
 
 interface NavEntry {
-  key: ViewKey;
+  path: string;
   label: string;
   icon: IconName;
+  /** Prefix used for active-state highlighting. */
+  match: string;
 }
 
 const primaryNav: NavEntry[] = [
-  { key: "runs", label: "New run", icon: "compose" },
-  { key: "tasks", label: "Tasks", icon: "history" },
-  { key: "dashboard", label: "Dashboard", icon: "grid" },
+  { path: "/new", label: "New task", icon: "compose", match: "/new" },
+  { path: "/tasks", label: "Tasks", icon: "history", match: "/tasks" },
+  { path: "/", label: "Dashboard", icon: "grid", match: "/" },
 ];
 
 const resourceNav: NavEntry[] = [
-  { key: "llm", label: "LLM", icon: "cloud" },
-  { key: "runtimes", label: "Runtimes", icon: "box" },
-  { key: "agents", label: "Agents", icon: "bot" },
-  { key: "workspaces", label: "Workspaces", icon: "folder" },
-  { key: "secrets", label: "Secrets", icon: "key" },
+  { path: "/llm", label: "LLM", icon: "cloud", match: "/llm" },
+  { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
+  { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
+  { path: "/workspaces", label: "Workspaces", icon: "folder", match: "/workspaces" },
+  { path: "/secrets", label: "Secrets", icon: "key", match: "/secrets" },
 ];
 
 const systemNav: NavEntry[] = [
-  { key: "handoffs", label: "Handoffs", icon: "archive" },
-  { key: "artifacts", label: "Artifacts", icon: "archive" },
-  { key: "usage", label: "Usage", icon: "chart" },
-  { key: "settings", label: "Settings", icon: "gear" },
+  { path: "/runs", label: "Runs", icon: "play", match: "/runs" },
+  { path: "/handoffs", label: "Handoffs", icon: "archive", match: "/handoffs" },
+  { path: "/artifacts", label: "Artifacts", icon: "archive", match: "/artifacts" },
+  { path: "/usage", label: "Usage", icon: "chart", match: "/usage" },
+  { path: "/settings", label: "Settings", icon: "gear", match: "/settings" },
 ];
 
 export function App() {
-  const [nav, setNav] = useState<NavState>({ view: "dashboard" });
+  const path = usePath();
+  const route: Route = parsePath(path);
   const [health, setHealth] = useState<string>("connecting…");
 
   useEffect(() => {
@@ -68,19 +61,20 @@ export function App() {
       .catch(() => setHealth("offline"));
   }, []);
 
-  const navigate = (view: ViewKey, runId?: string) => setNav({ view, runId });
-
   const renderNav = (items: NavEntry[]) =>
-    items.map(({ key, label, icon }) => (
+    items.map(({ path: p, label, icon, match }) => (
       <button
-        key={key}
-        className={`nav-item ${nav.view === key || (key === "runs" && nav.view === "run") ? "active" : ""}`}
-        onClick={() => navigate(key)}
+        key={p}
+        className={`nav-item ${isActive(route, p, match) ? "active" : ""}`}
+        onClick={() => navigate(p)}
       >
         <Icon name={icon} />
         <span>{label}</span>
       </button>
     ));
+
+  // The Task Thread is a full-height, composer-anchored layout (v5 §3).
+  const fullBleed = route.view === "task";
 
   return (
     <div className="app">
@@ -117,21 +111,28 @@ export function App() {
           </span>
         </div>
       </aside>
-      <main className="main">
-        {nav.view === "dashboard" && <Dashboard onOpenRun={(id) => navigate("run", id)} />}
-        {nav.view === "llm" && <LlmView />}
-        {nav.view === "runtimes" && <ResourceView kind="runtimes" />}
-        {nav.view === "agents" && <ResourceView kind="agents" />}
-        {nav.view === "workspaces" && <ResourceView kind="workspaces" />}
-        {nav.view === "secrets" && <ResourceView kind="secrets" />}
-        {nav.view === "runs" && <RunsView onOpenRun={(id) => navigate("run", id)} />}
-        {nav.view === "run" && <RunDetailView runId={nav.runId ?? ""} onBack={() => navigate("runs")} />}
-        {nav.view === "tasks" && <TasksView onOpenRun={(id) => navigate("run", id)} />}
-        {nav.view === "handoffs" && <HandoffsView />}
-        {nav.view === "artifacts" && <ArtifactsView />}
-        {nav.view === "usage" && <UsageView />}
-        {nav.view === "settings" && <SettingsView />}
+      <main className={`main ${fullBleed ? "fullbleed" : ""}`}>
+        {route.view === "dashboard" && <Dashboard />}
+        {route.view === "new-task" && <NewTaskView />}
+        {route.view === "tasks" && <TasksView />}
+        {route.view === "task" && route.id && <TaskThreadView taskId={route.id} />}
+        {route.view === "runs" && <RunsView />}
+        {route.view === "run" && route.id && <RunDetailView runId={route.id} />}
+        {route.view === "llm" && <LlmView />}
+        {route.view === "runtimes" && <ResourceView kind="runtimes" />}
+        {route.view === "agents" && <ResourceView kind="agents" />}
+        {route.view === "workspaces" && <ResourceView kind="workspaces" />}
+        {route.view === "secrets" && <ResourceView kind="secrets" />}
+        {route.view === "handoffs" && <HandoffsView />}
+        {route.view === "artifacts" && <ArtifactsView />}
+        {route.view === "usage" && <UsageView />}
+        {route.view === "settings" && <SettingsView />}
       </main>
     </div>
   );
+}
+
+function isActive(route: Route, path: string, match: string): boolean {
+  if (match === "/") return route.view === "dashboard";
+  return path === match || path.startsWith(`${match}/`);
 }

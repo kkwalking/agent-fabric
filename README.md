@@ -78,7 +78,16 @@ npm run dev:server
 npm run dev:web
 ```
 
-打开 http://localhost:7377 查看 Web UI（Dashboard / Tasks / Runs / Run Detail 实时事件流与原生 Session 状态 / Providers / Models / Runtimes / Agents / Workspaces / Handoffs / Artifacts / Usage / Settings）。
+打开 http://localhost:7377 查看 Web UI（New task / Tasks / Dashboard / Task Thread 对话式执行线程 / Run Inspector / Providers / Models / Runtimes / Agents / Workspaces / Handoffs / Artifacts / Usage / Settings）。
+
+## Web 交互模型（v5）
+
+> **Users interact with Tasks. The system executes Runs.**
+> **Task is the product surface. Run is the execution detail.**
+
+* **Task Thread（`/tasks/:taskId`）是主交互页面**：像 Codex / Claude Code 一样，用户消息（`run.userPrompt`，绝不是拼接后的完整 Harness Prompt）、Agent 工作过程（可读、默认折叠的 Tool / Command / File Activity）与 Agent 回答（`agent.message`）在同一页面持续展开；底部 Composer 继续任务，可切换 Runtime / Model / Agent Profile，并实时提示即将发生 **Resume**（同 Harness）还是 **Handoff**（跨 Harness，带语义化交接摘要）。运行中可 Stop，失败提供 Retry / Continue / Switch runtime。
+* **Run Detail 退回为 Run Inspector（`/runs/:runId`）**：高级执行详情 / 调试 / 审计页面——Raw Events、Logs、Artifacts、Usage、Runtime Native Session、Native State、Handoff 与完整 `inputInstruction`。
+* **前端 Presentation Layer**：Raw Event → Presentation Projector → Timeline Item（事件合并：`tool.started`+`tool.completed` → 一个 Tool Activity，`shell.command`+`shell.output` → 一个 Command Activity），不修改 Core Event Schema；`GET /api/tasks/:id/thread` 提供只读聚合，未引入新的 Message / Conversation / Session 后端模型。
 
 ## 长期任务执行模型（v1）
 

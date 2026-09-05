@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { get, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
 import { StatusBadge, useAsync, ErrorBox } from "../components";
+import { navigate } from "../router";
 
 interface DashboardData {
   counts: Record<string, number>;
@@ -8,7 +9,7 @@ interface DashboardData {
   usage: any;
 }
 
-export function Dashboard({ onOpenRun }: { onOpenRun: (id: string) => void }) {
+export function Dashboard() {
   const { data, error, reload } = useAsync<DashboardData>(() => get("/api/dashboard"), []);
   const [live, setLive] = useState<any[]>([]);
 
@@ -60,12 +61,12 @@ export function Dashboard({ onOpenRun }: { onOpenRun: (id: string) => void }) {
           </thead>
           <tbody>
             {data.recentRuns.length === 0 && (
-              <tr><td colSpan={7} className="muted">No runs yet — submit one with <span className="mono">af run "…"</span> or the Runs page.</td></tr>
+              <tr><td colSpan={7} className="muted">No runs yet — create a <a onClick={() => navigate("/new")}>New task</a> or run <span className="mono">af run "…"</span>.</td></tr>
             )}
             {data.recentRuns.map((r) => (
               <tr key={r.id}>
-                <td className="mono"><a onClick={() => onOpenRun(r.id)}>{shortId(r.id)}</a></td>
-                <td>{r.taskTitle}</td>
+                <td className="mono"><a onClick={() => navigate(`/runs/${r.id}`)}>{shortId(r.id)}</a></td>
+                <td><a onClick={() => navigate(`/tasks/${r.taskId}`)}>{r.taskTitle}</a></td>
                 <td><StatusBadge status={r.status} /></td>
                 <td>{r.runtimeName ?? "-"}</td>
                 <td>{r.modelName ?? "-"}</td>

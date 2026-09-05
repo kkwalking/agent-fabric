@@ -307,6 +307,29 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   });
   app.get("/api/tasks/:id/runs", (req, res) => ok(res, runs.forTask(req.params.id)));
 
+  // Task Thread read model (v5 §24/§35): an aggregate of everything the
+  // thread page renders — task, workspace, and per-run events, artifacts
+  // and consumed handoff. Pure projection over existing records; no new
+  // Message/Conversation/Session domain model.
+  app.get("/api/tasks/:id/thread", (req, res) => {
+    const task = tasks.get(req.params.id);
+    if (!task) return fail(res, new Error("Task not found"), 404);
+    const taskRuns = runs.forTask(task.id);
+    // The thread's current workspace follows the latest run (a continuation
+    // may have overridden it), falling back to the task default.
+    const currentWorkspaceId = taskRuns[taskRuns.length - 1]?.workspaceId ?? task.workspaceId;
+    ok(res, {
+      task,
+      workspace: currentWorkspaceId ? workspaces.get(currentWorkspaceId) ?? null : null,
+      runs: taskRuns.map((run) => ({
+        run,
+        events: runs.events(run.id),
+        artifacts: artifacts.list(run.id),
+        previousHandoff: run.previousHandoffId ? handoffs.get(run.previousHandoffId) ?? null : null,
+      })),
+    });
+  });
+
   // Preview of the resume-vs-handoff decision (spec v1 §18: make the
   // continuity explicit before executing).
   app.get("/api/tasks/:id/continue-options", (req, res) => {

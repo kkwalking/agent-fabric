@@ -272,6 +272,13 @@ export interface Run {
   /** The concrete instruction this Run executed (may include handoff context). */
   inputInstruction?: string;
   /**
+   * The user's actual input for this Run — the bare prompt, without
+   * handoff context, internal context or system instructions. The Task
+   * Thread shows this as the User Message; `inputInstruction` stays the
+   * full instruction sent to the harness (v5 §5).
+   */
+  userPrompt?: string;
+  /**
    * System instructions snapshotted from the agent profile when the run
    * was created (v4 §10) — delivered to the harness as its system prompt.
    */
