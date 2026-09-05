@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTokens } from "../api";
 import { ErrorBox, Icon, StatusBadge, useAsync } from "../components";
+import { Markdown } from "../markdown";
 import {
   projectTimeline,
   type AgentMessageItem,
@@ -408,7 +409,9 @@ function ActivityRow({ item, live }: { item: TimelineItem; live: boolean }) {
 function AgentMessage({ item }: { item: AgentMessageItem }) {
   return (
     <div className="agent-message">
-      <div className="agent-message-text">{item.content}</div>
+      <div className="agent-message-text">
+        <Markdown text={item.content} />
+      </div>
       {item.model && <div className="agent-message-model muted">{item.model}</div>}
     </div>
   );
@@ -418,9 +421,11 @@ function ThinkingRow({ item, live }: { item: ThinkingItem; live: boolean }) {
   const [open, setOpen] = useState(false);
   return (
     <div className={`activity thinking${item.content ? " clickable" : ""}`} onClick={() => item.content && setOpen(!open)}>
-      <span className="act-icon">{live ? <span className="spinner" /> : "◍"}</span>
-      <span className="act-label">Thinking…</span>
-      {item.content && <span className="act-detail-hint">{open ? "hide" : "reasoning"}</span>}
+      <div className="act-head">
+        <span className="act-icon">{live ? <span className="spinner" /> : "◍"}</span>
+        <span className="act-label">Thinking…</span>
+        {item.content && <span className="act-detail-hint">{open ? "hide" : "reasoning"}</span>}
+      </div>
       {open && item.content && <pre className="act-detail">{item.content}</pre>}
     </div>
   );
@@ -429,11 +434,13 @@ function ThinkingRow({ item, live }: { item: ThinkingItem; live: boolean }) {
 function ToolRow({ item, open, onToggle }: { item: ToolActivity; open: boolean; onToggle: () => void }) {
   return (
     <div className={`activity clickable ${item.status}`} onClick={onToggle}>
-      <span className="act-icon">
-        {item.status === "running" ? <span className="spinner" /> : item.status === "error" ? "✗" : "✓"}
-      </span>
-      <span className="act-label mono-target">{item.label}</span>
-      <span className={`chev ${open ? "open" : ""}`}><Icon name="chevron" size={12} /></span>
+      <div className="act-head">
+        <span className="act-icon">
+          {item.status === "running" ? <span className="spinner" /> : item.status === "error" ? "✗" : "✓"}
+        </span>
+        <span className="act-label mono-target">{item.label}</span>
+        <span className={`chev ${open ? "open" : ""}`}><Icon name="chevron" size={12} /></span>
+      </div>
       {open && (
         <div className="act-detail" onClick={(e) => e.stopPropagation()}>
           {item.args == null && item.result == null && item.error == null && (
@@ -468,13 +475,19 @@ function ToolRow({ item, open, onToggle }: { item: ToolActivity; open: boolean; 
 function CommandRow({ item, open, onToggle }: { item: CommandActivity; open: boolean; onToggle: () => void }) {
   return (
     <div className={`activity clickable command`} onClick={onToggle}>
-      <span className="act-icon">{item.running ? <span className="spinner" /> : <Icon name="terminal" size={13} />}</span>
-      <span className="act-label mono-target">Ran <code>{item.command}</code></span>
-      {item.summary && (
-        <span className={`cmd-summary ${item.summaryOk === false ? "bad" : "good"}`}>{item.summary}</span>
-      )}
+      <div className="act-head">
+        <span className="act-icon">{item.running ? <span className="spinner" /> : <Icon name="terminal" size={13} />}</span>
+        <span className="act-label mono-target">Ran <code>{item.command}</code></span>
+        {item.summary && (
+          <span className={`cmd-summary ${item.summaryOk === false ? "bad" : "good"}`}>{item.summary}</span>
+        )}
+      </div>
       {open && (
         <div className="act-detail" onClick={(e) => e.stopPropagation()}>
+          <div className="detail-title">
+            Command {item.cwd ? `· ${item.cwd}` : ""} {item.backend ? `· ${item.backend}` : ""}
+          </div>
+          <pre>{item.command}</pre>
           <div className="detail-title">
             Output {item.cwd ? `· ${item.cwd}` : ""} {item.backend ? `· ${item.backend}` : ""}
           </div>
@@ -488,8 +501,10 @@ function CommandRow({ item, open, onToggle }: { item: CommandActivity; open: boo
 function FileRow({ item }: { item: FileActivity }) {
   return (
     <div className="activity file">
-      <span className="act-icon">{item.action === "created" ? "+" : "±"}</span>
-      <span className="act-label">{item.action === "created" ? "Created" : "Modified"} <code>{item.path}</code></span>
+      <div className="act-head">
+        <span className="act-icon">{item.action === "created" ? "+" : "±"}</span>
+        <span className="act-label">{item.action === "created" ? "Created" : "Modified"} <code>{item.path}</code></span>
+      </div>
     </div>
   );
 }
@@ -497,8 +512,10 @@ function FileRow({ item }: { item: FileActivity }) {
 function ErrorRow({ item }: { item: ErrorItem }) {
   return (
     <div className="activity error">
-      <span className="act-icon">✗</span>
-      <span className="act-label">{item.message}</span>
+      <div className="act-head">
+        <span className="act-icon">✗</span>
+        <span className="act-label">{item.message}</span>
+      </div>
     </div>
   );
 }
