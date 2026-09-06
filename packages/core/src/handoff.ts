@@ -143,6 +143,13 @@ export function buildAssistedHandoffContent(input: AssistedHandoffInput): Handof
  * Renders a handoff as a markdown briefing that becomes part of the next
  * Run's input instruction. The new harness creates its own new native
  * session — only semantics cross the boundary, never session state.
+ *
+ * When the handoff carries a pi-style compaction checkpoint
+ * (`content.compactionSummary`), it is embedded verbatim: the checkpoint
+ * is already the exact context summary pi's compaction would inject
+ * into a compacted session, so re-rendering it section-by-section would
+ * only lose fidelity. Structured fields are rendered otherwise
+ * (harness-generated and heuristic fallback handoffs).
  */
 export function renderHandoffPrompt(handoff: Handoff, instruction: string): string {
   const c = handoff.content;
@@ -153,25 +160,30 @@ export function renderHandoffPrompt(handoff: Handoff, instruction: string): stri
     ``,
     `# Handoff from ${handoff.fromRuntimeName ?? handoff.fromRuntimeKind ?? "previous agent"} (run ${handoff.fromRunId})`,
   ];
-  const section = (title: string, value: string | string[] | undefined) => {
-    if (value === undefined) return;
-    lines.push("", `## ${title}`);
-    if (Array.isArray(value)) value.forEach((v) => lines.push(`- ${v}`));
-    else lines.push(value);
-  };
-  section("Original task", c.originalTask);
-  section("Current objective", c.currentObjective);
-  section("Progress summary", c.progressSummary);
-  section("Completed work", c.completedWork);
-  section("Remaining work", c.remainingWork);
-  section("Important decisions", c.importantDecisions);
-  section("User constraints", c.userConstraints);
-  section("Relevant files", c.relevantFiles);
-  section("Workspace status", c.workspaceStatus);
-  section("Artifacts", c.artifacts);
-  section("Test / build status", c.testBuildStatus);
-  section("Previous run result", c.previousRunResult);
-  section("Notes for you", c.notesForNextAgent);
+
+  if (c.compactionSummary) {
+    lines.push("", "## Context checkpoint (pi-style compaction summary)", "", c.compactionSummary);
+  } else {
+    const section = (title: string, value: string | string[] | undefined) => {
+      if (value === undefined) return;
+      lines.push("", `## ${title}`);
+      if (Array.isArray(value)) value.forEach((v) => lines.push(`- ${v}`));
+      else lines.push(value);
+    };
+    section("Original task", c.originalTask);
+    section("Current objective", c.currentObjective);
+    section("Progress summary", c.progressSummary);
+    section("Completed work", c.completedWork);
+    section("Remaining work", c.remainingWork);
+    section("Important decisions", c.importantDecisions);
+    section("User constraints", c.userConstraints);
+    section("Relevant files", c.relevantFiles);
+    section("Workspace status", c.workspaceStatus);
+    section("Artifacts", c.artifacts);
+    section("Test / build status", c.testBuildStatus);
+    section("Previous run result", c.previousRunResult);
+    section("Notes for you", c.notesForNextAgent);
+  }
   if (handoff.userNotes) {
     lines.push("", `## Notes from the user`, handoff.userNotes);
   }

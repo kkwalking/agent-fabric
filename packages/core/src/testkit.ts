@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { Store } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { RuntimeRegistry } from "./runtime.js";
-import { RunService } from "./orchestrator.js";
+import { RunService, type CompletionFactory } from "./orchestrator.js";
 import {
   NativeStateService,
   RuntimeService,
@@ -97,7 +97,7 @@ export interface Harness {
   nativeStates: NativeStateService;
 }
 
-export async function freshHarness(): Promise<Harness> {
+export async function freshHarness(opts?: { completionFactory?: CompletionFactory }): Promise<Harness> {
   const store = await Store.open(mkdtempSync(join(tmpdir(), "af-test-")));
   const bus = new EventBus();
   const registry = new RuntimeRegistry();
@@ -107,7 +107,13 @@ export async function freshHarness(): Promise<Harness> {
   await seedDefaults(store);
   // Real docker ops (routed at the fake docker binary by useBins) so
   // keep-alive abort destroys are observable in the docker call log.
-  const runService = new RunService(store, bus, registry, createDockerContainerOps());
+  const runService = new RunService(
+    store,
+    bus,
+    registry,
+    createDockerContainerOps(),
+    opts?.completionFactory
+  );
   return {
     store,
     runService,
