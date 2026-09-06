@@ -66,6 +66,9 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
     cwd: backend.type === "docker" ? (opts.workspaceContainerPath ?? "/") : cwd,
     backend: backend.type,
     source: opts.source,
+    // Marks the launch command — the thread view surfaces it on the turn
+    // header instead of as an activity row.
+    harnessInvocation: true,
   });
 
   let proc;

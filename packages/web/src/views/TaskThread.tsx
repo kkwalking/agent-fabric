@@ -3,6 +3,7 @@ import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTokens } from ".
 import { ErrorBox, Icon, StatusBadge, useAsync } from "../components";
 import { Markdown } from "../markdown";
 import {
+  findHarnessCommand,
   projectTimeline,
   type AgentMessageItem,
   type CommandActivity,
@@ -264,6 +265,15 @@ function TurnView({
     [turn.events, live]
   );
   const userPrompt = displayUserPrompt(run, task);
+  const harnessCommand = useMemo(() => findHarnessCommand(turn.events), [turn.events]);
+  // The newest thinking row is the one still being produced (live runs):
+  // it alone spins; every earlier row is finished reasoning and shows ◍.
+  const latestThinkingKey = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].kind === "thinking") return items[i].key;
+    }
+    return undefined;
+  }, [items]);
 
   return (
     <article className="turn">
@@ -279,7 +289,15 @@ function TurnView({
 
       {/* Agent turn */}
       <div className="agent-turn">
-        <div className="agent-name" title={run.runtimeName ?? "agent"}>{run.runtimeName ?? "Agent"}</div>
+        <div className="agent-name" title={run.runtimeName ?? "agent"}>
+          {live && <span className="spinner" title="Run in progress" />}
+          <span className="agent-badge">{run.runtimeName ?? "Agent"}</span>
+          {harnessCommand && (
+            <code className="harness-cmd" title={`Launch command · ${harnessCommand.command}`}>
+              {harnessCommand.command}
+            </code>
+          )}
+        </div>
         <div className="agent-body">
           {/* Lightweight resume status (v5 §19) */}
           {run.continuity === "resume" && (
@@ -289,7 +307,12 @@ function TurnView({
           {items.length === 0 && live && <div className="live-row"><span className="spinner" /> Starting…</div>}
 
           {items.map((item) => (
-            <ActivityRow key={item.key} item={item} live={live} />
+            <ActivityRow
+              key={item.key}
+              item={item}
+              live={live}
+              thinkingActive={live && item.kind === "thinking" && item.key === latestThinkingKey}
+            />
           ))}
 
           {live && items.length > 0 && (
@@ -405,13 +428,21 @@ function HandoffBanner({ handoff }: { handoff: any }) {
 /* Activity rows — readable, collapsed by default (v5 §7/§8/§9/§10)    */
 /* ================================================================== */
 
-function ActivityRow({ item, live }: { item: TimelineItem; live: boolean }) {
+function ActivityRow({
+  item,
+  live,
+  thinkingActive,
+}: {
+  item: TimelineItem;
+  live: boolean;
+  thinkingActive: boolean;
+}) {
   const [open, setOpen] = useState(false);
   switch (item.kind) {
     case "agent-message":
       return <AgentMessage item={item} />;
     case "thinking":
-      return <ThinkingRow item={item} live={live} />;
+      return <ThinkingRow item={item} active={thinkingActive} />;
     case "tool":
       return <ToolRow item={item} open={open} onToggle={() => setOpen(!open)} />;
     case "command":
@@ -435,12 +466,16 @@ function AgentMessage({ item }: { item: AgentMessageItem }) {
   );
 }
 
-function ThinkingRow({ item, live }: { item: ThinkingItem; live: boolean }) {
+/**
+ * One row per thinking block. `active` marks the block still being
+ * produced on a live run — it alone spins; finished blocks show ◍.
+ */
+function ThinkingRow({ item, active }: { item: ThinkingItem; active: boolean }) {
   const [open, setOpen] = useState(false);
   return (
     <div className={`activity thinking${item.content ? " clickable" : ""}`} onClick={() => item.content && setOpen(!open)}>
       <div className="act-head">
-        <span className="act-icon">{live ? <span className="spinner" /> : "◍"}</span>
+        <span className="act-icon">{active ? <span className="spinner" /> : "◍"}</span>
         <span className="act-label">Thinking…</span>
         {item.content && <span className="act-detail-hint">{open ? "hide" : "reasoning"}</span>}
       </div>
@@ -576,6 +611,7 @@ function Composer({
   live,
   liveRunId,
   defaultModelId,
+  previousRuntimeId,
   promptRef,
   runtimeRef,
   onStop,
@@ -585,6 +621,7 @@ function Composer({
   live: boolean;
   liveRunId?: string;
   defaultModelId?: string;
+  previousRuntimeId?: string;
   promptRef: React.RefObject<HTMLTextAreaElement>;
   runtimeRef: React.RefObject<HTMLSelectElement>;
   onStop: (runId: string) => void;

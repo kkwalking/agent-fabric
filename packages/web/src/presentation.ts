@@ -10,6 +10,9 @@
  *   instead (v5 §19).
  * - tool.started + tool.completed merge into ONE ToolActivity.
  * - shell.command + shell.output merge into ONE CommandActivity.
+ * - The harness invocation (the `pi --print …` launch command, the run's
+ *   first shell.command) is not an activity row — the turn header shows it
+ *   inline (see findHarnessCommand).
  * - Harness echoes of the input instruction (agent.message role=user /
  *   role=system) are swallowed — the thread shows `run.userPrompt`, never
  *   the stitched harness prompt (v5 §4/§5).
@@ -179,6 +182,32 @@ function eventText(data: Record<string, unknown> | undefined): string {
   return String(data?.content ?? data?.text ?? data?.message ?? data?.line ?? "");
 }
 
+/** The harness launch command (`pi --print …`), shown inline on the turn header. */
+export interface HarnessCommandInfo {
+  command: string;
+  cwd?: string;
+  backend?: string;
+}
+
+/**
+ * The execution loop emits exactly one launch `shell.command` per run,
+ * before the harness process starts — it is always the run's first
+ * shell.command event (explicitly tagged `harnessInvocation` on runs
+ * recorded after that flag was introduced).
+ */
+export function findHarnessCommand(events: RawEvent[]): HarnessCommandInfo | undefined {
+  for (const e of events) {
+    if (e.type !== "shell.command") continue;
+    const data = e.data ?? {};
+    return {
+      command: String(data.command ?? "(command)"),
+      cwd: typeof data.cwd === "string" ? data.cwd : undefined,
+      backend: typeof data.backend === "string" ? data.backend : undefined,
+    };
+  }
+  return undefined;
+}
+
 /**
  * Projects one run's events into timeline items (v5 §25 merging rules).
  * The input must be sorted by seq. `live` marks whether the run is still
@@ -190,6 +219,12 @@ export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {
   const filesByPath = new Map<string, FileActivity>();
   let keySeq = 0;
   const nextKey = (p: string) => `${p}-${++keySeq}`;
+
+  // The harness launch command rides the turn header, not the activity
+  // list. It is always the run's first shell.command event (the execution
+  // loop emits it before spawning the harness; newer runs also tag it
+  // explicitly with harnessInvocation).
+  const harnessEventId = events.find((e) => e.type === "shell.command")?.id;
 
   const findTool = (data: Record<string, unknown> | undefined, tool: string): ToolActivity | undefined => {
     const callId = data?.toolCallId ?? data?.callID;
@@ -279,6 +314,8 @@ export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {
       }
 
       case "shell.command": {
+        // The launch command is rendered on the turn header (findHarnessCommand).
+        if (e.id === harnessEventId) break;
         items.push({
           kind: "command",
           key: e.id ?? nextKey("cmd"),
