@@ -255,6 +255,8 @@ export class RunService {
   private controllers = new Map<string, { controller: AbortController; reason: "cancel" | "timeout" | "policy" }>();
   private active = new Map<string, Promise<void>>();
   private leaseManager: ContainerLeaseManager;
+  /** In-flight handoff generations keyed by the previous run, so the UI pre-generate and a racing continue share one result. */
+  private handoffGenerations = new Map<string, Promise<Handoff>>();
 
   constructor(
     private store: Store,
@@ -776,32 +778,15 @@ export class RunService {
       previousRun.generatedHandoffId != null ? handoffService.get(previousRun.generatedHandoffId) : undefined;
 
     if (!handoff) {
-      const artifacts = this.artifactService().list(previousRun.id);
-      const generated = await this.generateHandoffContent(task, previousRun, previousRuntime, artifacts);
-      handoff = await handoffService.create({
-        taskId: task.id,
-        fromRunId: previousRun.id,
-        fromRuntimeId: previousRuntime?.id,
-        fromRuntimeName: previousRuntime?.name,
-        fromRuntimeKind: previousRuntime?.kind,
-        toRuntimeId: target.id,
-        toRuntimeName: target.name,
-        toRuntimeKind: target.kind,
-        source: "agentfabric",
-        content: generated.content,
-        workspaceId: previousRun.workspaceId,
-        artifactIds: artifacts.map((a) => a.id),
-      });
-      await this.emitRunEvent(previousRun.id, "handoff.generated", {
-        handoffId: handoff.id,
-        source: "agentfabric",
-        method: generated.method,
-        ...(generated.detail ? { detail: generated.detail } : {}),
-        toRuntime: target.name,
-      });
-      if (!previousRun.generatedHandoffId) {
-        await this.store.update<Run>("runs", previousRun.id, { generatedHandoffId: handoff.id, updatedAt: now() });
+      // Concurrent callers (UI pre-generate + a racing continue) share one
+      // generation so only one summary is produced and one record stored.
+      let pending = this.handoffGenerations.get(previousRun.id);
+      if (!pending) {
+        pending = this.generateAndStoreHandoff(task, previousRun, previousRuntime, target);
+        this.handoffGenerations.set(previousRun.id, pending);
+        pending.catch(() => {}).finally(() => this.handoffGenerations.delete(previousRun.id));
       }
+      handoff = await pending;
     }
 
     if (input.userNotes?.trim()) {
@@ -815,6 +800,62 @@ export class RunService {
       toRuntimeKind: target.kind,
     })) ?? handoff;
     return handoff;
+  }
+
+  /** Generate the summary, store it as the previous run's legacy record, and announce it. */
+  private async generateAndStoreHandoff(
+    task: Task,
+    previousRun: Run,
+    previousRuntime: Runtime | undefined,
+    target: Runtime
+  ): Promise<Handoff> {
+    const handoffService = this.handoffService();
+    const artifacts = this.artifactService().list(previousRun.id);
+    const generated = await this.generateHandoffContent(task, previousRun, previousRuntime, artifacts);
+    const handoff = await handoffService.create({
+      taskId: task.id,
+      fromRunId: previousRun.id,
+      fromRuntimeId: previousRuntime?.id,
+      fromRuntimeName: previousRuntime?.name,
+      fromRuntimeKind: previousRuntime?.kind,
+      toRuntimeId: target.id,
+      toRuntimeName: target.name,
+      toRuntimeKind: target.kind,
+      source: "agentfabric",
+      content: generated.content,
+      workspaceId: previousRun.workspaceId,
+      artifactIds: artifacts.map((a) => a.id),
+    });
+    await this.emitRunEvent(previousRun.id, "handoff.generated", {
+      handoffId: handoff.id,
+      source: "agentfabric",
+      method: generated.method,
+      ...(generated.detail ? { detail: generated.detail } : {}),
+      toRuntime: target.name,
+    });
+    if (!previousRun.generatedHandoffId) {
+      await this.store.update<Run>("runs", previousRun.id, { generatedHandoffId: handoff.id, updatedAt: now() });
+    }
+    return handoff;
+  }
+
+  /**
+   * Pre-generate the task's handoff toward a target runtime without starting
+   * a run (used when the UI confirms a harness switch). The next continue
+   * reuses it through the previous run's generatedHandoffId instead of
+   * regenerating; if a generation is already running it is awaited, not doubled.
+   */
+  async generateHandoff(taskId: ID, runtimeId?: ID): Promise<Handoff> {
+    const task = this.taskService().get(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+    const previousRuns = this.forTask(taskId);
+    const previousRun = previousRuns[previousRuns.length - 1];
+    if (!previousRun) throw new Error(`No run to hand off from for task: ${taskId}`);
+    const previousRuntime = previousRun.runtimeId ? this.runtimeService().get(previousRun.runtimeId) : undefined;
+    const target = await this.pickTargetRuntime(task, runtimeId);
+    // prompt is unused on this path: a previous run always exists, so only
+    // userNotes/title are read by prepareHandoff.
+    return this.prepareHandoff(task, previousRun, previousRuntime, target, { prompt: "" });
   }
 
   /**

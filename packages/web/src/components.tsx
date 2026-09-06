@@ -240,6 +240,36 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
+/**
+ * Minimal confirmation dialog. Clicking the overlay or pressing Escape
+ * counts as cancel — callers just close without committing.
+ */
+export function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">{title}</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export function ErrorBox({ message }: { message: string | null }) {
   if (!message) return null;
   return <div className="card" style={{ borderColor: "var(--red)", color: "var(--red)" }}>Error: {message}</div>;

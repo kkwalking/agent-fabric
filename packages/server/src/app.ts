@@ -353,6 +353,18 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     }
   });
 
+  // Pre-generate the task's handoff toward a runtime without starting a run
+  // (the UI fires this when the user confirms a harness switch). The next
+  // continue reuses the stored summary instead of regenerating it.
+  app.post("/api/tasks/:id/handoff", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as { runtimeId?: string };
+      ok(res, await runs.generateHandoff(req.params.id, body.runtimeId), 201);
+    } catch (e) {
+      fail(res, e, 404);
+    }
+  });
+
   /* ---------------- runs ---------------- */
 
   app.get("/api/runs", (_req, res) => ok(res, runs.list()));
