@@ -5,7 +5,7 @@
  *
  * - §5: `run.userPrompt` is the bare user input; `run.inputInstruction`
  *   stays the complete execution instruction (handoff context included).
- * - submit / resume / handoff / rerun all record the correct userPrompt.
+ * - submit / resume / handoff all record the correct userPrompt.
  * - The Task Thread never has to show the rendered handoff prompt as a
  *   User Message (§4/§21), and the Run Inspector still can (§12).
  */
@@ -68,19 +68,4 @@ test("handoff continuation separates userPrompt from the rendered handoff instru
   assert.match(result.run.inputInstruction!, /换一个思路继续/);
   const finished = await waitForRun(h.runService, result.run.id);
   assert.equal(finished.userPrompt, "换一个思路继续");
-});
-
-test("rerun records the original user prompt as userPrompt (v5 §5)", async () => {
-  const h = await freshHarness();
-  const mock = mockRuntimeOf(h);
-  const first = await h.runService.submit({ prompt: "介绍一下当前项目", runtimeId: mock.id });
-  const finished = await waitForRun(h.runService, first.run.id);
-  assert.equal(finished.status, "completed");
-
-  const again = await h.runService.rerun(finished.id);
-  assert.equal(again.run.userPrompt, "介绍一下当前项目");
-  assert.equal(again.run.inputInstruction, "介绍一下当前项目");
-  assert.notEqual(again.run.id, finished.id, "rerun creates a fresh run on the same task");
-  const done = await waitForRun(h.runService, again.run.id);
-  assert.equal(done.status, "completed");
 });

@@ -455,7 +455,7 @@ test("effective capabilities merge adapter declaration with runtime overrides", 
 /* Per-run lifecycle overrides & keep-alive recovery wiring            */
 /* ------------------------------------------------------------------ */
 
-test("submit and rerun honor per-run lifecycle overrides (spec v1 §1)", async () => {
+test("submit honors per-run lifecycle overrides (spec v1 §1)", async () => {
   const h = await freshHarness();
   const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
   const { run } = await h.runService.submit({
@@ -467,11 +467,6 @@ test("submit and rerun honor per-run lifecycle overrides (spec v1 §1)", async (
   const stored = h.runService.get(run.id)!;
   assert.equal(stored.lifecycle?.mode, "keep-alive");
   assert.equal(stored.lifecycle?.idleTimeoutMs, 4321);
-
-  // rerun keeps the same lifecycle policy.
-  const rerun = await h.runService.rerun(run.id);
-  assert.equal(rerun.run.lifecycle?.mode, "keep-alive");
-  await waitForRun(h.runService, rerun.run.id);
 });
 
 test("keep-alive containers are re-armed from docker labels after a restart", async () => {

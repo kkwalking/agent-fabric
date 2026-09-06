@@ -6,7 +6,7 @@ import { navigate } from "../router";
 /**
  * Runs (v5 §33): the operations / run-history view. Users create Tasks,
  * not Runs — creation lives in New task; this page lists every execution
- * for inspection and operations (cancel / rerun / open inspector).
+ * for inspection and operations (cancel / open inspector).
  */
 export function RunsView() {
   const { data, error, loading, reload } = useAsync<any[]>(() => get("/api/runs"), []);
@@ -41,9 +41,6 @@ export function RunsView() {
                   <td>
                     {["pending", "starting", "running"].includes(r.status) && (
                       <button className="small danger" onClick={async () => { await post(`/api/runs/${r.id}/cancel`); reload(); }}>cancel</button>
-                    )}{" "}
-                    {["completed", "failed", "cancelled", "timeout"].includes(r.status) && (
-                      <button className="small" onClick={async () => { await post(`/api/runs/${r.id}/rerun`); reload(); }}>rerun</button>
                     )}
                   </td>
                 </tr>

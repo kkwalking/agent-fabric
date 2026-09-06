@@ -384,13 +384,6 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const r = await runs.cancel(req.params.id);
     r ? ok(res, r) : fail(res, new Error("Run not found"), 404);
   });
-  app.post("/api/runs/:id/rerun", async (req, res) => {
-    try {
-      ok(res, await runs.rerun(req.params.id), 201);
-    } catch (e) {
-      fail(res, e, 404);
-    }
-  });
   app.get("/api/runs/:id/events", (req, res) => ok(res, runs.events(req.params.id)));
   app.get("/api/runs/:id/logs", (req, res) => {
     res.type("text/plain").send(runs.logs(req.params.id).join("\n"));

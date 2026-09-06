@@ -535,30 +535,6 @@ export class RunService {
     };
   }
 
-  /** Re-run a finished run by cloning its task. */
-  async rerun(runId: string): Promise<SubmitResult> {
-    const run = this.get(runId);
-    if (!run) throw new Error(`Run not found: ${runId}`);
-    const task = this.taskService().get(run.taskId);
-    if (!task) throw new Error(`Task not found: ${run.taskId}`);
-    return this.submit({
-      prompt: task.prompt,
-      title: task.title,
-      runtimeId: task.runtimeId,
-      modelId: task.modelId,
-      workspaceId: task.workspaceId,
-      profileId: task.profileId,
-      env: task.env,
-      secretIds: task.secretIds,
-      tools: task.tools,
-      resourceLimits: task.resourceLimits,
-      timeoutMs: task.timeoutMs,
-      policy: task.policy,
-      lifecycle: run.lifecycle,
-      metadata: task.metadata,
-    });
-  }
-
   async cancel(runId: string): Promise<Run | undefined> {
     const run = this.get(runId);
     if (!run) return undefined;

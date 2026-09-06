@@ -253,7 +253,6 @@ af runs list
 af runs show <run-id> --follow
 af runs logs <run-id>
 af runs cancel <run-id>
-af runs rerun <run-id>
 af artifacts list --run <run-id>
 af artifacts get <artifact-id> --output report.md
 af usage  # 或 af config / af secrets / af tasks
@@ -272,7 +271,7 @@ af usage  # 或 af config / af secrets / af tasks
 | GET/POST | `/api/tasks` | Task |
 | POST | `/api/runs` | 提交 Task 并创建 Run（异步执行） |
 | GET | `/api/runs` `/api/runs/:id` | 查询 Run |
-| POST | `/api/runs/:id/cancel` `/rerun` | 取消 / 重跑 |
+| POST | `/api/runs/:id/cancel` | 取消 |
 | GET | `/api/runs/:id/events` `/logs` | 事件 / 日志 |
 | GET | `/api/runs/:id/events/stream` | **SSE**：单 Run 实时事件流 |
 | GET | `/api/events/stream` | **SSE**：全局事件流 |

@@ -192,11 +192,6 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
     bump();
   };
 
-  const retryRun = async (runId: string) => {
-    await post(`/api/runs/${runId}/rerun`).catch(() => {});
-    bump();
-  };
-
   return (
     <div className="task-thread">
       {/* ---------- Thread header (v5 §3/§22/§23) ---------- */}
@@ -232,7 +227,6 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               key={turn.run.id}
               turn={turn}
               task={thread.task}
-              onRetry={retryRun}
               onContinue={focusComposer}
               onSwitchRuntime={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}
               onStop={stopRun}
@@ -296,14 +290,12 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
 function TurnView({
   turn,
   task,
-  onRetry,
   onContinue,
   onSwitchRuntime,
   onStop,
 }: {
   turn: ThreadTurn;
   task: any;
-  onRetry: (runId: string) => void;
   onContinue: () => void;
   onSwitchRuntime: () => void;
   onStop: (runId: string) => void;
@@ -376,7 +368,6 @@ function TurnView({
               <div className="fail-title">Agent run failed{run.status === "timeout" ? " (timeout)" : ""}</div>
               {run.error && <div className="fail-reason">{run.error}</div>}
               <div className="row fail-actions">
-                <button className="small primary" onClick={() => onRetry(run.id)}>Retry</button>
                 <button className="small" onClick={onContinue}>Continue</button>
                 <button className="small" onClick={onSwitchRuntime}>Switch runtime</button>
                 <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>View run</button>

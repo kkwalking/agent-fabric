@@ -631,7 +631,7 @@ function buildProgram(): Command {
   program
     .command("runs")
     .description("manage runs")
-    .argument("<action>", "list | show | cancel | rerun | logs | events")
+    .argument("<action>", "list | show | cancel | logs | events")
     .argument("[id]", "run id")
     .option("--follow", "stream events live (for show)")
     .action(async (action: string, id: string | undefined, _opts: unknown, cmd: Command) => {
@@ -665,11 +665,6 @@ function buildProgram(): Command {
       if (action === "cancel") {
         const r = await c.post<unknown>(`/api/runs/${id}/cancel`);
         console.log(json(cmd) ? pretty(r) : `run ${id} -> ${(r as { status: string }).status}`);
-        return;
-      }
-      if (action === "rerun") {
-        const r = await c.post<unknown>(`/api/runs/${id}/rerun`);
-        console.log(json(cmd) ? pretty(r) : `re-run created: ${(r as { run: { id: string } }).run.id}`);
         return;
       }
       if (action === "logs") {
