@@ -266,13 +266,14 @@ function TurnView({
   );
   const userPrompt = displayUserPrompt(run, task);
   const harnessCommand = useMemo(() => findHarnessCommand(turn.events), [turn.events]);
-  // The newest thinking row is the one still being produced (live runs):
-  // it alone spins; every earlier row is finished reasoning and shows ◍.
-  const latestThinkingKey = useMemo(() => {
-    for (let i = items.length - 1; i >= 0; i--) {
-      if (items[i].kind === "thinking") return items[i].key;
-    }
-    return undefined;
+  // A thinking row spins only while it is still the timeline's last item.
+  // Both harnesses emit agent.thinking post-hoc (pi at message_end,
+  // opencode with the step parts), so the row is a finished record the
+  // moment anything lands after it — spinning it there would claim the
+  // agent is reasoning while later tool calls already completed.
+  const activeThinkingKey = useMemo(() => {
+    const last = items[items.length - 1];
+    return last?.kind === "thinking" ? last.key : undefined;
   }, [items]);
 
   return (
@@ -311,7 +312,7 @@ function TurnView({
               key={item.key}
               item={item}
               live={live}
-              thinkingActive={live && item.kind === "thinking" && item.key === latestThinkingKey}
+              thinkingActive={live && item.kind === "thinking" && item.key === activeThinkingKey}
             />
           ))}
 
@@ -467,8 +468,9 @@ function AgentMessage({ item }: { item: AgentMessageItem }) {
 }
 
 /**
- * One row per thinking block. `active` marks the block still being
- * produced on a live run — it alone spins; finished blocks show ◍.
+ * One row per thinking block. `active` marks the newest block on a live
+ * run that nothing has followed yet — it alone spins; every earlier block
+ * is finished reasoning and shows ◍.
  */
 function ThinkingRow({ item, active }: { item: ThinkingItem; active: boolean }) {
   const [open, setOpen] = useState(false);
