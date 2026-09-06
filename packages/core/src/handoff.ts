@@ -144,12 +144,18 @@ export function buildAssistedHandoffContent(input: AssistedHandoffInput): Handof
  * Run's input instruction. The new harness creates its own new native
  * session — only semantics cross the boundary, never session state.
  *
+ * The workspace section is always rendered (both render paths): the
+ * next agent starts with the workspace as its working directory and the
+ * checkpoint's file references are relative to it, so the workspace
+ * identity is load-bearing and must never depend on the previous
+ * agent's summary mentioning it.
+ *
  * When the handoff carries a pi-style compaction checkpoint
  * (`content.compactionSummary`), it is embedded verbatim: the checkpoint
  * is already the exact context summary pi's compaction would inject
  * into a compacted session, so re-rendering it section-by-section would
- * only lose fidelity. Structured fields are rendered otherwise
- * (harness-generated and heuristic fallback handoffs).
+ * only lose fidelity. The remaining structured fields are rendered
+ * otherwise (harness-generated and heuristic fallback handoffs).
  */
 export function renderHandoffPrompt(handoff: Handoff, instruction: string): string {
   const c = handoff.content;
@@ -157,6 +163,10 @@ export function renderHandoffPrompt(handoff: Handoff, instruction: string): stri
     `You are continuing an existing task on a new agent harness (${handoff.toRuntimeName ?? "new runtime"}).`,
     `A previous agent (${handoff.fromRuntimeName ?? handoff.fromRuntimeKind ?? "previous runtime"}) already worked on it.`,
     `There is NO shared session between you and the previous agent — work from the handoff below and the shared workspace.`,
+    ``,
+    `# Workspace`,
+    c.workspaceStatus ?? "No workspace was attached to the previous run.",
+    `This shared workspace is your current working directory: every relative path in the handoff below refers to it. Do not assume another directory is the project.`,
     ``,
     `# Handoff from ${handoff.fromRuntimeName ?? handoff.fromRuntimeKind ?? "previous agent"} (run ${handoff.fromRunId})`,
   ];
@@ -178,7 +188,6 @@ export function renderHandoffPrompt(handoff: Handoff, instruction: string): stri
     section("Important decisions", c.importantDecisions);
     section("User constraints", c.userConstraints);
     section("Relevant files", c.relevantFiles);
-    section("Workspace status", c.workspaceStatus);
     section("Artifacts", c.artifacts);
     section("Test / build status", c.testBuildStatus);
     section("Previous run result", c.previousRunResult);

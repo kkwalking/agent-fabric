@@ -27,7 +27,7 @@ import {
   type CompletionRequest,
 } from "./compaction.js";
 import { renderHandoffPrompt } from "./handoff.js";
-import type { Handoff, Run, RunEvent, Task } from "./types.js";
+import type { Handoff, Run, RunEvent, Task, Workspace } from "./types.js";
 import { freshHarness, makeFixtures, useBins, waitForRun } from "./testkit.js";
 
 let seq = 0;
@@ -44,6 +44,13 @@ function ev(type: RunEvent["type"], data: Record<string, unknown>): RunEvent {
 
 const task = { id: "task_1", title: "Fix flaky login tests", prompt: "fix the three flaky tests in login.test.ts" } as Task;
 const run = { id: "run_1", status: "completed", runtimeName: "opencode", usage: { modelRequests: 2 } } as unknown as Run;
+const workspace = {
+  id: "ws_1",
+  name: "bruce-go",
+  type: "local",
+  path: "/Users/zhouzekun/code/bruce-go",
+  persistent: true,
+} as Workspace;
 
 const CHECKPOINT = `## Goal
 Fix the three flaky tests in packages/auth/tests/login.test.ts
@@ -157,6 +164,24 @@ test("serializeRunConversation accumulates shell output and truncates tool resul
   assert.equal(Number(resultMatch[2]), 1000);
 });
 
+test("serializeRunConversation excludes orchestrator log events (server-side noise)", () => {
+  const text = serializeRunConversation([
+    ev("agent.message", { role: "user", content: "fix the tests" }),
+    ev("log", {
+      line: "pi provider config injected: deepseek (models.json in /Users/zhouzekun/code/agent-fabric/packages/server/data/harness-state/rt_1)",
+      kind: "config-injected",
+    }),
+    ev("log", { line: "opencode ignores unsupported model parameters: temperature", kind: "config-warning" }),
+    ev("agent.message", { role: "assistant", content: "done" }),
+  ]);
+  // The transcript must not leak AgentFabric's own paths or config lines —
+  // the summarizer mistook them for the project identity.
+  assert.ok(!text.includes("agent-fabric"), "server-side paths must not reach the summary input");
+  assert.ok(!text.includes("config injected"), "orchestrator bookkeeping is not conversation");
+  assert.match(text, /\[User\]: fix the tests/);
+  assert.match(text, /\[Assistant\]: done/);
+});
+
 /* ------------------------------------------------------------------ */
 /* File operations (pi: compaction/utils.ts)                           */
 /* ------------------------------------------------------------------ */
@@ -221,6 +246,20 @@ test("buildSummarizationPrompt wraps conversation, previous summary and pi promp
   assert.ok(focused.endsWith("Additional focus: focus on the auth work"));
 });
 
+test("buildSummarizationPrompt states the workspace authoritatively (AgentFabric addition)", () => {
+  const withWs = buildSummarizationPrompt("CONV", "PREV", undefined, workspace);
+  const wsStart = withWs.indexOf("<workspace>");
+  const convEnd = withWs.indexOf("</conversation>");
+  const prevStart = withWs.indexOf("<previous-summary>");
+  // Order: conversation → workspace → previous summary → pi prompt.
+  assert.ok(wsStart > convEnd && wsStart < prevStart);
+  assert.match(withWs, /<workspace>\nWorkspace "bruce-go" \(local\) at \/Users\/zhouzekun\/code\/bruce-go\./);
+  assert.match(withWs, /it is the "current project" the user refers to\./);
+  // No workspace attached → no block, prompts stay pi-verbatim.
+  const withoutWs = buildSummarizationPrompt("CONV");
+  assert.ok(!withoutWs.includes("<workspace>"));
+});
+
 test("getSummarizationFailure reproduces pi's error/length guards", () => {
   assert.equal(
     getSummarizationFailure({ text: "x", stopReason: "error", errorMessage: "boom" }, "Summarization"),
@@ -249,6 +288,7 @@ test("generateCompactionHandoff produces a pi checkpoint mapped onto HandoffCont
       ev("tool.completed", { tool: "read", path: "a.ts" }),
     ],
     artifacts: [],
+    workspace,
     complete: fakeCompletion(CHECKPOINT, requests),
   });
 
@@ -256,6 +296,7 @@ test("generateCompactionHandoff produces a pi checkpoint mapped onto HandoffCont
   assert.equal(requests.length, 1);
   assert.equal(requests[0].systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
   assert.ok(requests[0].prompt.startsWith("<conversation>\n[User]: fix the tests"));
+  assert.ok(requests[0].prompt.includes('<workspace>\nWorkspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.'));
   assert.equal(requests[0].maxTokens, Math.floor(0.8 * DEFAULT_COMPACTION_SETTINGS.reserveTokens));
 
   // Summary = checkpoint + pi's file XML tags from tracked operations.
@@ -383,6 +424,7 @@ test("renderHandoffPrompt embeds the compaction checkpoint verbatim", () => {
     content: {
       compactionSummary: CHECKPOINT + "\n\n<modified-files>\nb.ts\n</modified-files>",
       originalTask: "#mapped (not rendered when a checkpoint exists)",
+      workspaceStatus: 'Workspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.',
     },
   } as unknown as Handoff;
   const rendered = renderHandoffPrompt(handoff, "continue");
@@ -391,6 +433,40 @@ test("renderHandoffPrompt embeds the compaction checkpoint verbatim", () => {
   assert.ok(rendered.includes("<modified-files>"));
   assert.ok(!rendered.includes("#mapped"), "mapped fields must not duplicate the checkpoint");
   assert.match(rendered, /# Your instruction\ncontinue/);
+});
+
+test("renderHandoffPrompt always states the workspace, even for checkpoints", () => {
+  const base = {
+    id: "hoff_1",
+    taskId: "task_1",
+    fromRunId: "run_1",
+    source: "agentfabric",
+    sources: ["agentfabric"],
+    artifactIds: [],
+    createdAt: new Date().toISOString(),
+  };
+  const checkpoint = renderHandoffPrompt(
+    {
+      ...base,
+      content: {
+        compactionSummary: CHECKPOINT,
+        workspaceStatus: 'Workspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.',
+      },
+    } as unknown as Handoff,
+    "continue"
+  );
+  // The workspace section precedes the checkpoint and anchors every
+  // relative path in it — the summarizer's own project naming is not
+  // authoritative.
+  assert.match(checkpoint, /# Workspace\nWorkspace "bruce-go" \(local\) at \/Users\/zhouzekun\/code\/bruce-go\./);
+  assert.match(checkpoint, /current working directory/);
+  assert.ok(checkpoint.indexOf("# Workspace") < checkpoint.indexOf("## Context checkpoint"));
+
+  const heuristic = renderHandoffPrompt(
+    { ...base, content: { originalTask: "task" } } as unknown as Handoff,
+    "continue"
+  );
+  assert.match(heuristic, /# Workspace\nNo workspace was attached to the previous run\./);
 });
 
 /* ------------------------------------------------------------------ */

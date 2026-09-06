@@ -26,9 +26,13 @@
  * whole run is summarized — exactly like pi's own handoff extension.
  * pi forwards the session's thinkingLevel on reasoning models; the
  * standalone completion client here does not (AgentFabric models carry
- * no thinking-level configuration). And where a failed compaction fails
- * the pi session, callers here fall back to the heuristic generator so
- * a handoff always exists.
+ * no thinking-level configuration). The summarizer prompt also gains
+ * an authoritative <workspace> block pi does not need: pi summarizes
+ * within the session's own working directory, while an AgentFabric
+ * handoff crosses harnesses — the workspace identity must be stated,
+ * never re-inferred from transcript residue. And where a failed
+ * compaction fails the pi session, callers here fall back to the
+ * heuristic generator so a handoff always exists.
  */
 import type {
   Artifact,
@@ -205,7 +209,12 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *
  * RunEvents are the flat event log, so adjacent `shell.output` lines are
  * accumulated into a single tool-result part (the harness emitted them
- * as one command's output). A `tool.started` renders its call and the
+ * as one command's output). Orchestrator `log` events are excluded:
+ * they are AgentFabric's own bookkeeping (config injection, policy
+ * warnings, harness stderr), not the agent's conversation — folding
+ * them in leaked server-side absolute paths into the summary input,
+ * which the summarizer then mistook for the project identity. A
+ * `tool.started` renders its call and the
  * matching `tool.completed` closes it with the result only, so one tool
  * call serializes once — like pi's toolCall blocks. Consecutive tool
  * calls join with `; ` and consecutive thinking parts with `\n`, the way
@@ -288,8 +297,7 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
         if (command) parts.push({ kind: "toolCalls", text: formatToolCall("bash", { command }) });
         break;
       }
-      case "shell.output":
-      case "log": {
+      case "shell.output": {
         const line = eventText(e, ["line", "message"]);
         if (line) pendingShellOutput.push(line);
         break;
@@ -722,14 +730,33 @@ export async function retryCompletion(
 /* ------------------------------------------------------------------ */
 
 /**
+ * Authoritative workspace statement for the summarizer (AgentFabric
+ * addition — pi has no counterpart). Without it the summarizer fills
+ * the "current project" from transcript residue (harness config lines,
+ * incidental absolute paths) and can name the wrong project.
+ */
+export function formatWorkspaceBlock(workspace: Workspace): string {
+  const where = workspace.path ?? workspace.repoUrl ?? "unknown location";
+  return (
+    `<workspace>\n` +
+    `Workspace "${workspace.name}" (${workspace.type}) at ${where}.\n` +
+    `The conversation took place inside this directory — it is the "current project" the user refers to. ` +
+    `Relative file paths in the transcript resolve against it; do not infer the project from incidental absolute paths in harness output.\n` +
+    `</workspace>`
+  );
+}
+
+/**
  * Build the summarization user prompt: conversation wrapped in tags,
- * optional previous summary, then the base prompt (pi: verbatim
- * structure). Exposed for tests and preview tooling.
+ * the authoritative workspace block, optional previous summary, then
+ * the base prompt (pi: verbatim structure, plus the workspace block).
+ * Exposed for tests and preview tooling.
  */
 export function buildSummarizationPrompt(
   conversationText: string,
   previousSummary?: string,
-  customInstructions?: string
+  customInstructions?: string,
+  workspace?: Workspace
 ): string {
   let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
   if (customInstructions) {
@@ -737,6 +764,9 @@ export function buildSummarizationPrompt(
   }
 
   let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+  if (workspace) {
+    promptText += `${formatWorkspaceBlock(workspace)}\n\n`;
+  }
   if (previousSummary) {
     promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
   }
@@ -800,7 +830,7 @@ export async function generateCompactionHandoff(input: CompactionHandoffInput): 
   const maxTokens = Math.floor(0.8 * settings.reserveTokens); // pi: floor(0.8 × reserveTokens)
 
   const conversationText = serializeRunConversation(events, task);
-  const prompt = buildSummarizationPrompt(conversationText, input.previousSummary, input.customInstructions);
+  const prompt = buildSummarizationPrompt(conversationText, input.previousSummary, input.customInstructions, workspace);
 
   const response = await retryCompletion(
     () =>
