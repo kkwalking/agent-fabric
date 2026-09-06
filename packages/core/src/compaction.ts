@@ -5,21 +5,30 @@
  * Pi's compaction summarizes a conversation with an LLM into a
  * structured context checkpoint, supports iterative updates on top of a
  * previous summary, tracks file operations from tool calls and appends
- * them to the summary as XML tags. AgentFabric reuses that exact
- * pipeline — prompts, serialization format, token budgets and failure
- * checks are kept verbatim — to generate handoff content between runs:
+ * them to the summary as XML tags, and retries transient summarization
+ * failures with exponential backoff (pi-ai retryAssistantCall +
+ * settings.retry defaults). AgentFabric reuses that exact pipeline —
+ * prompts, serialization format, token budgets, file-list accumulation,
+ * retry policy and failure checks are kept verbatim — to generate
+ * handoff content between runs:
  *
  *   RunEvents → serializeConversation → <conversation>…</conversation>
  *             → (+ <previous-summary> from the previous handoff in the
  *                task's run chain, for pi's iterative update flow)
  *             → SUMMARIZATION_PROMPT / UPDATE_SUMMARIZATION_PROMPT
- *             → LLM → structured checkpoint + <read-files>/<modified-files>
+ *             → LLM (retried on transient errors) → structured
+ *               checkpoint + <read-files>/<modified-files>
  *             → HandoffContent
  *
- * One deliberate difference from in-session compaction: pi's cut-point
+ * Deliberate differences from in-session compaction: pi's cut-point
  * logic (keepRecentTokens) selects what to keep in the SAME session; a
  * handoff starts a NEW native session where nothing is kept, so the
  * whole run is summarized — exactly like pi's own handoff extension.
+ * pi forwards the session's thinkingLevel on reasoning models; the
+ * standalone completion client here does not (AgentFabric models carry
+ * no thinking-level configuration). And where a failed compaction fails
+ * the pi session, callers here fall back to the heuristic generator so
+ * a handoff always exists.
  */
 import type {
   Artifact,
@@ -169,6 +178,22 @@ function formatToolCall(name: string, args: Record<string, unknown>): string {
   return `${name}(${argsStr})`;
 }
 
+/**
+ * Extract a tool event's arguments: the full input object when present
+ * (`input` for OpenCode-style events, `args` for pi runtime events),
+ * else the common scalar keys off the event itself.
+ */
+function toolArgs(e: RunEvent): Record<string, unknown> {
+  if (isObj(e.data?.input)) return e.data!.input as Record<string, unknown>;
+  if (isObj(e.data?.args)) return e.data!.args as Record<string, unknown>;
+  if (e.data?.path !== undefined || e.data?.command !== undefined) {
+    return Object.fromEntries(
+      Object.entries(e.data!).filter(([k]) => ["path", "command", "pattern", "query"].includes(k))
+    );
+  }
+  return {};
+}
+
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
@@ -180,8 +205,12 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *
  * RunEvents are the flat event log, so adjacent `shell.output` lines are
  * accumulated into a single tool-result part (the harness emitted them
- * as one command's output). Tool results are truncated to
- * TOOL_RESULT_MAX_CHARS exactly like pi.
+ * as one command's output). A `tool.started` renders its call and the
+ * matching `tool.completed` closes it with the result only, so one tool
+ * call serializes once — like pi's toolCall blocks. Consecutive tool
+ * calls join with `; ` and consecutive thinking parts with `\n`, the way
+ * pi renders them within one assistant message. Tool results are
+ * truncated to TOOL_RESULT_MAX_CHARS exactly like pi.
  */
 export function serializeRunConversation(events: RunEvent[], task?: Task): string {
   const parts: SerializedPart[] = [];
@@ -202,6 +231,14 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
       pendingShellOutput = [];
     }
   };
+
+  // toolCallId when the runtime provides one (pi runtime), else the tool
+  // name — enough to pair a completion with its started call.
+  const toolKey = (e: RunEvent, tool: string): string => {
+    const id = e.data?.toolCallId ?? e.data?.callID ?? e.data?.callId;
+    return typeof id === "string" && id ? `id:${id}` : `name:${tool}`;
+  };
+  const openToolStarts = new Set<string>();
 
   for (const e of events) {
     switch (e.type) {
@@ -226,18 +263,21 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
         if (content) parts.push({ kind: "thinking", text: content });
         break;
       }
-      case "tool.started":
+      case "tool.started": {
+        flushShell();
+        const tool = eventText(e, ["tool", "toolName"]) ?? "tool";
+        parts.push({ kind: "toolCalls", text: formatToolCall(tool, toolArgs(e)) });
+        openToolStarts.add(toolKey(e, tool));
+        break;
+      }
       case "tool.completed": {
         flushShell();
         const tool = eventText(e, ["tool", "toolName"]) ?? "tool";
-        const args: Record<string, unknown> = isObj(e.data?.input)
-          ? (e.data!.input as Record<string, unknown>)
-          : e.data?.path !== undefined || e.data?.command !== undefined
-            ? Object.fromEntries(
-                Object.entries(e.data!).filter(([k]) => ["path", "command", "pattern", "query"].includes(k))
-              )
-            : {};
-        parts.push({ kind: "toolCalls", text: formatToolCall(tool, args) });
+        if (!openToolStarts.delete(toolKey(e, tool)) && !openToolStarts.delete(`name:${tool}`)) {
+          // No matching start (e.g. OpenCode only reports terminal
+          // states): the completed event itself carries the call.
+          parts.push({ kind: "toolCalls", text: formatToolCall(tool, toolArgs(e)) });
+        }
         const result = eventText(e, ["output", "result", "error"]);
         if (result) parts.push({ kind: "toolResult", text: result });
         break;
@@ -260,7 +300,19 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
   }
   flushShell();
 
-  const rendered = parts.map((p) => {
+  // Coalesce runs of like parts the way pi renders one assistant
+  // message: thinking blocks join with newlines, tool calls with "; ".
+  const coalesced: SerializedPart[] = [];
+  for (const p of parts) {
+    const last = coalesced[coalesced.length - 1];
+    if (last && last.kind === p.kind && (p.kind === "toolCalls" || p.kind === "thinking")) {
+      last.text += (p.kind === "toolCalls" ? "; " : "\n") + p.text;
+    } else {
+      coalesced.push({ ...p });
+    }
+  }
+
+  const rendered = coalesced.map((p) => {
     switch (p.kind) {
       case "user":
         return `[User]: ${p.text}`;
@@ -297,13 +349,36 @@ const WRITE_TOOLS = new Set(["write", "write_file", "writefile"]);
 const EDIT_TOOLS = new Set(["edit", "edit_file", "apply_patch", "str_replace"]);
 
 /**
+ * Parse the appended XML file tags back out of a checkpoint. Pi tracks
+ * these as structured details on the compaction entry; AgentFabric
+ * stores them only inside the summary text.
+ */
+export function parseFileListTags(summary: string): { readFiles: string[]; modifiedFiles: string[] } {
+  const readMatch = /<read-files>\n([\s\S]*?)\n<\/read-files>/.exec(summary);
+  const modifiedMatch = /<modified-files>\n([\s\S]*?)\n<\/modified-files>/.exec(summary);
+  return {
+    readFiles: (readMatch?.[1].split("\n") ?? []).filter(Boolean),
+    modifiedFiles: (modifiedMatch?.[1].split("\n") ?? []).filter(Boolean),
+  };
+}
+
+/**
  * Extract file operations from a run's events — pi extracts them from
  * assistant toolCall blocks; AgentFabric's equivalent records are
  * tool events plus the workspace-change events (file.created → written,
- * file.modified → edited).
+ * file.modified → edited). When a previous checkpoint is given, its
+ * file lists seed the sets (read-files → read, modified-files → edited)
+ * exactly like pi merging the previous compaction's details, so the
+ * lists accumulate across iterative updates instead of restarting per
+ * run.
  */
-export function extractFileOperations(events: RunEvent[]): FileOperations {
+export function extractFileOperations(events: RunEvent[], previousSummary?: string): FileOperations {
   const fileOps = createFileOps();
+  if (previousSummary) {
+    const prev = parseFileListTags(previousSummary);
+    for (const f of prev.readFiles) fileOps.read.add(f);
+    for (const f of prev.modifiedFiles) fileOps.edited.add(f);
+  }
   for (const e of events) {
     const path = eventText(e, ["path", "file"]);
     if (!path) continue;
@@ -517,6 +592,132 @@ export function createHttpCompletionFn(
 const HANDOFF_SUMMARY_TIMEOUT_MS = 120_000;
 
 /* ------------------------------------------------------------------ */
+/* Retry (pi: pi-ai utils/retry.ts retryAssistantCall + settings.retry */
+/* defaults — 3 retries, 2s base, exponential backoff)                 */
+/* ------------------------------------------------------------------ */
+
+export interface SummaryRetryPolicy {
+  enabled: boolean;
+  /** Max retry attempts (0 = no retries); the initial call never counts. */
+  maxRetries: number;
+  /** Base delay in ms; per-attempt delay is baseDelayMs × 2^(attempt−1). */
+  baseDelayMs: number;
+}
+
+export const DEFAULT_SUMMARY_RETRY_POLICY: SummaryRetryPolicy = {
+  enabled: true,
+  maxRetries: 3,
+  baseDelayMs: 2000,
+};
+
+/** Subscription/quota/billing exhaustion — deterministic, never retried (pi). */
+const NON_RETRYABLE_LIMIT_PATTERN = new RegExp(
+  [
+    "GoUsageLimitError",
+    "FreeUsageLimitError",
+    "Monthly usage limit reached",
+    "available balance",
+    "insufficient_quota",
+    "out of budget",
+    "quota exceeded",
+    "billing",
+  ].join("|"),
+  "i"
+);
+
+/** Transient provider/transport failures — retried (pi, verbatim patterns). */
+const RETRYABLE_PATTERN = new RegExp(
+  [
+    "overloaded",
+    "rate.?limit",
+    "too many requests",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "524",
+    "service.?unavailable",
+    "server.?error",
+    "internal.?error",
+    "provider.?returned.?error",
+    "exceeded request buffer limit while retrying upstream",
+    "network.?error",
+    "connection.?error",
+    "connection.?refused",
+    "connection.?lost",
+    "other side closed",
+    "fetch failed",
+    "getaddrinfo",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "upstream.?connect",
+    "reset before headers",
+    "socket hang up",
+    "socket connection was closed",
+    "timed? out",
+    "timeout",
+    "terminated",
+    "websocket.?closed",
+    "websocket.?error",
+    "ended without",
+    "stream ended before message_stop",
+    "stream ended before a terminal response event",
+    "http2 request did not get a response",
+    "retry delay",
+    "you can retry your request",
+    "try your request again",
+    "please retry your request",
+    "ResourceExhausted",
+  ].join("|"),
+  "i"
+);
+
+/** Classify a failed completion as transient (pi: isRetryableAssistantError). */
+export function isRetryableCompletionError(response: CompletionResponse): boolean {
+  if (response.stopReason !== "error" || !response.errorMessage) return false;
+  if (NON_RETRYABLE_LIMIT_PATTERN.test(response.errorMessage)) return false;
+  return RETRYABLE_PATTERN.test(response.errorMessage);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<"ok" | "aborted"> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve("aborted");
+    const timeout = setTimeout(() => resolve("ok"), ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timeout);
+      resolve("aborted");
+    }, { once: true });
+  });
+}
+
+/**
+ * Run the one-off summary call with bounded retry on transient errors
+ * (pi: retryAssistantCall). Success, aborts and non-error stops are
+ * terminal; deterministic errors fail fast; transient errors back off
+ * exponentially, and an abort during backoff normalizes to an aborted
+ * response.
+ */
+export async function retryCompletion(
+  produce: () => Promise<CompletionResponse>,
+  policy: SummaryRetryPolicy | undefined,
+  signal?: AbortSignal
+): Promise<CompletionResponse> {
+  const maxAttempts = policy?.enabled ? policy.maxRetries : 0;
+  let attempt = 0;
+  for (;;) {
+    const response = await produce();
+    if (response.stopReason !== "error") return response;
+    if (attempt >= maxAttempts || !isRetryableCompletionError(response)) return response;
+    attempt++;
+    const delayMs = policy!.baseDelayMs * 2 ** (attempt - 1);
+    if ((await sleep(delayMs, signal)) === "aborted") {
+      return { ...response, text: "", stopReason: "aborted" };
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Summarization (pi: generateSummaryWithUsage)                        */
 /* ------------------------------------------------------------------ */
 
@@ -571,6 +772,8 @@ export interface CompactionHandoffInput {
   customInstructions?: string;
   complete: CompletionFn;
   settings?: CompactionSettings;
+  /** Retry policy for the summary call (pi: settings.retry; default 3/2s). */
+  retry?: SummaryRetryPolicy;
   /** Cap from the model's parameters, when configured (pi: model.maxTokens). */
   modelMaxTokens?: number;
   signal?: AbortSignal;
@@ -599,18 +802,23 @@ export async function generateCompactionHandoff(input: CompactionHandoffInput): 
   const conversationText = serializeRunConversation(events, task);
   const prompt = buildSummarizationPrompt(conversationText, input.previousSummary, input.customInstructions);
 
-  const response = await complete({
-    systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-    prompt,
-    maxTokens: modelMax > 0 ? Math.min(maxTokens, modelMax) : maxTokens,
-    signal: input.signal,
-  });
+  const response = await retryCompletion(
+    () =>
+      complete({
+        systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+        prompt,
+        maxTokens: modelMax > 0 ? Math.min(maxTokens, modelMax) : maxTokens,
+        signal: input.signal,
+      }),
+    input.retry ?? DEFAULT_SUMMARY_RETRY_POLICY,
+    input.signal
+  );
 
   const failure = getSummarizationFailure(response, "Summarization");
   if (failure) throw new Error(failure);
   if (!response.text.trim()) throw new Error("Summarization returned an empty summary");
 
-  const fileOps = extractFileOperations(events);
+  const fileOps = extractFileOperations(events, input.previousSummary);
   const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 
   const summary = response.text.trim() + formatFileOperations(readFiles, modifiedFiles);
@@ -700,11 +908,8 @@ export function compactionSummaryToHandoffContent(
   const nextSteps = sectionLines(byTitle("Next Steps")?.body ?? []);
   const criticalContext = sectionLines(byTitle("Critical Context")?.body ?? []);
 
-  const readMatch = /<read-files>\n([\s\S]*?)\n<\/read-files>/.exec(summary);
-  const modifiedMatch = /<modified-files>\n([\s\S]*?)\n<\/modified-files>/.exec(summary);
-  const relevantFiles = [
-    ...new Set([...(readMatch?.[1].split("\n") ?? []), ...(modifiedMatch?.[1].split("\n") ?? [])].filter(Boolean)),
-  ];
+  const { readFiles: tagRead, modifiedFiles: tagModified } = parseFileListTags(summary);
+  const relevantFiles = [...new Set([...tagRead, ...tagModified])];
 
   const { run, task, artifacts, workspace } = meta;
   const remainingWork = [...inProgress.map((l) => `[in progress] ${l}`), ...blocked.map((l) => `[blocked] ${l}`), ...nextSteps];

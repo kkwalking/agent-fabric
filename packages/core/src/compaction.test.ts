@@ -4,7 +4,9 @@
  * produced by the pi coding agent's context-compaction pipeline —
  * pi-style conversation serialization, verbatim pi prompts (initial +
  * iterative update), pi's token budget and failure checks, tracked file
- * operations appended as XML tags, and a verbatim-checkpoint render.
+ * operations appended as XML tags (accumulated across iterative
+ * updates), pi's transient-error retry policy, and a
+ * verbatim-checkpoint render.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -97,6 +99,9 @@ test("serializeRunConversation emits pi transcript labels", () => {
   assert.match(text, /\[Assistant\]: I will start by reading the test file\./);
   assert.match(text, /\[Assistant tool calls\]: read_file\(path="login\.test\.ts"\)/);
   assert.match(text, /\[Tool result\]: test 1\nok/);
+  // One tool call serializes once: the completion closes the started
+  // call instead of re-rendering it (pi renders one toolCall block).
+  assert.equal(text.split("[Assistant tool calls]:").length - 1, 1);
   // pi separates parts with a blank line, never reorders them.
   const userIdx = text.indexOf("[User]:");
   const thinkIdx = text.indexOf("[Assistant thinking]:");
@@ -104,6 +109,28 @@ test("serializeRunConversation emits pi transcript labels", () => {
   const callIdx = text.indexOf("[Assistant tool calls]:");
   const resIdx = text.indexOf("[Tool result]:");
   assert.ok(userIdx < thinkIdx && thinkIdx < asstIdx && asstIdx < callIdx && callIdx < resIdx);
+});
+
+test("serializeRunConversation pairs started/completed calls by toolCallId (pi runtime shape)", () => {
+  const text = serializeRunConversation([
+    ev("tool.started", { tool: "edit", toolCallId: "c1", args: { path: "a.ts", old: "x", new: "y" } }),
+    ev("tool.started", { tool: "edit", toolCallId: "c2", args: { path: "b.ts", old: "x", new: "y" } }),
+    ev("tool.completed", { tool: "edit", toolCallId: "c1", result: "ok" }),
+    ev("tool.completed", { tool: "edit", toolCallId: "c2", result: "ok" }),
+  ]);
+  assert.equal(text.split("[Assistant tool calls]:").length - 1, 1);
+  assert.match(text, /\[Assistant tool calls\]: edit\(path="a\.ts", old="x", new="y"\); edit\(path="b\.ts", old="x", new="y"\)/);
+  assert.match(text, /\[Tool result\]: ok\n\n\[Tool result\]: ok/);
+});
+
+test("serializeRunConversation joins consecutive thinking parts with newlines (pi)", () => {
+  const text = serializeRunConversation([
+    ev("agent.thinking", { content: "first" }),
+    ev("agent.thinking", { content: "second" }),
+    ev("agent.message", { role: "assistant", content: "done" }),
+  ]);
+  assert.match(text, /\[Assistant thinking\]: first\nsecond/);
+  assert.equal(text.split("[Assistant thinking]:").length - 1, 1);
 });
 
 test("serializeRunConversation prepends the task prompt when no user message was echoed", () => {
@@ -146,6 +173,20 @@ test("extractFileOperations + computeFileLists mirror pi read/modified semantics
   assert.deepEqual(computeFileLists(ops), {
     readFiles: ["a.ts"], // read-only: d.ts was also written, so not read-only
     modifiedFiles: ["b.ts", "c.md", "d.ts"], // edited ∪ written, sorted
+  });
+});
+
+test("extractFileOperations seeds file lists from the previous checkpoint (pi prev-details merge)", () => {
+  const previousSummary =
+    "## Goal\nx\n\n<read-files>\nold.ts\n</read-files>\n\n<modified-files>\nmut.ts\n</modified-files>";
+  const ops = extractFileOperations(
+    [ev("tool.completed", { tool: "read", path: "new.ts" })],
+    previousSummary
+  );
+  // read-files → read, modified-files → edited (pi: compaction.ts extractFileOperations)
+  assert.deepEqual(computeFileLists(ops), {
+    readFiles: ["new.ts", "old.ts"],
+    modifiedFiles: ["mut.ts"],
   });
 });
 
@@ -247,6 +288,62 @@ test("generateCompactionHandoff passes previousSummary through the pi update flo
   });
   assert.ok(requests[0].prompt.includes("<previous-summary>\nPREV SUMMARY\n</previous-summary>"));
   assert.ok(requests[0].prompt.endsWith(UPDATE_SUMMARIZATION_PROMPT));
+});
+
+test("generateCompactionHandoff accumulates file lists across iterative updates (pi)", async () => {
+  const previousSummary =
+    CHECKPOINT + "\n\n<read-files>\nold.ts\n</read-files>\n\n<modified-files>\nmut.ts\n</modified-files>";
+  const result = await generateCompactionHandoff({
+    task,
+    run,
+    events: [ev("file.modified", { path: "b.ts" })],
+    artifacts: [],
+    previousSummary,
+    complete: fakeCompletion(CHECKPOINT),
+  });
+  // The new checkpoint's tags carry the previous run's files forward.
+  assert.ok(result.summary.includes("<read-files>\nold.ts\n</read-files>"));
+  assert.ok(result.summary.includes("<modified-files>\nb.ts\nmut.ts\n</modified-files>"));
+  assert.deepEqual(result.content.relevantFiles, ["old.ts", "b.ts", "mut.ts"]);
+});
+
+test("generateCompactionHandoff retries transient summary errors with backoff (pi retryAssistantCall)", async () => {
+  let calls = 0;
+  const complete: CompletionFn = async () => {
+    calls++;
+    if (calls < 3) return { text: "", stopReason: "error", errorMessage: "HTTP 503: overloaded" };
+    return { text: CHECKPOINT, stopReason: "stop" };
+  };
+  const result = await generateCompactionHandoff({
+    task,
+    run,
+    events: [],
+    artifacts: [],
+    complete,
+    retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 },
+  });
+  assert.equal(calls, 3);
+  assert.ok(result.summary.startsWith("## Goal"));
+});
+
+test("generateCompactionHandoff fails fast on non-retryable errors (quota/billing)", async () => {
+  let calls = 0;
+  const complete: CompletionFn = async () => {
+    calls++;
+    return { text: "", stopReason: "error", errorMessage: "HTTP 402: insufficient_quota" };
+  };
+  await assert.rejects(
+    generateCompactionHandoff({
+      task,
+      run,
+      events: [],
+      artifacts: [],
+      complete,
+      retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 },
+    }),
+    /insufficient_quota/
+  );
+  assert.equal(calls, 1, "deterministic quota errors must not be retried");
 });
 
 test("generateCompactionHandoff rejects incomplete summaries (pi failure checks)", async () => {
@@ -369,7 +466,8 @@ test("compaction failure falls back to the heuristic generator, handoff still ex
     completionFactory: () => async () => ({
       text: "",
       stopReason: "error",
-      errorMessage: "connection refused",
+      // Non-retryable auth failure — retries (pi settings.retry) must not kick in.
+      errorMessage: "HTTP 401: invalid api key",
     }),
   });
   try {
@@ -390,7 +488,7 @@ test("compaction failure falls back to the heuristic generator, handoff still ex
       .events(first.run.id)
       .find((e) => e.type === "handoff.generated");
     assert.equal(genEvt?.data?.method, "heuristic");
-    assert.match(String(genEvt?.data?.detail ?? ""), /connection refused/);
+    assert.match(String(genEvt?.data?.detail ?? ""), /invalid api key/);
     // Structured (non-checkpoint) handoffs still render section-by-section.
     assert.match(cont.run.inputInstruction!, /## Original task/);
     await waitForRun(h.runService, cont.run.id);
