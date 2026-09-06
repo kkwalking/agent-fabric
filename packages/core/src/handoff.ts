@@ -162,7 +162,7 @@ export function renderHandoffPrompt(handoff: Handoff, instruction: string): stri
   ];
 
   if (c.compactionSummary) {
-    lines.push("", "## Context checkpoint (pi-style compaction summary)", "", c.compactionSummary);
+    lines.push("", "## Context checkpoint", "", c.compactionSummary);
   } else {
     const section = (title: string, value: string | string[] | undefined) => {
       if (value === undefined) return;

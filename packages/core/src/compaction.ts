@@ -714,7 +714,7 @@ export function compactionSummaryToHandoffContent(
     currentObjective: goal || task.title,
     progressSummary:
       `Run ${run.id} on ${meta.runtimeName ?? run.runtimeName ?? "previous runtime"} ${run.status}` +
-      ` (${run.usage?.modelRequests ?? 0} model calls); summarized with pi-style compaction.`,
+      ` (${run.usage?.modelRequests ?? 0} model calls).`,
     ...(done.length ? { completedWork: done } : {}),
     ...(remainingWork.length ? { remainingWork } : {}),
     ...(decisions.length ? { importantDecisions: decisions } : {}),
