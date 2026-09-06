@@ -28,7 +28,6 @@ interface NavEntry {
 }
 
 const primaryNav: NavEntry[] = [
-  { path: "/new", label: "New task", icon: "compose", match: "/new" },
   { path: "/tasks", label: "Tasks", icon: "history", match: "/tasks" },
   { path: "/", label: "Dashboard", icon: "grid", match: "/" },
 ];
@@ -65,7 +64,7 @@ export function App() {
     items.map(({ path: p, label, icon, match }) => (
       <button
         key={p}
-        className={`nav-item ${isActive(route, p, match) ? "active" : ""}`}
+        className={`nav-item ${isActive(path, route, match) ? "active" : ""}`}
         onClick={() => navigate(p)}
       >
         <Icon name={icon} />
@@ -80,8 +79,9 @@ export function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">A</span>
-          <span className="brand-name">AgentFabric</span>
+          <button className="brand-btn" onClick={() => navigate("/")} title="Dashboard">
+            <span className="brand-name">AgentFabric</span>
+          </button>
           <span className="brand-actions">
             <button className="icon-btn" title="Search">
               <Icon name="search" />
@@ -91,6 +91,14 @@ export function App() {
             </button>
           </span>
         </div>
+
+        <button
+          className={`nav-item ${route.view === "new-task" ? "active" : ""}`}
+          onClick={() => navigate("/new")}
+        >
+          <Icon name="compose" size={15} />
+          <span>New task</span>
+        </button>
 
         <nav className="nav">
           {renderNav(primaryNav)}
@@ -132,7 +140,7 @@ export function App() {
   );
 }
 
-function isActive(route: Route, path: string, match: string): boolean {
+function isActive(currentPath: string, route: Route, match: string): boolean {
   if (match === "/") return route.view === "dashboard";
-  return path === match || path.startsWith(`${match}/`);
+  return currentPath === match || currentPath.startsWith(`${match}/`);
 }

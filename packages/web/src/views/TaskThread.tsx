@@ -56,6 +56,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const [thread, setThread] = useState<ThreadData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+  const [showJump, setShowJump] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
   const composerPromptRef = useRef<HTMLTextAreaElement>(null);
@@ -130,7 +131,17 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    stickBottom.current = nearBottom;
+    setShowJump(!nearBottom);
+  };
+
+  const jumpToBottom = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickBottom.current = true;
+    setShowJump(false);
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
 
   if (error) {
@@ -204,6 +215,13 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         </div>
       </div>
 
+      {/* Floating scroll-to-bottom (Codex style) */}
+      {showJump && (
+        <button className="jump-down" title="Scroll to latest" onClick={jumpToBottom}>
+          <Icon name="arrowDown" size={16} />
+        </button>
+      )}
+
       {/* ---------- Continue composer (v5 §17/§18) ---------- */}
       <Composer
         taskId={taskId}
@@ -253,15 +271,14 @@ function TurnView({
         <HandoffBanner handoff={turn.previousHandoff} />
       )}
 
-      {/* User message (v5 §4) */}
+      {/* User message (v5 §4) — right-aligned bubble, no label (Codex style) */}
       <div className="user-msg">
-        <div className="who user">You</div>
         <div className="user-bubble">{userPrompt}</div>
       </div>
 
       {/* Agent turn */}
       <div className="agent-turn">
-        <div className="who agent" title={run.runtimeName ?? "agent"}>{run.runtimeName ?? "Agent"}</div>
+        <div className="agent-name" title={run.runtimeName ?? "agent"}>{run.runtimeName ?? "Agent"}</div>
         <div className="agent-body">
           {/* Lightweight resume status (v5 §19) */}
           {run.continuity === "resume" && (
@@ -618,7 +635,7 @@ function Composer({
         <textarea
           ref={promptRef}
           rows={2}
-          placeholder={live ? "Agent is working — stop it or wait, then continue…" : "Continue this task, e.g. 继续修剩下的测试 / 换 OpenCode 再看看"}
+          placeholder={live ? "Agent 正在工作 — 可先停止或等待后再继续…" : "随心输入，继续这个任务…"}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {

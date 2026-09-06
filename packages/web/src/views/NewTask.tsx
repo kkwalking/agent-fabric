@@ -58,7 +58,7 @@ export function NewTaskView() {
         <textarea
           rows={5}
           autoFocus
-          placeholder="Describe the task, e.g. 介绍一下当前项目"
+          placeholder="随心输入，描述一个任务…"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
