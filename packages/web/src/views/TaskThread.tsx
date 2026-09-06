@@ -228,6 +228,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         live={isLive}
         liveRunId={liveRun?.id}
         defaultModelId={lastTurn?.run.modelId}
+        previousRuntimeId={lastTurn?.run.runtimeId}
         promptRef={composerPromptRef}
         runtimeRef={composerRuntimeRef}
         onStop={stopRun}
@@ -591,22 +592,56 @@ function Composer({
 }) {
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
+  const providers = useAsync<any[]>(() => get("/api/providers"), []);
   const profiles = useAsync<any[]>(() => get("/api/agents"), []);
   const [prompt, setPrompt] = useState("");
-  const [runtimeId, setRuntimeId] = useState("");
-  const [modelId, setModelId] = useState(defaultModelId ?? "");
+  const [runtimeChoice, setRuntimeChoice] = useState("");
+  const [runtimeTouched, setRuntimeTouched] = useState(false);
+  const [modelChoice, setModelChoice] = useState("");
+  const [modelTouched, setModelTouched] = useState(false);
   const [profileId, setProfileId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => setModelId(defaultModelId ?? ""), [defaultModelId]);
+  const runtimeList = runtimes.data ?? [];
+  const modelList = models.data ?? [];
+  const providerList = providers.data ?? [];
+  const profile = (profiles.data ?? []).find((p: any) => p.id === profileId);
+  const inList = (list: any[], id?: string) => Boolean(id && list.some((x) => x.id === id));
 
   // Resume vs Handoff preview for the selected runtime (v5 §18/§19).
+  // Untouched, the preview (and the submit below) use the task's default
+  // chain; the resolved target runtime is preselected visibly.
   const options = useAsync<any>(
-    () => get(`/api/tasks/${taskId}/continue-options${runtimeId ? `?runtimeId=${runtimeId}` : ""}`),
-    [taskId, runtimeId]
+    () => get(`/api/tasks/${taskId}/continue-options${runtimeTouched && runtimeChoice ? `?runtimeId=${runtimeChoice}` : ""}`),
+    [taskId, runtimeTouched, runtimeChoice]
   );
   const suggested = options.data?.suggestedMode;
+
+  // Visible defaults — the submitted ids are always the concrete values on
+  // screen: same-runtime continue when possible, else the built-in Pi
+  // runtime; last used model, else first model of the first provider.
+  const effectiveRuntimeId = runtimeTouched
+    ? runtimeChoice
+    : inList(runtimeList, options.data?.targetRuntime?.id)
+      ? options.data.targetRuntime.id
+      : inList(runtimeList, previousRuntimeId)
+        ? previousRuntimeId
+        : runtimeList.find((r: any) => r.kind === "pi")?.id ?? runtimeList[0]?.id ?? "";
+  const firstProviderWithModels = (() => {
+    const withModels = providerList.filter((p: any) => modelList.some((m: any) => m.providerId === p.id));
+    return withModels.find((p: any) => p.enabled) ?? withModels[0];
+  })();
+  const providerDefaultModelId = firstProviderWithModels
+    ? modelList.find((m: any) => m.providerId === firstProviderWithModels.id)?.id ?? ""
+    : "";
+  const effectiveModelId = modelTouched
+    ? modelChoice
+    : inList(modelList, profile?.modelId)
+      ? profile.modelId
+      : inList(modelList, defaultModelId)
+        ? defaultModelId
+        : providerDefaultModelId || (modelList[0]?.id ?? "");
 
   const submit = async () => {
     if (!prompt.trim() || busy) return;
@@ -615,8 +650,8 @@ function Composer({
     try {
       await post(`/api/tasks/${taskId}/continue`, {
         prompt: prompt.trim(),
-        runtimeId: runtimeId || undefined,
-        modelId: modelId || undefined,
+        runtimeId: effectiveRuntimeId || undefined,
+        modelId: effectiveModelId || undefined,
         profileId: profileId || undefined,
       });
       setPrompt("");
@@ -643,15 +678,24 @@ function Composer({
           }}
         />
         <div className="composer-bar">
-          <select ref={runtimeRef} className="pill" value={runtimeId} onChange={(e) => setRuntimeId(e.target.value)} title="Target runtime — same harness resumes, different harness hands off">
-            <option value="">Runtime: current</option>
-            {(runtimes.data ?? []).map((r) => (
+          <select
+            ref={runtimeRef}
+            className="pill"
+            value={effectiveRuntimeId}
+            onChange={(e) => { setRuntimeChoice(e.target.value); setRuntimeTouched(true); }}
+            title="Target runtime — same harness resumes, different harness hands off"
+          >
+            {runtimeList.map((r: any) => (
               <option key={r.id} value={r.id}>Runtime: {r.name} ({r.kind})</option>
             ))}
           </select>
-          <select className="pill" value={modelId} onChange={(e) => setModelId(e.target.value)} title="Model">
-            <option value="">Model: default</option>
-            {(models.data ?? []).map((m) => (
+          <select
+            className="pill"
+            value={effectiveModelId}
+            onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
+            title="Model"
+          >
+            {modelList.map((m: any) => (
               <option key={m.id} value={m.id}>Model: {m.alias ?? m.name}</option>
             ))}
           </select>
