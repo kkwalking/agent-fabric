@@ -109,24 +109,6 @@ const configs: Record<string, Config> = {
       </>
     ),
   },
-  secrets: {
-    title: "Secrets",
-    path: "/api/secrets",
-    columns: [
-      { key: "id", label: "ID", render: (r) => <span className="mono">{r.id}</span> },
-      { key: "name", label: "Name" },
-      { key: "scope", label: "Scope" },
-      { key: "masked", label: "Value", render: (r) => <span className="mono">{r.masked}</span> },
-    ],
-    createFields: [
-      { key: "name", label: "Name", required: true },
-      { key: "value", label: "Value", type: "password", required: true },
-      { key: "scope", label: "Scope", type: "select", options: ["env", "provider", "git", "runtime", "service"] },
-    ],
-    rowActions: (row, reload) => (
-      <button className="small danger" onClick={() => removeItem("/api/secrets", row.id, reload)}>delete</button>
-    ),
-  },
 };
 
 async function removeItem(path: string, id: string, reload: () => void) {

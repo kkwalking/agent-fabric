@@ -37,7 +37,6 @@ const resourceNav: NavEntry[] = [
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
   { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
   { path: "/workspaces", label: "Workspaces", icon: "folder", match: "/workspaces" },
-  { path: "/secrets", label: "Secrets", icon: "key", match: "/secrets" },
 ];
 
 const systemNav: NavEntry[] = [
@@ -130,7 +129,6 @@ export function App() {
         {route.view === "runtimes" && <ResourceView kind="runtimes" />}
         {route.view === "agents" && <ResourceView kind="agents" />}
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
-        {route.view === "secrets" && <ResourceView kind="secrets" />}
         {route.view === "handoffs" && <HandoffsView />}
         {route.view === "artifacts" && <ArtifactsView />}
         {route.view === "usage" && <UsageView />}

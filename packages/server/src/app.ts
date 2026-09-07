@@ -115,6 +115,14 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const p = providers.get(req.params.id);
     p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
   });
+  // Reveal the stored API key on demand (the eye button in the provider
+  // editor). Raw keys never appear in list/get responses, only here.
+  app.get("/api/providers/:id/api-key", (req, res) => {
+    const p = providers.get(req.params.id);
+    if (!p) return fail(res, new Error("Provider not found"), 404);
+    const secret = p.apiKeySecretId ? secrets.getWithValue(p.apiKeySecretId) : undefined;
+    ok(res, { apiKey: secret?.value });
+  });
   app.put("/api/providers/:id", async (req, res) => {
     try {
       const p = await providers.update(req.params.id, req.body);

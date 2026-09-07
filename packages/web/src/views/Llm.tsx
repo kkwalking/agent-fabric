@@ -157,6 +157,8 @@ function ProviderEditor({
     headers: "",
   });
   const [showKey, setShowKey] = useState(false);
+  /** 输入框里的 Key 是否为刚取回的已保存 Key（隐藏时清空，恢复「留空则不修改」）。 */
+  const [revealedSavedKey, setRevealedSavedKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState(false);
@@ -185,6 +187,41 @@ function ProviderEditor({
   const setField = (key: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     setForm((f) => ({ ...f, [key]: e.target.value }));
     setSavedMsg(false);
+  };
+
+  /** 手动编辑 API Key 时不再视为「取回的已保存 Key」。 */
+  const setApiKey = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setForm((f) => ({ ...f, apiKey: e.target.value }));
+    setRevealedSavedKey(false);
+    setSavedMsg(false);
+  };
+
+  /** 眼睛按钮：输入中的 Key 直接切换明文；已保存的 Key 向后端取回后明文显示。 */
+  const toggleShowKey = async () => {
+    if (showKey) {
+      setShowKey(false);
+      if (revealedSavedKey) {
+        setRevealedSavedKey(false);
+        setForm((f) => ({ ...f, apiKey: "" }));
+      }
+      return;
+    }
+    if (form.apiKey) {
+      setShowKey(true);
+      return;
+    }
+    if (!effectiveId || !existing.data?.apiKeyMasked) return;
+    try {
+      setError(null);
+      const d = await get<{ apiKey?: string }>(`/api/providers/${effectiveId}/api-key`);
+      if (d.apiKey) {
+        setForm((f) => ({ ...f, apiKey: d.apiKey! }));
+        setRevealedSavedKey(true);
+        setShowKey(true);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const save = async () => {
@@ -272,20 +309,22 @@ function ProviderEditor({
             <input
               type={showKey ? "text" : "password"}
               value={form.apiKey}
-              onChange={setField("apiKey")}
+              onChange={setApiKey}
               placeholder={
                 existing.data?.apiKeyMasked ? `已保存 ${existing.data.apiKeyMasked}，留空则不修改` : "sk-…"
               }
               autoComplete="new-password"
             />
-            <button
-              type="button"
-              className="eye"
-              onClick={() => setShowKey((v) => !v)}
-              title={showKey ? "隐藏" : "显示"}
-            >
-              <Icon name={showKey ? "eyeOff" : "eye"} size={16} />
-            </button>
+            {(form.apiKey || existing.data?.apiKeyMasked) && (
+              <button
+                type="button"
+                className="eye"
+                onClick={() => void toggleShowKey()}
+                title={showKey ? "隐藏" : "显示"}
+              >
+                <Icon name={showKey ? "eyeOff" : "eye"} size={16} />
+              </button>
+            )}
           </span>
         </label>
         <label>
