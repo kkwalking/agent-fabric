@@ -23,7 +23,7 @@ import {
   type Run,
   type Task,
 } from "@agentfabric/core";
-import { buildRegistry, createDockerContainerOps } from "@agentfabric/runtimes";
+import { buildRegistry, codexThreadSource, createDockerContainerOps } from "@agentfabric/runtimes";
 
 export interface ServerOptions {
   dataDir: string;
@@ -68,7 +68,9 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   const handoffs = new HandoffService(store);
   const runtimeSessions = new RuntimeSessionService(store);
   const nativeStates = new NativeStateService(store);
-  const runs = new RunService(store, bus, registry, createDockerContainerOps());
+  const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
+    codex: codexThreadSource,
+  });
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();
 
@@ -213,6 +215,66 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     if (!r) return fail(res, new Error("Runtime not found"), 404);
     const adapter = registry.get(r.kind);
     ok(res, adapter?.providerCompatibility ?? null);
+  });
+
+  /* ---------------- local harness threads (v6 §2/§6/§7/§8) ---------------- */
+
+  // Harness-native auth availability (v6 §2): detects installed/logged-in
+  // without ever touching the harness's token material.
+  app.get("/api/harness/:kind/auth-status", async (req, res) => {
+    try {
+      const status = await runs.harnessAuthStatus(req.params.kind);
+      status ? ok(res, status) : fail(res, new Error(`Runtime kind "${req.params.kind}" has no harness-native auth check`), 404);
+    } catch (e) {
+      fail(res, e, 500);
+    }
+  });
+
+  // Local thread discovery (v6 §6/§11): newest first, optionally narrowed
+  // to a workspace (its path) and a result limit.
+  app.get("/api/harness/:kind/threads", async (req, res) => {
+    try {
+      const limitRaw = Number(req.query.limit);
+      let cwd: string | undefined = typeof req.query.cwd === "string" && req.query.cwd ? req.query.cwd : undefined;
+      if (!cwd && typeof req.query.workspaceId === "string" && req.query.workspaceId) {
+        const ws = workspaces.get(req.query.workspaceId);
+        if (!ws) return fail(res, new Error("Workspace not found"), 404);
+        cwd = ws.path;
+      }
+      ok(res, await runs.listHarnessThreads(req.params.kind, { cwd, limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : undefined }));
+    } catch (e) {
+      fail(res, e, 500);
+    }
+  });
+
+  // Read an existing thread without executing the model again (v6 §7).
+  app.get("/api/harness/:kind/threads/:threadId", async (req, res) => {
+    try {
+      ok(res, await runs.readHarnessThread(req.params.kind, req.params.threadId));
+    } catch (e) {
+      fail(res, e, 404);
+    }
+  });
+
+  // Adopt an existing thread into AgentFabric (v6 §8): read → associate
+  // workspace → (optional) generate handoff toward another harness.
+  app.post("/api/harness/:kind/threads/import", async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      if (typeof body.threadId !== "string" || !body.threadId) throw new Error("threadId is required");
+      const result = await runs.importHarnessThread({
+        runtimeKind: req.params.kind as never,
+        threadId: body.threadId,
+        workspaceId: typeof body.workspaceId === "string" ? body.workspaceId : undefined,
+        title: typeof body.title === "string" ? body.title : undefined,
+        prompt: typeof body.prompt === "string" ? body.prompt : undefined,
+        targetRuntimeId: typeof body.targetRuntimeId === "string" ? body.targetRuntimeId : undefined,
+        userNotes: typeof body.userNotes === "string" ? body.userNotes : undefined,
+      });
+      ok(res, result, 201);
+    } catch (e) {
+      fail(res, e);
+    }
   });
 
   /* ---------------- workspaces ---------------- */

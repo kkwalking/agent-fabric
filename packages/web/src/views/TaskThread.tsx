@@ -72,10 +72,13 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const [reloadTick, setReloadTick] = useState(0);
   const [showJump, setShowJump] = useState(false);
   const [pendingHandoff, setPendingHandoff] = useState<PendingHandoff | null>(null);
+  /** Composer runtime preselection requested from outside (v6 §10 quota UX). */
+  const [runtimeRequest, setRuntimeRequest] = useState<{ id: string; n: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
   const composerPromptRef = useRef<HTMLTextAreaElement>(null);
   const composerRuntimeRef = useRef<HTMLSelectElement>(null);
+  const runtimeCatalog = useAsync<any[]>(() => get("/api/runtimes"), [taskId]);
 
   const bump = () => setReloadTick((t) => t + 1);
 
@@ -192,6 +195,21 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
     bump();
   };
 
+  // "Continue with Pi / OpenCode" (v6 §10): preselect the target runtime in
+  // the composer — the existing harness-switch confirmation takes over
+  // from there (handoff generation + new session on the other harness).
+  const continueWithRuntime = (runtimeId: string) => {
+    setRuntimeRequest((prev) => ({ id: runtimeId, n: (prev?.n ?? 0) + 1 }));
+    composerPromptRef.current?.focus();
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  };
+
+  // Cross-harness escape hatches offered when the current harness cannot
+  // continue (v6 §10): the other coding harnesses registered on this box.
+  const switchTargets = (runtimeCatalog.data ?? [])
+    .filter((r: any) => r.enabled && ["pi", "opencode"].includes(r.kind))
+    .map((r: any) => ({ id: r.id, name: r.name, kind: r.kind }));
+
   return (
     <div className="task-thread">
       {/* ---------- Thread header (v5 §3/§22/§23) ---------- */}
@@ -229,6 +247,8 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               task={thread.task}
               onContinue={focusComposer}
               onSwitchRuntime={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}
+              onContinueWithRuntime={continueWithRuntime}
+              switchTargets={switchTargets}
               onStop={stopRun}
             />
           ))}
@@ -270,6 +290,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         previousRuntimeId={lastTurn?.run.runtimeId}
         promptRef={composerPromptRef}
         runtimeRef={composerRuntimeRef}
+        runtimeRequest={runtimeRequest}
         onStop={stopRun}
         onSubmitted={bump}
         handoffPending={Boolean(pendingHandoff)}
@@ -292,12 +313,16 @@ function TurnView({
   task,
   onContinue,
   onSwitchRuntime,
+  onContinueWithRuntime,
+  switchTargets,
   onStop,
 }: {
   turn: ThreadTurn;
   task: any;
   onContinue: () => void;
   onSwitchRuntime: () => void;
+  onContinueWithRuntime: (runtimeId: string) => void;
+  switchTargets: Array<{ id: string; name: string; kind: string }>;
   onStop: (runId: string) => void;
 }) {
   const run = turn.run;
@@ -363,13 +388,37 @@ function TurnView({
           )}
 
           {/* Failure surface (v5 §29) */}
-          {(run.status === "failed" || run.status === "timeout") && (
+          {(run.status === "failed" || run.status === "timeout") && run.errorKind !== "usage-limit" && (
             <div className="fail-box">
               <div className="fail-title">Agent run failed{run.status === "timeout" ? " (timeout)" : ""}</div>
               {run.error && <div className="fail-reason">{run.error}</div>}
               <div className="row fail-actions">
                 <button className="small" onClick={onContinue}>Continue</button>
                 <button className="small" onClick={onSwitchRuntime}>Switch runtime</button>
+                <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>View run</button>
+              </div>
+            </div>
+          )}
+          {/* Quota exhaustion is a switch-harness scenario, not a plain
+              failure (v6 §10): the workspace and the Codex thread survive,
+              so offer the other harnesses directly. */}
+          {(run.status === "failed" || run.status === "timeout") && run.errorKind === "usage-limit" && (
+            <div className="fail-box quota-box">
+              <div className="fail-title">Codex usage limit reached.</div>
+              {run.error && <div className="fail-reason">{run.error}</div>}
+              <p className="muted">
+                The workspace and the Codex thread are preserved. Hand the task to another harness — a
+                handoff summary is generated automatically and the new agent continues in this thread.
+              </p>
+              <div className="row fail-actions">
+                {switchTargets.map((t) => (
+                  <button key={t.id} className="small primary" onClick={() => onContinueWithRuntime(t.id)}>
+                    Continue with {t.name}
+                  </button>
+                ))}
+                {switchTargets.length === 0 && (
+                  <span className="muted">No other coding harness is enabled — enable a Pi or OpenCode runtime first.</span>
+                )}
                 <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>View run</button>
               </div>
             </div>
@@ -657,6 +706,7 @@ function Composer({
   previousRuntimeId,
   promptRef,
   runtimeRef,
+  runtimeRequest,
   onStop,
   onSubmitted,
   handoffPending,
@@ -671,6 +721,8 @@ function Composer({
   previousRuntimeId?: string;
   promptRef: React.RefObject<HTMLTextAreaElement>;
   runtimeRef: React.RefObject<HTMLSelectElement>;
+  /** External runtime preselection (v6 §10) — applied through the same confirmed-switch path. */
+  runtimeRequest?: { id: string; n: number } | null;
   onStop: (runId: string) => void;
   onSubmitted: () => void;
   handoffPending: boolean;
@@ -720,6 +772,19 @@ function Composer({
       : inList(runtimeList, previousRuntimeId)
         ? previousRuntimeId
         : runtimeList.find((r: any) => r.kind === "pi")?.id ?? runtimeList[0]?.id ?? "";
+  const effectiveRuntime = runtimeList.find((r: any) => r.id === effectiveRuntimeId);
+  // Harness-native targets (v6 §3) run on their own account/model — the
+  // AgentFabric model selector does not apply.
+  const harnessNativeTarget =
+    effectiveRuntime?.credentialSource === "harness-native" || effectiveRuntime?.kind === "codex";
+
+  // External preselection (v6 §10 "Continue with Pi / OpenCode"): route it
+  // through the same confirmed-switch path as a manual selection.
+  useEffect(() => {
+    if (!runtimeRequest) return;
+    selectRuntime(runtimeRequest.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtimeRequest?.n]);
 
   // Switching to a different harness means the next submit performs a
   // handoff, so the selection only commits after explicit confirmation.
@@ -782,7 +847,8 @@ function Composer({
       await post(`/api/tasks/${taskId}/continue`, {
         prompt: prompt.trim(),
         runtimeId: effectiveRuntimeId || undefined,
-        modelId: effectiveModelId || undefined,
+        // Harness-native targets never bind an AgentFabric model (v6 §3).
+        modelId: harnessNativeTarget ? undefined : effectiveModelId || undefined,
         profileId: profileId || undefined,
       });
       setPrompt("");
@@ -821,16 +887,25 @@ function Composer({
               <option key={r.id} value={r.id}>Runtime: {r.name} ({r.kind})</option>
             ))}
           </select>
-          <select
-            className="pill"
-            value={effectiveModelId}
-            onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
-            title="Model"
-          >
-            {modelList.map((m: any) => (
-              <option key={m.id} value={m.id}>Model: {m.alias ?? m.name}</option>
-            ))}
-          </select>
+          {harnessNativeTarget ? (
+            <span
+              className="pill harness-native-note"
+              title="Harness-native credentials (v6): this runtime runs on its own logged-in account (Codex + ChatGPT) and its own default model."
+            >
+              Model: harness account (no AgentFabric model)
+            </span>
+          ) : (
+            <select
+              className="pill"
+              value={effectiveModelId}
+              onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
+              title="Model"
+            >
+              {modelList.map((m: any) => (
+                <option key={m.id} value={m.id}>Model: {m.alias ?? m.name}</option>
+              ))}
+            </select>
+          )}
           <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title="Agent profile">
             <option value="">Agent: none</option>
             {(profiles.data ?? []).map((p) => (

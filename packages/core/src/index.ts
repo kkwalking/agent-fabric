@@ -8,4 +8,5 @@ export * from "./handoff.js";
 export * from "./runtime.js";
 export * from "./services.js";
 export * from "./policy.js";
+export * from "./harnessThreads.js";
 export * from "./orchestrator.js";

@@ -313,3 +313,218 @@ if (sub === "run" || sub === "exec") {
 }
 // ps / rm / start: succeed silently.
 `;
+
+/* ------------------------------------------------------------------ */
+/* Fake codex CLI (v6)                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fake codex CLI implementing the verified wire surfaces (v6 §2/§5/§6/§7):
+ *
+ * - `--version` / `login status` — the auth-availability probes. Set
+ *   FAKE_CODEX_LOGGED_OUT=1 to model a missing ChatGPT login.
+ * - `codex exec --json [--sandbox X] [resume <id>] <prompt>` — the JSONL
+ *   event protocol (thread.started / turn.started / item.* / turn.completed
+ *   / turn.failed). A fresh run persists its thread id into
+ *   $FAKE_CODEX_HOME/sessions.json; `resume <id>` fails for unknown ids,
+ *   exactly like the real CLI. FAKE_CODEX_SCENARIO selects the shape:
+ *   "tools" (reasoning + command + file_change + mcp_tool_call), or
+ *   "usage-limit" (turn.failed with the canonical quota message, exit 1).
+ * - `codex app-server` — the JSON-RPC thread interfaces over stdio:
+ *   initialize, thread/list (sortKey/cwd/limit), thread/read,
+ *   thread/turns/list (cursor pagination, 2 turns per page). Fixtures come
+ *   from $FAKE_CODEX_THREADS_FILE (see makeCodexThreadsFixture).
+ *
+ * FAKE_CODEX_DUMP, when set, records every invocation's argv as JSON lines.
+ */
+export const FAKE_CODEX_SCRIPT = `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+
+const args = process.argv.slice(2);
+if (process.env.FAKE_CODEX_DUMP) {
+  try { appendFileSync(process.env.FAKE_CODEX_DUMP, JSON.stringify({ harness: "codex", argv: args, cwd: process.cwd() }) + "\\n"); } catch {}
+}
+const emit = (o) => console.log(JSON.stringify(o));
+
+/* ---- auth probes (v6 §2) ---- */
+if (args[0] === "--version") { console.log("codex-cli 0.153.4-fake"); process.exit(0); }
+if (args[0] === "login" && args[1] === "status") {
+  if (process.env.FAKE_CODEX_LOGGED_OUT) { console.error("Not logged in"); process.exit(1); }
+  console.log("Logged in using ChatGPT"); process.exit(0);
+}
+
+/* ---- app-server (v6 §6/§7): JSON-RPC over stdio ---- */
+if (args[0] === "app-server") {
+  const fixturePath = process.env.FAKE_CODEX_THREADS_FILE;
+  const db = fixturePath && existsSync(fixturePath) ? JSON.parse(readFileSync(fixturePath, "utf8")) : { threads: [] };
+  let buf = "";
+  const pending = new Map();
+  let nextId = 1;
+  const reply = (msg) => console.log(JSON.stringify(msg));
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buf += chunk;
+    let idx;
+    while ((idx = buf.indexOf("\\n")) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      let req;
+      try { req = JSON.parse(line); } catch { continue; }
+      const { id, method, params = {} } = req;
+      if (method === "initialize") { reply({ jsonrpc: "2.0", id, result: { codexHome: "/tmp/fake-codex-home" } }); continue; }
+      if (method === "thread/list") {
+        let threads = db.threads.slice();
+        // cwd accepts one path or a list (the real server resolves each);
+        // sourceKinds filters by source when given.
+        const cwds = Array.isArray(params.cwd) ? params.cwd : typeof params.cwd === "string" ? [params.cwd] : [];
+        if (cwds.length > 0) threads = threads.filter((t) => cwds.includes(t.cwd));
+        if (Array.isArray(params.sourceKinds) && params.sourceKinds.length > 0) {
+          threads = threads.filter((t) => !t.source || params.sourceKinds.includes(t.source));
+        }
+        threads.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+        if (params.limit) threads = threads.slice(0, params.limit);
+        const data = threads.map((t) => ({ ...t, turns: [] }));
+        reply({ jsonrpc: "2.0", id, result: { data, nextCursor: null, backwardsCursor: null } });
+        continue;
+      }
+      if (method === "thread/read") {
+        const t = db.threads.find((x) => x.id === params.threadId);
+        if (!t) { reply({ jsonrpc: "2.0", id, error: { code: -32000, message: "thread not found" } }); continue; }
+        const turns = params.includeTurns ? t.turns : [];
+        reply({ jsonrpc: "2.0", id, result: { thread: { ...t, turns } } });
+        continue;
+      }
+      if (method === "thread/turns/list") {
+        const t = db.threads.find((x) => x.id === params.threadId);
+        if (!t) { reply({ jsonrpc: "2.0", id, error: { code: -32000, message: "thread not found" } }); continue; }
+        const start = params.cursor ? Number(params.cursor) : 0;
+        const page = t.turns.slice(start, start + 2); // 2 turns per page: pagination is observable
+        const next = start + 2 < t.turns.length ? String(start + 2) : null;
+        reply({ jsonrpc: "2.0", id, result: { data: page, nextCursor: next, backwardsCursor: null } });
+        continue;
+      }
+      reply({ jsonrpc: "2.0", id, error: { code: -32601, message: "method not found: " + method } });
+    }
+  });
+  process.stdin.on("end", () => process.exit(0));
+  process.on('SIGTERM', () => process.exit(0));
+} else if (args[0] === "exec") {
+  /* ---- exec --json (v6 §5): the JSONL protocol ---- */
+  const rest = args.slice(1);
+  const resumeIdx = rest.indexOf("resume");
+  const resumeId = resumeIdx !== -1 ? rest[resumeIdx + 1] : undefined;
+  const VALUE_FLAGS = new Set(["--sandbox", "-s", "--cd", "-C", "--config", "-c", "--model", "-m", "--output-last-message", "-o", "--profile", "-p"]);
+  const positional = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (VALUE_FLAGS.has(rest[i])) { i++; continue; }
+    if (rest[i].startsWith("-")) continue;
+    if (i === resumeIdx) { i++; continue; } // the session id itself
+    positional.push(rest[i]);
+  }
+  const prompt = positional.filter((p) => p !== "exec").pop() ?? "";
+
+  const home = process.env.FAKE_CODEX_HOME ?? process.env.TMPDIR ?? "/tmp";
+  const storeFile = join(home, "sessions.json");
+  const store = existsSync(storeFile) ? JSON.parse(readFileSync(storeFile, "utf8")) : {};
+  let threadId;
+  if (resumeId) {
+    if (!store[resumeId]) { console.error("Unknown session: " + resumeId); process.exit(1); }
+    threadId = resumeId;
+    store[threadId].push(prompt);
+  } else {
+    threadId = "fake-thread-" + randomUUID().slice(0, 8);
+    store[threadId] = [prompt];
+  }
+  try { mkdirSync(dirname(storeFile), { recursive: true }); writeFileSync(storeFile, JSON.stringify(store)); } catch {}
+
+  const scenario = process.env.FAKE_CODEX_SCENARIO ?? "plain";
+  emit({ type: "thread.started", thread_id: threadId });
+  emit({ type: "turn.started" });
+  if (scenario === "usage-limit") {
+    emit({ type: "turn.failed", error: { message: "You've hit your usage limit. Try again in 3 hours 25 minutes." } });
+    process.exit(1);
+  }
+  if (resumeId) {
+    emit({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "codex resumed thread " + threadId + '; prior context: "' + (store[threadId][0] ?? "") + '"' } });
+  } else if (scenario === "tools") {
+    emit({ type: "item.completed", item: { id: "item_0", type: "reasoning", text: "Plan: run tests, then patch." } });
+    emit({ type: "item.started", item: { id: "item_1", type: "command_execution", command: "npm test", status: "in_progress" } });
+    emit({ type: "item.completed", item: { id: "item_1", type: "command_execution", command: "npm test", aggregated_output: "3 passing", exit_code: 0, status: "completed" } });
+    emit({ type: "item.completed", item: { id: "item_2", type: "file_change", changes: [{ path: "src/a.ts", kind: "add" }, { path: "src/b.ts", kind: "update" }], status: "completed" } });
+    emit({ type: "item.started", item: { id: "item_3", type: "mcp_tool_call", server: "github", tool: "create_issue", arguments: { title: "T" } } });
+    emit({ type: "item.completed", item: { id: "item_3", type: "mcp_tool_call", server: "github", tool: "create_issue", arguments: { title: "T" }, result: { issue: 7 } } });
+    emit({ type: "item.completed", item: { id: "item_4", type: "agent_message", text: "Done: tests pass and the patch landed." } });
+  } else {
+    emit({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "codex ok: " + prompt.slice(0, 40) } });
+  }
+  emit({ type: "turn.completed", usage: { input_tokens: 1200, cached_input_tokens: 300, cache_write_input_tokens: 20, output_tokens: 45, reasoning_output_tokens: 12 } });
+  process.exit(0);
+} else {
+  console.error("fake codex: unsupported invocation", args.join(" "));
+  process.exit(2);
+}
+`;
+
+/**
+ * A local-threads fixture for the fake codex app-server (v6 §6/§7): two
+ * threads, one inside the given workspace cwd with a full turn history
+ * (user / agent / reasoning / command / file change / tool call / error)
+ * and one elsewhere.
+ */
+export function makeCodexThreadsFixture(workspaceCwd: string): {
+  file: string;
+  inWorkspaceThreadId: string;
+  otherThreadId: string;
+} {
+  const inWorkspaceThreadId = "fake-thread-inws";
+  const otherThreadId = "fake-thread-other";
+  const db = {
+    threads: [
+      {
+        id: otherThreadId,
+        sessionId: otherThreadId,
+        name: "Unrelated thread",
+        preview: "somewhere else",
+        cwd: "/tmp/definitely-not-the-workspace",
+        createdAt: 1780000000,
+        updatedAt: 1780000100,
+        model: "gpt-5.6-sol",
+        source: "cli",
+        turns: [{ id: "t1", items: [{ type: "userMessage", content: [{ type: "text", text: "hi" }] }] }],
+      },
+      {
+        id: inWorkspaceThreadId,
+        sessionId: inWorkspaceThreadId,
+        name: "Fix the login bug",
+        preview: "Please fix the login bug in auth.ts",
+        cwd: workspaceCwd,
+        createdAt: 1780001000,
+        updatedAt: 1780002000,
+        model: "gpt-5.6-sol",
+        source: "vscode",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              { type: "userMessage", content: [{ type: "text", text: "Please fix the login bug in auth.ts" }] },
+              { type: "reasoning", text: "The bug is a missing await." },
+              { type: "commandExecution", command: "npm test", aggregatedOutput: "1 failing", exitCode: 1 },
+              { type: "agentMessage", text: "Reproduced the failing test; the login handler drops the promise." },
+            ],
+          },
+          {
+            id: "turn-2",
+            items: [
+              { type: "fileChange", changes: [{ path: "src/auth.ts", kind: "update" }] },
+              { type: "agentMessage", text: "Patched src/auth.ts — the test suite is green now." },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  return { file: JSON.stringify(db), inWorkspaceThreadId, otherThreadId };
+}

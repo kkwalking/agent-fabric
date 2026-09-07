@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { get, post } from "../api";
-import { useAsync, ErrorBox, Icon } from "../components";
+import { get, post, fmtRelative } from "../api";
+import { ErrorBox, Icon, useAsync } from "../components";
 import { navigate } from "../router";
 
 /**
@@ -12,7 +12,12 @@ import { navigate } from "../router";
  * pseudo-option: runtime → built-in Pi Agent, model → first model of the
  * first configured provider, workspace → first configured workspace. A
  * missing prerequisite (no LLM, no workspace) blocks submission with a
- * pointer to the right settings tab.
+ * pointer to the right settings tab — except for harness-native runtimes
+ * (Codex + ChatGPT, v6 §3), which need neither a provider nor a model.
+ *
+ * Below the composer, Local Codex Threads (v6 §6/§11) let the user adopt
+ * work that started outside AgentFabric: pick a thread, "Continue in
+ * AgentFabric", then hand it off to Pi / OpenCode from the task thread.
  */
 export function NewTaskView() {
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
@@ -50,6 +55,10 @@ export function NewTaskView() {
       ? profile.runtimeId
       : builtinPi?.id ?? runtimeList.find((r: any) => r.enabled)?.id ?? runtimeList[0]?.id ?? "";
   const effectiveRuntime = runtimeList.find((r: any) => r.id === effectiveRuntimeId);
+  // Harness-native runtimes (v6 §2/§3) run on their own account — Codex's
+  // ChatGPT login and default model. No provider/model binding applies.
+  const harnessNative =
+    effectiveRuntime?.credentialSource === "harness-native" || effectiveRuntime?.kind === "codex";
 
   const firstProviderWithModels = (() => {
     const withModels = providerList.filter((p: any) => modelList.some((m: any) => m.providerId === p.id));
@@ -66,7 +75,7 @@ export function NewTaskView() {
 
   const effectiveWorkspaceId = inList(workspaceList, workspaceChoice) ? workspaceChoice : workspaceList[0]?.id ?? "";
 
-  const missingModel = !models.loading && modelList.length === 0;
+  const missingModel = !harnessNative && !models.loading && modelList.length === 0;
   const missingWorkspace = !workspaces.loading && workspaceList.length === 0;
 
   const submit = async () => {
@@ -78,7 +87,8 @@ export function NewTaskView() {
         prompt: prompt.trim(),
         title: title.trim() || undefined,
         runtimeId: effectiveRuntimeId || undefined,
-        modelId: effectiveModelId || undefined,
+        // Harness-native runtimes never bind an AgentFabric model (v6 §3).
+        modelId: harnessNative ? undefined : effectiveModelId || undefined,
         workspaceId: effectiveWorkspaceId || undefined,
         profileId: profileId || undefined,
         lifecycle: lifecycle ? { mode: lifecycle } : undefined,
@@ -99,7 +109,7 @@ export function NewTaskView() {
         system executes each step.
       </p>
       {missingModel && (
-        <ErrorBox message="尚未配置任何 LLM 模型 — 请先前往 LLM 页面添加 Provider 与模型，再回来发起任务" />
+        <ErrorBox message="尚未配置任何 LLM 模型 — 请先前往 LLM 页面添加 Provider 与模型，再回来发起任务（或在 Runtime 选择 Codex，使用其自有 ChatGPT 登录）" />
       )}
       {missingWorkspace && (
         <ErrorBox message="尚未配置 Workspace — 请先前往 Workspaces 页面创建一个，再回来选择" />
@@ -133,16 +143,25 @@ export function NewTaskView() {
               <option key={r.id} value={r.id}>Runtime: {r.name} ({r.kind})</option>
             ))}
           </select>
-          <select
-            className="pill"
-            value={effectiveModelId}
-            onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
-            title="Model"
-          >
-            {modelList.map((m: any) => (
-              <option key={m.id} value={m.id}>Model: {m.alias ?? m.name}</option>
-            ))}
-          </select>
+          {harnessNative ? (
+            <span
+              className="pill harness-native-note"
+              title="Harness-native credentials (v6): this runtime runs on its own logged-in account (Codex + ChatGPT) and its own default model — no AgentFabric provider or API key is needed or used."
+            >
+              Model: harness account (no AgentFabric model)
+            </span>
+          ) : (
+            <select
+              className="pill"
+              value={effectiveModelId}
+              onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
+              title="Model"
+            >
+              {modelList.map((m: any) => (
+                <option key={m.id} value={m.id}>Model: {m.alias ?? m.name}</option>
+              ))}
+            </select>
+          )}
           <select
             className="pill"
             value={effectiveWorkspaceId}
@@ -180,6 +199,129 @@ export function NewTaskView() {
           </button>
         </div>
       </div>
+
+      <CodexThreadsPanel
+        hasCodexRuntime={runtimeList.some((r: any) => r.kind === "codex" && r.enabled)}
+        workspaceId={effectiveWorkspaceId}
+      />
     </div>
+  );
+}
+
+/* ================================================================== */
+/* Local Codex Threads discovery (v6 §6/§11)                           */
+/* ================================================================== */
+
+/**
+ * Lists Codex threads that already exist on this machine (created in the
+ * Codex CLI / IDE extension) and adopts them: Continue in AgentFabric
+ * reads the thread, associates its workspace and lands on the task
+ * thread, where switching to Pi / OpenCode generates the handoff (v6 §8).
+ */
+function CodexThreadsPanel({ hasCodexRuntime, workspaceId }: { hasCodexRuntime: boolean; workspaceId: string }) {
+  const [thisWorkspaceOnly, setThisWorkspaceOnly] = useState(false);
+  const [importing, setImporting] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  const auth = useAsync<any>(() => get("/api/harness/codex/auth-status"), [hasCodexRuntime]);
+  const threads = useAsync<any[]>(
+    () =>
+      hasCodexRuntime
+        ? get(`/api/harness/codex/threads${thisWorkspaceOnly && workspaceId ? `?workspaceId=${workspaceId}&limit=20` : "?limit=20"}`)
+        : Promise.resolve([]),
+    [hasCodexRuntime, thisWorkspaceOnly, workspaceId]
+  );
+
+  if (!hasCodexRuntime) return null;
+
+  const adopt = async (threadId: string) => {
+    setImporting(threadId);
+    setImportError(null);
+    try {
+      const r = await post<any>("/api/harness/codex/threads/import", { threadId });
+      navigate(`/tasks/${r.taskId}`);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : String(e));
+      setImporting(null);
+    }
+  };
+
+  const list = threads.data ?? [];
+
+  return (
+    <section className="threads-panel">
+      <div className="section-head">
+        <h2>Local Codex Threads</h2>
+        <label className="muted threads-filter" title="Only threads whose working directory matches the selected workspace">
+          <input
+            type="checkbox"
+            checked={thisWorkspaceOnly}
+            onChange={(e) => setThisWorkspaceOnly(e.target.checked)}
+          />{" "}
+          This workspace only
+        </label>
+        <button className="small right" onClick={threads.reload}>Refresh</button>
+      </div>
+      <p className="muted sub">
+        Work that started in the Codex CLI or IDE extension on this machine. Adopting a thread reads its
+        history — it never re-runs the model — so you can continue it here and hand it off to another harness.
+      </p>
+
+      {/* Harness-native auth availability (v6 §2) — detection only, never credentials. */}
+      {auth.data && !auth.data.ok && (
+        <div className="card auth-hint">
+          <strong>{auth.data.installed ? "Codex CLI not logged in" : "Codex CLI not installed"}</strong>
+          <div className="muted">{auth.data.hint ?? "Install the Codex CLI and sign in with ChatGPT to use Codex Local."}</div>
+        </div>
+      )}
+      {auth.data?.ok && auth.data.detail && (
+        <p className="muted auth-ok">
+          <Icon name="key" size={12} /> {auth.data.detail}
+          {auth.data.version ? ` · ${auth.data.version}` : ""}
+        </p>
+      )}
+      <ErrorBox message={threads.error ? `Codex thread discovery failed: ${threads.error}` : null} />
+      <ErrorBox message={importError} />
+
+      {threads.loading ? (
+        <div className="muted">Loading local Codex threads…</div>
+      ) : list.length === 0 && !threads.error ? (
+        <div className="muted">No local Codex threads found{thisWorkspaceOnly ? " in this workspace" : ""}.</div>
+      ) : (
+        <div className="thread-items">
+          {list.map((t: any) => (
+            <div key={t.id} className={`thread-item${t.adopted ? " adopted" : ""}`}>
+              <div className="thread-item-main">
+                <div className="thread-item-title" title={t.preview ?? t.title ?? t.id}>
+                  {t.title ?? t.id}
+                </div>
+                <div className="thread-item-meta muted">
+                  {t.cwd ? <span title={t.cwd}>{t.cwd.split("/").slice(-2).join("/")}</span> : <span>no workspace</span>}
+                  {t.updatedAt && <span> · updated {fmtRelative(t.updatedAt)}</span>}
+                  {t.turnCount != null && <span> · {t.turnCount} turn{t.turnCount === 1 ? "" : "s"}</span>}
+                  {t.model && <span> · {t.model}</span>}
+                </div>
+              </div>
+              <div className="thread-item-actions">
+                {t.adopted ? (
+                  <button className="small" onClick={() => navigate(`/tasks/${t.adoptedTaskId}`)}>
+                    In AgentFabric ↗
+                  </button>
+                ) : (
+                  <button
+                    className="small primary"
+                    disabled={importing !== null}
+                    title="Read this thread, adopt its workspace and continue it as an AgentFabric task"
+                    onClick={() => adopt(t.id)}
+                  >
+                    {importing === t.id ? <span className="spinner" /> : "Continue in AgentFabric"}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }

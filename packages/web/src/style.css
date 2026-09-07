@@ -1571,3 +1571,94 @@ a:hover {
 .instruction-details pre {
   max-height: 300px;
 }
+
+/* ---------- Local harness threads (v6 §6/§11) ---------- */
+
+.threads-panel {
+  margin-top: 32px;
+  border-top: 1px solid var(--border, #2a2a33);
+  padding-top: 20px;
+}
+.threads-panel .section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.threads-panel .section-head h2 {
+  margin: 0;
+  font-size: 15px;
+}
+.threads-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.auth-hint {
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+.auth-ok {
+  margin: 4px 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.thread-items {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.thread-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #2a2a33);
+  border-radius: 8px;
+}
+.thread-item.adopted {
+  opacity: 0.65;
+}
+.thread-item-main {
+  min-width: 0;
+}
+.thread-item-title {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 480px;
+}
+.thread-item-meta {
+  font-size: 12px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.thread-item-actions {
+  flex-shrink: 0;
+}
+
+/* ---------- Harness-native note + quota UX (v6 §2/§3/§10) ---------- */
+
+.harness-native-note {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  opacity: 0.8;
+}
+.quota-box {
+  border-color: #b4791f;
+}
+.quota-box .fail-title {
+  color: #e8a33d;
+}
+.quota-box p {
+  margin: 8px 0 0;
+  font-size: 13px;
+}

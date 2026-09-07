@@ -71,7 +71,18 @@ export interface Model {
 /* Runtime                                                            */
 /* ------------------------------------------------------------------ */
 
-export type RuntimeKind = "opencode" | "pi" | "docker" | "mock" | "custom";
+export type RuntimeKind = "opencode" | "pi" | "codex" | "docker" | "mock" | "custom";
+
+/**
+ * Where a runtime's model access comes from (v6 §2):
+ * - `agentfabric`: through an AgentFabric Provider/Model (API key in
+ *   Secrets, base URL and headers configured on the Provider).
+ * - `harness-native`: through the harness's own logged-in account and
+ *   subscription (e.g. Codex with ChatGPT login). AgentFabric never
+ *   reads, copies or stores that harness's credentials; runs on such a
+ *   runtime do not bind an AgentFabric Model.
+ */
+export type CredentialSource = "agentfabric" | "harness-native";
 
 export interface ResourceLimits {
   cpu?: string;
@@ -143,6 +154,12 @@ export interface Runtime {
   cwd?: string;
   /** If true, the adapter runs inside a Docker container. */
   containerized?: boolean;
+  /**
+   * Credential source (v6 §2): `harness-native` runtimes authenticate with
+   * their own logged-in account (e.g. Codex + ChatGPT) and therefore do
+   * not bind an AgentFabric Provider/Model. Defaults to `agentfabric`.
+   */
+  credentialSource?: CredentialSource;
   defaultModelId?: ID;
   enabled: boolean;
   /**
@@ -301,6 +318,14 @@ export interface Run {
   timeoutMs?: number;
   policy?: ExecutionPolicy;
   error?: string;
+  /**
+   * Structured failure classification (v6 §10): `usage-limit` marks a run
+   * that died on the harness's own subscription quota (e.g. Codex "You've
+   * hit your usage limit") — a switch-harness scenario, not a plain run
+   * failure. The Task page offers "Continue with Pi / OpenCode" instead of
+   * just "Run failed".
+   */
+  errorKind?: "usage-limit";
   startTime?: string;
   endTime?: string;
   usage?: Usage;
@@ -620,6 +645,9 @@ export interface AppConfig {
     bin?: string;
   };
   pi?: {
+    bin?: string;
+  };
+  codex?: {
     bin?: string;
   };
 }

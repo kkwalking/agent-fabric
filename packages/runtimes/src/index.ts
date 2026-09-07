@@ -2,6 +2,7 @@ import { RuntimeRegistry } from "@agentfabric/core";
 import { mockAdapter } from "./mock.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
+import { codexAdapter } from "./codex.js";
 import { dockerAdapter } from "./docker.js";
 
 export { mockAdapter, mockCapabilities } from "./mock.js";
@@ -38,6 +39,19 @@ export {
   PI_IMAGE_CONTRACT_HINT,
 } from "./pi.js";
 export {
+  codexAdapter,
+  mapCodexEvent,
+  extractCodexSessionRef,
+  parseCodexUsage,
+  detectCodexUsageLimit,
+  codexCapabilities,
+  codexAuthStatus,
+  codexBin,
+  codexProviderCompatibility,
+  CODEX_LOCAL_ONLY_HINT,
+} from "./codex.js";
+export { codexThreadSource, listCodexThreads, readCodexThread } from "./codexAppServer.js";
+export {
   dockerAdapter,
   runDockerContainer,
   runDockerWithLifecycle,
@@ -63,6 +77,7 @@ export function buildRegistry(): RuntimeRegistry {
   registry.register(mockAdapter);
   registry.register(opencodeAdapter);
   registry.register(piAdapter);
+  registry.register(codexAdapter);
   registry.register(dockerAdapter);
   return registry;
 }

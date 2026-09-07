@@ -16,6 +16,15 @@ import {
   sameResumeWorkspace,
   type NewTaskInput,
 } from "./services.js";
+import type {
+  HarnessThreadDetail,
+  HarnessThreadFilter,
+  HarnessThreadItem,
+  HarnessThreadSummary,
+  ImportHarnessThreadInput,
+  ImportHarnessThreadResult,
+  LocalHarnessThreadSource,
+} from "./harnessThreads.js";
 import {
   createHttpCompletionFn,
   generateCompactionHandoff,
@@ -36,6 +45,7 @@ import {
   effectiveCapabilities,
   type ArtifactDraft,
   type AgentRuntimeAdapter,
+  type HarnessAuthStatus,
   type ReusableContainer,
   type RuntimeContext,
   type RuntimeRegistry,
@@ -257,6 +267,13 @@ export class RunService {
   private leaseManager: ContainerLeaseManager;
   /** In-flight handoff generations keyed by the previous run, so the UI pre-generate and a racing continue share one result. */
   private handoffGenerations = new Map<string, Promise<Handoff>>();
+  /**
+   * Local harness thread sources (v6 §6–§8): read existing harness-native
+   * threads (e.g. Codex threads created outside AgentFabric) for
+   * discovery and adoption. Injected by the server/CLI; absent sources
+   * simply disable those routes.
+   */
+  private threadSources: Partial<Record<string, LocalHarnessThreadSource>>;
 
   constructor(
     private store: Store,
@@ -264,7 +281,8 @@ export class RunService {
     private registry: RuntimeRegistry,
     private containerOps: ContainerOps = { destroy: async () => {} },
     private completionFactory: CompletionFactory = ({ provider, model, apiKey }) =>
-      createHttpCompletionFn(provider, model, apiKey)
+      createHttpCompletionFn(provider, model, apiKey),
+    threadSources: Partial<Record<string, LocalHarnessThreadSource>> = {}
   ) {
     this.leaseManager = new ContainerLeaseManager(containerOps, {
       onDestroyed: async (lease) => {
@@ -276,6 +294,7 @@ export class RunService {
         });
       },
     });
+    this.threadSources = threadSources;
   }
 
   /* ---------------- public API ---------------- */
@@ -392,7 +411,9 @@ export class RunService {
     const mergedEnv = { ...(profile?.env ?? {}), ...(input.env ?? {}) };
     const mergedSecretIds = [...new Set([...(input.secretIds ?? []), ...(profile?.secretIds ?? [])])];
     const mergedPolicy = input.policy ?? profile?.policy;
-    const modelId = input.modelId ?? profile?.modelId ?? undefined;
+    // Harness-native targets (v6 §3) keep their own account/model — an
+    // explicit AgentFabric model never rides along.
+    const modelId = this.isHarnessNative(target) ? undefined : input.modelId ?? profile?.modelId ?? undefined;
 
     const previousRuntime = previousRun?.runtimeId ? this.runtimeService().get(previousRun.runtimeId) : undefined;
     const sameHarness = previousRuntime?.kind === target.kind;
@@ -614,8 +635,13 @@ export class RunService {
     const profile = input.profileId ? this.profileService().get(input.profileId) : undefined;
     const runtimeId = input.runtimeId ?? profile?.runtimeId ?? this.runtimeService().enabled()[0]?.id;
     const runtime = runtimeId ? this.runtimeService().get(runtimeId) : undefined;
-    const modelId =
-      input.modelId ?? profile?.modelId ?? runtime?.defaultModelId ?? this.modelService().list().find((m) => m.enabled)?.id;
+    // Harness-native runtimes (v6 §3) never bind an AgentFabric Model —
+    // they run on the harness's own account and default model (Codex +
+    // ChatGPT), so no model default is injected and any explicit modelId
+    // is dropped rather than silently misleading the run record.
+    const modelId = this.isHarnessNative(runtime)
+      ? undefined
+      : input.modelId ?? profile?.modelId ?? runtime?.defaultModelId ?? this.modelService().list().find((m) => m.enabled)?.id;
 
     let workspaceId = input.workspaceId;
     if (!workspaceId && profile?.workspaceConfig) {
@@ -711,6 +737,18 @@ export class RunService {
       return fallback;
     }
     return runtime;
+  }
+
+  /**
+   * True when the runtime authenticates with its own harness-native
+   * account (v6 §2/§3): the runtime record or the adapter declares
+   * `harness-native`, e.g. Codex Local with its ChatGPT login.
+   */
+  private isHarnessNative(runtime: Runtime | undefined): boolean {
+    if (!runtime) return false;
+    if (runtime.credentialSource === "harness-native") return true;
+    if (runtime.credentialSource === "agentfabric") return false;
+    return this.registry.get(runtime.kind)?.credentialSource === "harness-native";
   }
 
   /**
@@ -832,6 +870,313 @@ export class RunService {
     // prompt is unused on this path: a previous run always exists, so only
     // userNotes/title are read by prepareHandoff.
     return this.prepareHandoff(task, previousRun, previousRuntime, target, { prompt: "" });
+  }
+
+  /* ---------------- local harness threads (v6 §6–§8) ---------------- */
+
+  /** Live harness-native auth check (v6 §2); null when the adapter has none. */
+  async harnessAuthStatus(kind: string): Promise<HarnessAuthStatus | null> {
+    const check = this.registry.get(kind)?.checkAuth;
+    return check ? await check() : null;
+  }
+
+  private threadSource(kind: string): LocalHarnessThreadSource {
+    const source = this.threadSources[kind];
+    if (!source) throw new Error(`No local thread source registered for runtime kind "${kind}"`);
+    return source;
+  }
+
+  /**
+   * Lists existing local threads of a harness (v6 §6), newest first,
+   * optionally narrowed to a workspace cwd. Threads already adopted into
+   * a task are flagged so the UI can say "already in AgentFabric".
+   */
+  async listHarnessThreads(kind: string, filter: HarnessThreadFilter = {}): Promise<HarnessThreadSummary[]> {
+    const threads = await this.threadSource(kind).listThreads(filter);
+    // Adoption marker: task metadata { harness, threadId } (set by import).
+    const adopted = new Map<string, ID>();
+    for (const task of this.taskService().list()) {
+      const meta = task.metadata ?? {};
+      if (meta.importedFromHarness === kind && typeof meta.importedThreadId === "string") {
+        adopted.set(meta.importedThreadId, task.id);
+      }
+    }
+    return threads.map((t) => {
+      const taskId = adopted.get(t.id);
+      return taskId ? { ...t, adopted: true, adoptedTaskId: taskId } : t;
+    });
+  }
+
+  /** Reads an existing harness-native thread (v6 §7) — no model request. */
+  async readHarnessThread(kind: string, threadId: string): Promise<HarnessThreadDetail> {
+    return this.threadSource(kind).readThread(threadId);
+  }
+
+  /**
+   * Adopts an existing harness-native thread into AgentFabric (v6 §8):
+   *
+   *   Existing Codex Thread → Read Thread → Associate Workspace →
+   *   (optional) Generate Handoff → Continue with Pi / OpenCode
+   *
+   * The thread itself is NOT converted into an AgentFabric session (v6
+   * §14): each Codex turn is recorded as one completed Run whose events
+   * are projected from the thread's items, the thread id is registered as
+   * a RuntimeSessionRef (so Codex → Codex still native-resumes), and the
+   * handoff toward another harness is generated from those records.
+   */
+  async importHarnessThread(input: ImportHarnessThreadInput): Promise<ImportHarnessThreadResult> {
+    const kind = input.runtimeKind;
+    const source = this.threadSource(kind);
+    const runtime = this.runtimeService().enabled().find((r) => r.kind === kind);
+    if (!runtime) throw new Error(`No enabled "${kind}" runtime available to adopt a ${kind} thread`);
+    const adapter = this.registry.get(kind);
+    const caps = effectiveCapabilities(adapter, runtime);
+
+    const detail = await source.readThread(input.threadId);
+    if (!detail.id) throw new Error(`Thread not found: ${input.threadId}`);
+
+    /* ---- Associate workspace (v6 §8): explicit > cwd match > import cwd ---- */
+    let workspaceId = input.workspaceId;
+    if (workspaceId) {
+      if (!this.workspaceService().get(workspaceId)) throw new Error(`Workspace not found: ${workspaceId}`);
+    } else if (detail.cwd) {
+      const ws = await this.associateWorkspaceForCwd(detail.cwd, detail.title ?? detail.id);
+      workspaceId = ws?.id;
+    }
+
+    /* ---- Turn grouping: harness-provided boundaries when available,
+            else split the flattened history at each user message. ---- */
+    let turns: Array<{ userText?: string; items: HarnessThreadItem[] }>;
+    if (detail.turns && detail.turns.length > 0) {
+      turns = detail.turns;
+    } else {
+      turns = [];
+      for (const item of detail.items) {
+        if (item.kind === "user-message") {
+          turns.push({ userText: item.text, items: [] });
+        } else {
+          if (turns.length === 0) turns.push({ userText: undefined, items: [] });
+          turns[turns.length - 1].items.push(item);
+        }
+      }
+      if (turns.length === 0) turns.push({ userText: undefined, items: [] });
+    }
+
+    const firstUser = turns.find((t) => t.userText?.trim())?.userText;
+    const title =
+      input.title?.trim() ||
+      detail.title?.trim() ||
+      (firstUser ? firstUser.slice(0, 80) : undefined) ||
+      `${kind} thread ${detail.id.slice(0, 8)}`;
+    const prompt = input.prompt?.trim() || firstUser || detail.preview || `Imported ${kind} thread ${detail.id}`;
+
+    /* ---- Task + one completed Run per turn (v6 §7 → standard events). ---- */
+    const task = await this.taskService().create({
+      title,
+      prompt,
+      runtimeId: runtime.id,
+      workspaceId,
+      metadata: {
+        imported: true,
+        importedFromHarness: kind,
+        importedThreadId: detail.id,
+        importedAt: now(),
+        ...(detail.cwd ? { importedCwd: detail.cwd } : {}),
+        ...(detail.updatedAt ? { threadUpdatedAt: detail.updatedAt } : {}),
+      },
+    });
+
+    // Backdated, strictly increasing timestamps keep forTask() ordering
+    // stable even when turns are recorded within the same millisecond.
+    const baseMs = Date.now() - turns.length;
+    let runId: ID | undefined;
+    let budget = 4000; // hard cap on synthesized events per import
+    for (let i = 0; i < turns.length; i++) {
+      const turn = turns[i];
+      const run = await this.createRunFromTask(
+        task,
+        {
+          continuity: "new",
+          inputInstruction: turn.userText ?? "(turn without user input)",
+          userPrompt: turn.userText,
+          runtimeId: runtime.id,
+          workspaceId,
+        },
+        turn.userText ?? prompt
+      );
+      runId = run.id;
+      const stamp = new Date(baseMs + i).toISOString();
+      await this.store.update<Run>("runs", run.id, { createdAt: stamp, updatedAt: stamp });
+
+      await this.emitImportEvent(run.id, "run.started", {
+        runtime: runtime.name,
+        imported: true,
+        threadId: detail.id,
+        turn: i + 1,
+        turnCount: turns.length,
+      });
+      // Stand-in for the harness launch line so the thread view's turn
+      // header shows where this run came from (and later command items
+      // render as activity rows, not as the launch command).
+      await this.emitImportEvent(run.id, "shell.command", {
+        command: `${kind} (imported thread)`,
+        cwd: detail.cwd,
+        backend: "local",
+        harnessInvocation: true,
+        imported: true,
+      });
+      let used = 0;
+      for (const item of turn.items) {
+        if (budget-- <= 0) {
+          await this.emitImportEvent(run.id, "log", { line: "import truncated: too many thread items" }, "warn");
+          break;
+        }
+        const emitted = this.importItemEvents(item);
+        for (const ev of emitted) {
+          await this.emitImportEvent(run.id, ev.type as EventType, ev.data, ev.level as LogLevel | undefined);
+          used++;
+        }
+      }
+      await this.emitImportEvent(run.id, "run.completed", { exitCode: 0, imported: true });
+      await this.store.update<Run>("runs", run.id, {
+        status: "completed",
+        startTime: stamp,
+        endTime: stamp,
+        modelName: detail.model,
+        eventCount: used + 3,
+        updatedAt: stamp,
+      });
+    }
+
+    /* ---- Register the thread as the task's native session (v6 §4):
+            same harness resumes it, other harnesses go through Handoff. ---- */
+    let runtimeSessionRefId: ID | undefined;
+    if (runId) {
+      const ref = await this.runtimeSessionService().register({
+        runtimeId: runtime.id,
+        runtimeKind: runtime.kind,
+        runtimeName: runtime.name,
+        nativeSessionRef: detail.id,
+        resumeSupported: caps.supportsNativeResume,
+        taskId: task.id,
+        runId,
+        workspaceId,
+        executionBackend: "local",
+        metadata: { imported: true, threadTitle: detail.title, cwd: detail.cwd },
+      });
+      runtimeSessionRefId = ref.id;
+      await this.store.update<Run>("runs", runId, { runtimeSessionRefId: ref.id, updatedAt: now() });
+      await this.emitRunEvent(runId, "runtime.session.created", {
+        runtimeSessionRefId: ref.id,
+        nativeSessionRef: ref.nativeSessionRef,
+        runtimeKind: ref.runtimeKind,
+        imported: true,
+        resumeSupported: ref.resumeSupported,
+        executionBackend: ref.executionBackend,
+      });
+    }
+
+    /* ---- Optional handoff toward another harness (v6 §8/§9). ---- */
+    let handoffId: ID | undefined;
+    if (input.targetRuntimeId) {
+      let handoff: Handoff | undefined;
+      try {
+        handoff = await this.generateHandoff(task.id, input.targetRuntimeId);
+        if (input.userNotes?.trim()) {
+          handoff = (await this.handoffService().addUserNotes(handoff.id, input.userNotes)) ?? handoff;
+        }
+        handoffId = handoff?.id;
+      } catch {
+        // Adoption must succeed even when summary generation fails — the
+        // continuation path regenerates the handoff on demand.
+      }
+    }
+
+    return { taskId: task.id, runId: runId!, workspaceId, runtimeSessionRefId, handoffId };
+  }
+
+  /**
+   * Finds a workspace already pointing at `cwd`, or imports the directory
+   * in place (v6 §8 "Associate Workspace"). Adoption never copies user
+   * files — the workspace record references the existing directory.
+   */
+  private async associateWorkspaceForCwd(cwd: string, name: string): Promise<Workspace | undefined> {
+    const ws = this.workspaceService();
+    const existing = ws.list().find((w) => w.path && w.path === cwd);
+    if (existing) return existing;
+    try {
+      return await ws.import({ name: name?.slice(0, 60) || `imported ${cwd}`, type: "local", path: cwd });
+    } catch {
+      // The directory is gone — adopt without a workspace association.
+      return undefined;
+    }
+  }
+
+  /** Standard-event projections of one imported thread item (v6 §7). */
+  private importItemEvents(item: HarnessThreadItem): Array<{ type: string; data: Record<string, unknown>; level?: string }> {
+    switch (item.kind) {
+      case "agent-message":
+        return item.text.trim() ? [{ type: "agent.message", data: { content: item.text, role: "assistant" } }] : [];
+      case "reasoning":
+        return item.text.trim() ? [{ type: "agent.thinking", data: { content: item.text }, level: "debug" }] : [];
+      case "command":
+        return [
+          { type: "shell.command", data: { command: item.command, backend: "local" } },
+          {
+            type: "shell.output",
+            data: { output: item.output ?? "", exitCode: item.exitCode ?? null },
+            level: item.exitCode ? "info" : "warn",
+          },
+        ];
+      case "file-change":
+        return [
+          {
+            type: item.action === "add" ? "file.created" : "file.modified",
+            data: { path: item.path, changeKind: item.action },
+          },
+        ];
+      case "tool-call":
+        return [
+          {
+            type: "tool.completed",
+            data: { tool: item.tool, args: item.arguments, result: item.result, isError: Boolean(item.isError) },
+            level: item.isError ? "warn" : "info",
+          },
+        ];
+      case "web-search":
+        return [{ type: "tool.completed", data: { tool: "web_search", args: { query: item.query } } }];
+      case "error":
+        return [{ type: "runtime.error", data: { error: item.message }, level: "warn" }];
+      default:
+        return [];
+    }
+  }
+
+  /** Persists one synthesized event for an imported run and fans it out. */
+  private async emitImportEvent(
+    runId: string,
+    type: EventType,
+    data: Record<string, unknown>,
+    level: LogLevel = "info"
+  ): Promise<void> {
+    const event: RunEvent = {
+      id: newId("evt"),
+      runId,
+      seq: this.store.nextSeq(),
+      type,
+      timestamp: now(),
+      data,
+      level,
+      source: "import",
+    };
+    await this.store.insert("events", event);
+    const run = this.store.get<Run>("runs", runId);
+    if (run) {
+      run.eventCount += 1;
+      run.updatedAt = now();
+      await this.store.commit();
+    }
+    this.bus.publish(event);
   }
 
   /**
@@ -1168,8 +1513,8 @@ export class RunService {
       } else if (aborted) {
         await this.finish(runId, "cancelled", "Cancelled by user", usageAcc);
       } else if (result.error) {
-        await ctx.emit("run.failed", { error: result.error });
-        await this.finish(runId, "failed", result.error, addUsage(usageAcc, result.usage));
+        await ctx.emit("run.failed", { error: result.error, errorKind: result.errorKind });
+        await this.finish(runId, "failed", result.error, addUsage(usageAcc, result.usage), result.errorKind);
       } else {
         await ctx.emit("run.completed", { exitCode: result.exitCode });
         await this.finish(runId, "completed", undefined, addUsage(usageAcc, result.usage));
@@ -1442,7 +1787,8 @@ export class RunService {
     runId: string,
     status: Run["status"],
     error: string | undefined,
-    usage: Usage
+    usage: Usage,
+    errorKind?: "usage-limit"
   ): Promise<void> {
     const run = this.get(runId);
     if (!run) return;
@@ -1460,6 +1806,7 @@ export class RunService {
     await this.store.update<Run>("runs", runId, {
       status,
       error,
+      errorKind,
       usage,
       cost,
       endTime,

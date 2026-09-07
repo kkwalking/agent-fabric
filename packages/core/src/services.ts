@@ -232,6 +232,7 @@ export interface NewRuntimeInput {
   command?: string[];
   cwd?: string;
   containerized?: boolean;
+  credentialSource?: Runtime["credentialSource"];
   defaultModelId?: ID;
   enabled?: boolean;
   ephemeral?: boolean;
@@ -272,6 +273,7 @@ export class RuntimeService {
       command: input.command,
       cwd: input.cwd,
       containerized: input.containerized ?? false,
+      credentialSource: input.credentialSource,
       defaultModelId: input.defaultModelId,
       enabled: input.enabled ?? true,
       ephemeral: input.ephemeral ?? lifecycle.mode === "ephemeral",
@@ -937,7 +939,22 @@ export class UsageService {
 /* ------------------------------------------------------------------ */
 
 export async function seedDefaults(store: Store): Promise<void> {
-  if (store.list<Runtime>("runtimes").length > 0) return;
+  // Existing installs (pre-v6) get the Codex Local runtime seeded too —
+  // idempotent, keyed by kind.
+  if (store.list<Runtime>("runtimes").length > 0) {
+    if (!store.list<Runtime>("runtimes").some((r) => r.kind === "codex")) {
+      await new RuntimeService(store).create({
+        name: "Codex (ChatGPT)",
+        kind: "codex",
+        description: "Codex CLI on this machine — runs on its own ChatGPT login and subscription (no AgentFabric provider needed)",
+        credentialSource: "harness-native",
+        enabled: true,
+        ephemeral: true,
+        env: {},
+      });
+    }
+    return;
+  }
 
   const providerService = new ProviderService(store);
   const modelService = new ModelService(store);
@@ -971,6 +988,17 @@ export async function seedDefaults(store: Store): Promise<void> {
     name: "Pi Agent",
     kind: "pi",
     description: "Pi coding agent (local)",
+    enabled: true,
+    ephemeral: true,
+    env: {},
+  });
+  // Codex Local (v6 §1): the user's own codex CLI + ChatGPT login. No
+  // Provider/API key is configured or expected (v6 §2/§3).
+  await runtimeService.create({
+    name: "Codex (ChatGPT)",
+    kind: "codex",
+    description: "Codex CLI on this machine — runs on its own ChatGPT login and subscription (no AgentFabric provider needed)",
+    credentialSource: "harness-native",
     enabled: true,
     ephemeral: true,
     env: {},

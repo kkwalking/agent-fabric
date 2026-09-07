@@ -1,5 +1,6 @@
 import type {
   Artifact,
+  CredentialSource,
   ExecutionPolicy,
   ArtifactKind,
   EventType,
@@ -198,6 +199,12 @@ export interface RuntimeResult {
   exitCode?: number;
   usage?: Usage;
   error?: string;
+  /**
+   * Structured failure classification (v6 §10). `usage-limit` means the
+   * run died on the harness's own subscription quota — the Task page
+   * surfaces a switch-harness affordance instead of a plain failure.
+   */
+  errorKind?: "usage-limit";
   /** Docker container id, when the adapter ran a container. */
   containerId?: string;
   /**
@@ -214,6 +221,31 @@ export interface RuntimeResult {
    * the harness itself (spec v1 §7), stored for the next continuation.
    */
   handoffContent?: HandoffContent;
+}
+
+/* ------------------------------------------------------------------ */
+/* Harness-native authentication (v6 §2)                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Live check of a harness-native credential (v6 §2). AgentFabric detects
+ * only *availability* — installed, logged in, usable. It never reads,
+ * copies or stores the harness's access token, refresh token or auth
+ * files; the harness keeps full ownership of its identity.
+ */
+export interface HarnessAuthStatus {
+  /** The harness CLI is installed and runnable. */
+  installed: boolean;
+  /** The harness reports an authenticated session. */
+  loggedIn: boolean;
+  /** installed && loggedIn — the run path is usable. */
+  ok: boolean;
+  /** Human-readable detail, e.g. the login method ("ChatGPT"). */
+  detail?: string;
+  /** CLI version, when known. */
+  version?: string;
+  /** How to fix it when not ok (shown in the UI). */
+  hint?: string;
 }
 
 /**
@@ -263,6 +295,18 @@ export interface AgentRuntimeAdapter {
    * actually honor (v4 §4). Absent means "no provider support at all".
    */
   readonly providerCompatibility?: ProviderCompatibility;
+  /**
+   * Credential source this harness authenticates with (v6 §2):
+   * `harness-native` adapters run on the harness's own logged-in account
+   * (Codex + ChatGPT) and never bind an AgentFabric Provider/Model.
+   */
+  readonly credentialSource?: CredentialSource;
+  /**
+   * Live availability check for harness-native credentials (v6 §2).
+   * Detects installed/logged-in/usable without ever touching the
+   * harness's token material.
+   */
+  checkAuth?(): Promise<HarnessAuthStatus>;
   /**
    * Container image the harness executes in when the runtime record has
    * no `image` configured (v3 §10/§11). Only harnesses with an official,

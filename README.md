@@ -28,11 +28,11 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
                         └───────┬─────────────────────────┘
                                 │ Harness Adapter (RuntimeRegistry)
                                 │ + Execution Backend (local / docker)
-                  ┌─────────────┼──────────────┬──────────────┐
-                  ▼             ▼              ▼              ▼
-             OpenCode       Pi Agent        Docker        Mock
-             Adapter        Adapter         Adapter        Adapter
-             (本地+容器)    (本地+容器)     (容器)         (模拟)
+                  ┌─────────────┼──────────────┬──────────────┬─────────────┐
+                  ▼             ▼              ▼              ▼             ▼
+             OpenCode       Pi Agent        Codex         Docker        Mock
+             Adapter        Adapter         Local         Adapter        Adapter
+             (本地+容器)    (本地+容器)     (本地)         (容器)         (模拟)
 ```
 
 设计原则（来自 `mvp-spec.md`）：
@@ -47,7 +47,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | --- | --- |
 | Provider | 增删改查、自定义 Base URL、API Key 走 Secrets、OpenAI-compatible、启用/禁用 |
 | Model | 增删改查、所属 Provider、参数、Alias、运行时自由选择 |
-| Runtime | OpenCode / Pi Agent / Docker / Mock，统一 Adapter 协议，可扩展 |
+| Runtime | OpenCode / Pi Agent / Codex Local / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
 | Workspace | 本地目录 / Git / Volume，持久化，与 Run 关联 |
 | Task | 指定 Runtime / Model / Workspace / Env / Secrets / 资源限制 / 超时 / Policy |
@@ -88,6 +88,20 @@ npm run dev:web
 * **Task Thread（`/tasks/:taskId`）是主交互页面**：像 Codex / Claude Code 一样，用户消息（`run.userPrompt`，绝不是拼接后的完整 Harness Prompt）、Agent 工作过程（可读、默认折叠的 Tool / Command / File Activity）与 Agent 回答（`agent.message`）在同一页面持续展开；底部 Composer 继续任务，可切换 Runtime / Model / Agent Profile，并实时提示即将发生 **Resume**（同 Harness）还是 **Handoff**（跨 Harness，带语义化交接摘要）。运行中可 Stop，失败提供 Retry / Continue / Switch runtime。
 * **Run Detail 退回为 Run Inspector（`/runs/:runId`）**：高级执行详情 / 调试 / 审计页面——Raw Events、Logs、Artifacts、Usage、Runtime Native Session、Native State、Handoff 与完整 `inputInstruction`。
 * **前端 Presentation Layer**：Raw Event → Presentation Projector → Timeline Item（事件合并：`tool.started`+`tool.completed` → 一个 Tool Activity，`shell.command`+`shell.output` → 一个 Command Activity），不修改 Core Event Schema；`GET /api/tasks/:id/thread` 提供只读聚合，未引入新的 Message / Conversation / Session 后端模型。
+
+## Codex Local 与跨 Harness Handoff（v6）
+
+v6（`v6.md`）接入本机 **Codex CLI** 作为 Harness，核心目标是：用户在 Codex 里做到一半（额度耗尽或主动切换），能通过 AgentFabric 把工作自然交接给 Pi / OpenCode，无需重新解释上下文。
+
+> **Harness identity stays native. Codex subscription is used through Codex itself.**
+> **Same Harness means Resume. Different Harness means Handoff.**
+
+* **Codex Local Runtime（`kind: codex`，仅本地执行）**：直接使用本机已安装的 `codex` CLI（`codex exec --json`），执行任务、捕获 thread id、解析事件（agent_message / reasoning / command_execution / file_change / mcp_tool_call / web_search / turn usage）、保存 `RuntimeSessionRef`（`runtimeKind=codex, nativeSessionRef=thread id, executionBackend=local, resumeSupported=true`），并用 `codex exec resume <id>` 原生续接。容器化在本阶段被明确拒绝。
+* **Harness-native 认证（`credentialSource: "harness-native"`）**：Codex 使用自己的 ChatGPT 登录与套餐额度；AgentFabric 只通过 `codex --version` / `codex login status` 检测「已安装 / 已登录 / 可用」，**不读取、不复制、不保存**任何 access token / refresh token / auth 文件，也绝不把 Codex 登录转换成 AgentFabric Provider。未登录时 Run 快速失败并给出 `codex login` 修复指引。
+* **不绑定 AgentFabric Model**：harness-native Runtime 不注入模型默认值（显式传入也会被忽略）——Codex 使用自己账号的默认模型；UI 上模型选择器替换为说明提示。
+* **本地 Thread 发现与读取（官方接口）**：通过 `codex app-server` 的 JSON-RPC（`thread/list` / `thread/read` / `thread/turns/list`）发现本机已有 Codex Threads（按 cwd / 最近更新过滤，包含 cli / vscode / exec 三类来源），只读地取出用户输入、Agent 回复与 Tool Activity——**不解析 `~/.codex` 内部文件**，也绝不触发新的模型请求。
+* **接管已有工作（Import / Adopt）**：`POST /api/harness/codex/threads/import` — Read Thread → 按 cwd 关联（或就地导入）Workspace → 每个 Codex turn 记录为一个已完成 Run（事件由 thread 内容投影）→ 注册 thread 为可 Resume 的 Native Session →（可选）预生成指向目标 Harness 的 Handoff。不把 Codex Thread 转换成统一 Session。
+* **额度耗尽 UX（`errorKind: "usage-limit"`）**：识别 Codex 的配额错误（"You've hit your usage limit…"），Task 页面显示 **Codex usage limit reached.** 与 **Continue with Pi / Continue with OpenCode**，一键预选目标 Harness 并立即生成 Handoff，新 Harness 建立自己的新 Native Session 继续任务。
 
 ## 长期任务执行模型（v1）
 
@@ -276,6 +290,10 @@ af usage  # 或 af config / af secrets / af tasks
 | GET | `/api/runs/:id/events/stream` | **SSE**：单 Run 实时事件流 |
 | GET | `/api/events/stream` | **SSE**：全局事件流 |
 | GET | `/api/runtime-sessions` `/api/native-states` | 原生 Session 引用 / Native State |
+| GET | `/api/harness/:kind/auth-status` | Harness-native 登录状态检测（v6，仅检测不碰凭据） |
+| GET | `/api/harness/:kind/threads` | 本地 Harness Thread 发现（`?cwd=` / `?workspaceId=` / `?limit=`） |
+| GET | `/api/harness/:kind/threads/:threadId` | 只读读取已有 Thread 内容 |
+| POST | `/api/harness/:kind/threads/import` | 接管已有 Thread → Task + Handoff |
 | GET | `/api/artifacts` `/api/artifacts/:id/content` | Artifacts |
 | GET | `/api/usage` | Usage & Cost 聚合 |
 | GET/PUT | `/api/config` | 配置 |

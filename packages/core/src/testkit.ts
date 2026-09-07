@@ -19,9 +19,11 @@ import {
 } from "./services.js";
 import { opencodeAdapter } from "../../runtimes/src/opencode.js";
 import { piAdapter } from "../../runtimes/src/pi.js";
+import { codexAdapter } from "../../runtimes/src/codex.js";
+import { codexThreadSource } from "../../runtimes/src/codexAppServer.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import { createDockerContainerOps } from "../../runtimes/src/docker.js";
-import { FAKE_DOCKER_SCRIPT, FAKE_OPENCODE_SCRIPT, FAKE_PI_SCRIPT } from "./fakes.js";
+import { FAKE_CODEX_SCRIPT, FAKE_DOCKER_SCRIPT, FAKE_OPENCODE_SCRIPT, FAKE_PI_SCRIPT } from "./fakes.js";
 import type { Run } from "./types.js";
 
 export interface Fixtures {
@@ -29,6 +31,7 @@ export interface Fixtures {
   fakeOpenCode: string;
   fakePi: string;
   fakeDocker: string;
+  fakeCodex: string;
   dockerLog: string;
 }
 
@@ -46,6 +49,7 @@ export function makeFixtures(): Fixtures {
     fakeOpenCode: writeExecutable(dir, "fake-opencode.mjs", FAKE_OPENCODE_SCRIPT),
     fakePi: writeExecutable(dir, "fake-pi.mjs", FAKE_PI_SCRIPT),
     fakeDocker: writeExecutable(dir, "fake-docker.mjs", FAKE_DOCKER_SCRIPT),
+    fakeCodex: writeExecutable(dir, "fake-codex.mjs", FAKE_CODEX_SCRIPT),
     dockerLog: join(dir, "docker-calls.log"),
   };
 }
@@ -60,16 +64,27 @@ export function useBins(fx: Fixtures, extra: Record<string, string> = {}, unset:
   const saved: Record<string, string | undefined> = {
     AGENTFABRIC_OPENCODE_BIN: process.env.AGENTFABRIC_OPENCODE_BIN,
     AGENTFABRIC_PI_BIN: process.env.AGENTFABRIC_PI_BIN,
+    AGENTFABRIC_CODEX_BIN: process.env.AGENTFABRIC_CODEX_BIN,
     AGENTFABRIC_DOCKER_BIN: process.env.AGENTFABRIC_DOCKER_BIN,
     AGENTFABRIC_PI_IMAGE: process.env.AGENTFABRIC_PI_IMAGE,
     AGENTFABRIC_OPENCODE_IMAGE: process.env.AGENTFABRIC_OPENCODE_IMAGE,
     FAKE_DOCKER_LOG: process.env.FAKE_DOCKER_LOG,
+    FAKE_CODEX_HOME: process.env.FAKE_CODEX_HOME,
+    FAKE_CODEX_THREADS_FILE: process.env.FAKE_CODEX_THREADS_FILE,
+    FAKE_CODEX_DUMP: process.env.FAKE_CODEX_DUMP,
+    FAKE_CODEX_SCENARIO: process.env.FAKE_CODEX_SCENARIO,
+    FAKE_CODEX_LOGGED_OUT: process.env.FAKE_CODEX_LOGGED_OUT,
     ...Object.fromEntries(Object.keys(extra).map((k) => [k, process.env[k]])),
   };
   process.env.AGENTFABRIC_OPENCODE_BIN = fx.fakeOpenCode;
   process.env.AGENTFABRIC_PI_BIN = fx.fakePi;
+  process.env.AGENTFABRIC_CODEX_BIN = fx.fakeCodex;
   process.env.AGENTFABRIC_DOCKER_BIN = fx.fakeDocker;
   process.env.FAKE_DOCKER_LOG = fx.dockerLog;
+  // Isolated per-test codex state: session store + threads fixture live in
+  // the fixtures dir unless a test overrides them.
+  process.env.FAKE_CODEX_HOME ??= fx.dir;
+  if (!process.env.FAKE_CODEX_THREADS_FILE) delete process.env.FAKE_CODEX_THREADS_FILE;
   for (const [k, v] of Object.entries(extra)) process.env[k] = v;
   for (const k of unset) delete process.env[k];
   writeFileSync(fx.dockerLog, "");
@@ -104,15 +119,19 @@ export async function freshHarness(opts?: { completionFactory?: CompletionFactor
   registry.register(mockAdapter);
   registry.register(opencodeAdapter);
   registry.register(piAdapter);
+  registry.register(codexAdapter);
   await seedDefaults(store);
   // Real docker ops (routed at the fake docker binary by useBins) so
   // keep-alive abort destroys are observable in the docker call log.
+  // The codex thread source is the real app-server client pointed at the
+  // fake codex binary via AGENTFABRIC_CODEX_BIN (v6 §6–§8).
   const runService = new RunService(
     store,
     bus,
     registry,
     createDockerContainerOps(),
-    opts?.completionFactory
+    opts?.completionFactory,
+    { codex: codexThreadSource }
   );
   return {
     store,

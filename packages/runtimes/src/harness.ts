@@ -38,10 +38,23 @@ export interface HarnessExecutionOptions {
    * AgentFabric-generated harness config (v4 §1).
    */
   extraMounts?: Array<{ hostPath: string; containerPath: string }>;
-  /** Maps one raw stdout line to a standard event (null = not JSON). */
-  mapLine: (raw: string, runId: string, seq: () => number) => RunEvent | null;
+  /**
+   * Maps one raw stdout line to standard events (null = not JSON). A line
+   * may carry several logical events (e.g. a codex file_change item with
+   * multiple changed paths).
+   */
+  mapLine: (raw: string, runId: string, seq: () => number) => RunEvent | RunEvent[] | null;
   /** Extracts the harness's opaque native session reference from a line. */
   extractSessionRef: (raw: string) => string | undefined;
+  /**
+   * Classifies a failed exit (non-zero code or spawn of a live process
+   * that ended badly) from everything the loop observed — e.g. the last
+   * runtime.error the harness emitted. Returning a value replaces the
+   * generic "exited with code N" message, so harness-specific failures
+   * (Codex usage-limit exhaustion, v6 §10) keep their identity.
+   */
+  describeFailure?: (seen: { exitCode: number | null; lastError?: string }) =>
+    { error: string; errorKind?: "usage-limit" } | undefined;
   /**
    * Extracts a per-request Usage from an *authoritative* harness event
    * (e.g. pi `message_end` / opencode `step_finish`). Called for every
@@ -94,6 +107,7 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
 
   let seq = 0;
   let nativeSessionRef: string | undefined;
+  let lastRuntimeError: string | undefined;
   const consume = (stream: AsyncIterable<string>, stderr: boolean) =>
     (async () => {
       for await (const line of stream) {
@@ -126,8 +140,13 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
           }
         }
         const mapped = opts.mapLine(line, ctx.run.id, () => ++seq);
-        if (mapped) {
-          void ctx.emit(mapped.type, mapped.data, { level: mapped.level, source: opts.source });
+        const mappedList = Array.isArray(mapped) ? mapped : mapped ? [mapped] : [];
+        for (const m of mappedList) {
+          if (m.type === "runtime.error") {
+            const detail = m.data?.error ?? m.data?.message;
+            if (typeof detail === "string" && detail.trim()) lastRuntimeError = detail;
+          }
+          void ctx.emit(m.type, m.data, { level: m.level, source: opts.source });
         }
       }
     })().catch(() => {
@@ -146,6 +165,18 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
     return { exitCode: exit.code ?? 1, error: `${opts.source} run aborted`, nativeSessionRef, containerId: exit.containerId };
   }
   if (exit.code !== 0) {
+    // Let the harness adapter give the failure its real identity (v6 §10)
+    // before falling back to the generic exit-code message.
+    const described = opts.describeFailure?.({ exitCode: exit.code, lastError: lastRuntimeError });
+    if (described) {
+      return {
+        exitCode: exit.code ?? 1,
+        error: described.error,
+        errorKind: described.errorKind,
+        nativeSessionRef,
+        containerId: exit.containerId,
+      };
+    }
     return {
       exitCode: exit.code ?? 1,
       error: `${opts.source} exited with code ${exit.code}`,
