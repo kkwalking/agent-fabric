@@ -13,12 +13,24 @@ import { navigate } from "../router";
  * first configured provider, workspace → first configured workspace. A
  * missing prerequisite (no LLM, no workspace) blocks submission with a
  * pointer to the right settings tab — except for harness-native runtimes
- * (Codex + ChatGPT, v6 §3), which need neither a provider nor a model.
+ * (Codex + ChatGPT, Claude Code + Claude.ai — v6 §3/v7 §3), which need
+ * neither a provider nor a model.
  *
- * Below the composer, Local Codex Threads (v6 §6/§11) let the user adopt
- * work that started outside AgentFabric: pick a thread, "Continue in
- * AgentFabric", then hand it off to Pi / OpenCode from the task thread.
+ * Below the composer, Local Harness Threads (v6 §6/§11, v7 §9/§11) let
+ * the user adopt work that started outside AgentFabric: pick a Codex
+ * thread or Claude Code session, "Continue in AgentFabric", then hand it
+ * off to another harness from the task thread.
  */
+
+/** Harnesses exposing local thread/session discovery (v7 §9). */
+const HARNESS_THREAD_SOURCES = [
+  { kind: "claude-code", label: "Claude Code", noun: "Sessions", hint: "in the Claude Code CLI on this machine" },
+  { kind: "codex", label: "Codex", noun: "Threads", hint: "in the Codex CLI or IDE extension" },
+] as const;
+
+/** Harness kinds that authenticate with their own account (v6 §2/v7 §2). */
+const HARNESS_NATIVE_KINDS = new Set(["codex", "claude-code"]);
+
 export function NewTaskView() {
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
@@ -55,10 +67,12 @@ export function NewTaskView() {
       ? profile.runtimeId
       : builtinPi?.id ?? runtimeList.find((r: any) => r.enabled)?.id ?? runtimeList[0]?.id ?? "";
   const effectiveRuntime = runtimeList.find((r: any) => r.id === effectiveRuntimeId);
-  // Harness-native runtimes (v6 §2/§3) run on their own account — Codex's
-  // ChatGPT login and default model. No provider/model binding applies.
+  // Harness-native runtimes (v6 §2/§3, v7 §2/§3) run on their own account —
+  // Codex's ChatGPT or Claude Code's Claude.ai login and default model. No
+  // provider/model binding applies.
   const harnessNative =
-    effectiveRuntime?.credentialSource === "harness-native" || effectiveRuntime?.kind === "codex";
+    effectiveRuntime?.credentialSource === "harness-native" ||
+    HARNESS_NATIVE_KINDS.has(effectiveRuntime?.kind ?? "");
 
   const firstProviderWithModels = (() => {
     const withModels = providerList.filter((p: any) => modelList.some((m: any) => m.providerId === p.id));
@@ -109,7 +123,7 @@ export function NewTaskView() {
         system executes each step.
       </p>
       {missingModel && (
-        <ErrorBox message="尚未配置任何 LLM 模型 — 请先前往 LLM 页面添加 Provider 与模型，再回来发起任务（或在 Runtime 选择 Codex，使用其自有 ChatGPT 登录）" />
+        <ErrorBox message="尚未配置任何 LLM 模型 — 请先前往 LLM 页面添加 Provider 与模型，再回来发起任务（或在 Runtime 选择 Codex / Claude Code，使用其自有登录）" />
       )}
       {missingWorkspace && (
         <ErrorBox message="尚未配置 Workspace — 请先前往 Workspaces 页面创建一个，再回来选择" />
@@ -200,45 +214,67 @@ export function NewTaskView() {
         </div>
       </div>
 
-      <CodexThreadsPanel
-        hasCodexRuntime={runtimeList.some((r: any) => r.kind === "codex" && r.enabled)}
-        workspaceId={effectiveWorkspaceId}
-      />
+      {HARNESS_THREAD_SOURCES.map((src) => (
+        <LocalHarnessThreadsPanel
+          key={src.kind}
+          kind={src.kind}
+          label={src.label}
+          noun={src.noun}
+          hint={src.hint}
+          enabled={runtimeList.some((r: any) => r.kind === src.kind && r.enabled)}
+          workspaceId={effectiveWorkspaceId}
+        />
+      ))}
     </div>
   );
 }
 
 /* ================================================================== */
-/* Local Codex Threads discovery (v6 §6/§11)                           */
+/* Local harness thread discovery (v6 §6/§11, v7 §9/§11)               */
 /* ================================================================== */
 
 /**
- * Lists Codex threads that already exist on this machine (created in the
- * Codex CLI / IDE extension) and adopts them: Continue in AgentFabric
- * reads the thread, associates its workspace and lands on the task
- * thread, where switching to Pi / OpenCode generates the handoff (v6 §8).
+ * Lists a harness's local threads/sessions that already exist on this
+ * machine (created outside AgentFabric) and adopts them: Continue in
+ * AgentFabric reads the thread, associates its workspace and lands on
+ * the task thread, where switching to another harness generates the
+ * handoff (v6 §8, v7 §11).
  */
-function CodexThreadsPanel({ hasCodexRuntime, workspaceId }: { hasCodexRuntime: boolean; workspaceId: string }) {
+function LocalHarnessThreadsPanel({
+  kind,
+  label,
+  noun,
+  hint,
+  enabled,
+  workspaceId,
+}: {
+  kind: string;
+  label: string;
+  noun: string;
+  hint: string;
+  enabled: boolean;
+  workspaceId: string;
+}) {
   const [thisWorkspaceOnly, setThisWorkspaceOnly] = useState(false);
   const [importing, setImporting] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
 
-  const auth = useAsync<any>(() => get("/api/harness/codex/auth-status"), [hasCodexRuntime]);
+  const auth = useAsync<any>(() => get(`/api/harness/${kind}/auth-status`), [kind, enabled]);
   const threads = useAsync<any[]>(
     () =>
-      hasCodexRuntime
-        ? get(`/api/harness/codex/threads${thisWorkspaceOnly && workspaceId ? `?workspaceId=${workspaceId}&limit=20` : "?limit=20"}`)
+      enabled
+        ? get(`/api/harness/${kind}/threads${thisWorkspaceOnly && workspaceId ? `?workspaceId=${workspaceId}&limit=20` : "?limit=20"}`)
         : Promise.resolve([]),
-    [hasCodexRuntime, thisWorkspaceOnly, workspaceId]
+    [kind, enabled, thisWorkspaceOnly, workspaceId]
   );
 
-  if (!hasCodexRuntime) return null;
+  if (!enabled) return null;
 
   const adopt = async (threadId: string) => {
     setImporting(threadId);
     setImportError(null);
     try {
-      const r = await post<any>("/api/harness/codex/threads/import", { threadId });
+      const r = await post<any>(`/api/harness/${kind}/threads/import`, { threadId });
       navigate(`/tasks/${r.taskId}`);
     } catch (e) {
       setImportError(e instanceof Error ? e.message : String(e));
@@ -251,7 +287,7 @@ function CodexThreadsPanel({ hasCodexRuntime, workspaceId }: { hasCodexRuntime: 
   return (
     <section className="threads-panel">
       <div className="section-head">
-        <h2>Local Codex Threads</h2>
+        <h2>Local {label} {noun}</h2>
         <label className="muted threads-filter" title="Only threads whose working directory matches the selected workspace">
           <input
             type="checkbox"
@@ -263,15 +299,15 @@ function CodexThreadsPanel({ hasCodexRuntime, workspaceId }: { hasCodexRuntime: 
         <button className="small right" onClick={threads.reload}>Refresh</button>
       </div>
       <p className="muted sub">
-        Work that started in the Codex CLI or IDE extension on this machine. Adopting a thread reads its
-        history — it never re-runs the model — so you can continue it here and hand it off to another harness.
+        Work that started {hint}. Adopting a {noun.toLowerCase().replace(/s$/, "")} reads its history — it never
+        re-runs the model — so you can continue it here and hand it off to another harness.
       </p>
 
-      {/* Harness-native auth availability (v6 §2) — detection only, never credentials. */}
+      {/* Harness-native auth availability (v6 §2, v7 §2) — detection only, never credentials. */}
       {auth.data && !auth.data.ok && (
         <div className="card auth-hint">
-          <strong>{auth.data.installed ? "Codex CLI not logged in" : "Codex CLI not installed"}</strong>
-          <div className="muted">{auth.data.hint ?? "Install the Codex CLI and sign in with ChatGPT to use Codex Local."}</div>
+          <strong>{auth.data.installed ? `${label} CLI not logged in` : `${label} CLI not installed`}</strong>
+          <div className="muted">{auth.data.hint ?? `Install the ${label} CLI and sign in to use ${label} Local.`}</div>
         </div>
       )}
       {auth.data?.ok && auth.data.detail && (
@@ -280,13 +316,13 @@ function CodexThreadsPanel({ hasCodexRuntime, workspaceId }: { hasCodexRuntime: 
           {auth.data.version ? ` · ${auth.data.version}` : ""}
         </p>
       )}
-      <ErrorBox message={threads.error ? `Codex thread discovery failed: ${threads.error}` : null} />
+      <ErrorBox message={threads.error ? `${label} thread discovery failed: ${threads.error}` : null} />
       <ErrorBox message={importError} />
 
       {threads.loading ? (
-        <div className="muted">Loading local Codex threads…</div>
+        <div className="muted">Loading local {label} {noun.toLowerCase()}…</div>
       ) : list.length === 0 && !threads.error ? (
-        <div className="muted">No local Codex threads found{thisWorkspaceOnly ? " in this workspace" : ""}.</div>
+        <div className="muted">No local {label} {noun.toLowerCase()} found{thisWorkspaceOnly ? " in this workspace" : ""}.</div>
       ) : (
         <div className="thread-items">
           {list.map((t: any) => (

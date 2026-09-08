@@ -30,6 +30,9 @@
  * the harness fails, just like the real CLIs.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 export const FAKE_PI_SCRIPT = `#!/usr/bin/env node
 import { mkdirSync, readdirSync, readFileSync, existsSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
@@ -467,6 +470,271 @@ if (args[0] === "app-server") {
   process.exit(2);
 }
 `;
+
+/* ------------------------------------------------------------------ */
+/* Fake Claude Code CLI (v7)                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fake claude CLI implementing the verified wire surfaces (v7 §2/§4/§9/§10):
+ *
+ * - `--version` / `auth status` — the auth-availability probes. Set
+ *   FAKE_CLAUDE_LOGGED_OUT=1 to model a missing Claude.ai login.
+ * - `claude -p [--resume <id>] <prompt>` with
+ *   `--output-format stream-json --verbose` — the stream-json protocol
+ *   (system/init, assistant messages with text/thinking/tool_use blocks,
+ *   user tool_result messages, final result with usage). A fresh run
+ *   persists a *real-format* transcript under
+ *   $FAKE_CLAUDE_HOME/projects/<encoded-cwd>/<session-id>.jsonl;
+ *   `--resume <id>` fails for unknown ids, exactly like the real CLI.
+ *   FAKE_CLAUDE_SCENARIO selects the shape: "tools" (bash + edit + read
+ *   tool round-trip), "usage-limit" (error result with the canonical
+ *   quota message, exit 1), or "plain".
+ *
+ * FAKE_CLAUDE_DUMP, when set, records every invocation's argv as JSON
+ * lines.
+ */
+export const FAKE_CLAUDE_SCRIPT = `#!/usr/bin/env node
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+
+const args = process.argv.slice(2);
+if (process.env.FAKE_CLAUDE_DUMP) {
+  try { appendFileSync(process.env.FAKE_CLAUDE_DUMP, JSON.stringify({ harness: "claude-code", argv: args, cwd: process.cwd() }) + "\\n"); } catch {}
+}
+const emit = (o) => console.log(JSON.stringify(o));
+
+/* ---- auth probes (v7 §2) ---- */
+if (args[0] === "--version") { console.log("2.1.235-fake (Claude Code)"); process.exit(0); }
+if (args[0] === "auth" && args[1] === "status") {
+  if (process.env.FAKE_CLAUDE_LOGGED_OUT) { console.log(JSON.stringify({ loggedIn: false })); process.exit(1); }
+  console.log(JSON.stringify({ loggedIn: true, authMethod: "oauth_token", apiProvider: "firstParty" }));
+  process.exit(0);
+}
+
+if (!args.includes("-p") && !args.includes("--print")) {
+  console.error("fake claude: unsupported invocation", args.join(" "));
+  process.exit(2);
+}
+
+/* ---- -p stream-json (v7 §4) ---- */
+const VALUE_FLAGS = new Set(["--output-format", "--permission-mode", "--resume", "-r", "--append-system-prompt", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools", "--model", "-m", "--session-id"]);
+const resumeIdx = args.findIndex((a) => a === "--resume" || a === "-r");
+const resumeId = resumeIdx !== -1 ? args[resumeIdx + 1] : undefined;
+const positional = [];
+for (let i = 0; i < args.length; i++) {
+  if (VALUE_FLAGS.has(args[i])) { i++; continue; }
+  if (args[i].startsWith("-")) continue;
+  if (i === resumeIdx) { i++; continue; }
+  positional.push(args[i]);
+}
+const prompt = positional.filter((p) => p !== "-p" && p !== "--print").pop() ?? "";
+
+// Real claude keeps session transcripts under
+// $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/<session-id>.jsonl.
+const home = process.env.FAKE_CLAUDE_HOME ?? process.env.HOME ?? "/tmp";
+const projectsRoot = join(home, "projects");
+const encodedCwd = process.cwd().replace(/[^a-zA-Z0-9]/g, "-");
+const projectDir = join(projectsRoot, encodedCwd);
+const encode = (cwd) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
+
+function findTranscript(id) {
+  if (!existsSync(projectsRoot)) return null;
+  for (const dir of readdirSync(projectsRoot)) {
+    const candidate = join(projectsRoot, dir, id + ".jsonl");
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+let sessionId;
+let priorFirst;
+let resumeFile;
+if (resumeId) {
+  const file = findTranscript(resumeId);
+  if (!file) { console.error("No conversation found with session ID: " + resumeId); process.exit(1); }
+  sessionId = resumeId;
+  resumeFile = file;
+  const lines = readFileSync(file, "utf8").split("\\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } });
+  priorFirst = (lines.find((l) => l && l.type === "user" && typeof l.message?.content === "string") ?? {}).message?.content;
+  appendToTranscript(file, "user", prompt);
+} else {
+  sessionId = randomUUID();
+  mkdirSync(projectDir, { recursive: true });
+  appendToTranscript(join(projectDir, sessionId + ".jsonl"), "user", prompt);
+}
+
+function appendToTranscript(file, type, payload, blocks) {
+  const line = {
+    parentUuid: null,
+    isSidechain: false,
+    type,
+    message: type === "user" ? { role: "user", content: payload } : { role: "assistant", model: "claude-fake-model", content: blocks },
+    cwd: process.cwd(),
+    sessionId,
+    uuid: randomUUID(),
+    timestamp: new Date().toISOString(),
+    userType: "external",
+    version: "2.1.235-fake",
+    gitBranch: "main",
+  };
+  try { appendFileSync(file, JSON.stringify(line) + "\\n"); } catch {}
+}
+
+const ts = () => new Date().toISOString();
+emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: sessionId, tools: ["Bash", "Edit", "Read", "Write"], model: "claude-fake-model" });
+
+const scenario = process.env.FAKE_CLAUDE_SCENARIO ?? "plain";
+if (scenario === "usage-limit") {
+  emit({ type: "result", subtype: "error_during_execution", is_error: true, result: "Claude usage limit reached. You've hit your usage limit and it resets at 5pm.", session_id: sessionId, duration_ms: 300, usage: { input_tokens: 50, output_tokens: 0 } });
+  process.exit(1);
+}
+
+const sessionFile = resumeId ? resumeFile : join(projectDir, sessionId + ".jsonl");
+if (resumeId) {
+  const blocks = [{ type: "text", text: "claude resumed session " + sessionId + '; prior context: "' + (priorFirst ?? "") + '"' }];
+  emit({ type: "assistant", message: { id: "msg_r", type: "message", role: "assistant", model: "claude-fake-model", content: blocks, usage: { input_tokens: 0, output_tokens: 0 } }, parent_tool_use_id: null, session_id: sessionId, timestamp: ts() });
+  appendToTranscript(sessionFile, "assistant", null, blocks);
+} else if (scenario === "tools") {
+  const a1 = [{ type: "text", text: "I'll run the tests, then patch the failing module." }];
+  emit({ type: "assistant", message: { id: "msg_1", type: "message", role: "assistant", model: "claude-fake-model", content: a1, usage: { input_tokens: 0, output_tokens: 0 } }, parent_tool_use_id: null, session_id: sessionId, timestamp: ts() });
+  appendToTranscript(sessionFile, "assistant", null, a1);
+
+  const bashId = "toolu_bash1";
+  emit({ type: "assistant", message: { id: "msg_2", type: "message", role: "assistant", model: "claude-fake-model", content: [{ type: "tool_use", id: bashId, name: "Bash", input: { command: "npm test", description: "Run the suite" } }], usage: { input_tokens: 0, output_tokens: 0 } }, parent_tool_use_id: null, session_id: sessionId, timestamp: ts() });
+  emit({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: bashId, content: "3 passing", is_error: false }] }, session_id: sessionId, timestamp: ts() });
+
+  const editId = "toolu_edit1";
+  emit({ type: "assistant", message: { id: "msg_3", type: "message", role: "assistant", model: "claude-fake-model", content: [{ type: "tool_use", id: editId, name: "Edit", input: { file_path: "src/a.ts", old_string: "x", new_string: "y" } }], usage: { input_tokens: 0, output_tokens: 0 } }, parent_tool_use_id: null, session_id: sessionId, timestamp: ts() });
+  emit({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: editId, content: "The file src/a.ts has been updated.", is_error: false }] }, session_id: sessionId, timestamp: ts() });
+  appendToTranscript(sessionFile, "assistant", null, [{ type: "tool_use", id: editId, name: "Edit", input: { file_path: "src/a.ts" } }]);
+
+  const readId = "toolu_read1";
+  emit({ type: "assistant", message: { id: "msg_4", type: "message", role: "assistant", model: "claude-fake-model", content: [{ type: "tool_use", id: readId, name: "Read", input: { file_path: "README.md" } }], usage: { input_tokens: 0, output_tokens: 0 } }, parent_tool_use_id: null, session_id: sessionId, timestamp: ts() });
+  emit({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: readId, content: "# hello", is_error: false }] }, session_id: sessionId, timestamp: ts() });
+
+  const a2 = [{ type: "thinking", thinking: "Tests pass and the edit is minimal." }, { type: "text", text: "Done: tests pass and the patch landed." }];
+  emit({ type: "assistant", message: { id: "msg_5", type: "message", role: "assistant", model: "claude-fake-model", content: a2, usage: { input_tokens: 0, output_tokens: 0 } }, parent_tool_use_id: null, session_id: sessionId, timestamp: ts() });
+  appendToTranscript(sessionFile, "assistant", null, a2);
+} else {
+  const blocks = [{ type: "text", text: "claude ok: " + prompt.slice(0, 40) }];
+  emit({ type: "assistant", message: { id: "msg_1", type: "message", role: "assistant", model: "claude-fake-model", content: blocks, usage: { input_tokens: 0, output_tokens: 0 } }, parent_tool_use_id: null, session_id: sessionId, timestamp: ts() });
+  appendToTranscript(sessionFile, "assistant", null, blocks);
+}
+
+emit({
+  type: "result",
+  subtype: "success",
+  is_error: false,
+  result: scenario === "tools" ? "Done: tests pass and the patch landed." : "ok",
+  session_id: sessionId,
+  duration_ms: 1500,
+  num_turns: 2,
+  total_cost_usd: 0.12,
+  usage: { input_tokens: 900, output_tokens: 60, cache_creation_input_tokens: 10, cache_read_input_tokens: 150, output_tokens_details: { thinking_tokens: 8 } },
+});
+process.exit(0);
+`;
+
+/**
+ * A local-sessions fixture for Claude Code discovery (v7 §9/§10): two
+ * session transcripts in the real ~/.claude/projects layout — one inside
+ * the given workspace cwd with a full turn history (user / agent /
+ * reasoning / command / file change / tool call), one elsewhere.
+ *
+ * The mtimes order the in-workspace session as the most recent.
+ */
+export function makeClaudeSessionsFixture(workspaceCwd: string, projectsRoot: string): {
+  inWorkspaceSessionId: string;
+  otherSessionId: string;
+} {
+  const inWorkspaceSessionId = "11111111-2222-3333-4444-555555555555";
+  const otherSessionId = "66666666-7777-8888-9999-000000000000";
+  const encode = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
+  const base = (sessionId: string, cwd: string) => ({
+    parentUuid: null,
+    isSidechain: false,
+    cwd,
+    sessionId,
+    userType: "external",
+    version: "2.1.235-fake",
+    gitBranch: "main",
+  });
+  const line = (o) => JSON.stringify({ timestamp: "2026-01-02T10:00:00.000Z", ...o });
+
+  const inWorkspace = [
+    line({ ...base(inWorkspaceSessionId, workspaceCwd), type: "summary", summary: "Fix the login bug" }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "user",
+      uuid: "u1",
+      message: { role: "user", content: "Please fix the login bug in auth.ts" },
+    }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "assistant",
+      uuid: "a1",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "thinking", thinking: "The bug is a missing await." }] },
+    }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "assistant",
+      uuid: "a2",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "tool_use", id: "toolu_fixture_bash", name: "Bash", input: { command: "npm test" } }] },
+    }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "user",
+      uuid: "u2",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_fixture_bash", content: "1 failing", is_error: false }] },
+    }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "assistant",
+      uuid: "a3",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Reproduced the failing test; the login handler drops the promise." }] },
+    }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "assistant",
+      uuid: "a4",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "tool_use", id: "toolu_fixture_edit", name: "Edit", input: { file_path: "src/auth.ts", old_string: "x", new_string: "y" } }] },
+    }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "user",
+      uuid: "u3",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_fixture_edit", content: "updated", is_error: false }] },
+    }),
+    line({
+      ...base(inWorkspaceSessionId, workspaceCwd),
+      type: "assistant",
+      uuid: "a5",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Patched src/auth.ts — the test suite is green now." }] },
+    }),
+    // Synthetic plumbing that must not surface as conversation.
+    line({ ...base(inWorkspaceSessionId, workspaceCwd), type: "user", uuid: "u9", isMeta: true, message: { role: "user", content: "<command-name>/exit</command-name>" } }),
+    line({ ...base(inWorkspaceSessionId, workspaceCwd), type: "attachment", uuid: "x1", attachment: { type: "hook_success" } }),
+  ].join("\n");
+
+  const elsewhere = [
+    line({ ...base(otherSessionId, "/tmp/definitely-not-the-workspace"), type: "user", uuid: "u1", message: { role: "user", content: "hi" } }),
+    line({
+      ...base(otherSessionId, "/tmp/definitely-not-the-workspace"),
+      type: "assistant",
+      uuid: "a1",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "hello" }] },
+    }),
+  ].join("\n");
+
+  mkdirSync(join(projectsRoot, encode(workspaceCwd)), { recursive: true });
+  mkdirSync(join(projectsRoot, encode("/tmp/definitely-not-the-workspace")), { recursive: true });
+  // Written last so its mtime orders the in-workspace session newest.
+  writeFileSync(join(projectsRoot, encode("/tmp/definitely-not-the-workspace"), otherSessionId + ".jsonl"), elsewhere + "\n");
+  writeFileSync(join(projectsRoot, encode(workspaceCwd), inWorkspaceSessionId + ".jsonl"), inWorkspace + "\n");
+  return { inWorkspaceSessionId, otherSessionId };
+}
 
 /**
  * A local-threads fixture for the fake codex app-server (v6 §6/§7): two

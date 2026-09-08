@@ -71,16 +71,24 @@ export interface Model {
 /* Runtime                                                            */
 /* ------------------------------------------------------------------ */
 
-export type RuntimeKind = "opencode" | "pi" | "codex" | "docker" | "mock" | "custom";
+export type RuntimeKind =
+  | "opencode"
+  | "pi"
+  | "codex"
+  | "claude-code"
+  | "docker"
+  | "mock"
+  | "custom";
 
 /**
  * Where a runtime's model access comes from (v6 §2):
  * - `agentfabric`: through an AgentFabric Provider/Model (API key in
  *   Secrets, base URL and headers configured on the Provider).
  * - `harness-native`: through the harness's own logged-in account and
- *   subscription (e.g. Codex with ChatGPT login). AgentFabric never
- *   reads, copies or stores that harness's credentials; runs on such a
- *   runtime do not bind an AgentFabric Model.
+ *   subscription (e.g. Codex with ChatGPT login, Claude Code with its
+ *   Claude.ai login). AgentFabric never reads, copies or stores that
+ *   harness's credentials; runs on such a runtime do not bind an
+ *   AgentFabric Model.
  */
 export type CredentialSource = "agentfabric" | "harness-native";
 
@@ -649,5 +657,10 @@ export interface AppConfig {
   };
   codex?: {
     bin?: string;
+  };
+  claudeCode?: {
+    bin?: string;
+    /** Override for the ~/.claude/projects transcript root (tests). */
+    projectsDir?: string;
   };
 }

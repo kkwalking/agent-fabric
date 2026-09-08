@@ -3,6 +3,7 @@ import { mockAdapter } from "./mock.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
 import { codexAdapter } from "./codex.js";
+import { claudeCodeAdapter } from "./claudecode.js";
 import { dockerAdapter } from "./docker.js";
 
 export { mockAdapter, mockCapabilities } from "./mock.js";
@@ -52,6 +53,23 @@ export {
 } from "./codex.js";
 export { codexThreadSource, listCodexThreads, readCodexThread } from "./codexAppServer.js";
 export {
+  claudeCodeAdapter,
+  mapClaudeEvent,
+  extractClaudeSessionRef,
+  parseClaudeUsage,
+  detectClaudeUsageLimit,
+  claudeCodeCapabilities,
+  claudeCodeAuthStatus,
+  claudeCodeBin,
+  CLAUDE_CODE_LOCAL_ONLY_HINT,
+} from "./claudecode.js";
+export {
+  claudeCodeThreadSource,
+  listClaudeSessions,
+  readClaudeSession,
+  encodeClaudeProjectDir,
+} from "./claudeCodeThreads.js";
+export {
   dockerAdapter,
   runDockerContainer,
   runDockerWithLifecycle,
@@ -78,6 +96,7 @@ export function buildRegistry(): RuntimeRegistry {
   registry.register(opencodeAdapter);
   registry.register(piAdapter);
   registry.register(codexAdapter);
+  registry.register(claudeCodeAdapter);
   registry.register(dockerAdapter);
   return registry;
 }

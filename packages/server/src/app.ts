@@ -23,7 +23,7 @@ import {
   type Run,
   type Task,
 } from "@agentfabric/core";
-import { buildRegistry, codexThreadSource, createDockerContainerOps } from "@agentfabric/runtimes";
+import { buildRegistry, codexThreadSource, claudeCodeThreadSource, createDockerContainerOps } from "@agentfabric/runtimes";
 
 export interface ServerOptions {
   dataDir: string;
@@ -70,6 +70,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   const nativeStates = new NativeStateService(store);
   const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
     codex: codexThreadSource,
+    "claude-code": claudeCodeThreadSource,
   });
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();

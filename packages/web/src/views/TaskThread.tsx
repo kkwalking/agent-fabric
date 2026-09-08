@@ -205,10 +205,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   };
 
   // Cross-harness escape hatches offered when the current harness cannot
-  // continue (v6 §10): the other coding harnesses registered on this box.
+  // continue (v6 §10, v7 §14): the other coding harnesses registered on
+  // this box. Each turn filters out its own harness kind.
   const switchTargets = (runtimeCatalog.data ?? [])
-    .filter((r: any) => r.enabled && ["pi", "opencode"].includes(r.kind))
+    .filter((r: any) => r.enabled && ["pi", "opencode", "codex", "claude-code"].includes(r.kind))
     .map((r: any) => ({ id: r.id, name: r.name, kind: r.kind }));
+  // runtimeId → kind lookup so each turn can exclude its own harness.
+  const runtimeKinds = Object.fromEntries(
+    (runtimeCatalog.data ?? []).map((r: any) => [r.id, r.kind as string])
+  );
 
   return (
     <div className="task-thread">
@@ -245,6 +250,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               key={turn.run.id}
               turn={turn}
               task={thread.task}
+              runtimeKinds={runtimeKinds}
               onContinue={focusComposer}
               onSwitchRuntime={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}
               onContinueWithRuntime={continueWithRuntime}
@@ -311,6 +317,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
 function TurnView({
   turn,
   task,
+  runtimeKinds,
   onContinue,
   onSwitchRuntime,
   onContinueWithRuntime,
@@ -319,6 +326,7 @@ function TurnView({
 }: {
   turn: ThreadTurn;
   task: any;
+  runtimeKinds: Record<string, string>;
   onContinue: () => void;
   onSwitchRuntime: () => void;
   onContinueWithRuntime: (runtimeId: string) => void;
@@ -327,6 +335,8 @@ function TurnView({
 }) {
   const run = turn.run;
   const live = LIVE_STATUSES.has(run.status);
+  const runtimeKindOfRun = run.runtimeId ? runtimeKinds[run.runtimeId] : undefined;
+  const otherHarnessTargets = switchTargets.filter((t) => t.kind !== runtimeKindOfRun);
   const items = useMemo(
     () => projectTimeline(turn.events, { live }),
     [turn.events, live]
@@ -400,24 +410,25 @@ function TurnView({
             </div>
           )}
           {/* Quota exhaustion is a switch-harness scenario, not a plain
-              failure (v6 §10): the workspace and the Codex thread survive,
-              so offer the other harnesses directly. */}
+              failure (v6 §10, v7 §14): the workspace and the harness's own
+              session survive, so offer the other harnesses directly. */}
           {(run.status === "failed" || run.status === "timeout") && run.errorKind === "usage-limit" && (
             <div className="fail-box quota-box">
-              <div className="fail-title">Codex usage limit reached.</div>
+              <div className="fail-title">{run.runtimeName ?? "Harness"} usage limit reached.</div>
               {run.error && <div className="fail-reason">{run.error}</div>}
               <p className="muted">
-                The workspace and the Codex thread are preserved. Hand the task to another harness — a
-                handoff summary is generated automatically and the new agent continues in this thread.
+                The workspace and the {run.runtimeName ?? "harness"} session are preserved. Hand the task to
+                another harness — a handoff summary is generated automatically and the new agent continues in
+                this thread.
               </p>
               <div className="row fail-actions">
-                {switchTargets.map((t) => (
+                {otherHarnessTargets.map((t) => (
                   <button key={t.id} className="small primary" onClick={() => onContinueWithRuntime(t.id)}>
                     Continue with {t.name}
                   </button>
                 ))}
-                {switchTargets.length === 0 && (
-                  <span className="muted">No other coding harness is enabled — enable a Pi or OpenCode runtime first.</span>
+                {otherHarnessTargets.length === 0 && (
+                  <span className="muted">No other coding harness is enabled — enable a Codex, Claude Code, Pi or OpenCode runtime first.</span>
                 )}
                 <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>View run</button>
               </div>
@@ -773,10 +784,11 @@ function Composer({
         ? previousRuntimeId
         : runtimeList.find((r: any) => r.kind === "pi")?.id ?? runtimeList[0]?.id ?? "";
   const effectiveRuntime = runtimeList.find((r: any) => r.id === effectiveRuntimeId);
-  // Harness-native targets (v6 §3) run on their own account/model — the
-  // AgentFabric model selector does not apply.
+  // Harness-native targets (v6 §3, v7 §3) run on their own account/model
+  // — the AgentFabric model selector does not apply.
   const harnessNativeTarget =
-    effectiveRuntime?.credentialSource === "harness-native" || effectiveRuntime?.kind === "codex";
+    effectiveRuntime?.credentialSource === "harness-native" ||
+    ["codex", "claude-code"].includes(effectiveRuntime?.kind ?? "");
 
   // External preselection (v6 §10 "Continue with Pi / OpenCode"): route it
   // through the same confirmed-switch path as a manual selection.

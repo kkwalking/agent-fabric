@@ -35,12 +35,17 @@ const configs: Record<string, Config> = {
       { key: "kind", label: "Kind" },
       { key: "image", label: "Image", render: (r) => <span className="mono">{r.image ?? "-"}</span> },
       { key: "containerized", label: "Container", render: (r) => String(Boolean(r.containerized)) },
+      {
+        key: "credentialSource",
+        label: "Credentials",
+        render: (r) => (r.credentialSource === "harness-native" ? "Harness native" : "AgentFabric"),
+      },
       { key: "lifecycle", label: "Lifecycle", render: (r) => r.lifecycle?.mode ?? (r.ephemeral === false ? "persistent" : "ephemeral") },
       { key: "enabled", label: "Enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
     ],
     createFields: [
       { key: "name", label: "Name", required: true },
-      { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "docker", "mock", "custom"] },
+      { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "docker", "mock", "custom"] },
       { key: "image", label: "Docker image", placeholder: "node:22-alpine" },
       { key: "command", label: "Container command (docker kind)", placeholder: "sh -c echo hello" },
       { key: "lifecycle", label: "Container lifecycle", type: "select", options: ["ephemeral", "keep-alive", "persistent"] },
@@ -120,6 +125,65 @@ async function removeItem(path: string, id: string, reload: () => void) {
 async function toggleRuntime(row: any, reload: () => void) {
   await post(`/api/runtimes/${row.id}/${row.enabled ? "disable" : "enable"}`);
   reload();
+}
+
+/**
+ * Lightweight harness runtime status (v6 §12, v7 §16): for each enabled
+ * harness-native runtime, show CLI installed / authenticated / credential
+ * source / execution backend — availability detection only. Sensitive
+ * credential material is never displayed or read.
+ */
+function HarnessStatusCard() {
+  const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
+  const kinds = [...new Set(
+    (runtimes.data ?? [])
+      .filter((r) => r.enabled && ["claude-code", "codex"].includes(r.kind))
+      .map((r) => r.kind)
+  )];
+  return (
+    <div className="card">
+      <h2>Harness runtime status</h2>
+      <p className="sub">
+        Local coding harnesses run on their own logged-in account (Codex + ChatGPT, Claude Code + Claude.ai).
+        AgentFabric only detects availability — credentials stay with the harness and are never displayed or read.
+      </p>
+      {kinds.length === 0 ? (
+        <div className="muted">No harness-native runtime enabled.</div>
+      ) : (
+        kinds.map((kind) => <HarnessStatusRow key={kind} kind={kind} runtimes={runtimes.data ?? []} />)
+      )}
+    </div>
+  );
+}
+
+function HarnessStatusRow({ kind, runtimes }: { kind: string; runtimes: any[] }) {
+  const auth = useAsync<any>(() => get(`/api/harness/${kind}/auth-status`), [kind]);
+  const runtime = runtimes.find((r) => r.kind === kind && r.enabled);
+  const status = auth.data;
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <strong>{runtime?.name ?? kind}</strong>
+      <table>
+        <thead>
+          <tr><th>CLI installed</th><th>Authenticated</th><th>Credential source</th><th>Execution backend</th><th>Detail</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{status ? (status.installed ? "✓" : "✗") : "…"}</td>
+            <td>{status ? (status.loggedIn ? "✓" : "✗") : "…"}</td>
+            <td>Harness native</td>
+            <td>{runtime?.containerized ? "docker" : "local"}</td>
+            <td className="muted">
+              {status?.detail ?? (auth.error ? auth.error : "checking…")}
+              {status?.version ? ` · ${status.version}` : ""}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      {status && !status.ok && status.hint && <div className="muted">{status.hint}</div>}
+      {auth.error && <div className="muted">Auth check unavailable: {auth.error}</div>}
+    </div>
+  );
 }
 
 /**
@@ -279,6 +343,7 @@ export function ResourceView({ kind }: { kind: string }) {
         )}
       </div>
 
+      {kind === "runtimes" && <HarnessStatusCard />}
       {kind === "runtimes" && <RuntimeNativeSessionsCard />}
     </div>
   );

@@ -939,14 +939,26 @@ export class UsageService {
 /* ------------------------------------------------------------------ */
 
 export async function seedDefaults(store: Store): Promise<void> {
-  // Existing installs (pre-v6) get the Codex Local runtime seeded too —
-  // idempotent, keyed by kind.
-  if (store.list<Runtime>("runtimes").length > 0) {
-    if (!store.list<Runtime>("runtimes").some((r) => r.kind === "codex")) {
+  // Existing installs (pre-v6/v7) get the harness-native local runtimes
+  // seeded too — idempotent, keyed by kind.
+  const existing = store.list<Runtime>("runtimes");
+  if (existing.length > 0) {
+    if (!existing.some((r) => r.kind === "codex")) {
       await new RuntimeService(store).create({
         name: "Codex (ChatGPT)",
         kind: "codex",
         description: "Codex CLI on this machine — runs on its own ChatGPT login and subscription (no AgentFabric provider needed)",
+        credentialSource: "harness-native",
+        enabled: true,
+        ephemeral: true,
+        env: {},
+      });
+    }
+    if (!existing.some((r) => r.kind === "claude-code")) {
+      await new RuntimeService(store).create({
+        name: "Claude Code (Claude.ai)",
+        kind: "claude-code",
+        description: "Claude Code CLI on this machine — runs on its own Claude.ai login and subscription (no AgentFabric provider needed)",
         credentialSource: "harness-native",
         enabled: true,
         ephemeral: true,
@@ -998,6 +1010,17 @@ export async function seedDefaults(store: Store): Promise<void> {
     name: "Codex (ChatGPT)",
     kind: "codex",
     description: "Codex CLI on this machine — runs on its own ChatGPT login and subscription (no AgentFabric provider needed)",
+    credentialSource: "harness-native",
+    enabled: true,
+    ephemeral: true,
+    env: {},
+  });
+  // Claude Code Local (v7 §1): the user's own claude CLI + Claude.ai
+  // login. Same harness-native rules as Codex (v7 §2/§3).
+  await runtimeService.create({
+    name: "Claude Code (Claude.ai)",
+    kind: "claude-code",
+    description: "Claude Code CLI on this machine — runs on its own Claude.ai login and subscription (no AgentFabric provider needed)",
     credentialSource: "harness-native",
     enabled: true,
     ephemeral: true,

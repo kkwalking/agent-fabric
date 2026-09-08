@@ -33,6 +33,9 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
              OpenCode       Pi Agent        Codex         Docker        Mock
              Adapter        Adapter         Local         Adapter        Adapter
              (本地+容器)    (本地+容器)     (本地)         (容器)         (模拟)
+                                │
+                          Claude Code
+                          Local (本地)
 ```
 
 设计原则（来自 `mvp-spec.md`）：
@@ -47,7 +50,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | --- | --- |
 | Provider | 增删改查、自定义 Base URL、API Key 走 Secrets、OpenAI-compatible、启用/禁用 |
 | Model | 增删改查、所属 Provider、参数、Alias、运行时自由选择 |
-| Runtime | OpenCode / Pi Agent / Codex Local / Docker / Mock，统一 Adapter 协议，可扩展 |
+| Runtime | OpenCode / Pi Agent / Codex Local / Claude Code Local / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
 | Workspace | 本地目录 / Git / Volume，持久化，与 Run 关联 |
 | Task | 指定 Runtime / Model / Workspace / Env / Secrets / 资源限制 / 超时 / Policy |
@@ -102,6 +105,20 @@ v6（`v6.md`）接入本机 **Codex CLI** 作为 Harness，核心目标是：用
 * **本地 Thread 发现与读取（官方接口）**：通过 `codex app-server` 的 JSON-RPC（`thread/list` / `thread/read` / `thread/turns/list`）发现本机已有 Codex Threads（按 cwd / 最近更新过滤，包含 cli / vscode / exec 三类来源），只读地取出用户输入、Agent 回复与 Tool Activity——**不解析 `~/.codex` 内部文件**，也绝不触发新的模型请求。
 * **接管已有工作（Import / Adopt）**：`POST /api/harness/codex/threads/import` — Read Thread → 按 cwd 关联（或就地导入）Workspace → 每个 Codex turn 记录为一个已完成 Run（事件由 thread 内容投影）→ 注册 thread 为可 Resume 的 Native Session →（可选）预生成指向目标 Harness 的 Handoff。不把 Codex Thread 转换成统一 Session。
 * **额度耗尽 UX（`errorKind: "usage-limit"`）**：识别 Codex 的配额错误（"You've hit your usage limit…"），Task 页面显示 **Codex usage limit reached.** 与 **Continue with Pi / Continue with OpenCode**，一键预选目标 Harness 并立即生成 Handoff，新 Harness 建立自己的新 Native Session 继续任务。
+
+## Claude Code Local Harness（v7）
+
+v7（`v7.md`）以同样的 harness-native 模式接入本机 **Claude Code CLI**，核心目标是：用户在 Claude Code 里做到一半（额度耗尽或主动切换），都能通过 AgentFabric 把任务自然交接给 Codex / Pi / OpenCode，并继续使用同一个 Workspace。
+
+> **Claude Code subscription is used through Claude Code itself. AgentFabric must not turn Claude.ai subscription into an API Provider.**
+
+* **Claude Code Local Runtime（`kind: claude-code`，仅本地执行）**：使用本机已安装的 `claude` CLI 非交互模式（`claude -p <prompt> --output-format stream-json --verbose`），执行任务、捕获 session id、解析事件（assistant text / thinking / tool_use→Bash·Edit·Write·Read…、tool_result、result usage）、保存 `RuntimeSessionRef`（`runtimeKind=claude-code, nativeSessionRef=session id, executionBackend=local, resumeSupported=true`），并用 `claude --resume <id> -p` 原生续接。容器化在本阶段被明确拒绝。
+* **Harness-native 认证**：Claude Code 使用自己的 Claude.ai 登录与套餐；AgentFabric 只通过 `claude --version` / `claude auth status` 检测「已安装 / 已登录 / 可用」，**不读取、不复制、不保存**任何 credential / keychain / OAuth token，也绝不把 Claude.ai 套餐转换成 Anthropic Provider。未登录时 Run 快速失败并给出 `claude login` 修复指引。
+* **不绑定 AgentFabric Model**：Claude Code 使用自己账号与默认模型配置；Usage / Cost 只采用 CLI 自报数字（`total_cost_usd`），绝不按 Anthropic API 定价估算套餐 Run 成本。
+* **本地 Session 发现与读取**：Claude Code 官方只提供 `--resume <id>`（无 list 命令），因此发现走本地 transcript（`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`）——相关解析被严格限制在 Claude Code Adapter 内（`packages/runtimes`），不泄漏进 AgentFabric Core，且防御性处理未知行类型；读取不触发任何模型请求。
+* **接管已有工作（Import / Adopt）**：`POST /api/harness/claude-code/threads/import` — Read Session → 按 cwd 关联（或就地导入）Workspace → 每个 session turn 记录为一个已完成 Run → 注册为可 Resume 的 Native Session →（可选）预生成 Handoff。
+* **双向 Handoff**：Claude Code ↔ Codex / Pi / OpenCode 全部走既有 Handoff 流程（Claude Code → 其他 Harness 生成包含 Session Context / Workspace / 文件变更 / 进度 / 决策的交接摘要；其他 Harness → Claude Code 注入 Handoff 后新建自己的 Native Session）。额度耗尽时 Task 页面显示 **Claude Code usage limit reached.** 与其他 Harness 的一键 Continue。
+* **Runtime 状态**：Web UI Runtimes 页展示轻量状态（CLI Installed / Authenticated / Credential Source: Harness Native / Execution Backend: Local），不展示任何敏感 credential。
 
 ## 长期任务执行模型（v1）
 

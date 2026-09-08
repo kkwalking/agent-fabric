@@ -21,9 +21,17 @@ import { opencodeAdapter } from "../../runtimes/src/opencode.js";
 import { piAdapter } from "../../runtimes/src/pi.js";
 import { codexAdapter } from "../../runtimes/src/codex.js";
 import { codexThreadSource } from "../../runtimes/src/codexAppServer.js";
+import { claudeCodeAdapter } from "../../runtimes/src/claudecode.js";
+import { claudeCodeThreadSource } from "../../runtimes/src/claudeCodeThreads.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import { createDockerContainerOps } from "../../runtimes/src/docker.js";
-import { FAKE_CODEX_SCRIPT, FAKE_DOCKER_SCRIPT, FAKE_OPENCODE_SCRIPT, FAKE_PI_SCRIPT } from "./fakes.js";
+import {
+  FAKE_CLAUDE_SCRIPT,
+  FAKE_CODEX_SCRIPT,
+  FAKE_DOCKER_SCRIPT,
+  FAKE_OPENCODE_SCRIPT,
+  FAKE_PI_SCRIPT,
+} from "./fakes.js";
 import type { Run } from "./types.js";
 
 export interface Fixtures {
@@ -32,7 +40,12 @@ export interface Fixtures {
   fakePi: string;
   fakeDocker: string;
   fakeCodex: string;
+  fakeClaude: string;
   dockerLog: string;
+  /** Claude Code home shared by the fake CLI and the thread source. */
+  claudeHome: string;
+  /** Transcript root: $claudeHome/projects (real ~/.claude/projects layout). */
+  claudeProjects: string;
 }
 
 function writeExecutable(dir: string, name: string, content: string): string {
@@ -44,13 +57,17 @@ function writeExecutable(dir: string, name: string, content: string): string {
 
 export function makeFixtures(): Fixtures {
   const dir = mkdtempSync(join(tmpdir(), "af-fixtures-"));
+  const claudeHome = join(dir, "claude-home");
   return {
     dir,
     fakeOpenCode: writeExecutable(dir, "fake-opencode.mjs", FAKE_OPENCODE_SCRIPT),
     fakePi: writeExecutable(dir, "fake-pi.mjs", FAKE_PI_SCRIPT),
     fakeDocker: writeExecutable(dir, "fake-docker.mjs", FAKE_DOCKER_SCRIPT),
     fakeCodex: writeExecutable(dir, "fake-codex.mjs", FAKE_CODEX_SCRIPT),
+    fakeClaude: writeExecutable(dir, "fake-claude.mjs", FAKE_CLAUDE_SCRIPT),
     dockerLog: join(dir, "docker-calls.log"),
+    claudeHome,
+    claudeProjects: join(claudeHome, "projects"),
   };
 }
 
@@ -65,6 +82,8 @@ export function useBins(fx: Fixtures, extra: Record<string, string> = {}, unset:
     AGENTFABRIC_OPENCODE_BIN: process.env.AGENTFABRIC_OPENCODE_BIN,
     AGENTFABRIC_PI_BIN: process.env.AGENTFABRIC_PI_BIN,
     AGENTFABRIC_CODEX_BIN: process.env.AGENTFABRIC_CODEX_BIN,
+    AGENTFABRIC_CLAUDE_BIN: process.env.AGENTFABRIC_CLAUDE_BIN,
+    AGENTFABRIC_CLAUDE_PROJECTS_DIR: process.env.AGENTFABRIC_CLAUDE_PROJECTS_DIR,
     AGENTFABRIC_DOCKER_BIN: process.env.AGENTFABRIC_DOCKER_BIN,
     AGENTFABRIC_PI_IMAGE: process.env.AGENTFABRIC_PI_IMAGE,
     AGENTFABRIC_OPENCODE_IMAGE: process.env.AGENTFABRIC_OPENCODE_IMAGE,
@@ -74,6 +93,10 @@ export function useBins(fx: Fixtures, extra: Record<string, string> = {}, unset:
     FAKE_CODEX_DUMP: process.env.FAKE_CODEX_DUMP,
     FAKE_CODEX_SCENARIO: process.env.FAKE_CODEX_SCENARIO,
     FAKE_CODEX_LOGGED_OUT: process.env.FAKE_CODEX_LOGGED_OUT,
+    FAKE_CLAUDE_HOME: process.env.FAKE_CLAUDE_HOME,
+    FAKE_CLAUDE_DUMP: process.env.FAKE_CLAUDE_DUMP,
+    FAKE_CLAUDE_SCENARIO: process.env.FAKE_CLAUDE_SCENARIO,
+    FAKE_CLAUDE_LOGGED_OUT: process.env.FAKE_CLAUDE_LOGGED_OUT,
     ...Object.fromEntries(Object.keys(extra).map((k) => [k, process.env[k]])),
   };
   process.env.AGENTFABRIC_OPENCODE_BIN = fx.fakeOpenCode;
@@ -84,6 +107,12 @@ export function useBins(fx: Fixtures, extra: Record<string, string> = {}, unset:
   // Isolated per-test codex state: session store + threads fixture live in
   // the fixtures dir unless a test overrides them.
   process.env.FAKE_CODEX_HOME ??= fx.dir;
+  // Claude Code: the fake CLI and the discovery thread source share one
+  // fake ~/.claude tree so sessions created by runs are discoverable and
+  // fixture sessions are resumable (v7 §9/§10).
+  process.env.AGENTFABRIC_CLAUDE_BIN = fx.fakeClaude;
+  process.env.AGENTFABRIC_CLAUDE_PROJECTS_DIR = fx.claudeProjects;
+  process.env.FAKE_CLAUDE_HOME = fx.claudeHome;
   if (!process.env.FAKE_CODEX_THREADS_FILE) delete process.env.FAKE_CODEX_THREADS_FILE;
   for (const [k, v] of Object.entries(extra)) process.env[k] = v;
   for (const k of unset) delete process.env[k];
@@ -120,18 +149,19 @@ export async function freshHarness(opts?: { completionFactory?: CompletionFactor
   registry.register(opencodeAdapter);
   registry.register(piAdapter);
   registry.register(codexAdapter);
+  registry.register(claudeCodeAdapter);
   await seedDefaults(store);
   // Real docker ops (routed at the fake docker binary by useBins) so
   // keep-alive abort destroys are observable in the docker call log.
-  // The codex thread source is the real app-server client pointed at the
-  // fake codex binary via AGENTFABRIC_CODEX_BIN (v6 §6–§8).
+  // The codex/claude-code thread sources are the real clients pointed at
+  // the fake CLIs / fake ~/.claude tree via env (v6 §6–§8, v7 §9–§10).
   const runService = new RunService(
     store,
     bus,
     registry,
     createDockerContainerOps(),
     opts?.completionFactory,
-    { codex: codexThreadSource }
+    { codex: codexThreadSource, "claude-code": claudeCodeThreadSource }
   );
   return {
     store,
@@ -154,3 +184,4 @@ export async function waitForRun(runService: RunService, runId: string): Promise
 }
 
 export { existsSync, mkdtempSync, join, tmpdir };
+export { makeClaudeSessionsFixture, makeCodexThreadsFixture } from "./fakes.js";
