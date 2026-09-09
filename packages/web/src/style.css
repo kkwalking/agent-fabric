@@ -1410,16 +1410,15 @@ a:hover {
 }
 .handoff-pending .handoff-cancel {
   margin-left: auto;
-  border: none;
+  border: 1px solid var(--border);
   background: none;
-  color: var(--dim);
+  color: var(--red);
   font-size: 12px;
   cursor: pointer;
   padding: 2px 8px;
   border-radius: 7px;
 }
 .handoff-pending .handoff-cancel:hover {
-  color: var(--red);
   background: var(--panel-2);
 }
 
