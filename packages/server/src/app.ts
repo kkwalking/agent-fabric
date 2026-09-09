@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
+import { execFile } from "node:child_process";
 import {
   Store,
   EventBus,
@@ -594,6 +595,47 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   app.get("/api/config", (_req, res) => ok(res, store.config()));
   app.put("/api/config", async (req, res) => {
     ok(res, await store.updateConfig(req.body));
+  });
+
+  /* ---------------- proxy ---------------- */
+
+  /**
+   * Probes an HTTP/SOCKS5 proxy from the server host (where local harness
+   * processes run) by fetching a 204 endpoint through it. Uses curl so
+   * both proxy protocols work without extra dependencies; socks5h also
+   * resolves DNS through the proxy, matching what a blocked target
+   * actually experiences.
+   */
+  app.post("/api/proxy/test", (req, res) => {
+    const { scheme = "http", host, port } = req.body ?? {};
+    const hostText = typeof host === "string" ? host.trim() : "";
+    const portNumber = Number(port);
+    if (!hostText || !Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+      fail(res, "Proxy host and a valid port (1–65535) are required");
+      return;
+    }
+    const proxyUrl = `${scheme === "socks5" ? "socks5h" : "http"}://${hostText}:${portNumber}`;
+    const started = Date.now();
+    execFile(
+      "curl",
+      ["-x", proxyUrl, "-sS", "-o", "/dev/null", "-m", "8", "-w", "%{http_code}", "https://www.gstatic.com/generate_204"],
+      { timeout: 12_000 },
+      (err, stdout, stderr) => {
+        const latencyMs = Date.now() - started;
+        if (err) {
+          ok(res, { ok: false, proxyUrl, latencyMs, error: (stderr ?? err.message).toString().trim() });
+          return;
+        }
+        const status = parseInt(stdout.toString().trim(), 10);
+        ok(res, {
+          ok: status >= 200 && status < 400,
+          proxyUrl,
+          status: Number.isNaN(status) ? undefined : status,
+          latencyMs,
+          error: status >= 400 ? `proxy reachable but target returned HTTP ${status}` : undefined,
+        });
+      }
+    );
   });
 
   /* ---------------- static web UI ---------------- */

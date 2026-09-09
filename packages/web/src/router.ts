@@ -37,6 +37,7 @@ export interface Route {
     | "handoffs"
     | "artifacts"
     | "usage"
+    | "proxy"
     | "settings";
   id?: string;
 }
@@ -53,6 +54,7 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   "/handoffs": "handoffs",
   "/artifacts": "artifacts",
   "/usage": "usage",
+  "/proxy": "proxy",
   "/settings": "settings",
 };
 

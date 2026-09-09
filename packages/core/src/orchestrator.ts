@@ -40,6 +40,7 @@ import {
   type ContainerOps,
 } from "./lifecycle.js";
 import { addUsage, emptyUsage, estimateCost } from "./cost.js";
+import { buildProxyEnv } from "./proxy.js";
 import { resolveRunConfig, type ResolvedRunConfig } from "./policy.js";
 import {
   effectiveCapabilities,
@@ -1308,8 +1309,14 @@ export class RunService {
     }
 
     // Run-level overrides (set at continuation time) take precedence
-    // over the task's defaults.
-    const mergedEnv: Record<string, string> = { ...(task.env ?? {}), ...(run.env ?? {}) };
+    // over the task's defaults. The Proxy page env (when enabled) is the
+    // lowest layer — explicit task/run env wins — and is resolved at
+    // spawn time: toggling affects subsequent runs, never live ones.
+    const mergedEnv: Record<string, string> = {
+      ...buildProxyEnv(this.store.config().proxy, Boolean(runtime.containerized)),
+      ...(task.env ?? {}),
+      ...(run.env ?? {}),
+    };
     const mergedSecretIds = [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
     const secrets = this.secretService().resolve(mergedSecretIds);
     const lifecycle = normalizeLifecycle(run.lifecycle ?? resolveLifecycle(runtime));

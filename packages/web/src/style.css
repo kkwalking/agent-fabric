@@ -373,6 +373,18 @@ label {
   margin-top: 8px;
 }
 
+/* Inline checkbox row (Proxy enable toggle etc.) */
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+label.check input {
+  width: auto;
+  margin: 0;
+}
+
 /* ---------- Composer (Codex-style prompt box) ---------- */
 
 .composer {

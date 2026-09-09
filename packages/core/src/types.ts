@@ -640,6 +640,19 @@ export interface AgentProfile {
 /* Config                                                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Global egress proxy for harness processes (Proxy page). Off by default;
+ * when enabled, every newly spawned harness receives standard proxy env
+ * vars — running processes and the AgentFabric server itself are not
+ * affected.
+ */
+export interface ProxyConfig {
+  enabled?: boolean;
+  scheme?: "http" | "socks5";
+  host?: string;
+  port?: number;
+}
+
 export interface AppConfig {
   server?: {
     host?: string;
@@ -663,4 +676,5 @@ export interface AppConfig {
     /** Override for the ~/.claude/projects transcript root (tests). */
     projectsDir?: string;
   };
+  proxy?: ProxyConfig;
 }

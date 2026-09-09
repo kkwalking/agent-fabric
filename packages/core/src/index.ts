@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./store.js";
 export * from "./eventbus.js";
 export * from "./cost.js";
+export * from "./proxy.js";
 export * from "./lifecycle.js";
 export * from "./compaction.js";
 export * from "./handoff.js";
