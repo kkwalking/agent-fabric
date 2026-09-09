@@ -52,6 +52,8 @@ interface PendingHandoff {
   to: string;
   /** Runs present in the thread when the handoff started; the marker clears once a new run lands. */
   baseRuns: number;
+  /** True for the UI pre-generation (confirmed switch) — its request can be aborted. */
+  cancellable?: boolean;
 }
 
 /** The User Message is the user's bare input — never the stitched harness prompt (v5 §4/§5). */
@@ -78,6 +80,8 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const stickBottom = useRef(true);
   const composerPromptRef = useRef<HTMLTextAreaElement>(null);
   const composerRuntimeRef = useRef<HTMLSelectElement>(null);
+  /** Composer-owned cancel for the pre-generation request; the banner's Cancel button calls it. */
+  const handoffCancelRef = useRef<() => void>(() => {});
   const runtimeCatalog = useAsync<any[]>(() => get("/api/runtimes"), [taskId]);
 
   const bump = () => setReloadTick((t) => t + 1);
@@ -274,6 +278,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
                     ? `generating context summary · new ${pendingHandoff.to} session…`
                     : `context summary ready — send a message to continue with ${pendingHandoff.to}`}
                 </span>
+                {pendingHandoff.stage === "generating" && pendingHandoff.cancellable && (
+                  <button
+                    className="handoff-cancel"
+                    title="Cancel handoff generation and stay on the current harness"
+                    onClick={() => handoffCancelRef.current()}
+                  >
+                    Cancel
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -300,6 +313,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         onStop={stopRun}
         onSubmitted={bump}
         handoffPending={Boolean(pendingHandoff)}
+        handoffCancelRef={handoffCancelRef}
         onHandoffStart={(info) =>
           setPendingHandoff({ stage: "generating", ...info, baseRuns: thread?.runs.length ?? 0 })
         }
@@ -723,6 +737,7 @@ function Composer({
   onHandoffStart,
   onHandoffReady,
   onHandoffAbort,
+  handoffCancelRef,
 }: {
   taskId: string;
   live: boolean;
@@ -736,9 +751,11 @@ function Composer({
   onStop: (runId: string) => void;
   onSubmitted: () => void;
   handoffPending: boolean;
-  onHandoffStart: (info: { from: string; to: string }) => void;
+  onHandoffStart: (info: { from: string; to: string; cancellable?: boolean }) => void;
   onHandoffReady: () => void;
   onHandoffAbort: () => void;
+  /** Banner-side handle: the Cancel button aborts the pre-generation request. */
+  handoffCancelRef: React.MutableRefObject<() => void>;
 }) {
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
@@ -754,6 +771,8 @@ function Composer({
   const [error, setError] = useState<string | null>(null);
   /** Runtime picked in the select whose harness differs — awaiting handoff confirmation. */
   const [pendingRuntime, setPendingRuntime] = useState<any | null>(null);
+  /** In-flight pre-generation request, so the banner Cancel can abort it. */
+  const handoffAbortRef = useRef<AbortController | null>(null);
 
   const runtimeList = runtimes.data ?? [];
   const modelList = models.data ?? [];
@@ -822,11 +841,31 @@ function Composer({
     setPendingRuntime(null);
     // Confirmed: kick off handoff generation right away so the next submit
     // doesn't stall on it. The marker makes that work visible in the thread.
-    onHandoffStart({ from: current?.name ?? current?.kind ?? "current", to: target.name ?? target.kind });
-    post(`/api/tasks/${taskId}/handoff`, { runtimeId: target.id })
+    onHandoffStart({ from: current?.name ?? current?.kind ?? "current", to: target.name ?? target.kind, cancellable: true });
+    const controller = new AbortController();
+    handoffAbortRef.current = controller;
+    post(`/api/tasks/${taskId}/handoff`, { runtimeId: target.id }, controller.signal)
       .then(() => onHandoffReady())
-      .catch(() => onHandoffAbort());
+      .catch(() => onHandoffAbort())
+      .finally(() => {
+        if (handoffAbortRef.current === controller) handoffAbortRef.current = null;
+      });
   };
+  // Banner Cancel: drop the request and the marker, and snap the runtime
+  // back to the previous harness so the next submit stays a resume. The
+  // server may still finish and store the summary — it is simply unused.
+  const cancelHandoff = () => {
+    handoffAbortRef.current?.abort();
+    handoffAbortRef.current = null;
+    onHandoffAbort();
+    if (previousRuntimeId) {
+      setRuntimeChoice(previousRuntimeId);
+      setRuntimeTouched(true);
+    }
+  };
+  useEffect(() => {
+    handoffCancelRef.current = cancelHandoff;
+  });
   const firstProviderWithModels = (() => {
     const withModels = providerList.filter((p: any) => modelList.some((m: any) => m.providerId === p.id));
     return withModels.find((p: any) => p.enabled) ?? withModels[0];
