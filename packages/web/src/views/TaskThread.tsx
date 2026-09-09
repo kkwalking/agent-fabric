@@ -3,7 +3,8 @@ import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTokens } from ".
 import { ErrorBox, Icon, Modal, StatusBadge, useAsync } from "../components";
 import { Markdown } from "../markdown";
 import {
-  findHarnessCommand,
+  modelLabel,
+  modelOptionLabel,
   projectTimeline,
   type AgentMessageItem,
   type CommandActivity,
@@ -83,6 +84,8 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   /** Composer-owned cancel for the pre-generation request; the banner's Cancel button calls it. */
   const handoffCancelRef = useRef<() => void>(() => {});
   const runtimeCatalog = useAsync<any[]>(() => get("/api/runtimes"), [taskId]);
+  const providers = useAsync<any[]>(() => get("/api/providers"), []);
+  const providerList = providers.data ?? [];
 
   const bump = () => setReloadTick((t) => t + 1);
 
@@ -218,6 +221,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const runtimeKinds = Object.fromEntries(
     (runtimeCatalog.data ?? []).map((r: any) => [r.id, r.kind as string])
   );
+  const lastModelLabel = modelLabel(providerList, lastTurn?.run ?? {});
 
   return (
     <div className="task-thread">
@@ -235,7 +239,9 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
             <Icon name="folder" size={13} /> {thread.workspace?.name ?? "no workspace"}
           </span>
           <span className="meta-chip"><Icon name="box" size={13} /> {lastTurn?.run.runtimeName ?? "—"}</span>
-          <span className="meta-chip"><Icon name="cpu" size={13} /> {lastTurn?.run.modelName ?? "—"}</span>
+          <span className="meta-chip" title={lastModelLabel ?? "—"}>
+            <Icon name="cpu" size={13} /> {lastModelLabel ?? "—"}
+          </span>
           <a className="switch-link" onClick={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}>
             <Icon name="refresh" size={12} /> Switch runtime
           </a>
@@ -255,6 +261,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               turn={turn}
               task={thread.task}
               runtimeKinds={runtimeKinds}
+              providers={providerList}
               onContinue={focusComposer}
               onSwitchRuntime={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}
               onContinueWithRuntime={continueWithRuntime}
@@ -332,6 +339,7 @@ function TurnView({
   turn,
   task,
   runtimeKinds,
+  providers,
   onContinue,
   onSwitchRuntime,
   onContinueWithRuntime,
@@ -341,6 +349,7 @@ function TurnView({
   turn: ThreadTurn;
   task: any;
   runtimeKinds: Record<string, string>;
+  providers: any[];
   onContinue: () => void;
   onSwitchRuntime: () => void;
   onContinueWithRuntime: (runtimeId: string) => void;
@@ -356,7 +365,7 @@ function TurnView({
     [turn.events, live]
   );
   const userPrompt = displayUserPrompt(run, task);
-  const harnessCommand = useMemo(() => findHarnessCommand(turn.events), [turn.events]);
+  const turnModelLabel = modelLabel(providers, run);
   // A thinking row spins only while it is still the timeline's last item.
   // Both harnesses emit agent.thinking post-hoc (pi at message_end,
   // opencode with the step parts), so the row is a finished record the
@@ -383,11 +392,6 @@ function TurnView({
       <div className="agent-turn">
         <div className="agent-name" title={run.runtimeName ?? "agent"}>
           <span className="agent-badge">{run.runtimeName ?? "Agent"}</span>
-          {harnessCommand && (
-            <code className="harness-cmd" title={`Launch command · ${harnessCommand.command}`}>
-              {harnessCommand.command}
-            </code>
-          )}
         </div>
         <div className="agent-body">
           {/* Lightweight resume status (v5 §19) */}
@@ -473,7 +477,7 @@ function TurnView({
               <>
                 <StatusBadge status={run.status} />
                 <span>{run.runtimeName ?? "—"}</span>
-                {run.modelName && <span>{run.modelName}</span>}
+                {turnModelLabel && <span>{turnModelLabel}</span>}
                 {run.usage?.durationMs != null && <span>{fmtDuration(run.usage.durationMs)}</span>}
                 {run.usage && (
                   <span>{fmtTokens((run.usage.inputTokens ?? 0) + (run.usage.outputTokens ?? 0))} tokens</span>
@@ -952,7 +956,7 @@ function Composer({
               title="Model"
             >
               {modelList.map((m: any) => (
-                <option key={m.id} value={m.id}>Model: {m.alias ?? m.name}</option>
+                <option key={m.id} value={m.id}>Model: {modelOptionLabel(providerList, m)}</option>
               ))}
             </select>
           )}

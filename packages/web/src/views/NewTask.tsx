@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { get, post, fmtRelative } from "../api";
 import { ErrorBox, Icon, useAsync } from "../components";
+import { modelOptionLabel } from "../presentation";
 import { navigate } from "../router";
 
 /**
@@ -172,7 +173,7 @@ export function NewTaskView() {
               title="Model"
             >
               {modelList.map((m: any) => (
-                <option key={m.id} value={m.id}>Model: {m.alias ?? m.name}</option>
+                <option key={m.id} value={m.id}>Model: {modelOptionLabel(providerList, m)}</option>
               ))}
             </select>
           )}

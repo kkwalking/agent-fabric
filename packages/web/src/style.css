@@ -971,23 +971,6 @@ a:hover {
   line-height: 1.3;
   flex-shrink: 0;
 }
-/* Harness launch command, inline on the turn header line (one line, ellipsized) */
-.agent-name .harness-cmd {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 400;
-  color: var(--dim);
-  background: var(--panel-2);
-  border-radius: 5px;
-  padding: 1px 6px;
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: default;
-}
-
 .resume-chip {
   display: inline-flex;
   align-items: center;

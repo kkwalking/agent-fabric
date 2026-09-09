@@ -11,8 +11,8 @@
  * - tool.started + tool.completed merge into ONE ToolActivity.
  * - shell.command + shell.output merge into ONE CommandActivity.
  * - The harness invocation (the `pi --print …` launch command, the run's
- *   first shell.command) is not an activity row — the turn header shows it
- *   inline (see findHarnessCommand).
+ *   first shell.command) is not an activity row and not shown on the turn
+ *   header either — it stays in the Run Inspector (see projectTimeline).
  * - Harness echoes of the input instruction (agent.message role=user /
  *   role=system) are swallowed — the thread shows `run.userPrompt`, never
  *   the stitched harness prompt (v5 §4/§5).
@@ -87,6 +87,34 @@ export type TimelineItem = ToolActivity | CommandActivity | FileActivity | Think
 /* ------------------------------------------------------------------ */
 /* Readable labels (v5 §7/§10)                                         */
 /* ------------------------------------------------------------------ */
+
+/** Provider id → name lookup for `provider/model` labels. */
+export function providerNameOf(providers: any[], providerId?: string): string | undefined {
+  return providerId ? providers.find((p: any) => p.id === providerId)?.name : undefined;
+}
+
+/**
+ * `provider/model` display label for a Run (e.g. `moark/deepseek-v4`) —
+ * the plain model name when the provider is unknown (deleted, or a run
+ * recorded before providerId was stored).
+ */
+export function modelLabel(
+  providers: any[],
+  run: { modelName?: string; providerId?: string }
+): string | undefined {
+  if (!run?.modelName) return undefined;
+  const provider = providerNameOf(providers, run.providerId);
+  return provider ? `${provider}/${run.modelName}` : run.modelName;
+}
+
+/** Composer option label for a model record: `provider/alias`. */
+export function modelOptionLabel(
+  providers: any[],
+  m: { name: string; alias?: string; providerId?: string }
+): string {
+  const provider = providerNameOf(providers, m.providerId);
+  return provider ? `${provider}/${m.alias ?? m.name}` : m.alias ?? m.name;
+}
 
 const TOOL_VERBS: Record<string, string> = {
   read: "Read",
@@ -182,32 +210,6 @@ function eventText(data: Record<string, unknown> | undefined): string {
   return String(data?.content ?? data?.text ?? data?.message ?? data?.line ?? "");
 }
 
-/** The harness launch command (`pi --print …`), shown inline on the turn header. */
-export interface HarnessCommandInfo {
-  command: string;
-  cwd?: string;
-  backend?: string;
-}
-
-/**
- * The execution loop emits exactly one launch `shell.command` per run,
- * before the harness process starts — it is always the run's first
- * shell.command event (explicitly tagged `harnessInvocation` on runs
- * recorded after that flag was introduced).
- */
-export function findHarnessCommand(events: RawEvent[]): HarnessCommandInfo | undefined {
-  for (const e of events) {
-    if (e.type !== "shell.command") continue;
-    const data = e.data ?? {};
-    return {
-      command: String(data.command ?? "(command)"),
-      cwd: typeof data.cwd === "string" ? data.cwd : undefined,
-      backend: typeof data.backend === "string" ? data.backend : undefined,
-    };
-  }
-  return undefined;
-}
-
 /**
  * Projects one run's events into timeline items (v5 §25 merging rules).
  * The input must be sorted by seq. `live` marks whether the run is still
@@ -220,10 +222,10 @@ export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {
   let keySeq = 0;
   const nextKey = (p: string) => `${p}-${++keySeq}`;
 
-  // The harness launch command rides the turn header, not the activity
-  // list. It is always the run's first shell.command event (the execution
-  // loop emits it before spawning the harness; newer runs also tag it
-  // explicitly with harnessInvocation).
+  // The harness launch command stays out of the timeline entirely (the
+  // Run Inspector keeps it). It is always the run's first shell.command
+  // event (the execution loop emits it before spawning the harness;
+  // newer runs also tag it explicitly with harnessInvocation).
   const harnessEventId = events.find((e) => e.type === "shell.command")?.id;
 
   const findTool = (data: Record<string, unknown> | undefined, tool: string): ToolActivity | undefined => {
@@ -314,7 +316,7 @@ export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {
       }
 
       case "shell.command": {
-        // The launch command is rendered on the turn header (findHarnessCommand).
+        // The launch command stays out of the timeline (Run Inspector only).
         if (e.id === harnessEventId) break;
         items.push({
           kind: "command",
