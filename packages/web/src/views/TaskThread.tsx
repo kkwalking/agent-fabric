@@ -368,7 +368,6 @@ function TurnView({
       {/* Agent turn */}
       <div className="agent-turn">
         <div className="agent-name" title={run.runtimeName ?? "agent"}>
-          {live && <span className="spinner" title="Run in progress" />}
           <span className="agent-badge">{run.runtimeName ?? "Agent"}</span>
           {harnessCommand && (
             <code className="harness-cmd" title={`Launch command · ${harnessCommand.command}`}>
