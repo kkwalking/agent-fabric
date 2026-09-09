@@ -302,6 +302,40 @@ test("continue on the same harness without a resumable session falls back to han
   assert.match(result.explanation, /Handoff/);
 });
 
+test("an explicitly requested handoff is harness-agnostic and arms the next turn", async () => {
+  const h = await freshHarness();
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const { taskId } = await startTaskOn(h, mockRuntime.id);
+
+  // The standalone Handoff action binds no harness.
+  const handoff = await h.runService.generateHandoff(taskId);
+  assert.equal(handoff.awaitingNextTurn, true);
+  assert.equal(handoff.toRuntimeKind, undefined, "pre-generated handoff must not bind a target harness");
+
+  // Same harness would normally resume — the armed handoff wins.
+  const options = h.runService.continueOptions(taskId);
+  assert.equal(options.handoffReady, true);
+  assert.equal(options.resumeAvailable, false);
+  assert.equal(options.suggestedMode, "handoff");
+  assert.match(options.explanation, /any harness/);
+
+  const result = await h.runService.continueTask(taskId, { prompt: "continue from the summary" });
+  assert.equal(result.continuity, "handoff");
+  assert.equal(result.handoff!.id, handoff.id, "must reuse the armed handoff, not regenerate");
+  assert.equal(result.run.previousHandoffId, handoff.id);
+  assert.equal(
+    h.handoffs.get(handoff.id)!.awaitingNextTurn,
+    false,
+    "consumption must disarm the handoff"
+  );
+  await waitForRun(h.runService, result.run.id);
+
+  // …and the turn after that is back to normal (resume the new session).
+  const optionsAfter = h.runService.continueOptions(taskId);
+  assert.equal(optionsAfter.handoffReady, false);
+  assert.equal(optionsAfter.suggestedMode, "resume");
+});
+
 /* ------------------------------------------------------------------ */
 /* Handoff: cross-harness continuation (spec v1 §4–§8/§14/§20)          */
 /* ------------------------------------------------------------------ */

@@ -390,9 +390,16 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     // The thread's current workspace follows the latest run (a continuation
     // may have overridden it), falling back to the task default.
     const currentWorkspaceId = taskRuns[taskRuns.length - 1]?.workspaceId ?? task.workspaceId;
+    // Explicitly requested handoff waiting in the thread: the next turn
+    // (any harness) consumes it as the sole context.
+    const latestRun = taskRuns[taskRuns.length - 1];
+    const latestGenerated = latestRun?.generatedHandoffId
+      ? handoffs.get(latestRun.generatedHandoffId)
+      : undefined;
     ok(res, {
       task,
       workspace: currentWorkspaceId ? workspaces.get(currentWorkspaceId) ?? null : null,
+      pendingHandoff: latestGenerated?.awaitingNextTurn ? latestGenerated : null,
       runs: taskRuns.map((run) => ({
         run,
         events: runs.events(run.id),

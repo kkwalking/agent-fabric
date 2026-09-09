@@ -474,6 +474,13 @@ export interface Handoff {
   toRuntimeId?: ID;
   toRuntimeName?: string;
   toRuntimeKind?: RuntimeKind;
+  /**
+   * Set when the handoff was pre-generated on explicit request (the UI
+   * Handoff action): it is harness-agnostic and armed for the next turn —
+   * whichever harness that turn runs on — which consumes it as its sole
+   * context instead of resuming a native session. Cleared on consumption.
+   */
+  awaitingNextTurn?: boolean;
   /** Primary generator of the content. */
   source: HandoffSource;
   /** All generators that contributed (e.g. agentfabric + user). */

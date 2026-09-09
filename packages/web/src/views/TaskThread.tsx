@@ -39,21 +39,22 @@ interface ThreadTurn {
 interface ThreadData {
   task: any;
   workspace: any | null;
+  /** Explicitly requested handoff waiting in the thread — the next turn (any harness) consumes it. */
+  pendingHandoff: any | null;
   runs: ThreadTurn[];
 }
 
 /**
  * Optimistic handoff marker shown in the timeline. It appears the moment the
- * user confirms a harness switch (or submits into a handoff) and tracks the
- * generation until the run consuming it lands.
+ * user confirms handoff generation from a turn's Handoff button (or submits
+ * into a fresh handoff) and tracks the generation until the run consuming it
+ * lands.
  */
 interface PendingHandoff {
   stage: "generating" | "ready";
-  from: string;
-  to: string;
   /** Runs present in the thread when the handoff started; the marker clears once a new run lands. */
   baseRuns: number;
-  /** True for the UI pre-generation (confirmed switch) — its request can be aborted. */
+  /** True for the UI pre-generation (confirmed handoff) — its request can be aborted. */
   cancellable?: boolean;
 }
 
@@ -75,14 +76,18 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const [reloadTick, setReloadTick] = useState(0);
   const [showJump, setShowJump] = useState(false);
   const [pendingHandoff, setPendingHandoff] = useState<PendingHandoff | null>(null);
-  /** Composer runtime preselection requested from outside (v6 §10 quota UX). */
+  /** Composer runtime preselection requested from outside (quota flow aim). */
   const [runtimeRequest, setRuntimeRequest] = useState<{ id: string; n: number } | null>(null);
+  /** Handoff confirmation dialog; `aimRuntimeId` re-aims the composer after confirming (quota flow). */
+  const [handoffDialog, setHandoffDialog] = useState<{ aimRuntimeId?: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
   const composerPromptRef = useRef<HTMLTextAreaElement>(null);
   const composerRuntimeRef = useRef<HTMLSelectElement>(null);
-  /** Composer-owned cancel for the pre-generation request; the banner's Cancel button calls it. */
+  /** Banner-side handle: the Cancel button aborts the pre-generation request. */
   const handoffCancelRef = useRef<() => void>(() => {});
+  /** In-flight pre-generation request, so the banner Cancel can abort it. */
+  const handoffAbortRef = useRef<AbortController | null>(null);
   const runtimeCatalog = useAsync<any[]>(() => get("/api/runtimes"), [taskId]);
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
   const providerList = providers.data ?? [];
@@ -111,6 +116,17 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
       setPendingHandoff(null);
     }
   }, [thread, pendingHandoff]);
+
+  // Banner Cancel: abort the pre-generation request and drop the marker. The
+  // composer runtime is left untouched — harness choice and handoff are
+  // independent now.
+  useEffect(() => {
+    handoffCancelRef.current = () => {
+      handoffAbortRef.current?.abort();
+      handoffAbortRef.current = null;
+      setPendingHandoff(null);
+    };
+  });
 
   const turnIds = useMemo(() => new Set((thread?.runs ?? []).map((t) => t.run.id)), [thread]);
 
@@ -202,13 +218,11 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
     bump();
   };
 
-  // "Continue with Pi / OpenCode" (v6 §10): preselect the target runtime in
-  // the composer — the existing harness-switch confirmation takes over
-  // from there (handoff generation + new session on the other harness).
-  const continueWithRuntime = (runtimeId: string) => {
-    setRuntimeRequest((prev) => ({ id: runtimeId, n: (prev?.n ?? 0) + 1 }));
-    composerPromptRef.current?.focus();
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  // "Continue with Pi / OpenCode" (v6 §10): open the handoff confirmation,
+  // then re-aim the composer at that harness once confirmed — handoff
+  // generation itself stays harness-agnostic.
+  const handoffViaRuntime = (runtimeId: string) => {
+    setHandoffDialog({ aimRuntimeId: runtimeId });
   };
 
   // Cross-harness escape hatches offered when the current harness cannot
@@ -222,6 +236,31 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
     (runtimeCatalog.data ?? []).map((r: any) => [r.id, r.kind as string])
   );
   const lastModelLabel = modelLabel(providerList, lastTurn?.run ?? {});
+
+  // Confirmed handoff: generate the context summary as a standalone action —
+  // it binds no harness. Once ready it waits in the thread and the next
+  // message (any harness) consumes it as the sole context. `aimRuntimeId`
+  // optionally re-aims the composer afterwards (quota escape hatch).
+  const confirmHandoff = (aimRuntimeId?: string) => {
+    setHandoffDialog(null);
+    if (!thread) return;
+    setPendingHandoff({ stage: "generating", baseRuns: thread.runs.length, cancellable: true });
+    if (aimRuntimeId) setRuntimeRequest((prev) => ({ id: aimRuntimeId, n: (prev?.n ?? 0) + 1 }));
+    const controller = new AbortController();
+    handoffAbortRef.current = controller;
+    post(`/api/tasks/${taskId}/handoff`, {}, controller.signal)
+      .then(() => {
+        setPendingHandoff((p) => (p ? { ...p, stage: "ready" } : p));
+        bump();
+      })
+      .catch(() => setPendingHandoff((p) => (p ? null : p)))
+      .finally(() => {
+        if (handoffAbortRef.current === controller) handoffAbortRef.current = null;
+      });
+  };
+  // Armed on the server (loaded or regenerated elsewhere): shown as a
+  // ready banner until a run consumes it.
+  const armedHandoff = thread.pendingHandoff ?? null;
 
   return (
     <div className="task-thread">
@@ -264,14 +303,31 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               providers={providerList}
               onContinue={focusComposer}
               onSwitchRuntime={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}
-              onContinueWithRuntime={continueWithRuntime}
+              onHandoffRequest={handoffViaRuntime}
+              onHandoff={() => setHandoffDialog({})}
+              handoffDisabled={Boolean(pendingHandoff) || Boolean(armedHandoff)}
               switchTargets={switchTargets}
               onStop={stopRun}
             />
           ))}
 
-          {/* Handoff confirmed by the user: generation runs up-front so the
-              next submit can go straight to the new harness (v5 §20) */}
+          {/* Explicitly requested handoff waiting in the thread: the next
+              message (any harness) starts a fresh session from it */}
+          {!pendingHandoff && armedHandoff && (
+            <div className="handoff-banner handoff-pending" aria-live="polite">
+              <div className="handoff-line">
+                <span className="handoff-mark">
+                  <span className="handoff-done">✓</span> Handoff
+                </span>
+                <span className="muted">
+                  context summary ready — your next message, on any harness, starts a fresh session seeded with it
+                  as the only context
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Handoff being generated after explicit confirmation (v5 §20) */}
           {pendingHandoff && (
             <div className="handoff-banner handoff-pending" aria-live="polite">
               <div className="handoff-line">
@@ -279,16 +335,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
                   {pendingHandoff.stage === "generating" ? <span className="spinner" /> : <span className="handoff-done">✓</span>}
                   Handoff
                 </span>
-                <strong>{pendingHandoff.from} → {pendingHandoff.to}</strong>
                 <span className="muted">
                   {pendingHandoff.stage === "generating"
-                    ? `generating context summary · new ${pendingHandoff.to} session…`
-                    : `context summary ready — send a message to continue with ${pendingHandoff.to}`}
+                    ? "generating context summary from this thread…"
+                    : "context summary ready — your next message, on any harness, starts a fresh session seeded with it as the only context"}
                 </span>
                 {pendingHandoff.stage === "generating" && pendingHandoff.cancellable && (
                   <button
                     className="handoff-cancel"
-                    title="Cancel handoff generation and stay on the current harness"
+                    title="Cancel handoff generation"
                     onClick={() => handoffCancelRef.current()}
                   >
                     Cancel
@@ -319,15 +374,49 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         runtimeRequest={runtimeRequest}
         onStop={stopRun}
         onSubmitted={bump}
-        handoffPending={Boolean(pendingHandoff)}
-        handoffCancelRef={handoffCancelRef}
-        onHandoffStart={(info) =>
-          setPendingHandoff({ stage: "generating", ...info, baseRuns: thread?.runs.length ?? 0 })
-        }
-        onHandoffReady={() => setPendingHandoff((p) => (p ? { ...p, stage: "ready" } : p))}
+        handoffState={pendingHandoff?.stage ?? (armedHandoff ? "ready" : undefined)}
+        onHandoffStart={() => setPendingHandoff({ stage: "generating", baseRuns: thread?.runs.length ?? 0 })}
         onHandoffAbort={() => setPendingHandoff(null)}
       />
+
+      {/* ---------- Handoff confirmation (the only trigger of generation) ---------- */}
+      {handoffDialog && (
+        <HandoffConfirmModal
+          onConfirm={() => confirmHandoff(handoffDialog.aimRuntimeId)}
+          onClose={() => setHandoffDialog(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/* ================================================================== */
+/* Handoff confirmation — the single gate in front of generation       */
+/* ================================================================== */
+
+function HandoffConfirmModal({
+  onConfirm,
+  onClose,
+}: {
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal title="Generate handoff context?" onClose={onClose}>
+      <div className="handoff-confirm">
+        <p>
+          This generates a context summary of the task so far as a standalone action — it is not tied to any
+          harness. Once ready it stays in this thread: your next message, on any harness including the current
+          one, starts a fresh session that uses this summary as its only context. The workspace is preserved.
+        </p>
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" autoFocus onClick={onConfirm}>
+            Generate handoff
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -342,7 +431,9 @@ function TurnView({
   providers,
   onContinue,
   onSwitchRuntime,
-  onContinueWithRuntime,
+  onHandoff,
+  onHandoffRequest,
+  handoffDisabled,
   switchTargets,
   onStop,
 }: {
@@ -352,7 +443,11 @@ function TurnView({
   providers: any[];
   onContinue: () => void;
   onSwitchRuntime: () => void;
-  onContinueWithRuntime: (runtimeId: string) => void;
+  /** Turn-footer Handoff button: open the handoff confirmation unpicked. */
+  onHandoff: () => void;
+  /** Quota escape hatch: open the handoff confirmation with a pre-picked target. */
+  onHandoffRequest: (runtimeId: string) => void;
+  handoffDisabled: boolean;
   switchTargets: Array<{ id: string; name: string; kind: string }>;
   onStop: (runId: string) => void;
 }) {
@@ -435,12 +530,12 @@ function TurnView({
               {run.error && <div className="fail-reason">{run.error}</div>}
               <p className="muted">
                 The workspace and the {run.runtimeName ?? "harness"} session are preserved. Hand the task to
-                another harness — a handoff summary is generated automatically and the new agent continues in
-                this thread.
+                another harness — after you confirm, a handoff summary is generated and the new agent continues
+                in this thread.
               </p>
               <div className="row fail-actions">
                 {otherHarnessTargets.map((t) => (
-                  <button key={t.id} className="small primary" onClick={() => onContinueWithRuntime(t.id)}>
+                  <button key={t.id} className="small primary" onClick={() => onHandoffRequest(t.id)}>
                     Continue with {t.name}
                   </button>
                 ))}
@@ -485,6 +580,14 @@ function TurnView({
                 {run.cost ? <span>{fmtCostShort(run.cost)}</span> : null}
                 {turn.artifacts.length > 0 && <span>{turn.artifacts.length} artifact{turn.artifacts.length > 1 ? "s" : ""}</span>}
                 <a onClick={() => navigate(`/runs/${run.id}`)}>View run ↗</a>
+                <button
+                  className="turn-handoff"
+                  title="Generate a handoff summary so another harness can continue this task"
+                  disabled={handoffDisabled}
+                  onClick={onHandoff}
+                >
+                  ⇄ Handoff
+                </button>
               </>
             )}
           </footer>
@@ -737,11 +840,9 @@ function Composer({
   runtimeRequest,
   onStop,
   onSubmitted,
-  handoffPending,
+  handoffState,
   onHandoffStart,
-  onHandoffReady,
   onHandoffAbort,
-  handoffCancelRef,
 }: {
   taskId: string;
   live: boolean;
@@ -750,16 +851,14 @@ function Composer({
   previousRuntimeId?: string;
   promptRef: React.RefObject<HTMLTextAreaElement>;
   runtimeRef: React.RefObject<HTMLSelectElement>;
-  /** External runtime preselection (v6 §10) — applied through the same confirmed-switch path. */
+  /** External runtime preselection (quota flow aim) — applied directly, no confirmation attached. */
   runtimeRequest?: { id: string; n: number } | null;
   onStop: (runId: string) => void;
   onSubmitted: () => void;
-  handoffPending: boolean;
-  onHandoffStart: (info: { from: string; to: string; cancellable?: boolean }) => void;
-  onHandoffReady: () => void;
+  /** Optimistic/armed handoff lifecycle, kept in sync so the preview and announce stay truthful. */
+  handoffState?: "generating" | "ready";
+  onHandoffStart: () => void;
   onHandoffAbort: () => void;
-  /** Banner-side handle: the Cancel button aborts the pre-generation request. */
-  handoffCancelRef: React.MutableRefObject<() => void>;
 }) {
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
@@ -773,10 +872,6 @@ function Composer({
   const [profileId, setProfileId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** Runtime picked in the select whose harness differs — awaiting handoff confirmation. */
-  const [pendingRuntime, setPendingRuntime] = useState<any | null>(null);
-  /** In-flight pre-generation request, so the banner Cancel can abort it. */
-  const handoffAbortRef = useRef<AbortController | null>(null);
 
   const runtimeList = runtimes.data ?? [];
   const modelList = models.data ?? [];
@@ -788,12 +883,12 @@ function Composer({
   // Untouched, the preview (and the submit below) use the task's default
   // chain; the resolved target runtime is preselected visibly.
   // previousRuntimeId doubles as "latest run changed" — refresh the preview
-  // after a run lands so the suggestion never goes stale mid-thread.
+  // after a run lands so the suggestion never goes stale mid-thread;
+  // handoffState re-runs it when a handoff is armed or consumed.
   const options = useAsync<any>(
     () => get(`/api/tasks/${taskId}/continue-options${runtimeTouched && runtimeChoice ? `?runtimeId=${runtimeChoice}` : ""}`),
-    [taskId, runtimeTouched, runtimeChoice, previousRuntimeId]
+    [taskId, runtimeTouched, runtimeChoice, previousRuntimeId, handoffState]
   );
-  const suggested = options.data?.suggestedMode;
 
   // Visible defaults — the submitted ids are always the concrete values on
   // screen: same-runtime continue when possible, else the built-in Pi
@@ -812,64 +907,22 @@ function Composer({
     effectiveRuntime?.credentialSource === "harness-native" ||
     ["codex", "claude-code"].includes(effectiveRuntime?.kind ?? "");
 
-  // External preselection (v6 §10 "Continue with Pi / OpenCode"): route it
-  // through the same confirmed-switch path as a manual selection.
+  // External preselection (post-handoff aim, v6 §10 "Continue with X"):
+  // apply it directly — harness choice carries no confirmation of its own.
   useEffect(() => {
     if (!runtimeRequest) return;
     selectRuntime(runtimeRequest.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtimeRequest?.n]);
 
-  // Switching to a different harness means the next submit performs a
-  // handoff, so the selection only commits after explicit confirmation.
-  // Cancel is a no-op: the controlled select snaps back to the old value.
+  // Harness choice is fully independent of handoff: switching never starts,
+  // confirms, or cancels one — it only re-aims the next submit. Whether that
+  // submit resumes or continues from an armed handoff is decided server-side.
   const selectRuntime = (nextId: string) => {
     if (!nextId || nextId === effectiveRuntimeId) return;
-    const target = runtimeList.find((r: any) => r.id === nextId);
-    const current = options.data?.currentRuntime;
-    if (current && target && target.kind !== current.kind) {
-      setPendingRuntime(target);
-      return;
-    }
-    // Committing a same-harness selection abandons any prepared handoff.
-    if (handoffPending) onHandoffAbort();
     setRuntimeChoice(nextId);
     setRuntimeTouched(true);
   };
-  const confirmSwitch = () => {
-    if (!pendingRuntime) return;
-    const target = pendingRuntime;
-    const current = options.data?.currentRuntime;
-    setRuntimeChoice(target.id);
-    setRuntimeTouched(true);
-    setPendingRuntime(null);
-    // Confirmed: kick off handoff generation right away so the next submit
-    // doesn't stall on it. The marker makes that work visible in the thread.
-    onHandoffStart({ from: current?.name ?? current?.kind ?? "current", to: target.name ?? target.kind, cancellable: true });
-    const controller = new AbortController();
-    handoffAbortRef.current = controller;
-    post(`/api/tasks/${taskId}/handoff`, { runtimeId: target.id }, controller.signal)
-      .then(() => onHandoffReady())
-      .catch(() => onHandoffAbort())
-      .finally(() => {
-        if (handoffAbortRef.current === controller) handoffAbortRef.current = null;
-      });
-  };
-  // Banner Cancel: drop the request and the marker, and snap the runtime
-  // back to the previous harness so the next submit stays a resume. The
-  // server may still finish and store the summary — it is simply unused.
-  const cancelHandoff = () => {
-    handoffAbortRef.current?.abort();
-    handoffAbortRef.current = null;
-    onHandoffAbort();
-    if (previousRuntimeId) {
-      setRuntimeChoice(previousRuntimeId);
-      setRuntimeTouched(true);
-    }
-  };
-  useEffect(() => {
-    handoffCancelRef.current = cancelHandoff;
-  });
   const firstProviderWithModels = (() => {
     const withModels = providerList.filter((p: any) => modelList.some((m: any) => m.providerId === p.id));
     return withModels.find((p: any) => p.enabled) ?? withModels[0];
@@ -889,13 +942,14 @@ function Composer({
     if (!prompt.trim() || busy) return;
     setBusy(true);
     setError(null);
-    // Without a confirmed pre-generation, announce the handoff here — it is
+    // Without an armed/ready handoff, announce the handoff here — it is
     // generated server-side before the run exists, which can take a while.
+    // An armed handoff is consumed instantly, so no announcement is needed.
     const opts = options.data;
     const willHandoff = opts?.suggestedContinuity === "handoff" && opts.currentRuntime && opts.targetRuntime;
-    const announceHere = willHandoff && !handoffPending;
+    const announceHere = willHandoff && !handoffState && !opts.handoffReady;
     if (announceHere) {
-      onHandoffStart({ from: opts.currentRuntime.name ?? opts.currentRuntime.kind, to: opts.targetRuntime.name ?? opts.targetRuntime.kind });
+      onHandoffStart();
     }
     try {
       await post(`/api/tasks/${taskId}/continue`, {
@@ -966,8 +1020,6 @@ function Composer({
               <option key={p.id} value={p.id}>Agent: {p.name}</option>
             ))}
           </select>
-          {suggested === "resume" && <span className="continuity resume" title={options.data?.explanation}>▶ Resume</span>}
-          {suggested === "handoff" && <span className="continuity handoff" title={options.data?.explanation}>⇄ Handoff</span>}
           {live && liveRunId && (
             <button className="small danger" onClick={() => onStop(liveRunId)} title="Stop the current run — the task stays open">
               <Icon name="stop" size={11} /> Stop
@@ -978,28 +1030,6 @@ function Composer({
           </button>
         </div>
       </div>
-
-      {/* Harness-switch confirmation (v5 §18: continuity explicit before executing) */}
-      {pendingRuntime && (
-        <Modal title="Switch harness and hand off?" onClose={() => setPendingRuntime(null)}>
-          <div className="handoff-confirm">
-            <div className="handoff-switch">
-              <span className="from" title={options.data?.currentRuntime?.kind}>{options.data?.currentRuntime?.name ?? "Current"}</span>
-              <span className="arrow">→</span>
-              <span className="to" title={pendingRuntime.kind}>{pendingRuntime.name}</span>
-            </div>
-            <p>
-              Confirming starts the handoff right away: {pendingRuntime.name} will continue in a new session seeded
-              with a summary of this task's history. The workspace is preserved — you can type your next message
-              while the summary is being generated.
-            </p>
-            <div className="modal-actions">
-              <button onClick={() => setPendingRuntime(null)}>Cancel</button>
-              <button className="primary" autoFocus onClick={confirmSwitch}>Switch & hand off</button>
-            </div>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }
