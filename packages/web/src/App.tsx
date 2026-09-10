@@ -7,7 +7,6 @@ import { TasksView } from "./views/Tasks";
 import { NewTaskView } from "./views/NewTask";
 import { TaskThreadView } from "./views/TaskThread";
 import { HandoffsView, HandoffDetailView } from "./views/Handoffs";
-import { ArtifactsView } from "./views/Artifacts";
 import { UsageView } from "./views/Usage";
 import { ProxyView } from "./views/Proxy";
 import { SettingsView } from "./views/Settings";
@@ -43,7 +42,6 @@ const resourceNav: NavEntry[] = [
 const systemNav: NavEntry[] = [
   { path: "/runs", label: "Runs", icon: "play", match: "/runs" },
   { path: "/handoffs", label: "Handoffs", icon: "archive", match: "/handoffs" },
-  { path: "/artifacts", label: "Artifacts", icon: "archive", match: "/artifacts" },
   { path: "/usage", label: "Usage", icon: "chart", match: "/usage" },
   { path: "/proxy", label: "Proxy", icon: "cloud", match: "/proxy" },
   { path: "/settings", label: "Settings", icon: "gear", match: "/settings" },
@@ -133,7 +131,6 @@ export function App() {
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
         {route.view === "handoffs" && <HandoffsView />}
         {route.view === "handoff" && route.id && <HandoffDetailView handoffId={route.id} />}
-        {route.view === "artifacts" && <ArtifactsView />}
         {route.view === "usage" && <UsageView />}
         {route.view === "proxy" && <ProxyView />}
         {route.view === "settings" && <SettingsView />}
