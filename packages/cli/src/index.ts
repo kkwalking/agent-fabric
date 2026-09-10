@@ -485,8 +485,6 @@ function buildProgram(): Command {
         console.log("\nhandoffs:");
         console.log(table(taskHandoffs.map((h) => ({
           id: h.id,
-          from: h.fromRuntimeName ?? h.fromRuntimeKind ?? "-",
-          to: h.toRuntimeName ?? h.toRuntimeKind ?? "-",
           source: h.source,
           createdAt: h.createdAt,
         }))));
@@ -542,8 +540,6 @@ function buildProgram(): Command {
         console.log(table(rows.map((h) => ({
           id: h.id,
           task: h.taskId,
-          from: h.fromRuntimeName ?? h.fromRuntimeKind ?? "-",
-          to: h.toRuntimeName ?? h.toRuntimeKind ?? "-",
           source: h.source,
           createdAt: h.createdAt,
         }))));

@@ -604,8 +604,6 @@ function TurnView({
 function HandoffBanner({ handoff }: { handoff: any }) {
   const [open, setOpen] = useState(false);
   const c = handoff.content ?? {};
-  const from = handoff.fromRuntimeName ?? handoff.fromRuntimeKind ?? "previous agent";
-  const to = handoff.toRuntimeName ?? handoff.toRuntimeKind ?? "new runtime";
   const Section = ({ title, children }: { title: string; children: React.ReactNode }) =>
     children ? (
       <div className="handoff-section">
@@ -617,13 +615,11 @@ function HandoffBanner({ handoff }: { handoff: any }) {
     <div className="handoff-banner">
       <div className="handoff-line">
         <span className="handoff-mark">⇄ Handoff</span>
-        <strong>{from} → {to}</strong>
-        <span className="muted">workspace preserved · new {to} session</span>
+        <span className="muted">workspace preserved · new native session</span>
         <button className="small right" onClick={() => setOpen(!open)}>{open ? "Hide handoff" : "View handoff"}</button>
       </div>
       {open && (
         <div className="handoff-detail">
-          <Section title="Previous agent">{from}</Section>
           <Section title="Current progress">{c.progressSummary}</Section>
           <Section title="Completed work">
             {(c.completedWork ?? []).map((w: string, i: number) => <div key={i}>✓ {w}</div>)}

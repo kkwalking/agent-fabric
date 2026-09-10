@@ -52,15 +52,13 @@ export function HandoffsView() {
         {data && data.length > 0 ? (
           <table>
             <thead>
-              <tr><th>ID</th><th>Task</th><th>From</th><th>To</th><th>Source</th><th>Created</th><th></th></tr>
+              <tr><th>ID</th><th>Task</th><th>Source</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
               {data.map((h) => (
                 <tr key={h.id}>
                   <td className="mono"><a onClick={() => navigate(`/handoffs/${h.id}`)}>{shortId(h.id)}</a></td>
                   <td className="mono">{shortId(h.taskId)}</td>
-                  <td>{h.fromRuntimeName ?? h.fromRuntimeKind ?? "-"}</td>
-                  <td>{h.toRuntimeName ?? h.toRuntimeKind ?? "-"}</td>
                   <td><SourceBadge source={h.source} /></td>
                   <td className="muted">{fmtTime(h.createdAt)}</td>
                   <td><button className="small" onClick={() => navigate(`/handoffs/${h.id}`)}>view</button></td>
@@ -98,8 +96,7 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
       </div>
       <h1 className="mono">{detail.id}</h1>
       <p className="sub">
-        {detail.fromRuntimeName ?? detail.fromRuntimeKind ?? "unknown"} → {detail.toRuntimeName ?? detail.toRuntimeKind ?? "(next agent picks)"}
-        {" "}· Run <span className="mono">{shortId(detail.fromRunId)}</span>
+        Run <span className="mono">{shortId(detail.fromRunId)}</span>
         {detail.workspaceId ? <> · Workspace <span className="mono">{shortId(detail.workspaceId)}</span></> : null}
         {" "}· {fmtTime(detail.createdAt)}
       </p>

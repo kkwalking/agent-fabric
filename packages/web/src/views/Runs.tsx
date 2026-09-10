@@ -177,8 +177,7 @@ export function RunDetailView({ runId }: { runId: string }) {
             )}
             {previousHandoff && (
               <span>
-                consumed handoff: <span className="mono">{shortId(previousHandoff.id)}</span>{" "}
-                <span className="muted">({previousHandoff.fromRuntimeName ?? previousHandoff.fromRuntimeKind} → {previousHandoff.toRuntimeName ?? previousHandoff.toRuntimeKind})</span>
+                consumed handoff: <span className="mono">{shortId(previousHandoff.id)}</span>
               </span>
             )}
             {generatedHandoff && (
