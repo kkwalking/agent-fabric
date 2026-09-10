@@ -19,6 +19,7 @@ import {
   NativeStateService,
   seedDefaults,
   effectiveCapabilities,
+  renderHandoffBody,
   type NewTaskInput,
   type ContinueTaskInput,
   type Run,
@@ -508,7 +509,11 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   });
   app.get("/api/handoffs/:id", (req, res) => {
     const h = handoffs.get(req.params.id);
-    h ? ok(res, h) : fail(res, new Error("Handoff not found"), 404);
+    if (!h) return fail(res, new Error("Handoff not found"), 404);
+    // Rendered body = the exact text the consuming harness receives ahead of
+    // its `# Your instruction`; consumers let the UI link to that full text.
+    const consumedByRunIds = runs.list().filter((r) => r.previousHandoffId === h.id).map((r) => r.id);
+    ok(res, { ...h, renderedPrompt: renderHandoffBody(h), consumedByRunIds });
   });
   // Fold user-provided notes into an existing handoff (spec v1 §7).
   app.post("/api/handoffs/:id/notes", async (req, res) => {

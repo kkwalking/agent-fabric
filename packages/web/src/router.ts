@@ -35,6 +35,7 @@ export interface Route {
     | "agents"
     | "workspaces"
     | "handoffs"
+    | "handoff"
     | "artifacts"
     | "usage"
     | "proxy"
@@ -64,5 +65,6 @@ export function parsePath(path: string): Route {
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "tasks" && parts[1]) return { view: "task", id: decodeURIComponent(parts[1]) };
   if (parts[0] === "runs" && parts[1]) return { view: "run", id: decodeURIComponent(parts[1]) };
+  if (parts[0] === "handoffs" && parts[1]) return { view: "handoff", id: decodeURIComponent(parts[1]) };
   return { view: "dashboard" };
 }

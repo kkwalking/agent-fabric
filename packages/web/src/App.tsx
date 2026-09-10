@@ -6,7 +6,7 @@ import { RunsView, RunDetailView } from "./views/Runs";
 import { TasksView } from "./views/Tasks";
 import { NewTaskView } from "./views/NewTask";
 import { TaskThreadView } from "./views/TaskThread";
-import { HandoffsView } from "./views/Handoffs";
+import { HandoffsView, HandoffDetailView } from "./views/Handoffs";
 import { ArtifactsView } from "./views/Artifacts";
 import { UsageView } from "./views/Usage";
 import { ProxyView } from "./views/Proxy";
@@ -132,6 +132,7 @@ export function App() {
         {route.view === "agents" && <ResourceView kind="agents" />}
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
         {route.view === "handoffs" && <HandoffsView />}
+        {route.view === "handoff" && route.id && <HandoffDetailView handoffId={route.id} />}
         {route.view === "artifacts" && <ArtifactsView />}
         {route.view === "usage" && <UsageView />}
         {route.view === "proxy" && <ProxyView />}

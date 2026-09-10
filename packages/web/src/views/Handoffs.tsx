@@ -1,6 +1,6 @@
-import { useState } from "react";
 import { get, fmtTime, shortId } from "../api";
 import { useAsync, ErrorBox } from "../components";
+import { navigate } from "../router";
 
 const CONTENT_SECTIONS: Array<{ key: string; label: string }> = [
   { key: "originalTask", label: "Original task" },
@@ -38,11 +38,6 @@ function HandoffSection({ label, value }: { label: string; value: unknown }) {
 
 export function HandoffsView() {
   const { data, error, reload } = useAsync<any[]>(() => get("/api/handoffs"), []);
-  const [selected, setSelected] = useState<string | null>(null);
-  const { data: detail } = useAsync<any>(
-    () => (selected ? get(`/api/handoffs/${selected}`) : Promise.resolve(null)),
-    [selected]
-  );
 
   return (
     <div>
@@ -62,13 +57,13 @@ export function HandoffsView() {
             <tbody>
               {data.map((h) => (
                 <tr key={h.id}>
-                  <td className="mono">{shortId(h.id)}</td>
+                  <td className="mono"><a onClick={() => navigate(`/handoffs/${h.id}`)}>{shortId(h.id)}</a></td>
                   <td className="mono">{shortId(h.taskId)}</td>
                   <td>{h.fromRuntimeName ?? h.fromRuntimeKind ?? "-"}</td>
                   <td>{h.toRuntimeName ?? h.toRuntimeKind ?? "-"}</td>
                   <td><SourceBadge source={h.source} /></td>
                   <td className="muted">{fmtTime(h.createdAt)}</td>
-                  <td><button className="small" onClick={() => setSelected(h.id === selected ? null : h.id)}>{selected === h.id ? "hide" : "view"}</button></td>
+                  <td><button className="small" onClick={() => navigate(`/handoffs/${h.id}`)}>view</button></td>
                 </tr>
               ))}
             </tbody>
@@ -80,26 +75,65 @@ export function HandoffsView() {
           <button className="small" onClick={reload}>refresh</button>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {detail && (
-        <div className="card">
-          <div className="row">
-            <h2>Handoff <span className="mono">{detail.id}</span></h2>
-            <span className="right">
-              {(detail.sources ?? [detail.source]).map((s: string) => <SourceBadge key={s} source={s} />)}
-            </span>
-          </div>
-          <p className="sub">
-            Run <span className="mono">{shortId(detail.fromRunId)}</span>
-            {" "}· {detail.fromRuntimeName ?? detail.fromRuntimeKind ?? "unknown"} → {detail.toRuntimeName ?? detail.toRuntimeKind ?? "(next agent picks)"}
-            {detail.workspaceId ? <> · Workspace <span className="mono">{shortId(detail.workspaceId)}</span></> : null}
-          </p>
-          {CONTENT_SECTIONS.map(({ key, label }) => (
-            <HandoffSection key={key} label={label} value={(detail.content ?? {})[key]} />
-          ))}
-          {detail.userNotes && <HandoffSection label="User notes (verbatim)" value={detail.userNotes} />}
-        </div>
-      )}
+export function HandoffDetailView({ handoffId }: { handoffId: string }) {
+  const { data: detail, error } = useAsync<any>(() => get(`/api/handoffs/${handoffId}`), [handoffId]);
+
+  if (error) return <ErrorBox message={error} />;
+  if (!detail) return <div className="muted">Loading…</div>;
+  const consumedBy: string[] = detail.consumedByRunIds ?? [];
+
+  return (
+    <div>
+      <div className="row">
+        <a onClick={() => navigate("/handoffs")}>← handoffs</a>
+        <a onClick={() => navigate(`/tasks/${detail.taskId}`)}>task thread ↗</a>
+        <a onClick={() => navigate(`/runs/${detail.fromRunId}`)}>source run ↗</a>
+        <span className="right">
+          {(detail.sources ?? [detail.source]).map((s: string) => <SourceBadge key={s} source={s} />)}
+        </span>
+      </div>
+      <h1 className="mono">{detail.id}</h1>
+      <p className="sub">
+        {detail.fromRuntimeName ?? detail.fromRuntimeKind ?? "unknown"} → {detail.toRuntimeName ?? detail.toRuntimeKind ?? "(next agent picks)"}
+        {" "}· Run <span className="mono">{shortId(detail.fromRunId)}</span>
+        {detail.workspaceId ? <> · Workspace <span className="mono">{shortId(detail.workspaceId)}</span></> : null}
+        {" "}· {fmtTime(detail.createdAt)}
+      </p>
+
+      <h2>Rendered handoff — what the next agent receives</h2>
+      <div className="card">
+        <pre style={{ whiteSpace: "pre-wrap", maxHeight: "none" }}>{detail.renderedPrompt}</pre>
+        <p className="muted" style={{ margin: "10px 0 0" }}>
+          {consumedBy.length > 0 ? (
+            <>
+              The consuming turn's user input is appended under <span className="mono"># Your instruction</span>. Consumed by{" "}
+              {consumedBy.map((id: string, i: number) => (
+                <span key={id}>
+                  {i > 0 ? ", " : ""}
+                  <a className="mono" onClick={() => navigate(`/runs/${id}`)}>{shortId(id)} ↗</a>
+                </span>
+              ))}
+              {" "}— open the run inspector for the full input instruction.
+            </>
+          ) : detail.awaitingNextTurn ? (
+            <>Armed for the next turn: the user input of that turn is appended under <span className="mono"># Your instruction</span> when it runs.</>
+          ) : (
+            <>Not consumed by any run yet; the consuming turn's user input is appended under <span className="mono"># Your instruction</span>.</>
+          )}
+        </p>
+      </div>
+
+      <h2>Parsed fields (for inspection)</h2>
+      <div className="card">
+        {CONTENT_SECTIONS.map(({ key, label }) => (
+          <HandoffSection key={key} label={label} value={(detail.content ?? {})[key]} />
+        ))}
+        {detail.userNotes && <HandoffSection label="User notes (verbatim)" value={detail.userNotes} />}
+      </div>
     </div>
   );
 }

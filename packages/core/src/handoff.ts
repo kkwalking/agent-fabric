@@ -156,8 +156,13 @@ export function buildAssistedHandoffContent(input: AssistedHandoffInput): Handof
  * into a compacted session, so re-rendering it section-by-section would
  * only lose fidelity. The remaining structured fields are rendered
  * otherwise (harness-generated and heuristic fallback handoffs).
+ *
+ * `renderHandoffBody` is everything the handoff itself contributes; the
+ * consuming turn's user input is only known when the next run is created,
+ * so `renderHandoffPrompt` appends it under `# Your instruction`. The API
+ * exposes the body so inspection shows exactly what the next harness gets.
  */
-export function renderHandoffPrompt(handoff: Handoff, instruction: string): string {
+export function renderHandoffBody(handoff: Handoff): string {
   const c = handoff.content;
   const lines: string[] = [
     `You are continuing an existing task on a new agent harness (${handoff.toRuntimeName ?? "new runtime"}).`,
@@ -196,8 +201,11 @@ export function renderHandoffPrompt(handoff: Handoff, instruction: string): stri
   if (handoff.userNotes) {
     lines.push("", `## Notes from the user`, handoff.userNotes);
   }
-  lines.push("", `# Your instruction`, instruction);
   return lines.join("\n");
+}
+
+export function renderHandoffPrompt(handoff: Handoff, instruction: string): string {
+  return [renderHandoffBody(handoff), "", `# Your instruction`, instruction].join("\n");
 }
 
 /* ------------------------------------------------------------------ */
