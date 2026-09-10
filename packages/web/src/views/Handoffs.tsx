@@ -128,6 +128,11 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
       </div>
 
       <h2>Parsed fields (for inspection)</h2>
+      <p className="sub">
+        The same handoff content broken into structured fields for inspection. When the handoff carries a
+        compaction checkpoint, these fields are parsed out of it and the rendered prompt above embeds the
+        checkpoint verbatim — the fields below are not sent to the next agent.
+      </p>
       <div className="card">
         {CONTENT_SECTIONS.map(({ key, label }) => (
           <HandoffSection key={key} label={label} value={(detail.content ?? {})[key]} />

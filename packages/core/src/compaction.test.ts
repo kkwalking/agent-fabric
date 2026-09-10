@@ -23,6 +23,7 @@ import {
   generateCompactionHandoff,
   getSummarizationFailure,
   serializeRunConversation,
+  stripCheckpointPreamble,
   type CompletionFn,
   type CompletionRequest,
 } from "./compaction.js";
@@ -348,6 +349,65 @@ test("generateCompactionHandoff accumulates file lists across iterative updates 
   assert.deepEqual(result.content.relevantFiles, ["old.ts", "b.ts", "mut.ts"]);
 });
 
+test("stripCheckpointPreamble drops the summarizer's chain-of-thought preamble", () => {
+  const dirty = `Let me analyze this conversation carefully.\n\nThe conversation is very short.\n\nLet me write the structured summary.\n${CHECKPOINT}`;
+  assert.ok(stripCheckpointPreamble(dirty).startsWith("## Goal"));
+  assert.ok(!stripCheckpointPreamble(dirty).includes("Let me analyze"));
+  // No `## ` section at all → nothing distinguishes reasoning from a
+  // malformed summary, so it is kept unchanged.
+  assert.equal(stripCheckpointPreamble("just thinking out loud"), "just thinking out loud");
+});
+
+test("generateCompactionHandoff stores and renders a preamble-free checkpoint", async () => {
+  const dirty = `Let me analyze this conversation carefully.\n\nLet me write the structured summary.\n${CHECKPOINT}`;
+  const result = await generateCompactionHandoff({
+    task,
+    run,
+    events: [],
+    artifacts: [],
+    complete: fakeCompletion(dirty),
+  });
+  assert.ok(result.summary.startsWith("## Goal"));
+  assert.ok(!result.summary.includes("Let me analyze"));
+  assert.equal(result.content.compactionSummary, result.summary);
+});
+
+test("parsed fields drop elaborated \"(none …)\" placeholder lines", async () => {
+  const checkpoint = [
+    "## Goal", "Answer the user's question.", "",
+    "## Constraints & Preferences", "- (none explicitly stated by the user)", "",
+    "## Progress", "### Done", "- [x] Answered.", "",
+    "### In Progress", "- (none — this was a single informational Q&A)", "",
+    "### Blocked", "- (none)", "",
+    "## Key Decisions", "- (none)", "",
+    "## Next Steps", "1. Await the user's next instruction.", "",
+    "## Critical Context", "- (none)",
+  ].join("\n");
+  const result = await generateCompactionHandoff({
+    task,
+    run,
+    events: [],
+    artifacts: [],
+    complete: fakeCompletion(checkpoint),
+  });
+  assert.equal(result.content.userConstraints, undefined);
+  assert.equal(result.content.importantDecisions, undefined);
+  assert.equal(result.content.notesForNextAgent, undefined);
+  assert.deepEqual(result.content.remainingWork, ["Await the user's next instruction."]);
+});
+
+test("taskLabel does not repeat the prompt when the title defaults to it", async () => {
+  const sameTask = { id: "task_1", title: "当前项目是什么语言写的", prompt: "当前项目是什么语言写的" } as Task;
+  const result = await generateCompactionHandoff({
+    task: sameTask,
+    run,
+    events: [],
+    artifacts: [],
+    complete: fakeCompletion(CHECKPOINT),
+  });
+  assert.equal(result.content.originalTask, "#当前项目是什么语言写的");
+});
+
 test("generateCompactionHandoff retries transient summary errors with backoff (pi retryAssistantCall)", async () => {
   let calls = 0;
   const complete: CompletionFn = async () => {
@@ -433,6 +493,27 @@ test("renderHandoffPrompt embeds the compaction checkpoint verbatim", () => {
   assert.ok(rendered.includes("<modified-files>"));
   assert.ok(!rendered.includes("#mapped"), "mapped fields must not duplicate the checkpoint");
   assert.match(rendered, /# Your instruction\ncontinue/);
+});
+
+test("renderHandoffPrompt strips a preamble from an already-stored checkpoint", () => {
+  const handoff = {
+    id: "hoff_1",
+    taskId: "task_1",
+    fromRunId: "run_1",
+    fromRuntimeName: "OpenCode",
+    toRuntimeName: "Pi Agent",
+    source: "agentfabric",
+    sources: ["agentfabric"],
+    artifactIds: [],
+    createdAt: new Date().toISOString(),
+    content: {
+      compactionSummary: `Let me analyze this conversation carefully.\n${CHECKPOINT}`,
+      workspaceStatus: 'Workspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.',
+    },
+  } as unknown as Handoff;
+  const rendered = renderHandoffPrompt(handoff, "continue");
+  assert.ok(!rendered.includes("Let me analyze"), "stored preambles must not reach the next agent");
+  assert.ok(rendered.includes(CHECKPOINT));
 });
 
 test("renderHandoffPrompt always states the workspace, even for checkpoints", () => {

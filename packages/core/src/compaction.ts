@@ -230,7 +230,7 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
     (e) => e.type === "agent.message" && e.data?.role === "user"
   );
   if (task && !hasUserMessage) {
-    parts.push({ kind: "user", text: `#${task.title}: ${task.prompt}` });
+    parts.push({ kind: "user", text: taskLabel(task) });
   }
 
   let pendingShellOutput: string[] = [];
@@ -789,6 +789,32 @@ export function getSummarizationFailure(response: CompletionResponse, label: str
   return undefined;
 }
 
+/**
+ * The checkpoint format starts at the first `## ` section; the
+ * system prompt forbids anything else. Models sometimes prepend
+ * chain-of-thought anyway ("Let me analyze this conversation…") —
+ * everything before the first `## ` heading is that leaked reasoning,
+ * not checkpoint content, so it is dropped. A summary with no `## `
+ * section is kept as-is: there is nothing to distinguish reasoning
+ * from a (malformed) summary. Applied at generation time and again at
+ * render time, so checkpoints stored before this guard also render
+ * clean.
+ */
+export function stripCheckpointPreamble(summary: string): string {
+  const match = /^##\s/m.exec(summary);
+  return match ? summary.slice(match.index).trim() : summary.trim();
+}
+
+/**
+ * The transcript's opening user line and the handoff's "original task".
+ * Tasks whose title defaults to the prompt would render it twice —
+ * `#fix the tests: fix the tests` — so the prompt is only appended when
+ * it adds something.
+ */
+export function taskLabel(task: Task): string {
+  return task.title === task.prompt ? `#${task.title}` : `#${task.title}: ${task.prompt}`;
+}
+
 export interface CompactionHandoffInput {
   task: Task;
   run: Run;
@@ -851,7 +877,7 @@ export async function generateCompactionHandoff(input: CompactionHandoffInput): 
   const fileOps = extractFileOperations(events, input.previousSummary);
   const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 
-  const summary = response.text.trim() + formatFileOperations(readFiles, modifiedFiles);
+  const summary = stripCheckpointPreamble(response.text) + formatFileOperations(readFiles, modifiedFiles);
   const content = compactionSummaryToHandoffContent(summary, {
     task,
     run,
@@ -887,7 +913,9 @@ function sectionLines(body: string[]): string[] {
   return body
     // Strip list markers and pi's `- [x]` / `- [ ]` checkboxes, keep content.
     .map((l) => l.trim().replace(/^[-*+]\s+\[[ xX]\]\s*/, "").replace(/^([-*+]|\d+[.)])\s*/, "").trim())
-    .filter((l) => l && !/^\[.*\]$/.test(l) && l !== "(none)");
+    // Models elaborate the prompt's "(none)" placeholder ("(none — this
+    // was a single informational Q&A)") — every "(none…" line means "empty".
+    .filter((l) => l && !/^\[.*\]$/.test(l) && !/^\(none\b/i.test(l));
 }
 
 function subSection(body: string[], heading: string): string[] {
@@ -945,7 +973,7 @@ export function compactionSummaryToHandoffContent(
   const remainingWork = [...inProgress.map((l) => `[in progress] ${l}`), ...blocked.map((l) => `[blocked] ${l}`), ...nextSteps];
 
   const content: HandoffContent = {
-    originalTask: `#${task.title}: ${task.prompt}`.slice(0, 2000),
+    originalTask: taskLabel(task).slice(0, 2000),
     currentObjective: goal || task.title,
     progressSummary:
       `Run ${run.id} on ${meta.runtimeName ?? run.runtimeName ?? "previous runtime"} ${run.status}` +

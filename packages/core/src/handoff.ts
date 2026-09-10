@@ -1,5 +1,6 @@
 import { Store, newId } from "./store.js";
 import { now } from "./services.js";
+import { stripCheckpointPreamble, taskLabel } from "./compaction.js";
 import type {
   Artifact,
   Handoff,
@@ -110,7 +111,7 @@ export function buildAssistedHandoffContent(input: AssistedHandoffInput): Handof
     : "No workspace was attached to the previous run.";
 
   return {
-    originalTask: clip(`#${task.title}: ${task.prompt}`),
+    originalTask: clip(taskLabel(task)),
     currentObjective: clip(task.title, 200),
     progressSummary: clip(
       `Run ${run.id} on ${input.runtimeName ?? run.runtimeName ?? "previous runtime"} ${run.status}` +
@@ -173,11 +174,13 @@ export function renderHandoffBody(handoff: Handoff): string {
     c.workspaceStatus ?? "No workspace was attached to the previous run.",
     `This shared workspace is your current working directory: every relative path in the handoff below refers to it. Do not assume another directory is the project.`,
     ``,
-    `# Handoff from ${handoff.fromRuntimeName ?? handoff.fromRuntimeKind ?? "previous agent"} (run ${handoff.fromRunId})`,
+    `# Handoff from ${handoff.fromRuntimeName ?? handoff.fromRuntimeKind ?? "previous agent"}`,
   ];
 
   if (c.compactionSummary) {
-    lines.push("", "## Context checkpoint", "", c.compactionSummary);
+    // Render-time guard: checkpoints stored before the generation-time
+    // strip may carry the summarizer's chain-of-thought preamble.
+    lines.push("", "## Context checkpoint", "", stripCheckpointPreamble(c.compactionSummary));
   } else {
     const section = (title: string, value: string | string[] | undefined) => {
       if (value === undefined) return;
