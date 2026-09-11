@@ -25,15 +25,39 @@ interface Config {
   rowActions?: (row: any, reload: () => void) => ReactNode;
 }
 
+/** Long mono values (ids, paths) clip to an ellipsis; the full value stays in the hover tooltip. */
+function Clip({ value, max }: { value: string; max: number }) {
+  return (
+    <span className="mono clip" title={value} style={{ maxWidth: max }}>
+      {value}
+    </span>
+  );
+}
+
+/** Truncated id with the full value in the hover tooltip (same shape as the dashboard). */
+function Id({ value }: { value: string }) {
+  return (
+    <span className="mono nw" title={value}>
+      {shortId(value)}
+    </span>
+  );
+}
+
+/** "Sep 9, 11:15 PM" — minute precision keeps the column narrow; full ISO in the tooltip. */
+function fmtSaved(iso?: string): string {
+  if (!iso) return "-";
+  return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 const configs: Record<string, Config> = {
   runtimes: {
     title: "Runtimes",
     path: "/api/runtimes",
     columns: [
-      { key: "id", label: "ID", render: (r) => <span className="mono">{r.id}</span> },
-      { key: "name", label: "Name" },
+      { key: "id", label: "ID", render: (r) => <Id value={r.id} /> },
+      { key: "name", label: "Name", render: (r) => <span className="nw">{r.name}</span> },
       { key: "kind", label: "Kind" },
-      { key: "image", label: "Image", render: (r) => <span className="mono">{r.image ?? "-"}</span> },
+      { key: "image", label: "Image", render: (r) => <Clip value={r.image ?? "-"} max={200} /> },
       { key: "containerized", label: "Container", render: (r) => String(Boolean(r.containerized)) },
       {
         key: "credentialSource",
@@ -53,7 +77,7 @@ const configs: Record<string, Config> = {
     ],
     rowActions: (row, reload) => (
       <>
-        <button className="small" onClick={() => toggleRuntime(row, reload)}>{row.enabled ? "disable" : "enable"}</button>{" "}
+        <button className="small" onClick={() => toggleRuntime(row, reload)}>{row.enabled ? "disable" : "enable"}</button>
         <button className="small danger" onClick={() => removeItem("/api/runtimes", row.id, reload)}>delete</button>
       </>
     ),
@@ -62,11 +86,11 @@ const configs: Record<string, Config> = {
     title: "Agents",
     path: "/api/agents",
     columns: [
-      { key: "id", label: "ID", render: (r) => <span className="mono">{r.id}</span> },
-      { key: "name", label: "Name" },
+      { key: "id", label: "ID", render: (r) => <Id value={r.id} /> },
+      { key: "name", label: "Name", render: (r) => <span className="nw">{r.name}</span> },
       { key: "description", label: "Description", render: (r) => r.description ?? "-" },
-      { key: "runtimeId", label: "Runtime", render: (r) => <span className="mono">{r.runtimeId ?? "-"}</span> },
-      { key: "modelId", label: "Model", render: (r) => <span className="mono">{r.modelId ?? "-"}</span> },
+      { key: "runtimeId", label: "Runtime", render: (r) => <Id value={r.runtimeId ?? "-"} /> },
+      { key: "modelId", label: "Model", render: (r) => <Id value={r.modelId ?? "-"} /> },
     ],
     createFields: [
       { key: "name", label: "Name", required: true },
@@ -83,13 +107,13 @@ const configs: Record<string, Config> = {
     title: "Workspaces",
     path: "/api/workspaces",
     columns: [
-      { key: "id", label: "ID", render: (r) => <span className="mono">{r.id}</span> },
-      { key: "name", label: "Name" },
+      { key: "id", label: "ID", render: (r) => <Id value={r.id} /> },
+      { key: "name", label: "Name", render: (r) => <span className="nw">{r.name}</span> },
       { key: "type", label: "Type" },
       { key: "source", label: "Source", render: (r) => r.source ?? "create" },
-      { key: "path", label: "Path / Repo", render: (r) => <span className="mono">{r.path ?? r.repoUrl ?? "-"}</span> },
+      { key: "path", label: "Path / Repo", render: (r) => <Clip value={r.path ?? r.repoUrl ?? "-"} max={220} /> },
       { key: "status", label: "Status", render: (r) => <StatusBadge status={r.status === "missing" ? "failed" : "completed"} /> },
-      { key: "lastSavedAt", label: "Last saved", render: (r) => r.lastSavedAt ?? "-" },
+      { key: "lastSavedAt", label: "Last saved", render: (r) => <span className="nw" title={r.lastSavedAt}>{fmtSaved(r.lastSavedAt)}</span> },
     ],
     createFields: [
       { key: "name", label: "Name", required: true },
@@ -109,7 +133,7 @@ const configs: Record<string, Config> = {
           title="Persist/verify the workspace (containers are disposable, workspaces are durable)"
         >
           save
-        </button>{" "}
+        </button>
         <button className="small danger" onClick={() => removeItem("/api/workspaces", row.id, reload)}>delete</button>
       </>
     ),
@@ -325,19 +349,21 @@ export function ResourceView({ kind }: { kind: string }) {
       <ErrorBox message={error} />
       <div className="card">
         {data && data.length > 0 ? (
-          <table>
-            <thead>
-              <tr>{cfg.columns.map((c) => <th key={c.key}>{c.label}</th>)}<th></th></tr>
-            </thead>
-            <tbody>
-              {data.map((row) => (
-                <tr key={row.id}>
-                  {cfg.columns.map((c) => <td key={c.key}>{c.render ? c.render(row) : String(row[c.key] ?? "")}</td>)}
-                  <td>{cfg.rowActions?.(row, reload)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>{cfg.columns.map((c) => <th key={c.key}>{c.label}</th>)}<th className="actions"></th></tr>
+              </thead>
+              <tbody>
+                {data.map((row) => (
+                  <tr key={row.id}>
+                    {cfg.columns.map((c) => <td key={c.key}>{c.render ? c.render(row) : String(row[c.key] ?? "")}</td>)}
+                    <td className="actions">{cfg.rowActions?.(row, reload)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div className="muted">{loading ? "Loading…" : "No items yet."}</div>
         )}

@@ -293,6 +293,34 @@ tbody tr:last-child td {
 tbody tr:hover {
   background: var(--panel-2);
 }
+/* Wide tables scroll inside their card instead of spilling past its border. */
+.table-wrap {
+  overflow-x: auto;
+}
+.table-wrap th,
+.table-wrap td {
+  padding-inline: 8px;
+}
+th.actions,
+td.actions {
+  text-align: right;
+  white-space: nowrap;
+}
+.actions button + button {
+  margin-left: 6px;
+}
+/* Long mono values clip rather than stretching their column. */
+.clip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.nw {
+  white-space: nowrap;
+}
 
 /* ---------- Buttons ---------- */
 
