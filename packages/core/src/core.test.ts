@@ -26,6 +26,31 @@ test("store persists and reloads records", async () => {
   assert.equal(store2.list("providers").length, 1);
 });
 
+test("event sequence numbers keep increasing across a store reload", async () => {
+  // A run's events are read back sorted by seq, so a counter that restarts
+  // at 1 after a process restart hands out numbers that already exist and
+  // silently reorders the timeline instead of appending to it.
+  const dir = mkdtempSync(join(tmpdir(), "af-test-"));
+  const store1 = await Store.open(dir);
+  const first = store1.nextSeq();
+  await store1.insert("events", {
+    id: newId("evt"), runId: "run_1", seq: first, type: "run.started", timestamp: "", data: {},
+  });
+  await store1.commit();
+
+  const store2 = await Store.open(dir);
+  const second = store2.nextSeq();
+  assert.equal(second, first + 1, "the counter resumes above the stored events");
+  await store2.insert("events", {
+    id: newId("evt"), runId: "run_1", seq: second, type: "run.completed", timestamp: "", data: {},
+  });
+  await store2.commit();
+
+  const reloaded = await Store.open(dir);
+  const seqs = reloaded.list<{ seq: number }>("events").map((e) => e.seq);
+  assert.deepEqual(seqs, [first, first + 1], "appended, never colliding");
+});
+
 test("masked secrets never expose plaintext", async () => {
   const store = await freshStore();
   const secrets = new SecretService(store);

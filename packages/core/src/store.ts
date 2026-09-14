@@ -138,6 +138,13 @@ export class Store {
         throw err;
       }
     }
+    // The event counter is global and must stay monotonic across process
+    // restarts. Left at its constructor value it restarts at 1 on every
+    // load and hands out seq numbers that already exist — and since a run's
+    // events are read back sorted by seq, a freshly written event (a
+    // handoff row, a tool result) silently renders *before* the work that
+    // preceded it instead of appending to it.
+    this.seq = this.db.events.reduce((max, e) => Math.max(max, e.seq ?? 0), 0) + 1;
   }
 
   private async persist(): Promise<void> {
