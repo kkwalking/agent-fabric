@@ -1424,6 +1424,52 @@ a:hover {
 .handoff-pending .handoff-cancel:hover {
   background: var(--panel-2);
 }
+.handoff-pending .handoff-view {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 7px;
+}
+.handoff-pending .handoff-view:hover {
+  background: var(--panel-2);
+}
+
+/* Keep the ready/generating banner on ONE row: the message shrinks and
+   truncates with an ellipsis instead of pushing the action onto a second
+   line (hovering shows the full text via its title). */
+.handoff-pending .handoff-line {
+  flex-wrap: nowrap;
+}
+.handoff-pending .handoff-line .muted {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.handoff-pending .handoff-mark,
+.handoff-pending .handoff-cancel,
+.handoff-pending .handoff-view {
+  flex: 0 0 auto;
+}
+
+/* ---------- Handoff quick view (modal) ---------- */
+.handoff-quickview-body {
+  white-space: pre-wrap;
+  max-height: 55vh;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
 
 /* ---------- Degraded handoff (no model summary) ---------- */
 .handoff-degraded {

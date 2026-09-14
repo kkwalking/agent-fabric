@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTokens, ApiError } from "../api";
+import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTime, fmtTokens, ApiError } from "../api";
 import { ErrorBox, Icon, Modal, StatusBadge, useAsync } from "../components";
 import { Markdown } from "../markdown";
 import {
@@ -56,6 +56,8 @@ interface PendingHandoff {
   baseRuns: number;
   /** True for the UI pre-generation (confirmed handoff) — its request can be aborted. */
   cancellable?: boolean;
+  /** Generated record, once known — lets the banner open its quick view. */
+  handoffId?: string;
 }
 
 /** The User Message is the user's bare input — never the stitched harness prompt (v5 §4/§5). */
@@ -84,6 +86,8 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const stickBottom = useRef(true);
   const composerPromptRef = useRef<HTMLTextAreaElement>(null);
   const composerRuntimeRef = useRef<HTMLSelectElement>(null);
+  /** Handoff opened in the quick-view modal (from the ready banner). */
+  const [viewHandoffId, setViewHandoffId] = useState<string | null>(null);
   /** Banner-side handle: the Cancel button aborts the pre-generation request. */
   const handoffCancelRef = useRef<() => void>(() => {});
   /** In-flight pre-generation request, so the banner Cancel can abort it. */
@@ -248,9 +252,9 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
     if (aimRuntimeId) setRuntimeRequest((prev) => ({ id: aimRuntimeId, n: (prev?.n ?? 0) + 1 }));
     const controller = new AbortController();
     handoffAbortRef.current = controller;
-    post(`/api/tasks/${taskId}/handoff`, {}, controller.signal)
-      .then(() => {
-        setPendingHandoff((p) => (p ? { ...p, stage: "ready" } : p));
+    post<{ id?: string }>(`/api/tasks/${taskId}/handoff`, {}, controller.signal)
+      .then((h) => {
+        setPendingHandoff((p) => (p ? { ...p, stage: "ready", handoffId: h?.id } : p));
         bump();
       })
       .catch((e) => {
@@ -326,10 +330,20 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
                 <span className="handoff-mark">
                   <span className="handoff-done">✓</span> Handoff
                 </span>
-                <span className="muted">
+                <span
+                  className="muted"
+                  title="context summary ready — your next message, on any harness, starts a fresh session seeded with it as the only context"
+                >
                   context summary ready — your next message, on any harness, starts a fresh session seeded with it
                   as the only context
                 </span>
+                <button
+                  className="handoff-view"
+                  title="See the context the next session will receive"
+                  onClick={() => setViewHandoffId(armedHandoff.id)}
+                >
+                  View handoff
+                </button>
               </div>
             </div>
           )}
@@ -342,7 +356,14 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
                   {pendingHandoff.stage === "generating" ? <span className="spinner" /> : <span className="handoff-done">✓</span>}
                   Handoff
                 </span>
-                <span className="muted">
+                <span
+                  className="muted"
+                  title={
+                    pendingHandoff.stage === "generating"
+                      ? "generating context summary from this thread…"
+                      : "context summary ready — your next message, on any harness, starts a fresh session seeded with it as the only context"
+                  }
+                >
                   {pendingHandoff.stage === "generating"
                     ? "generating context summary from this thread…"
                     : "context summary ready — your next message, on any harness, starts a fresh session seeded with it as the only context"}
@@ -354,6 +375,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
                     onClick={() => handoffCancelRef.current()}
                   >
                     Cancel
+                  </button>
+                )}
+                {pendingHandoff.stage === "ready" && pendingHandoff.handoffId && (
+                  <button
+                    className="handoff-view"
+                    title="See the context the next session will receive"
+                    onClick={() => setViewHandoffId(pendingHandoff.handoffId!)}
+                  >
+                    View handoff
                   </button>
                 )}
               </div>
@@ -392,7 +422,70 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           onClose={() => setHandoffDialog(null)}
         />
       )}
+
+      {/* ---------- Quick look at a generated handoff ---------- */}
+      {viewHandoffId && (
+        <HandoffQuickView handoffId={viewHandoffId} onClose={() => setViewHandoffId(null)} />
+      )}
     </div>
+  );
+}
+
+/**
+ * Quick look at a generated handoff, without leaving the thread: exactly
+ * what the next session receives ahead of your message (the rendered
+ * prompt), plus how it was produced. The full page — parsed fields,
+ * consumed-by runs — stays one link away.
+ */
+function HandoffQuickView({ handoffId, onClose }: { handoffId: string; onClose: () => void }) {
+  const { data, error } = useAsync<any>(() => get(`/api/handoffs/${handoffId}`), [handoffId]);
+  const generation = data?.generation as { method?: string; detail?: string; chunks?: number } | undefined;
+  const degraded = generation?.method === "heuristic";
+  return (
+    <Modal title="Handoff context" onClose={onClose}>
+      <div className="handoff-quickview">
+        {error && <ErrorBox message={error} />}
+        {!data && !error && <div className="muted">Loading…</div>}
+        {data && (
+          <>
+            <p className="sub" style={{ margin: "0 0 10px" }}>
+              {data.fromRuntimeName ?? data.fromRuntimeKind ?? "previous agent"} →{" "}
+              {data.toRuntimeName ?? data.toRuntimeKind ?? "(next agent picks)"} · {fmtTime(data.createdAt)}
+              {generation?.method ? (
+                <>
+                  {" "}· context: <span className="mono">{generation.method}</span>
+                  {generation.chunks && generation.chunks > 1 ? <> ({generation.chunks} chunks)</> : null}
+                </>
+              ) : null}
+            </p>
+            {degraded && (
+              <p className="handoff-degraded-detail" style={{ margin: "0 0 10px" }}>
+                ⚠ Degraded context — not a model summary.{" "}
+                {generation?.detail ?? "The summarization model was unavailable."}
+              </p>
+            )}
+            <pre className="handoff-quickview-body">{data.renderedPrompt}</pre>
+            <p className="muted" style={{ margin: "10px 0 0" }}>
+              This is what the next session receives; your message is appended under{" "}
+              <span className="mono"># Your instruction</span> when you send it.
+            </p>
+            <div className="modal-actions">
+              <button
+                onClick={() => {
+                  onClose();
+                  navigate(`/handoffs/${handoffId}`);
+                }}
+              >
+                Open full page ↗
+              </button>
+              <button className="primary" autoFocus onClick={onClose}>
+                Close
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
   );
 }
 
