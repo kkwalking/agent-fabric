@@ -159,6 +159,13 @@ export function buildAssistedHandoffContent(input: AssistedHandoffInput): Handof
  * only lose fidelity. The remaining structured fields are rendered
  * otherwise (harness-generated and heuristic fallback handoffs).
  *
+ * The checkpoint is a document of its own, whose `## Goal` …
+ * `## Critical Context` sections *are* the handoff's content, so it gets
+ * no container heading: adding one would render those sections as its
+ * siblings instead of its contents, and would also swallow the
+ * `## Notes from the user` section that follows. What the checkpoint is
+ * is said in prose, above it.
+ *
  * `renderHandoffBody` is everything the handoff itself contributes; the
  * consuming turn's user input is only known when the next run is created,
  * so `renderHandoffPrompt` appends it under `# Your instruction`. The API
@@ -179,10 +186,18 @@ export function renderHandoffBody(handoff: Handoff): string {
   ];
 
   if (c.compactionSummary) {
-    // Embedded verbatim: the checkpoint was reduced to the model's answer
-    // when the handoff was generated, and rendering does not re-parse or
-    // repair it (AGENTS.md: "No compatibility logic for old data").
-    lines.push("", "## Context checkpoint", "", c.compactionSummary);
+    // Verbatim, with no heading of our own: the checkpoint's `## Goal` …
+    // `## Critical Context` sections nest directly under `# Handoff from …`
+    // (exactly where the non-checkpoint branch's sections sit), so they are
+    // never siblings of a wrapper that is supposed to contain them.
+    // Rendering does not re-parse or repair the checkpoint (AGENTS.md:
+    // "No compatibility logic for old data").
+    lines.push(
+      "",
+      `The context below is the structured checkpoint the previous session was summarized into.`,
+      "",
+      c.compactionSummary
+    );
   } else {
     const section = (title: string, value: string | string[] | undefined) => {
       if (value === undefined) return;
