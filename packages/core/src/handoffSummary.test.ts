@@ -987,6 +987,85 @@ function piRuntimeOf(h: Awaited<ReturnType<typeof freshHarness>>) {
   return rt as { id: string };
 }
 
+test("a handoff records how it was produced and which runs it covers", async () => {
+  // The audit trail. The same facts ride the record and the
+  // `handoff.generated` event, so the handoff page and the task timeline
+  // cannot describe one generation differently — and the event outlives the
+  // record after a Discard.
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const requests: CompletionRequest[] = [];
+  const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
+  try {
+    const oc = opencodeRuntimeOf(h);
+    const pi = piRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "MARKER_Q1", runtimeId: oc.id });
+    await waitForRun(h.runService, first.run.id);
+    // A native-resume turn in between: coverage must include it, even though
+    // no handoff was involved in that turn.
+    const second = await h.runService.continueTask(first.task.id, { prompt: "MARKER_Q2", runtimeId: oc.id });
+    assert.equal(second.continuity, "resume");
+    await waitForRun(h.runService, second.run.id);
+
+    // Generating a handoff is explicit, so the continue asks for one rather
+    // than expecting it to happen on its own (HandoffRequiredError otherwise).
+    const cont = await h.runService.continueTask(first.task.id, {
+      prompt: "继续",
+      runtimeId: pi.id,
+      mode: "handoff",
+    });
+    const g = cont.handoff!.generation!;
+    assert.equal(g.method, "summarized");
+    assert.equal(g.trigger, "continuation", "a handoff produced by a continue says so");
+    assert.equal(g.chunks, 1);
+    assert.deepEqual(g.coveredRunIds, [first.run.id, second.run.id], "coverage is recorded, oldest first");
+    assert.ok(g.modelName, "the model that wrote the checkpoint is recorded");
+    assert.ok(g.providerName);
+    assert.equal(typeof g.durationMs, "number");
+    assert.deepEqual(g.usage, { inputTokens: 10, outputTokens: 20 });
+
+    // The timeline reads the event, which must carry the same facts.
+    const evt = h.runService.events(second.run.id).find((e) => e.type === "handoff.generated")!;
+    assert.equal(evt.data.handoffId, cont.handoff!.id);
+    assert.equal(evt.data.trigger, "continuation");
+    assert.deepEqual(evt.data.coveredRunIds, [first.run.id, second.run.id]);
+    assert.equal(evt.data.modelName, g.modelName);
+    assert.equal(evt.data.providerName, g.providerName);
+    assert.deepEqual(evt.data.usage, { inputTokens: 10, outputTokens: 20 });
+    await waitForRun(h.runService, cont.run.id);
+  } finally {
+    restore();
+  }
+});
+
+test("the standalone Handoff action records itself as the explicit trigger", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const requests: CompletionRequest[] = [];
+  const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
+  try {
+    const pi = piRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: pi.id });
+    await waitForRun(h.runService, first.run.id);
+
+    // A pre-generation toward a harness is cached for it, not armed.
+    const targeted = await h.runService.generateHandoff(first.task.id, pi.id);
+    assert.equal(targeted.generation?.trigger, "targeted");
+    assert.equal(targeted.awaitingNextTurn, undefined);
+    assert.deepEqual(targeted.generation?.coveredRunIds, [first.run.id]);
+
+    // The standalone action reuses that same summary (same runs, no second
+    // model call) and arms it; the record still says why it *exists*.
+    const explicit = await h.runService.generateHandoff(first.task.id);
+    assert.equal(explicit.id, targeted.id, "no second summarization for the same runs");
+    assert.equal(requests.length, 1);
+    assert.equal(explicit.generation?.trigger, "targeted");
+    assert.equal(explicit.awaitingNextTurn, true, "the standalone action arms it");
+  } finally {
+    restore();
+  }
+});
+
 test("the continuation preview is stale until the previous run finished", async () => {
   // Documents why the *client* must never refuse to send based on its own
   // resume/handoff preview: taken while the run is still starting, the

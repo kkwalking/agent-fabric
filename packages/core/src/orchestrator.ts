@@ -59,6 +59,8 @@ import type {
   ExecutionPolicy,
   Handoff,
   HandoffContent,
+  HandoffGeneration,
+  HandoffTrigger,
   ID,
   LogLevel,
   Model,
@@ -486,12 +488,11 @@ export class RunService {
     const resumeGate = resumable
       ? evaluateResumeCompatibility(resumable, target, caps, workspaceId, this.nativeStateService())
       : undefined;
-    const storedHandoff =
-      previousRun?.generatedHandoffId != null ? this.handoffService().get(previousRun.generatedHandoffId) : undefined;
+    const armed = this.armedHandoff(taskId);
     // An explicitly requested handoff (the standalone Handoff action) is
     // harness-independent: the next turn consumes it as the *sole* context —
     // even on the same harness, where a native resume would otherwise win.
-    const handoffArmed = Boolean(storedHandoff?.awaitingNextTurn) && input.mode !== "resume";
+    const handoffArmed = Boolean(armed) && input.mode !== "resume";
     const forcedHandoff = input.mode === "handoff";
     const resumePossible =
       sameHarness && Boolean(resumable && resumeGate?.compatible) && !forcedHandoff && !handoffArmed;
@@ -529,7 +530,15 @@ export class RunService {
     }
 
     /* ---------------- Handoff: semantic work handoff, new native session ---------------- */
-    const handoff = await this.prepareHandoff(task, previousRun, previousRuntime, target, input, options?.signal);
+    const handoff = await this.prepareHandoff(
+      task,
+      previousRun,
+      previousRuntime,
+      target,
+      input,
+      "continuation",
+      options?.signal
+    );
     const rendered = renderHandoffPrompt(handoff, input.prompt);
     const run = await this.createRunFromTask(task, {
       continuity: "handoff",
@@ -548,10 +557,16 @@ export class RunService {
       policy: mergedPolicy,
       systemInstructions: profile?.systemInstructions,
     });
-    // Consuming an armed handoff disarms it: the turn after this one
-    // continues the new session normally.
-    if (handoff.awaitingNextTurn) {
-      await this.store.update<Handoff>("handoffs", handoff.id, { awaitingNextTurn: false });
+    // The next turn happened, so nothing is awaiting it any more: retire
+    // every armed handoff of the task, which is the exit condition of the
+    // invariant arming maintains. Retiring only the consumed record would
+    // let an armed record left behind by another client (the flag is stored
+    // state, so an older tab or CLI can leave one) be *resurrected* by this
+    // turn and hijack a later one.
+    for (const awaiting of this.handoffService().list({ taskId })) {
+      if (awaiting.awaitingNextTurn) {
+        await this.store.update<Handoff>("handoffs", awaiting.id, { awaitingNextTurn: false });
+      }
     }
     void this.execute(run.id);
     const reason = forcedHandoff
@@ -583,9 +598,7 @@ export class RunService {
       ? evaluateResumeCompatibility(resumable, target, caps, workspaceId, this.nativeStateService())
       : undefined;
     const sameHarness = previousRuntime && target && previousRuntime.kind === target.kind;
-    const storedHandoff =
-      previousRun?.generatedHandoffId != null ? this.handoffService().get(previousRun.generatedHandoffId) : undefined;
-    const handoffReady = Boolean(storedHandoff?.awaitingNextTurn);
+    const handoffReady = Boolean(this.armedHandoff(taskId));
     const resumeAvailable = Boolean(sameHarness && resumable && resumeGate?.compatible) && !handoffReady;
     const suggestedMode: "resume" | "handoff" = resumeAvailable ? "resume" : "handoff";
 
@@ -613,7 +626,7 @@ export class RunService {
       suggestedContinuity: resumeAvailable ? "resume" : previousRun ? "handoff" : "new",
       resumableSession: resumable,
       handoffReady,
-      handoffAvailable: Boolean(storedHandoff),
+      handoffAvailable: Boolean(previousRun && this.latestHandoffFrom(previousRun.id)),
       explanation: explanation + noAdapter,
     };
   }
@@ -669,6 +682,39 @@ export class RunService {
   }
   private handoffService() {
     return new HandoffService(this.store);
+  }
+
+  /**
+   * The handoff armed for this task's next turn — the one an explicit
+   * Handoff action pre-generated and the next message must consume as its
+   * sole context.
+   *
+   * The flag lives on the handoff record (`awaitingNextTurn`) because *it*
+   * is what the next turn consumes. A run's `generatedHandoffId` only says
+   * which handoff was generated from that run: it is history, it is
+   * written on whichever path happened to produce a handoff (so a run that
+   * generated one last week keeps it), and it can name a record that has
+   * since been discarded. Deriving "is a handoff armed?" from it made the
+   * armed handoff invisible the moment the page that requested it was
+   * gone — the thread showed no handoff and the next message resumed the
+   * native session instead of using it.
+   *
+   * A task has one next turn, so at most one handoff is armed; arming a
+   * new one disarms the previous (see `generateHandoff`).
+   */
+  private armedHandoff(taskId: ID): Handoff | undefined {
+    return this.handoffService()
+      .list({ taskId })
+      .find((h) => h.awaitingNextTurn);
+  }
+
+  /**
+   * The newest handoff generated from a run — the cached summary a
+   * continuation of that run reuses instead of summarizing the same runs
+   * again.
+   */
+  private latestHandoffFrom(runId: ID): Handoff | undefined {
+    return this.handoffService().list({ runId })[0];
   }
 
   /** Low-level event write used by lease callbacks (outside a run ctx). */
@@ -826,6 +872,7 @@ export class RunService {
     previousRuntime: Runtime | undefined,
     target: Runtime | undefined,
     input: ContinueTaskInput,
+    trigger: HandoffTrigger,
     signal?: AbortSignal
   ): Promise<Handoff> {
     const handoffService = this.handoffService();
@@ -846,15 +893,17 @@ export class RunService {
         toRuntimeName: target?.name,
         toRuntimeKind: target?.kind,
         source: "agentfabric",
-        generation: { method: "brief" },
+        generation: { method: "brief", trigger },
         content,
         userNotes: input.userNotes,
         workspaceId: task.workspaceId,
       });
     }
 
-    let handoff =
-      previousRun.generatedHandoffId != null ? handoffService.get(previousRun.generatedHandoffId) : undefined;
+    // Reuse the newest handoff already generated from this run instead of
+    // summarizing it again — a pre-generated (armed or targeted) handoff is
+    // exactly this run's cached summary.
+    let handoff = this.latestHandoffFrom(previousRun.id);
 
     if (!handoff) {
       // Handoff vs context compaction: a handoff crosses from one native
@@ -872,7 +921,15 @@ export class RunService {
       const key = `${previousRun.id}:${allowDegraded ? "degraded" : "strict"}`;
       let pending = this.handoffGenerations.get(key);
       if (!pending) {
-        pending = this.generateAndStoreHandoff(task, previousRun, previousRuntime, target, allowDegraded, signal);
+        pending = this.generateAndStoreHandoff(
+          task,
+          previousRun,
+          previousRuntime,
+          target,
+          allowDegraded,
+          trigger,
+          signal
+        );
         this.handoffGenerations.set(key, pending);
         pending.catch(() => {}).finally(() => this.handoffGenerations.delete(key));
       }
@@ -901,6 +958,7 @@ export class RunService {
     previousRuntime: Runtime | undefined,
     target: Runtime | undefined,
     allowDegraded: boolean,
+    trigger: HandoffTrigger,
     signal?: AbortSignal
   ): Promise<Handoff> {
     const handoffService = this.handoffService();
@@ -913,6 +971,20 @@ export class RunService {
       allowDegraded,
       signal
     );
+    // The generation's provenance is written once and carried by both the
+    // record and the `handoff.generated` event, so the handoff page and the
+    // task timeline can never disagree about how it was produced.
+    const generation: HandoffGeneration = {
+      method: generated.method,
+      trigger,
+      ...(generated.detail ? { detail: generated.detail } : {}),
+      ...(generated.chunks ? { chunks: generated.chunks } : {}),
+      ...(generated.model ? { modelId: generated.model.id, modelName: generated.model.name } : {}),
+      ...(generated.providerName ? { providerName: generated.providerName } : {}),
+      ...(generated.coveredRunIds.length ? { coveredRunIds: generated.coveredRunIds } : {}),
+      durationMs: generated.durationMs,
+      ...(generated.usage ? { usage: generated.usage } : {}),
+    };
     const handoff = await handoffService.create({
       taskId: task.id,
       fromRunId: previousRun.id,
@@ -923,11 +995,7 @@ export class RunService {
       toRuntimeName: target?.name,
       toRuntimeKind: target?.kind,
       source: "agentfabric",
-      generation: {
-        method: generated.method,
-        ...(generated.detail ? { detail: generated.detail } : {}),
-        ...(generated.chunks ? { chunks: generated.chunks } : {}),
-      },
+      generation,
       content: generated.content,
       workspaceId: previousRun.workspaceId,
       artifactIds: artifacts.map((a) => a.id),
@@ -935,14 +1003,12 @@ export class RunService {
     await this.emitRunEvent(previousRun.id, "handoff.generated", {
       handoffId: handoff.id,
       source: "agentfabric",
-      method: generated.method,
-      ...(generated.detail ? { detail: generated.detail } : {}),
-      ...(generated.chunks ? { chunks: generated.chunks } : {}),
+      ...generation,
       ...(target ? { toRuntime: target.name } : {}),
     });
-    if (!previousRun.generatedHandoffId) {
-      await this.store.update<Run>("runs", previousRun.id, { generatedHandoffId: handoff.id, updatedAt: now() });
-    }
+    // The run keeps pointing at the handoff generated from it (the run
+    // inspector shows it); decisions never read it back (see `armedHandoff`).
+    await this.store.update<Run>("runs", previousRun.id, { generatedHandoffId: handoff.id, updatedAt: now() });
     return handoff;
   }
 
@@ -974,16 +1040,36 @@ export class RunService {
     const target = runtimeId ? await this.pickTargetRuntime(task, runtimeId) : undefined;
     // prompt is unused on this path: a previous run always exists, so only
     // userNotes/title are read by prepareHandoff.
-    const handoff = await this.prepareHandoff(task, previousRun, previousRuntime, target, {
-      prompt: "",
-      // The standalone action is itself the explicit handoff request.
-      mode: "handoff",
-      allowDegradedHandoff: options?.allowDegraded === true,
-    }, options?.signal);
+    const handoff = await this.prepareHandoff(
+      task,
+      previousRun,
+      previousRuntime,
+      target,
+      {
+        prompt: "",
+        // The standalone action is itself the explicit handoff request.
+        mode: "handoff",
+        allowDegradedHandoff: options?.allowDegraded === true,
+      },
+      // Without a target harness this is the user asking for a handoff; with
+      // one it is a pre-generation cached for that harness (Continue with X,
+      // thread adoption).
+      runtimeId ? "targeted" : "explicit",
+      options?.signal
+    );
     // Arm only the standalone, harness-agnostic generation. An explicitly
     // targeted pre-generation (thread adoption, CLI) stays a plain cached
     // summary for that runtime — it must not hijack a same-harness resume.
     if (!runtimeId) {
+      // Arming replaces whatever was armed before: a task has exactly one
+      // next turn, so exactly one handoff can be waiting for it. Without
+      // this, every extra click left another `awaitingNextTurn` record
+      // behind — invisible ones that no turn would ever consume.
+      for (const other of this.handoffService().list({ taskId })) {
+        if (other.awaitingNextTurn && other.id !== handoff.id) {
+          await this.store.update<Handoff>("handoffs", other.id, { awaitingNextTurn: false });
+        }
+      }
       return (await this.store.update<Handoff>("handoffs", handoff.id, { awaitingNextTurn: true })) ?? handoff;
     }
     return handoff;
@@ -1317,7 +1403,17 @@ export class RunService {
     artifacts: Artifact[],
     allowDegraded: boolean,
     signal?: AbortSignal
-  ): Promise<{ content: HandoffContent; method: "summarized" | "heuristic"; detail?: string; chunks?: number }> {
+  ): Promise<{
+    content: HandoffContent;
+    method: "summarized" | "heuristic";
+    detail?: string;
+    chunks?: number;
+    model?: Model;
+    providerName?: string;
+    coveredRunIds: ID[];
+    durationMs: number;
+    usage?: { inputTokens: number; outputTokens: number };
+  }> {
     // Coverage: everything after the newest checkpoint the task already
     // carries. Native-resume turns never consume a handoff, so anchoring
     // on `previousRun.previousHandoffId` alone silently dropped every run
@@ -1327,11 +1423,17 @@ export class RunService {
     const lastIndex = chain.findIndex((r) => r.id === previousRun.id);
     const covered = lastIndex >= 0 ? chain.slice(0, lastIndex + 1) : [previousRun];
     const { previousSummary, fromIndex } = this.handoffCheckpointAnchor(covered);
-    const turns = covered.slice(fromIndex).map((r) => ({
+    // The runs the checkpoint actually covers — recorded on the handoff so
+    // the record can be audited ("what is inside this context?") without
+    // re-deriving the anchor from the chain later.
+    const coveredRuns = covered.slice(fromIndex);
+    const coveredRunIds = coveredRuns.map((r) => r.id);
+    const turns = coveredRuns.map((r) => ({
       events: this.events(r.id),
       userPrompt: r.userPrompt,
     }));
     const events = turns.flatMap((t) => t.events);
+    const startedAt = Date.now();
 
     const workspace = previousRun.workspaceId
       ? this.workspaceService().get(previousRun.workspaceId)
@@ -1347,6 +1449,8 @@ export class RunService {
       }),
       method: "heuristic" as const,
       detail,
+      coveredRunIds,
+      durationMs: Date.now() - startedAt,
     });
 
     // Degradation is never implicit: either the model produced the context,
@@ -1384,7 +1488,16 @@ export class RunService {
         timeoutMs: HANDOFF_GENERATION_BUDGET_MS,
         signal,
       });
-      return { content: result.content, method: "summarized", chunks: result.chunks };
+      return {
+        content: result.content,
+        method: "summarized",
+        chunks: result.chunks,
+        model,
+        providerName: provider.name,
+        coveredRunIds,
+        durationMs: Date.now() - startedAt,
+        ...(result.usage ? { usage: result.usage } : {}),
+      };
     } catch (err) {
       const detail = `compaction summarization failed: ${err instanceof Error ? err.message : String(err)}`;
       // A cancelled request must never be turned into a stored handoff: the
@@ -1408,9 +1521,13 @@ export class RunService {
    */
   private handoffCheckpointAnchor(chain: Run[]): { previousSummary?: string; fromIndex: number } {
     for (let i = chain.length - 2; i >= 0; i--) {
-      const handoffId = chain[i].generatedHandoffId;
-      if (!handoffId) continue;
-      const summary = this.handoffService().get(handoffId)?.content.compactionSummary;
+      // The newest handoff generated from that run that carries a
+      // checkpoint — looked up, never taken from the run's
+      // `generatedHandoffId`, so a discarded record cannot silently drop
+      // the anchor and make the next summary re-cover runs it already has.
+      const summary = this.handoffService()
+        .list({ runId: chain[i].id })
+        .find((h) => h.content.compactionSummary)?.content.compactionSummary;
       if (summary) return { previousSummary: summary, fromIndex: i + 1 };
     }
     return { fromIndex: 0 };
@@ -1788,7 +1905,9 @@ export class RunService {
         fromRuntimeName: ctx.runtime.name,
         fromRuntimeKind: ctx.runtime.kind,
         source: "harness",
-        generation: { method: "harness" },
+        // No model of ours produced this, so there is no summarization to
+        // audit: only who produced it.
+        generation: { method: "harness", trigger: "harness" },
         content: result.handoffContent,
         workspaceId: ctx.workspace?.id,
         artifactIds: ctx.run.artifactIds,
@@ -1797,6 +1916,8 @@ export class RunService {
       await ctx.emit("handoff.generated", {
         handoffId: handoff.id,
         source: "harness",
+        method: "harness",
+        trigger: "harness",
         readyForNextAgent: true,
       });
     }

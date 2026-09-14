@@ -82,11 +82,55 @@ export interface ErrorItem {
   message: string;
 }
 
-export type TimelineItem = ToolActivity | CommandActivity | FileActivity | ThinkingItem | AgentMessageItem | ErrorItem;
+/**
+ * A handoff generated from this run, shown on the timeline where it
+ * happened. It carries the record's provenance — method, why it exists,
+ * what it covers, what the summarization cost — so the timeline answers
+ * "this turn handed the task over" without opening the handoff page.
+ */
+export interface HandoffActivity {
+  kind: "handoff";
+  key: string;
+  handoffId: string;
+  method: string;
+  trigger?: string;
+  /** `provider/model` that wrote the checkpoint, when a model was used. */
+  model?: string;
+  chunks?: number;
+  coveredRunIds?: string[];
+  usage?: { inputTokens: number; outputTokens: number };
+  durationMs?: number;
+  /** Why a degraded handoff is not a model summary. */
+  detail?: string;
+  toRuntime?: string;
+  /** The harness produced it itself (no AgentFabric summarization). */
+  fromHarness?: boolean;
+}
+
+export type TimelineItem =
+  | ToolActivity
+  | CommandActivity
+  | FileActivity
+  | ThinkingItem
+  | AgentMessageItem
+  | ErrorItem
+  | HandoffActivity;
 
 /* ------------------------------------------------------------------ */
 /* Readable labels (v5 §7/§10)                                         */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Why a handoff exists (`HandoffGeneration.trigger`), in a few words. Audit
+ * only — it never drives behaviour — and shared by the task timeline and the
+ * handoff page so the two can never describe the same record differently.
+ */
+export const HANDOFF_TRIGGERS: Record<string, string> = {
+  explicit: "you asked for it",
+  targeted: "pre-generated for the target harness",
+  continuation: "with the harness switch",
+  harness: "produced by the harness",
+};
 
 /** Provider id → name lookup for `provider/model` labels. */
 export function providerNameOf(providers: any[], providerId?: string): string | undefined {
@@ -365,6 +409,35 @@ export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {
       case "runtime.error": {
         const message = String(data.error ?? (eventText(data) || "Runtime error"));
         items.push({ kind: "error", key: e.id ?? nextKey("err"), message });
+        break;
+      }
+
+      case "handoff.generated": {
+        // The event names the record it produced; without one there is
+        // nothing to show or open.
+        const handoffId = typeof data.handoffId === "string" ? data.handoffId : undefined;
+        if (!handoffId) break;
+        const usage = data.usage as { inputTokens?: number; outputTokens?: number } | undefined;
+        const providerName = typeof data.providerName === "string" ? data.providerName : undefined;
+        const modelName = typeof data.modelName === "string" ? data.modelName : undefined;
+        items.push({
+          kind: "handoff",
+          key: e.id ?? nextKey("handoff"),
+          handoffId,
+          method: typeof data.method === "string" ? data.method : String(data.source ?? "handoff"),
+          trigger: typeof data.trigger === "string" ? data.trigger : undefined,
+          model: modelName ? (providerName ? `${providerName}/${modelName}` : modelName) : undefined,
+          chunks: typeof data.chunks === "number" ? data.chunks : undefined,
+          coveredRunIds: Array.isArray(data.coveredRunIds) ? (data.coveredRunIds as string[]) : undefined,
+          usage:
+            usage && typeof usage.inputTokens === "number"
+              ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens ?? 0 }
+              : undefined,
+          durationMs: typeof data.durationMs === "number" ? data.durationMs : undefined,
+          detail: typeof data.detail === "string" ? data.detail : undefined,
+          toRuntime: typeof data.toRuntime === "string" ? data.toRuntime : undefined,
+          fromHarness: data.source === "harness",
+        });
         break;
       }
 

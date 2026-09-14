@@ -445,12 +445,37 @@ export type HandoffSource = "harness" | "agentfabric" | "user";
  */
 export type HandoffGenerationMethod = "summarized" | "heuristic" | "harness" | "brief";
 
+/**
+ * Why a handoff exists. Audit-only — it never drives behaviour (the
+ * consuming turn reads `awaitingNextTurn`), it answers "who asked for
+ * this, and why" when the record is read back:
+ *
+ * - `explicit`: the standalone Handoff action — the user asked for one;
+ * - `targeted`: pre-generated toward a named harness (Continue with X,
+ *   thread adoption) and cached for it;
+ * - `continuation`: produced as part of a cross-harness continue;
+ * - `harness`: the previous harness produced it itself.
+ */
+export type HandoffTrigger = "explicit" | "targeted" | "continuation" | "harness";
+
 export interface HandoffGeneration {
   method: HandoffGenerationMethod;
+  /** Why it was generated. */
+  trigger?: HandoffTrigger;
   /** Why the model summary was unavailable (degraded handoffs only). */
   detail?: string;
   /** Summarization calls used; > 1 when the covered runs were chunked. */
   chunks?: number;
+  /** Model that wrote the checkpoint; absent when no model produced content. */
+  modelId?: ID;
+  modelName?: string;
+  providerName?: string;
+  /** Runs the checkpoint covers, oldest first. */
+  coveredRunIds?: ID[];
+  /** Wall-clock time the summarization took. */
+  durationMs?: number;
+  /** Tokens the summarization calls consumed (all chunks). */
+  usage?: { inputTokens: number; outputTokens: number };
 }
 
 /**

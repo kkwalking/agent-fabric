@@ -10,6 +10,8 @@ import {
   type CommandActivity,
   type ErrorItem,
   type FileActivity,
+  HANDOFF_TRIGGERS,
+  type HandoffActivity,
   type RawEvent,
   type ThinkingItem,
   type TimelineItem,
@@ -316,6 +318,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               onSwitchRuntime={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}
               onHandoffRequest={handoffViaRuntime}
               onHandoff={() => setHandoffDialog({})}
+              onViewHandoff={setViewHandoffId}
               handoffDisabled={Boolean(pendingHandoff) || Boolean(armedHandoff)}
               switchTargets={switchTargets}
               onStop={stopRun}
@@ -585,6 +588,7 @@ function TurnView({
   handoffDisabled,
   switchTargets,
   onStop,
+  onViewHandoff,
 }: {
   turn: ThreadTurn;
   task: any;
@@ -596,6 +600,8 @@ function TurnView({
   onHandoff: () => void;
   /** Quota escape hatch: open the handoff confirmation with a pre-picked target. */
   onHandoffRequest: (runtimeId: string) => void;
+  /** Open the quick view for a handoff generated from this turn. */
+  onViewHandoff: (handoffId: string) => void;
   handoffDisabled: boolean;
   switchTargets: Array<{ id: string; name: string; kind: string }>;
   onStop: (runId: string) => void;
@@ -651,6 +657,7 @@ function TurnView({
               item={item}
               live={live}
               thinkingActive={live && item.kind === "thinking" && item.key === activeThinkingKey}
+              onViewHandoff={onViewHandoff}
             />
           ))}
 
@@ -812,10 +819,12 @@ function ActivityRow({
   item,
   live,
   thinkingActive,
+  onViewHandoff,
 }: {
   item: TimelineItem;
   live: boolean;
   thinkingActive: boolean;
+  onViewHandoff: (handoffId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   switch (item.kind) {
@@ -831,6 +840,8 @@ function ActivityRow({
       return <FileRow item={item} />;
     case "error":
       return <ErrorRow item={item} />;
+    case "handoff":
+      return <HandoffRow item={item} onView={() => onViewHandoff(item.handoffId)} />;
   }
 }
 
@@ -949,6 +960,37 @@ function ErrorRow({ item }: { item: ErrorItem }) {
       <div className="act-head">
         <span className="act-icon">✗</span>
         <span className="act-label">{item.message}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The timeline's record that this turn handed the task over: one line with
+ * the provenance of the generated handoff (why, how, what it covers, what
+ * it cost) and the way into its full text.
+ */
+function HandoffRow({ item, onView }: { item: HandoffActivity; onView: () => void }) {
+  const facts: string[] = [];
+  if (item.trigger) facts.push(HANDOFF_TRIGGERS[item.trigger] ?? item.trigger);
+  facts.push(item.fromHarness ? "harness-generated" : item.method);
+  if (item.model) facts.push(item.model);
+  if (item.coveredRunIds?.length) {
+    facts.push(`covers ${item.coveredRunIds.length} run${item.coveredRunIds.length === 1 ? "" : "s"}`);
+  }
+  if (item.chunks && item.chunks > 1) facts.push(`${item.chunks} chunks`);
+  if (item.usage) facts.push(`${(item.usage.inputTokens + item.usage.outputTokens).toLocaleString()} tok`);
+  if (item.durationMs) facts.push(`${(item.durationMs / 1000).toFixed(1)}s`);
+  if (item.toRuntime) facts.push(`→ ${item.toRuntime}`);
+  if (item.detail) facts.push("⚠ degraded");
+  const title = [facts.join(" · "), item.detail ? `Degraded: ${item.detail}` : ""].filter(Boolean).join("\n");
+  return (
+    <div className="activity handoff">
+      <div className="act-head">
+        <span className="act-icon">⇄</span>
+        <span className="act-label">Handoff generated</span>
+        <span className="handoff-facts" title={title}>{facts.join(" · ")}</span>
+        <button className="small" onClick={onView}>view</button>
       </div>
     </div>
   );

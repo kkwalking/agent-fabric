@@ -23,7 +23,7 @@ import { buildAssistedHandoffContent, renderHandoffPrompt } from "./handoff.js";
 import { testCompletionFactory } from "./testkit.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import type { AgentRuntimeAdapter, RuntimeContext, RuntimeResult } from "./runtime.js";
-import type { Run } from "./types.js";
+import type { Handoff, Run } from "./types.js";
 
 async function freshStore(): Promise<Store> {
   const dir = mkdtempSync(join(tmpdir(), "af-v1-"));
@@ -335,6 +335,96 @@ test("an explicitly requested handoff is harness-agnostic and arms the next turn
   const optionsAfter = h.runService.continueOptions(taskId);
   assert.equal(optionsAfter.handoffReady, false);
   assert.equal(optionsAfter.suggestedMode, "resume");
+});
+
+test("a discarded handoff does not orphan the handoff generated after it", async () => {
+  const h = await freshHarness();
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const { taskId } = await startTaskOn(h, mockRuntime.id);
+
+  // Generate one, then discard it (dirty context, stale summary — a
+  // supported action). The run keeps pointing at the discarded record.
+  const discarded = await h.runService.generateHandoff(taskId);
+  await h.handoffs.remove(discarded.id);
+
+  // Generating again must arm something the *task* can see. Reading the
+  // armed state off the run's `generatedHandoffId` (history, and here a
+  // dangling id) made this handoff invisible: the thread showed none, and
+  // the next message silently resumed the native session instead of
+  // consuming it — the handoff the user asked for was never used.
+  const armed = await h.runService.generateHandoff(taskId);
+  assert.equal(armed.awaitingNextTurn, true);
+
+  const options = h.runService.continueOptions(taskId);
+  assert.equal(options.handoffReady, true, "an armed handoff is the task's state, not a client's");
+  assert.equal(options.handoffAvailable, true);
+  assert.equal(options.suggestedMode, "handoff");
+
+  const result = await h.runService.continueTask(taskId, { prompt: "continue from the summary" });
+  assert.equal(result.continuity, "handoff");
+  assert.equal(result.handoff!.id, armed.id, "the next turn consumes the armed handoff");
+  assert.equal(h.handoffs.get(armed.id)!.awaitingNextTurn, false, "consuming disarms it");
+  await waitForRun(h.runService, result.run.id);
+});
+
+test("arming a handoff replaces the one armed before it", async () => {
+  const h = await freshHarness();
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const { taskId } = await startTaskOn(h, mockRuntime.id);
+
+  const first = await h.runService.generateHandoff(taskId);
+  // An explicitly resumed turn leaves the armed handoff alone (only a
+  // handoff continuation consumes it), so it is still armed here.
+  const resumed = await h.runService.continueTask(taskId, { prompt: "resume instead", mode: "resume" });
+  assert.equal(resumed.continuity, "resume");
+  await waitForRun(h.runService, resumed.run.id);
+  assert.equal(h.handoffs.get(first.id)!.awaitingNextTurn, true);
+
+  // Generating again arms the new handoff and retires the old one: a task
+  // has exactly one next turn, so exactly one handoff can await it.
+  const second = await h.runService.generateHandoff(taskId);
+  assert.notEqual(second.id, first.id);
+  assert.deepEqual(
+    h.store.list<Handoff>("handoffs").filter((x) => x.awaitingNextTurn).map((x) => x.id),
+    [second.id]
+  );
+  const result = await h.runService.continueTask(taskId, { prompt: "continue from the summary" });
+  assert.equal(result.handoff!.id, second.id, "the newest armed handoff wins");
+  await waitForRun(h.runService, result.run.id);
+  assert.equal(
+    h.store.list<Handoff>("handoffs").filter((x) => x.awaitingNextTurn).length,
+    0,
+    "the turn that happened leaves nothing awaiting it"
+  );
+});
+
+test("a handoff left armed by another client cannot hijack a later turn", async () => {
+  const h = await freshHarness();
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const { taskId } = await startTaskOn(h, mockRuntime.id);
+
+  const armed = await h.runService.generateHandoff(taskId);
+  // The flag is stored state, so a second client can leave another record
+  // armed for the same next turn (this is the shape the reported task was
+  // in: three generations, all still claiming to await it).
+  const stale: Handoff = {
+    ...armed,
+    id: "hoff_stale",
+    createdAt: new Date(Date.now() + 1000).toISOString(),
+    awaitingNextTurn: true,
+  };
+  await h.store.insert("handoffs", stale);
+
+  // This turn consumes the newest and retires both: a record that was
+  // waiting for a turn that has already happened must not be armed again.
+  const result = await h.runService.continueTask(taskId, { prompt: "continue from the summary" });
+  assert.equal(result.handoff!.id, stale.id);
+  await waitForRun(h.runService, result.run.id);
+  assert.equal(
+    h.store.list<Handoff>("handoffs").filter((x) => x.awaitingNextTurn).length,
+    0,
+    "the stale armed record must not survive to hijack the turn after this one"
+  );
 });
 
 /* ------------------------------------------------------------------ */

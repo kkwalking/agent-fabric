@@ -1086,6 +1086,22 @@ a:hover {
   color: var(--dim);
   margin-left: auto;
 }
+/* Handoff activity: the provenance line ellipsizes, the view button does not. */
+.activity.handoff .act-icon {
+  color: var(--accent, #6ea8fe);
+}
+.activity.handoff .handoff-facts {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--dim);
+}
+.activity.handoff .act-head button {
+  flex-shrink: 0;
+}
 .activity .chev {
   margin-left: 4px;
   color: var(--dim);

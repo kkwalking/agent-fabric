@@ -431,15 +431,17 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     // may have overridden it), falling back to the task default.
     const currentWorkspaceId = taskRuns[taskRuns.length - 1]?.workspaceId ?? task.workspaceId;
     // Explicitly requested handoff waiting in the thread: the next turn
-    // (any harness) consumes it as the sole context.
-    const latestRun = taskRuns[taskRuns.length - 1];
-    const latestGenerated = latestRun?.generatedHandoffId
-      ? handoffs.get(latestRun.generatedHandoffId)
-      : undefined;
+    // (any harness) consumes it as the sole context. It is looked up by the
+    // flag that turn actually consumes (`awaitingNextTurn`), not through the
+    // latest run's `generatedHandoffId` — that pointer is history: it names
+    // whichever handoff was generated from that run, possibly long ago and
+    // possibly since discarded. Reading it hid a freshly armed handoff as
+    // soon as the page that requested it went away.
+    const pendingHandoff = handoffs.list({ taskId: task.id }).find((h) => h.awaitingNextTurn) ?? null;
     ok(res, {
       task,
       workspace: currentWorkspaceId ? workspaces.get(currentWorkspaceId) ?? null : null,
-      pendingHandoff: latestGenerated?.awaitingNextTurn ? latestGenerated : null,
+      pendingHandoff,
       runs: taskRuns.map((run) => ({
         run,
         events: runs.events(run.id),

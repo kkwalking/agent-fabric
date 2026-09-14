@@ -1,5 +1,6 @@
 import { get, del, fmtTime, shortId } from "../api";
 import { useAsync, ErrorBox } from "../components";
+import { HANDOFF_TRIGGERS } from "../presentation";
 import { navigate } from "../router";
 
 const CONTENT_SECTIONS: Array<{ key: string; label: string }> = [
@@ -32,6 +33,16 @@ function HandoffSection({ label, value }: { label: string; value: unknown }) {
     <div style={{ marginBottom: 10 }}>
       <div className="muted">{label}</div>
       <div>{body}</div>
+    </div>
+  );
+}
+
+/** One read-only provenance row on the handoff page (audit, not content). */
+function AuditRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div className="muted">{label}</div>
+      <div>{children}</div>
     </div>
   );
 }
@@ -83,8 +94,23 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
   if (error) return <ErrorBox message={error} />;
   if (!detail) return <div className="muted">Loading…</div>;
   const consumedBy: string[] = detail.consumedByRunIds ?? [];
-  const generation = detail.generation as { method?: string; detail?: string; chunks?: number } | undefined;
-  const degraded = generation?.method === "heuristic";
+  const g = detail.generation as
+    | {
+        method?: string;
+        trigger?: string;
+        detail?: string;
+        chunks?: number;
+        modelName?: string;
+        providerName?: string;
+        coveredRunIds?: string[];
+        durationMs?: number;
+        usage?: { inputTokens: number; outputTokens: number };
+      }
+    | undefined;
+  const degraded = g?.method === "heuristic";
+  const writtenBy = g?.modelName ? (g.providerName ? `${g.providerName}/${g.modelName}` : g.modelName) : undefined;
+  const covered = g?.coveredRunIds ?? [];
+  const tokens = g?.usage ? g.usage.inputTokens + g.usage.outputTokens : 0;
 
   return (
     <div>
@@ -101,9 +127,6 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
         Run <span className="mono">{shortId(detail.fromRunId)}</span>
         {detail.workspaceId ? <> · Workspace <span className="mono">{shortId(detail.workspaceId)}</span></> : null}
         {" "}· {fmtTime(detail.createdAt)}
-        {generation?.method ? <> · context: <span className="mono">{generation.method}</span>
-          {generation.chunks && generation.chunks > 1 ? <> ({generation.chunks} chunks)</> : null}
-        </> : null}
       </p>
       <div className="row">
         {/* Wrong context is discarded, never repaired in place: a handoff is
@@ -123,11 +146,66 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
       {degraded && (
         <div className="card handoff-degraded-card">
           <b>⚠ Degraded context — not a model summary.</b>{" "}
-          {generation?.detail ?? "The summarization model was unavailable."}{" "}
+          {g?.detail ?? "The summarization model was unavailable."}{" "}
           The next agent receives a structured digest of the run records (task, changed files, tools, last
           message) rather than a synthesized summary.
         </div>
       )}
+
+      {/* How this context was produced — written once at generation and
+          carried by the record, with the same facts riding the
+          `handoff.generated` event so the task timeline shows identical
+          provenance where it happened. */}
+      <h2>Generation — how this context was produced</h2>
+      <div className="card">
+        <AuditRow label="Trigger">
+          {g?.trigger ? (
+            <>
+              <span className="mono">{g.trigger}</span>{" "}
+              <span className="muted">— {HANDOFF_TRIGGERS[g.trigger] ?? "recorded reason"}</span>
+            </>
+          ) : (
+            <span className="muted">not recorded (generated before this was tracked)</span>
+          )}
+        </AuditRow>
+        <AuditRow label="Method">
+          <span className="mono">{g?.method ?? "unknown"}</span>
+          {g?.chunks && g.chunks > 1 ? <span className="muted"> · {g.chunks} summarization calls</span> : null}
+        </AuditRow>
+        <AuditRow label="Written by">
+          {writtenBy ? (
+            <span className="mono">{writtenBy}</span>
+          ) : (
+            <span className="muted">
+              no model — {g?.method === "harness" ? "the previous harness wrote this content" : "degraded digest"}
+            </span>
+          )}
+        </AuditRow>
+        <AuditRow label="Covers">
+          {covered.length > 0 ? (
+            <>
+              {covered.map((id, i) => (
+                <span key={id}>
+                  {i > 0 ? ", " : ""}
+                  <a className="mono" onClick={() => navigate(`/runs/${id}`)}>{shortId(id)} ↗</a>
+                </span>
+              ))}{" "}
+              <span className="muted">
+                — the runs summarized into this context; runs already inside an earlier checkpoint are not re-covered.
+              </span>
+            </>
+          ) : (
+            <span className="muted">no run (nothing had been executed when this was written)</span>
+          )}
+        </AuditRow>
+        {(g?.durationMs || tokens > 0) && (
+          <AuditRow label="Cost">
+            {g?.durationMs ? <>{g.durationMs} ms</> : null}
+            {g?.durationMs && tokens > 0 ? <span className="muted"> · </span> : null}
+            {tokens > 0 ? <>{tokens.toLocaleString()} tok</> : null}
+          </AuditRow>
+        )}
+      </div>
 
       <h2>Rendered handoff — what the next agent receives</h2>
       <div className="card">
