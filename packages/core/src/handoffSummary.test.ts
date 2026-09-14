@@ -18,18 +18,19 @@ import {
   buildSummarizationPrompt,
   computeFileLists,
   createFileOps,
+  createHttpCompletionFn,
   extractFileOperations,
   formatFileOperations,
   generateHandoffSummary,
   getSummarizationFailure,
   serializeRunChain,
   serializeRunConversation,
-  stripCheckpointPreamble,
+  extractCheckpoint,
   type CompletionFn,
   type CompletionRequest,
 } from "./handoffSummary.js";
 import { renderHandoffPrompt } from "./handoff.js";
-import type { Handoff, Run, RunEvent, Task, Workspace } from "./types.js";
+import type { Handoff, Model, Provider, Run, RunEvent, Task, Workspace } from "./types.js";
 import { freshHarness, makeFixtures, useBins, waitForRun } from "./testkit.js";
 
 let seq = 0;
@@ -399,13 +400,53 @@ test("generateHandoffSummary accumulates file lists across iterative updates (pi
   assert.deepEqual(result.content.relevantFiles, ["old.ts", "b.ts", "mut.ts"]);
 });
 
-test("stripCheckpointPreamble drops the summarizer's chain-of-thought preamble", () => {
+test("extractCheckpoint drops the summarizer's chain-of-thought preamble", () => {
   const dirty = `Let me analyze this conversation carefully.\n\nThe conversation is very short.\n\nLet me write the structured summary.\n${CHECKPOINT}`;
-  assert.ok(stripCheckpointPreamble(dirty).startsWith("## Goal"));
-  assert.ok(!stripCheckpointPreamble(dirty).includes("Let me analyze"));
+  assert.ok(extractCheckpoint(dirty).startsWith("## Goal"));
+  assert.ok(!extractCheckpoint(dirty).includes("Let me analyze"));
   // No `## ` section at all → nothing distinguishes reasoning from a
   // malformed summary, so it is kept unchanged.
-  assert.equal(stripCheckpointPreamble("just thinking out loud"), "just thinking out loud");
+  assert.equal(extractCheckpoint("just thinking out loud"), "just thinking out loud");
+});
+
+test("generateHandoffSummary refuses an answer that is not a checkpoint", async () => {
+  // The model answered the transcript instead of summarizing it: prose that
+  // would otherwise be stored as a "checkpoint" and handed to the next agent.
+  await assert.rejects(
+    () =>
+      generateHandoffSummary({
+        task,
+        run,
+        events: [],
+        artifacts: [],
+        complete: fakeCompletion("Sure — the project is a Go service with six HTTP endpoints."),
+      }),
+    /did not return a checkpoint/
+  );
+});
+
+test("extractCheckpoint keeps only the last of several drafts in one answer", () => {
+  // The reported shape: a leaked reasoning draft, the model's commentary
+  // on it, then the checkpoint it actually meant to produce.
+  const final = CHECKPOINT.replace("Fix the three flaky tests", "Fix the two flaky tests");
+  const dirty = [
+    "Let me analyze this conversation.",
+    CHECKPOINT,
+    "I should keep it concise but preserve exact paths.",
+    "Let me draft:",
+    "## Goal",
+    "草稿",
+    "## Critical Context",
+    "- 草稿",
+    "That's comprehensive. Let me finalize.",
+    final,
+  ].join("\n");
+  const clean = extractCheckpoint(dirty);
+  assert.ok(clean.startsWith("## Goal"));
+  assert.ok(clean.includes("Fix the two flaky tests"));
+  for (const leak of ["Let me analyze", "I should keep it concise", "Let me draft", "草稿", "Let me finalize"]) {
+    assert.ok(!clean.includes(leak), `leaked: ${leak}`);
+  }
 });
 
 test("generateHandoffSummary stores and renders a preamble-free checkpoint", async () => {
@@ -1059,4 +1100,93 @@ test("the iterative update resumes from the newest checkpoint even across resume
   } finally {
     restore();
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* Wire formats: the answer, never the model's deliberation            */
+/* ------------------------------------------------------------------ */
+
+/** Serve one canned JSON body to the next `fetch` the client makes. */
+async function withStubbedFetch<T>(body: unknown, run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch;
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+const responsesProvider = { id: "prov_1", name: "moark", type: "openai-responses", baseUrl: "https://api.example.com/v1", headers: {} } as Provider;
+const responsesModel = { id: "mod_1", providerId: "prov_1", name: "deepseek-v4-flash-0731" } as Model;
+
+test("openai-responses keeps the reasoning item out of the answer", async () => {
+  // The shape that leaked: an interleaved `reasoning` item whose
+  // `summary_text`/`reasoning_text` blocks hold the model's draft and its
+  // "let me …" commentary, with the real checkpoint in a `message` item.
+  const body = {
+    status: "completed",
+    output: [
+      {
+        type: "reasoning",
+        status: "completed",
+        content: [{ type: "summary_text", text: "Let me analyze this conversation.\n## Goal\nDRAFT GOAL\n## Critical Context\n- DRAFT" }],
+      },
+      {
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "## Goal\n" },
+          { type: "output_text", text: "Fix the flaky tests" },
+        ],
+      },
+      { type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: "I should keep it concise. Let me finalize." }] },
+    ],
+    usage: { input_tokens: 10, output_tokens: 20 },
+  };
+  const complete = createHttpCompletionFn(responsesProvider, responsesModel, "sk-test");
+  const text = await withStubbedFetch(body, () => complete({ systemPrompt: "s", prompt: "p", maxTokens: 100 }));
+  assert.equal(text.text, "## Goal\nFix the flaky tests");
+  for (const leak of ["Let me analyze", "DRAFT", "I should keep it concise"]) {
+    assert.ok(!text.text.includes(leak), `leaked: ${leak}`);
+  }
+  assert.equal(text.stopReason, "stop");
+  assert.deepEqual(text.usage, { inputTokens: 10, outputTokens: 20 });
+});
+
+test("openai-completions ignores reasoning_content and reasoning content blocks", async () => {
+  const provider = { id: "prov_2", name: "deepseek", type: "openai-completions", baseUrl: "https://api.example.com/v1", headers: {} } as Provider;
+  const model = { id: "mod_2", providerId: "prov_2", name: "deepseek-reasoner" } as Model;
+  const complete = createHttpCompletionFn(provider, model, "sk-test");
+
+  const reasoningField = await withStubbedFetch(
+    { choices: [{ message: { role: "assistant", reasoning_content: "SECRET THOUGHTS", content: "## Goal\nGood" }, finish_reason: "stop" }] },
+    () => complete({ systemPrompt: "s", prompt: "p", maxTokens: 100 })
+  );
+  assert.equal(reasoningField.text, "## Goal\nGood");
+
+  const blockForm = await withStubbedFetch(
+    {
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: [
+              { type: "reasoning", text: "SECRET THOUGHTS" },
+              { type: "text", text: "## Goal\n" },
+              { type: "text", text: "Good" },
+            ],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    },
+    () => complete({ systemPrompt: "s", prompt: "p", maxTokens: 100 })
+  );
+  assert.equal(blockForm.text, "## Goal\nGood");
 });

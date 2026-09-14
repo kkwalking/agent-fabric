@@ -21,7 +21,7 @@ import {
   effectiveCapabilities,
   renderHandoffBody,
   handoffCheckpointToContent,
-  stripCheckpointPreamble,
+  extractCheckpoint,
   HandoffUnavailableError,
   HandoffRequiredError,
   type NewTaskInput,
@@ -564,7 +564,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const run = runs.get(h.fromRunId);
     if (content.compactionSummary && task && run) {
       const workspaceId = h.workspaceId ?? run.workspaceId;
-      content = handoffCheckpointToContent(stripCheckpointPreamble(content.compactionSummary), {
+      content = handoffCheckpointToContent(extractCheckpoint(content.compactionSummary), {
         task,
         run,
         artifacts: artifacts.list(h.fromRunId),

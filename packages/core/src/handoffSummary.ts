@@ -563,6 +563,31 @@ function joinUrl(base: string, path: string): string {
 }
 
 /**
+ * Block types that carry a model's chain of thought rather than its
+ * answer. The Responses API puts them in *separate* `reasoning` items
+ * (as `summary_text` / `reasoning_text` blocks) that sit between the
+ * assistant's `message` items, so a naive "any block with a `text`
+ * field" read interleaves the model's private deliberation with — and
+ * sometimes inside — the checkpoint.
+ */
+const REASONING_BLOCK_TYPES = new Set([
+  "reasoning",
+  "reasoning_text",
+  "summary_text",
+  "thinking",
+  "redacted_thinking",
+]);
+
+/** Concatenate the answer blocks of one message item, skipping reasoning. */
+function answerText(blocks: unknown[]): string {
+  return blocks
+    .filter((b): b is { type?: unknown; text: string } => isObj(b) && typeof b.text === "string")
+    .filter((b) => !REASONING_BLOCK_TYPES.has(String(b.type ?? "")))
+    .map((b) => b.text)
+    .join("");
+}
+
+/**
  * Minimal standalone completion client honoring AgentFabric Provider
  * wire formats. This is AgentFabric's counterpart of pi's
  * `completeSimple` one-off summary call (no tools offered, no prompt
@@ -671,11 +696,15 @@ export function createHttpCompletionFn(
       };
     }
     if (type === "openai-responses") {
-      const text = (json.output ?? [])
-        .flatMap((o: any) => o?.content ?? [])
-        .filter((b: any) => b?.type === "output_text" || typeof b?.text === "string")
-        .map((b: any) => b.text)
-        .join("\n");
+      // `output` interleaves `reasoning` items with the assistant's
+      // `message` items. Only message items are the answer; a reasoning
+      // item's `summary`/`content` is the model's deliberation, and
+      // reading it made the summarizer's own draft (and its "let me …"
+      // commentary) part of the stored checkpoint.
+      const messages = (json.output ?? []).filter(
+        (o: any) => isObj(o) && (o.type === "message" || (o.type === undefined && Array.isArray(o.content)))
+      );
+      const text = messages.map((o: any) => answerText(o.content ?? [])).filter(Boolean).join("\n");
       const incomplete = json.status === "incomplete";
       return {
         text,
@@ -686,7 +715,17 @@ export function createHttpCompletionFn(
       };
     }
     const choice = json.choices?.[0];
-    const text: string = choice?.message?.content ?? "";
+    const message = choice?.message ?? {};
+    // `reasoning_content` (DeepSeek and friends) is a *separate* field and
+    // is deliberately never read; some OpenAI-compatible providers instead
+    // return `content` as typed blocks, where `reasoning` blocks must be
+    // dropped and `text` blocks concatenated.
+    const text: string =
+      typeof message.content === "string"
+        ? message.content
+        : Array.isArray(message.content)
+          ? answerText(message.content)
+          : "";
     return {
       text,
       stopReason: choice?.finish_reason === "length" ? "length" : "stop",
@@ -900,19 +939,34 @@ export function getSummarizationFailure(response: CompletionResponse, label: str
 }
 
 /**
- * The checkpoint format starts at the first `## ` section; the
- * system prompt forbids anything else. Models sometimes prepend
- * chain-of-thought anyway ("Let me analyze this conversation…") —
- * everything before the first `## ` heading is that leaked reasoning,
- * not checkpoint content, so it is dropped. A summary with no `## `
- * section is kept as-is: there is nothing to distinguish reasoning
- * from a (malformed) summary. Applied at generation time and again at
- * render time, so checkpoints stored before this guard also render
- * clean.
+ * Reduce a completion to the one checkpoint it is supposed to carry.
+ *
+ * The format's first legal token is the `## Goal` heading; the system
+ * prompt forbids anything else. Two leaks have to be survived, because a
+ * malformed answer must never reach the next agent as context:
+ *
+ * - **A preamble.** Models prepend chain-of-thought ("Let me analyze this
+ *   conversation…") before the heading. Everything before the first
+ *   section goes.
+ * - **Several drafts in one answer.** Models that deliberate in the
+ *   visible channel write a draft checkpoint, comment on it, then write
+ *   the real one. The last `## Goal`-rooted block is the answer; earlier
+ *   ones are drafts (and when a provider interleaves reasoning, its
+ *   leaked draft).
+ *
+ * A summary with no `## ` section at all is kept as-is: there is nothing
+ * to distinguish reasoning from a (malformed) summary. Applied at
+ * generation time and again at render and read time, so checkpoints
+ * stored before this guard are cleaned up too.
  */
-export function stripCheckpointPreamble(summary: string): string {
-  const match = /^##\s/m.exec(summary);
-  return match ? summary.slice(match.index).trim() : summary.trim();
+export function extractCheckpoint(summary: string): string {
+  const trimmed = summary.trim();
+  const drafts = [...trimmed.matchAll(/^##[ \t]+Goal\b.*$/gim)];
+  if (drafts.length > 0) {
+    return trimmed.slice(drafts[drafts.length - 1].index).trim();
+  }
+  const firstSection = /^##\s/m.exec(trimmed);
+  return firstSection ? trimmed.slice(firstSection.index).trim() : trimmed;
 }
 
 /**
@@ -1088,6 +1142,15 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
       const failure = getSummarizationFailure(response, "Summarization");
       if (failure) throw new Error(failure);
       if (!response.text.trim()) throw new Error("Summarization returned an empty summary");
+      // The prompt mandates an EXACT format whose first heading is
+      // `## Goal`; an answer without it is not a checkpoint (the model
+      // answered the conversation, or narrated instead of summarizing).
+      // Storing it would hand the next agent prose that merely looks like
+      // context, so the generation fails instead.
+      const checkpoint = extractCheckpoint(response.text);
+      if (!/^##[ \t]+Goal\b/im.test(checkpoint)) {
+        throw new Error('Summarization did not return a checkpoint (no "## Goal" heading in the answer)');
+      }
       chunks += 1;
       if (response.usage) {
         usage.inputTokens += response.usage.inputTokens;
@@ -1099,7 +1162,7 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
       const chunkEvents = chunk.flatMap((t) => t.events);
       const fileOps = extractFileOperations(chunkEvents, summary);
       const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-      summary = stripCheckpointPreamble(response.text) + formatFileOperations(readFiles, modifiedFiles);
+      summary = checkpoint + formatFileOperations(readFiles, modifiedFiles);
     }
   } finally {
     if (timer) clearTimeout(timer);

@@ -1,6 +1,6 @@
 import { Store, newId } from "./store.js";
 import { now } from "./services.js";
-import { stripCheckpointPreamble, taskLabel } from "./handoffSummary.js";
+import { extractCheckpoint, taskLabel } from "./handoffSummary.js";
 import type {
   Artifact,
   Handoff,
@@ -181,7 +181,7 @@ export function renderHandoffBody(handoff: Handoff): string {
   if (c.compactionSummary) {
     // Render-time guard: checkpoints stored before the generation-time
     // strip may carry the summarizer's chain-of-thought preamble.
-    lines.push("", "## Context checkpoint", "", stripCheckpointPreamble(c.compactionSummary));
+    lines.push("", "## Context checkpoint", "", extractCheckpoint(c.compactionSummary));
   } else {
     const section = (title: string, value: string | string[] | undefined) => {
       if (value === undefined) return;
