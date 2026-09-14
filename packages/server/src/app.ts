@@ -20,13 +20,10 @@ import {
   seedDefaults,
   effectiveCapabilities,
   renderHandoffBody,
-  handoffCheckpointToContent,
-  extractCheckpoint,
   HandoffUnavailableError,
   HandoffRequiredError,
   type NewTaskInput,
   type ContinueTaskInput,
-  type Handoff,
   type Run,
   type Task,
 } from "@agentfabric/core";
@@ -545,43 +542,19 @@ export async function createApp(options: ServerOptions): Promise<Express> {
 
   /* ---------------- handoffs (spec v1 §4–§8) ---------------- */
 
-  /**
-   * A checkpoint handoff's stored parsed fields are a projection of its
-   * checkpoint, not independent data — re-derive them with the current
-   * parser on every read, so handoffs written by an older parser inspect
-   * consistently with today's (no LLM involved). This is also what cleans
-   * records whose checkpoint carried the summarizer's leaked reasoning:
-   * the stored text stays as the model produced it, the projection does
-   * not. Every read route goes through it, so the list and the detail page
-   * can never disagree.
-   */
-  const derivedHandoff = (h: Handoff): Handoff => {
-    if (!h.content.compactionSummary) return h;
-    const task = tasks.get(h.taskId);
-    const run = runs.get(h.fromRunId);
-    if (!task || !run) return h;
-    const workspaceId = h.workspaceId ?? run.workspaceId;
-    return {
-      ...h,
-      content: handoffCheckpointToContent(extractCheckpoint(h.content.compactionSummary), {
-        task,
-        run,
-        artifacts: artifacts.list(h.fromRunId),
-        workspace: workspaceId ? workspaces.get(workspaceId) : undefined,
-        runtimeName: h.fromRuntimeName,
-      }),
-    };
-  };
-
+  // Reads are pure reads. A handoff's content is projected from its
+  // checkpoint once, when it is generated (`handoffCheckpointToContent`);
+  // nothing re-parses, re-projects or repairs a stored record here. A
+  // record that is wrong is discarded and regenerated, never patched at
+  // read time (AGENTS.md: "No compatibility logic for old data").
   app.get("/api/handoffs", (req, res) => {
     const taskId = typeof req.query.taskId === "string" ? req.query.taskId : undefined;
     const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
-    ok(res, handoffs.list({ taskId, runId }).map(derivedHandoff));
+    ok(res, handoffs.list({ taskId, runId }));
   });
   app.get("/api/handoffs/:id", (req, res) => {
-    const found = handoffs.get(req.params.id);
-    if (!found) return fail(res, new Error("Handoff not found"), 404);
-    const h = derivedHandoff(found);
+    const h = handoffs.get(req.params.id);
+    if (!h) return fail(res, new Error("Handoff not found"), 404);
     // Rendered body = the exact text the consuming harness receives ahead of
     // its `# Your instruction`; consumers let the UI link to that full text.
     const consumedByRunIds = runs.list().filter((r) => r.previousHandoffId === h.id).map((r) => r.id);
@@ -593,7 +566,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     if (!notes?.trim()) return fail(res, new Error("notes is required"));
     try {
       const h = await handoffs.addUserNotes(req.params.id, notes);
-      h ? ok(res, derivedHandoff(h)) : fail(res, new Error("Handoff not found"), 404);
+      h ? ok(res, h) : fail(res, new Error("Handoff not found"), 404);
     } catch (e) {
       fail(res, e);
     }

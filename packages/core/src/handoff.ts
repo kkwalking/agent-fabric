@@ -1,6 +1,6 @@
 import { Store, newId } from "./store.js";
 import { now } from "./services.js";
-import { extractCheckpoint, taskLabel } from "./handoffSummary.js";
+import { taskLabel } from "./handoffSummary.js";
 import type {
   Artifact,
   Handoff,
@@ -179,9 +179,10 @@ export function renderHandoffBody(handoff: Handoff): string {
   ];
 
   if (c.compactionSummary) {
-    // Render-time guard: checkpoints stored before the generation-time
-    // strip may carry the summarizer's chain-of-thought preamble.
-    lines.push("", "## Context checkpoint", "", extractCheckpoint(c.compactionSummary));
+    // Embedded verbatim: the checkpoint was reduced to the model's answer
+    // when the handoff was generated, and rendering does not re-parse or
+    // repair it (AGENTS.md: "No compatibility logic for old data").
+    lines.push("", "## Context checkpoint", "", c.compactionSummary);
   } else {
     const section = (title: string, value: string | string[] | undefined) => {
       if (value === undefined) return;

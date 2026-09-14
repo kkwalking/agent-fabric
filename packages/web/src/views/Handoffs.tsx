@@ -1,4 +1,4 @@
-import { get, fmtTime, shortId } from "../api";
+import { get, del, fmtTime, shortId } from "../api";
 import { useAsync, ErrorBox } from "../components";
 import { navigate } from "../router";
 
@@ -105,6 +105,21 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
           {generation.chunks && generation.chunks > 1 ? <> ({generation.chunks} chunks)</> : null}
         </> : null}
       </p>
+      <div className="row">
+        {/* Wrong context is discarded, never repaired in place: a handoff is
+            whatever the model produced at generation time, so a bad one is
+            deleted and regenerated from the task thread (AGENTS.md). */}
+        <button
+          className="small"
+          onClick={async () => {
+            if (!confirm(`Discard ${detail.id}? It cannot be recovered — generate a new handoff instead.`)) return;
+            await del(`/api/handoffs/${detail.id}`);
+            navigate("/handoffs");
+          }}
+        >
+          Discard handoff
+        </button>
+      </div>
       {degraded && (
         <div className="card handoff-degraded-card">
           <b>⚠ Degraded context — not a model summary.</b>{" "}

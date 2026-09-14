@@ -955,9 +955,12 @@ export function getSummarizationFailure(response: CompletionResponse, label: str
  *   leaked draft).
  *
  * A summary with no `## ` section at all is kept as-is: there is nothing
- * to distinguish reasoning from a (malformed) summary. Applied at
- * generation time and again at render and read time, so checkpoints
- * stored before this guard are cleaned up too.
+ * to distinguish reasoning from a (malformed) summary.
+ *
+ * Applied once, at generation time. Nothing downstream re-parses a stored
+ * checkpoint: what is in the record is what the next agent gets, so a bad
+ * record is discarded and regenerated rather than repaired on read
+ * (AGENTS.md: "No compatibility logic for old data").
  */
 export function extractCheckpoint(summary: string): string {
   const trimmed = summary.trim();

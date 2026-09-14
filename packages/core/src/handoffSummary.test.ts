@@ -586,7 +586,13 @@ test("renderHandoffPrompt embeds the compaction checkpoint verbatim", () => {
   assert.match(rendered, /# Your instruction\ncontinue/);
 });
 
-test("renderHandoffPrompt strips a preamble from an already-stored checkpoint", () => {
+test("renderHandoffPrompt embeds a stored checkpoint verbatim, without repairing it", () => {
+  // Reads and renders are pure: the checkpoint is reduced to the model's
+  // answer when the handoff is generated, and a stored record is never
+  // re-parsed to compensate for an older generation (AGENTS.md: "No
+  // compatibility logic for old data"). A wrong record is discarded and
+  // regenerated instead.
+  const stored = `Let me analyze this conversation carefully.\n${CHECKPOINT}`;
   const handoff = {
     id: "hoff_1",
     taskId: "task_1",
@@ -598,12 +604,12 @@ test("renderHandoffPrompt strips a preamble from an already-stored checkpoint", 
     artifactIds: [],
     createdAt: new Date().toISOString(),
     content: {
-      compactionSummary: `Let me analyze this conversation carefully.\n${CHECKPOINT}`,
+      compactionSummary: stored,
       workspaceStatus: 'Workspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.',
     },
   } as unknown as Handoff;
   const rendered = renderHandoffPrompt(handoff, "continue");
-  assert.ok(!rendered.includes("Let me analyze"), "stored preambles must not reach the next agent");
+  assert.ok(rendered.includes(stored), "the stored checkpoint is the source of truth");
   assert.ok(rendered.includes(CHECKPOINT));
 });
 
