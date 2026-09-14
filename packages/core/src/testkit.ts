@@ -141,6 +141,32 @@ export interface Harness {
   nativeStates: NativeStateService;
 }
 
+/**
+ * Deterministic offline summarization for suites that do not inject their
+ * own `completionFactory`. Without it the default HTTP client would call
+ * the seeded (keyless) OpenAI provider — slow, network-dependent, and now
+ * a hard error instead of a silent fallback. Tests that exercise a failing
+ * or degraded summary pass their own factory.
+ */
+const TEST_CHECKPOINT = `## Goal
+Continue the task described by the covered runs.
+
+## Progress
+### Done
+- [x] Work recorded in the covered runs
+
+### In Progress
+- [ ] Finish the remaining work
+
+## Next Steps
+1. Continue the work and verify the result`;
+
+export const testCompletionFactory: CompletionFactory = () => async () => ({
+  text: TEST_CHECKPOINT,
+  stopReason: "stop" as const,
+  usage: { inputTokens: 10, outputTokens: 20 },
+});
+
 export async function freshHarness(opts?: { completionFactory?: CompletionFactory }): Promise<Harness> {
   const store = await Store.open(mkdtempSync(join(tmpdir(), "af-test-")));
   const bus = new EventBus();
@@ -160,7 +186,7 @@ export async function freshHarness(opts?: { completionFactory?: CompletionFactor
     bus,
     registry,
     createDockerContainerOps(),
-    opts?.completionFactory,
+    opts?.completionFactory ?? testCompletionFactory,
     { codex: codexThreadSource, "claude-code": claudeCodeThreadSource }
   );
   return {

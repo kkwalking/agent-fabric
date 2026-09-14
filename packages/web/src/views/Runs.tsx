@@ -261,7 +261,8 @@ export function RunDetailView({ runId }: { runId: string }) {
           <div>
             <p className="sub">
               How this run continues the task: <strong>{CONTINUITY_LABEL[run.continuity ?? "new"] ?? run.continuity}</strong>.
-              Same harness → native Resume; different harness → Handoff (sessions are never migrated).
+              A native resume continues the same harness's own session; a handoff starts a new one (sessions are
+              never migrated).
             </p>
             {previousHandoff && (
               <>

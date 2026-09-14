@@ -202,7 +202,8 @@ function RuntimeNativeSessionsCard() {
       <h2>Native sessions (per harness)</h2>
       <p className="sub">
         Opaque references into each harness's own session store. Pi sessions and OpenCode sessions are different
-        things — AgentFabric never converts between them. Same harness → Resume; different harness → Handoff.
+        things — AgentFabric never converts between them. A valid reference lets its <b>own</b> harness resume the
+        session natively; it is never migrated to another harness.
       </p>
       {allRefs.length > 0 ? (
         <table>

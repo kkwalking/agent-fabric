@@ -453,6 +453,7 @@ function buildProgram(): Command {
     .option("--model <id>", "model id (for continue)")
     .option("--mode <mode>", "resume | handoff | auto (default auto)")
     .option("--notes <text>", "user notes folded into the handoff")
+    .option("--allow-degraded", "if the model summary is unavailable, continue with a degraded structured context")
     .option("--lifecycle <mode>", "container lifecycle: ephemeral | keep-alive | persistent")
     .option("--idle-timeout <ms>", "keep-alive idle timeout in ms")
     .action(async (action: string, id: string | undefined, prompt: string | undefined, _opts: unknown, cmd: Command) => {
@@ -504,6 +505,7 @@ function buildProgram(): Command {
           modelId: opts.model,
           mode: opts.mode,
           userNotes: opts.notes,
+          allowDegradedHandoff: Boolean(opts.allowDegraded),
           lifecycle: opts.lifecycle
             ? { mode: opts.lifecycle, idleTimeoutMs: opts.idleTimeout ? Number(opts.idleTimeout) : undefined }
             : opts.idleTimeout

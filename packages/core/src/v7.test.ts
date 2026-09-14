@@ -41,7 +41,7 @@ import { claudeCodeAuthStatus, detectClaudeUsageLimit } from "../../runtimes/src
 import { encodeClaudeProjectDir } from "../../runtimes/src/claudeCodeThreads.js";
 import type { CompletionFactory } from "./orchestrator.js";
 
-/** Fails summarization instantly so handoffs use the heuristic generator. */
+/** Fails summarization instantly so handoffs take the explicitly-degraded digest path. */
 const offlineCompletion: CompletionFactory = () =>
   async () => ({ text: "", stopReason: "error" as const, errorMessage: "test: offline" });
 
@@ -220,7 +220,7 @@ test("scenario C: claude quota exhaustion is usage-limit, then hands off to Pi (
 
     // The workspace stays and the session context is readable — switch to Pi.
     const pi = runtimeOf(h, "pi");
-    const cont = await h.runService.continueTask(task.id, { prompt: "continue on pi", runtimeId: pi.id });
+    const cont = await h.runService.continueTask(task.id, { prompt: "continue on pi", runtimeId: pi.id, mode: "handoff", allowDegradedHandoff: true });
     assert.equal(cont.continuity, "handoff");
     assert.ok(cont.handoff);
     assert.equal(cont.handoff?.fromRuntimeKind, "claude-code");
@@ -411,7 +411,7 @@ test("scenario B: adopt an existing claude session, resume same-harness, then ha
 
     // Different harness → handoff: the imported work crosses to Pi as a
     // semantic summary; Pi creates its own new native session.
-    const cont = await h.runService.continueTask(result.taskId, { prompt: "continue on pi", runtimeId: pi.id });
+    const cont = await h.runService.continueTask(result.taskId, { prompt: "continue on pi", runtimeId: pi.id, mode: "handoff", allowDegradedHandoff: true });
     assert.equal(cont.continuity, "handoff");
     assert.equal(cont.handoff?.fromRuntimeKind, "claude-code");
     assert.equal(cont.handoff?.toRuntimeKind, "pi");
@@ -467,7 +467,7 @@ test("scenario D: Pi hands off into a fresh Claude Code native session on the sa
     assert.equal(firstRun.status, "completed", firstRun.error);
 
     // Switch to Claude Code: handoff, new native session, same workspace.
-    const cont = await h.runService.continueTask(first.task.id, { prompt: "continue with claude", runtimeId: claude.id });
+    const cont = await h.runService.continueTask(first.task.id, { prompt: "continue with claude", runtimeId: claude.id, mode: "handoff", allowDegradedHandoff: true });
     assert.equal(cont.continuity, "handoff");
     assert.ok(cont.handoff);
     assert.equal(cont.handoff?.fromRuntimeKind, "pi");

@@ -1,3 +1,20 @@
+/**
+ * HTTP error carrying the server's machine-readable code. A
+ * `handoff-unavailable` error means the continuation is still possible if
+ * the user explicitly accepts a degraded context (`allowDegraded`).
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly allowDegraded?: boolean
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: options?.body ? { "Content-Type": "application/json" } : undefined,
@@ -11,7 +28,13 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
     data = text;
   }
   if (!res.ok) {
-    throw new Error((data as { error?: string })?.error ?? `${res.status} ${res.statusText}`);
+    const body = (data ?? {}) as { error?: string; code?: string; allowDegraded?: boolean };
+    throw new ApiError(
+      body.error ?? `${res.status} ${res.statusText}`,
+      res.status,
+      body.code,
+      body.allowDegraded
+    );
   }
   return data as T;
 }

@@ -416,6 +416,9 @@ test("cross-harness switch still handoffs, never migrates sessions (v2 §16)", a
     const switched = await h.runService.continueTask(task.id, {
       prompt: "continue on opencode",
       runtimeId: ocRuntime.id,
+      // A handoff is explicit: the client asks for it, the server never
+      // generates one as a side effect of sending a message.
+      mode: "handoff",
     });
     assert.equal(switched.continuity, "handoff");
     assert.ok(switched.handoff);

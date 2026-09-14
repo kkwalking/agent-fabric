@@ -19,8 +19,9 @@ import { navigate } from "../router";
  *
  * Below the composer, Local Harness Threads (v6 §6/§11, v7 §9/§11) let
  * the user adopt work that started outside AgentFabric: pick a Codex
- * thread or Claude Code session, "Continue in AgentFabric", then hand it
- * off to another harness from the task thread.
+ * thread or Claude Code session, "Continue in AgentFabric", then work on
+ * it in the task thread — where a handoff can be generated explicitly
+ * whenever the task needs a new native session.
  */
 
 /** Harnesses exposing local thread/session discovery (v7 §9). */
@@ -238,8 +239,8 @@ export function NewTaskView() {
  * Lists a harness's local threads/sessions that already exist on this
  * machine (created outside AgentFabric) and adopts them: Continue in
  * AgentFabric reads the thread, associates its workspace and lands on
- * the task thread, where switching to another harness generates the
- * handoff (v6 §8, v7 §11).
+ * the task thread, where a handoff can be generated explicitly to
+ * continue in a new native session (v6 §8, v7 §11).
  */
 function LocalHarnessThreadsPanel({
   kind,
@@ -301,7 +302,8 @@ function LocalHarnessThreadsPanel({
       </div>
       <p className="muted sub">
         Work that started {hint}. Adopting a {noun.toLowerCase().replace(/s$/, "")} reads its history — it never
-        re-runs the model — so you can continue it here and hand it off to another harness.
+        re-runs the model — so you can continue it here, and generate a handoff explicitly when it needs a new
+        native session.
       </p>
 
       {/* Harness-native auth availability (v6 §2, v7 §2) — detection only, never credentials. */}

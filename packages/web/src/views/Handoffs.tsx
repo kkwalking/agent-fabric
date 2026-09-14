@@ -43,8 +43,8 @@ export function HandoffsView() {
     <div>
       <h1>Handoffs</h1>
       <p className="sub">
-        A Handoff is a semantic work handover between two agent harnesses — the new harness always starts its own
-        new native session; sessions are never migrated. Same harness → Resume, different harness → Handoff.
+        A Handoff is a semantic work handover: it carries a task's context into a NEW native session — on the
+        same harness or a different one — and generating it is an explicit action. Sessions are never migrated.
       </p>
       <ErrorBox message={error} />
 
@@ -67,7 +67,7 @@ export function HandoffsView() {
             </tbody>
           </table>
         ) : (
-          <div className="muted">No handoffs yet. Continue a task on a different harness to create one.</div>
+          <div className="muted">No handoffs yet. Open a task thread and generate one from there.</div>
         )}
         <div className="row" style={{ marginTop: 10 }}>
           <button className="small" onClick={reload}>refresh</button>
@@ -83,6 +83,8 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
   if (error) return <ErrorBox message={error} />;
   if (!detail) return <div className="muted">Loading…</div>;
   const consumedBy: string[] = detail.consumedByRunIds ?? [];
+  const generation = detail.generation as { method?: string; detail?: string; chunks?: number } | undefined;
+  const degraded = generation?.method === "heuristic";
 
   return (
     <div>
@@ -99,7 +101,18 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
         Run <span className="mono">{shortId(detail.fromRunId)}</span>
         {detail.workspaceId ? <> · Workspace <span className="mono">{shortId(detail.workspaceId)}</span></> : null}
         {" "}· {fmtTime(detail.createdAt)}
+        {generation?.method ? <> · context: <span className="mono">{generation.method}</span>
+          {generation.chunks && generation.chunks > 1 ? <> ({generation.chunks} chunks)</> : null}
+        </> : null}
       </p>
+      {degraded && (
+        <div className="card handoff-degraded-card">
+          <b>⚠ Degraded context — not a model summary.</b>{" "}
+          {generation?.detail ?? "The summarization model was unavailable."}{" "}
+          The next agent receives a structured digest of the run records (task, changed files, tools, last
+          message) rather than a synthesized summary.
+        </div>
+      )}
 
       <h2>Rendered handoff — what the next agent receives</h2>
       <div className="card">
@@ -127,8 +140,9 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
       <h2>Parsed fields (for inspection)</h2>
       <p className="sub">
         The same handoff content broken into structured fields for inspection. When the handoff carries a
-        compaction checkpoint, these fields are parsed out of it and the rendered prompt above embeds the
-        checkpoint verbatim — the fields below are not sent to the next agent.
+        written checkpoint (a handoff summary, not a session compaction), these fields are parsed out of it and
+        the rendered prompt above embeds the checkpoint verbatim — the fields below are not sent to the next
+        agent.
       </p>
       <div className="card">
         {CONTENT_SECTIONS.map(({ key, label }) => (

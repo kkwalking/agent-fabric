@@ -35,7 +35,7 @@ import { makeCodexThreadsFixture } from "./fakes.js";
 import { codexAuthStatus, detectCodexUsageLimit } from "../../runtimes/src/codex.js";
 import type { CompletionFactory } from "./orchestrator.js";
 
-/** Fails summarization instantly so handoffs use the heuristic generator. */
+/** Fails summarization instantly so handoffs take the explicitly-degraded digest path. */
 const offlineCompletion: CompletionFactory = () =>
   async () => ({ text: "", stopReason: "error" as const, errorMessage: "test: offline" });
 
@@ -191,7 +191,7 @@ test("quota exhaustion is classified as usage-limit, then hands off to Pi (v6 §
 
     // The workspace stays and the thread is readable — switch to Pi.
     const pi = runtimeOf(h, "pi");
-    const cont = await h.runService.continueTask(task.id, { prompt: "continue on pi" , runtimeId: pi.id });
+    const cont = await h.runService.continueTask(task.id, { prompt: "continue on pi" , runtimeId: pi.id, mode: "handoff", allowDegradedHandoff: true });
     assert.equal(cont.continuity, "handoff");
     assert.ok(cont.handoff);
     assert.equal(cont.handoff?.fromRuntimeKind, "codex");
@@ -370,7 +370,7 @@ test("scenario B: adopt an existing codex thread, then continue on Pi via handof
 
     // Different harness → handoff: the imported work crosses to Pi as a
     // semantic summary; Pi creates its own new native session.
-    const cont = await h.runService.continueTask(result.taskId, { prompt: "continue on pi", runtimeId: pi.id });
+    const cont = await h.runService.continueTask(result.taskId, { prompt: "continue on pi", runtimeId: pi.id, mode: "handoff", allowDegradedHandoff: true });
     assert.equal(cont.continuity, "handoff");
     assert.equal(cont.handoff?.fromRuntimeKind, "codex");
     assert.equal(cont.handoff?.toRuntimeKind, "pi");

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTokens } from "../api";
+import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTokens, ApiError } from "../api";
 import { ErrorBox, Icon, Modal, StatusBadge, useAsync } from "../components";
 import { Markdown } from "../markdown";
 import {
@@ -253,7 +253,14 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         setPendingHandoff((p) => (p ? { ...p, stage: "ready" } : p));
         bump();
       })
-      .catch(() => setPendingHandoff((p) => (p ? null : p)))
+      .catch((e) => {
+        setPendingHandoff((p) => (p ? null : p));
+        // An explicit handoff never degrades: surface why it could not be
+        // generated instead of silently dropping the request.
+        if (!(e instanceof DOMException && e.name === "AbortError")) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      })
       .finally(() => {
         if (handoffAbortRef.current === controller) handoffAbortRef.current = null;
       });
@@ -369,14 +376,13 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         liveRunId={liveRun?.id}
         defaultModelId={lastTurn?.run.modelId}
         previousRuntimeId={lastTurn?.run.runtimeId}
+        previousRunStatus={lastTurn?.run.status}
         promptRef={composerPromptRef}
         runtimeRef={composerRuntimeRef}
         runtimeRequest={runtimeRequest}
         onStop={stopRun}
         onSubmitted={bump}
         handoffState={pendingHandoff?.stage ?? (armedHandoff ? "ready" : undefined)}
-        onHandoffStart={() => setPendingHandoff({ stage: "generating", baseRuns: thread?.runs.length ?? 0 })}
-        onHandoffAbort={() => setPendingHandoff(null)}
       />
 
       {/* ---------- Handoff confirmation (the only trigger of generation) ---------- */}
@@ -397,22 +403,72 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
 function HandoffConfirmModal({
   onConfirm,
   onClose,
+  thenSubmit = false,
+  targetName,
 }: {
+  onConfirm: () => void;
+  onClose: () => void;
+  /** The message is waiting to be sent: generate the handoff, then send it. */
+  thenSubmit?: boolean;
+  targetName?: string;
+}) {
+  return (
+    <Modal title={thenSubmit ? "Generate a handoff for this message?" : "Generate handoff context?"} onClose={onClose}>
+      <div className="handoff-confirm">
+        {thenSubmit ? (
+          <p>
+            Sending this message starts a <b>new native session</b>
+            {targetName ? <> on <b>{targetName}</b></> : null}, because the current one cannot be resumed. That
+            needs a handoff context — and a handoff is an <b>explicit action</b>: confirm to summarize this thread,
+            then your message is sent into the new session with that summary as its only context. The workspace is
+            preserved.
+          </p>
+        ) : (
+          <p>
+            This generates a context summary of the task so far as a standalone action — it is not tied to any
+            harness. Once ready it stays in this thread: your next message, on any harness including the current
+            one, starts a fresh session that uses this summary as its only context. The workspace is preserved.
+          </p>
+        )}
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" autoFocus onClick={onConfirm}>
+            {thenSubmit ? "Generate handoff and send" : "Generate handoff"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * The model summary for the handoff failed. Degrading is a choice, never a
+ * silent substitution: the user sees the reason and explicitly accepts a
+ * structured digest (marked as degraded on the handoff) or cancels.
+ */
+function DegradedHandoffModal({
+  message,
+  onConfirm,
+  onClose,
+}: {
+  message: string;
   onConfirm: () => void;
   onClose: () => void;
 }) {
   return (
-    <Modal title="Generate handoff context?" onClose={onClose}>
+    <Modal title="Handoff summary unavailable" onClose={onClose}>
       <div className="handoff-confirm">
+        <p className="handoff-degraded-reason">{message}</p>
         <p>
-          This generates a context summary of the task so far as a standalone action — it is not tied to any
-          harness. Once ready it stays in this thread: your next message, on any harness including the current
-          one, starts a fresh session that uses this summary as its only context. The workspace is preserved.
+          You can still continue in a new native session, but the next agent would receive a{" "}
+          <b>structured digest</b> instead of a model-written summary: the original task, the files that changed,
+          the tools used and the last agent message — without synthesized decisions or a coherent progress
+          narrative. This handoff is marked as degraded so it is never mistaken for a summary.
         </p>
         <div className="modal-actions">
           <button onClick={onClose}>Cancel</button>
           <button className="primary" autoFocus onClick={onConfirm}>
-            Generate handoff
+            Continue with degraded context
           </button>
         </div>
       </div>
@@ -529,9 +585,9 @@ function TurnView({
               <div className="fail-title">{run.runtimeName ?? "Harness"} usage limit reached.</div>
               {run.error && <div className="fail-reason">{run.error}</div>}
               <p className="muted">
-                The workspace and the {run.runtimeName ?? "harness"} session are preserved. Hand the task to
-                another harness — after you confirm, a handoff summary is generated and the new agent continues
-                in this thread.
+                The workspace and the {run.runtimeName ?? "harness"} session are preserved. Continue on another
+                harness: after you confirm, a handoff summary is generated (an explicit action — it is never
+                produced implicitly) and the new agent continues in a new native session.
               </p>
               <div className="row fail-actions">
                 {otherHarnessTargets.map((t) => (
@@ -582,7 +638,7 @@ function TurnView({
                 <a onClick={() => navigate(`/runs/${run.id}`)}>View run ↗</a>
                 <button
                   className="turn-handoff"
-                  title="Generate a handoff summary so another harness can continue this task"
+                  title="Generate a handoff summary so a new native session can continue this task"
                   disabled={handoffDisabled}
                   onClick={onHandoff}
                 >
@@ -604,6 +660,10 @@ function TurnView({
 function HandoffBanner({ handoff }: { handoff: any }) {
   const [open, setOpen] = useState(false);
   const c = handoff.content ?? {};
+  // A degraded handoff (`generation.method: "heuristic"`) is a structured
+  // digest, not a model summary — say so instead of letting the next agent
+  // (and the user) assume otherwise.
+  const degraded = handoff.generation?.method === "heuristic";
   const Section = ({ title, children }: { title: string; children: React.ReactNode }) =>
     children ? (
       <div className="handoff-section">
@@ -615,9 +675,18 @@ function HandoffBanner({ handoff }: { handoff: any }) {
     <div className="handoff-banner">
       <div className="handoff-line">
         <span className="handoff-mark">⇄ Handoff</span>
-        <span className="muted">workspace preserved · new native session</span>
+        {degraded ? (
+          <span className="handoff-degraded" title={handoff.generation?.detail ?? undefined}>
+            ⚠ 结构化降级（非模型摘要）
+          </span>
+        ) : (
+          <span className="muted">workspace preserved · new native session</span>
+        )}
         <button className="small right" onClick={() => setOpen(!open)}>{open ? "Hide handoff" : "View handoff"}</button>
       </div>
+      {degraded && handoff.generation?.detail && (
+        <div className="handoff-degraded-detail">原因：{handoff.generation.detail}</div>
+      )}
       {open && (
         <div className="handoff-detail">
           <Section title="Current progress">{c.progressSummary}</Section>
@@ -831,30 +900,29 @@ function Composer({
   liveRunId,
   defaultModelId,
   previousRuntimeId,
+  previousRunStatus,
   promptRef,
   runtimeRef,
   runtimeRequest,
   onStop,
   onSubmitted,
   handoffState,
-  onHandoffStart,
-  onHandoffAbort,
 }: {
   taskId: string;
   live: boolean;
   liveRunId?: string;
   defaultModelId?: string;
   previousRuntimeId?: string;
+  /** Latest run's status: the resume/handoff preview changes when a run finishes. */
+  previousRunStatus?: string;
   promptRef: React.RefObject<HTMLTextAreaElement>;
   runtimeRef: React.RefObject<HTMLSelectElement>;
   /** External runtime preselection (quota flow aim) — applied directly, no confirmation attached. */
   runtimeRequest?: { id: string; n: number } | null;
   onStop: (runId: string) => void;
   onSubmitted: () => void;
-  /** Optimistic/armed handoff lifecycle, kept in sync so the preview and announce stay truthful. */
+  /** Armed/generating handoff lifecycle, so the resume-vs-handoff preview stays truthful. */
   handoffState?: "generating" | "ready";
-  onHandoffStart: () => void;
-  onHandoffAbort: () => void;
 }) {
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
@@ -868,6 +936,10 @@ function Composer({
   const [profileId, setProfileId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Model summary unavailable: the user must accept a degraded context or cancel. */
+  const [degradedError, setDegradedError] = useState<string | null>(null);
+  /** Send was gated: a handoff must be generated explicitly before this message. */
+  const [handoffGate, setHandoffGate] = useState(false);
 
   const runtimeList = runtimes.data ?? [];
   const modelList = models.data ?? [];
@@ -880,10 +952,12 @@ function Composer({
   // chain; the resolved target runtime is preselected visibly.
   // previousRuntimeId doubles as "latest run changed" — refresh the preview
   // after a run lands so the suggestion never goes stale mid-thread;
-  // handoffState re-runs it when a handoff is armed or consumed.
+  // previousRunStatus refreshes it when that run finishes (its native
+  // session ref only exists once the run is done); handoffState re-runs it
+  // when a handoff is armed or consumed.
   const options = useAsync<any>(
     () => get(`/api/tasks/${taskId}/continue-options${runtimeTouched && runtimeChoice ? `?runtimeId=${runtimeChoice}` : ""}`),
-    [taskId, runtimeTouched, runtimeChoice, previousRuntimeId, handoffState]
+    [taskId, runtimeTouched, runtimeChoice, previousRuntimeId, previousRunStatus, handoffState]
   );
 
   // Visible defaults — the submitted ids are always the concrete values on
@@ -934,31 +1008,59 @@ function Composer({
         ? defaultModelId
         : providerDefaultModelId || (modelList[0]?.id ?? "");
 
-  const submit = async () => {
+  /** POST /continue with the composer's current selections. */
+  const postContinue = (allowDegraded: boolean) =>
+    post(`/api/tasks/${taskId}/continue`, {
+      prompt: prompt.trim(),
+      runtimeId: effectiveRuntimeId || undefined,
+      // Harness-native targets never bind an AgentFabric model (v6 §3).
+      modelId: harnessNativeTarget ? undefined : effectiveModelId || undefined,
+      profileId: profileId || undefined,
+      // Set only after the user explicitly accepts a degraded context.
+      allowDegradedHandoff: allowDegraded || undefined,
+    });
+
+  const submit = async (allowDegraded = false) => {
     if (!prompt.trim() || busy) return;
     setBusy(true);
     setError(null);
-    // Without an armed/ready handoff, announce the handoff here — it is
-    // generated server-side before the run exists, which can take a while.
-    // An armed handoff is consumed instantly, so no announcement is needed.
-    const opts = options.data;
-    const willHandoff = opts?.suggestedContinuity === "handoff" && opts.currentRuntime && opts.targetRuntime;
-    const announceHere = willHandoff && !handoffState && !opts.handoffReady;
-    if (announceHere) {
-      onHandoffStart();
-    }
     try {
-      await post(`/api/tasks/${taskId}/continue`, {
-        prompt: prompt.trim(),
-        runtimeId: effectiveRuntimeId || undefined,
-        // Harness-native targets never bind an AgentFabric model (v6 §3).
-        modelId: harnessNativeTarget ? undefined : effectiveModelId || undefined,
-        profileId: profileId || undefined,
-      });
+      await postContinue(allowDegraded);
+      setPrompt("");
+      setDegradedError(null);
+      onSubmitted();
+    } catch (e) {
+      // The server owns the resume-vs-handoff decision: the preview shown
+      // here can be a stale snapshot (e.g. taken while the previous run was
+      // still starting, before its native session ref existed), so the client
+      // must never refuse to send on its own. The server refuses with
+      // `handoff-required` when a handoff genuinely does not exist yet —
+      // then we ask, generate, and send.
+      if (e instanceof ApiError && e.code === "handoff-required") {
+        setHandoffGate(true);
+      } else if (e instanceof ApiError && e.allowDegraded) {
+        // The model summary is unavailable: do not silently degrade — ask.
+        setDegradedError(e.message);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Explicit gate confirmed: generate the handoff, then send the message. */
+  const generateThenSubmit = async () => {
+    setHandoffGate(false);
+    setBusy(true);
+    setError(null);
+    try {
+      await post(`/api/tasks/${taskId}/handoff`, {});
+      onSubmitted();
+      await postContinue(false);
       setPrompt("");
       onSubmitted();
     } catch (e) {
-      if (announceHere) onHandoffAbort();
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -968,6 +1070,24 @@ function Composer({
   return (
     <div className="thread-composer-wrap">
       <ErrorBox message={error} />
+      {handoffGate && (
+        <HandoffConfirmModal
+          thenSubmit
+          targetName={effectiveRuntime?.name}
+          onClose={() => setHandoffGate(false)}
+          onConfirm={() => void generateThenSubmit()}
+        />
+      )}
+      {degradedError && (
+        <DegradedHandoffModal
+          message={degradedError}
+          onClose={() => setDegradedError(null)}
+          onConfirm={() => {
+            setDegradedError(null);
+            void submit(true);
+          }}
+        />
+      )}
       <div className="composer thread-composer">
         <textarea
           ref={promptRef}
@@ -985,7 +1105,7 @@ function Composer({
             className="pill"
             value={effectiveRuntimeId}
             onChange={(e) => selectRuntime(e.target.value)}
-            title="Target runtime — same harness resumes, different harness hands off"
+            title="Target runtime for the next message"
           >
             {runtimeList.map((r: any) => (
               <option key={r.id} value={r.id}>Runtime: {r.name} ({r.kind})</option>
@@ -1021,7 +1141,7 @@ function Composer({
               <Icon name="stop" size={11} /> Stop
             </button>
           )}
-          <button className="send" title="Continue task (⌘↵)" disabled={busy || live || !prompt.trim()} onClick={submit}>
+          <button className="send" title="Continue task (⌘↵)" disabled={busy || live || !prompt.trim()} onClick={() => submit()}>
             {busy ? <span className="spinner" /> : <Icon name="arrowUp" size={16} />}
           </button>
         </div>

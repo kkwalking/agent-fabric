@@ -1425,6 +1425,33 @@ a:hover {
   background: var(--panel-2);
 }
 
+/* ---------- Degraded handoff (no model summary) ---------- */
+.handoff-degraded {
+  color: var(--yellow, #d9a441);
+  border: 1px solid rgba(217, 164, 65, 0.45);
+  background: rgba(217, 164, 65, 0.1);
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 11.5px;
+}
+.handoff-degraded-detail {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+.handoff-degraded-reason {
+  color: var(--red);
+  font-size: 12.5px;
+  border-left: 2px solid var(--red);
+  padding-left: 10px;
+}
+.handoff-degraded-card {
+  border-color: rgba(217, 164, 65, 0.45);
+  background: rgba(217, 164, 65, 0.07);
+  margin: 12px 0;
+  font-size: 13px;
+}
+
 /* ---------- Modal (handoff confirmation) ---------- */
 
 .modal-overlay {

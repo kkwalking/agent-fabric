@@ -1,38 +1,43 @@
 /**
- * Handoff context generation aligned with the pi coding agent's session
- * compaction (pi: packages/coding-agent/src/core/compaction/).
+ * Handoff summary generation — writing the briefing that carries a task
+ * across a session boundary.
  *
- * Pi's compaction summarizes a conversation with an LLM into a
- * structured context checkpoint, supports iterative updates on top of a
- * previous summary, tracks file operations from tool calls and appends
- * them to the summary as XML tags, and retries transient summarization
- * failures with exponential backoff (pi-ai retryAssistantCall +
- * settings.retry defaults). AgentFabric reuses that exact pipeline —
- * prompts, serialization format, token budgets, file-list accumulation,
- * retry policy and failure checks are kept verbatim — to generate
- * handoff content between runs:
+ * ## Two different things, deliberately
+ *
+ * - **Context compaction** is an *intra-session* event: the harness (pi,
+ *   Claude Code, …) summarizes older turns of a live conversation to fit
+ *   the model's window, then keeps going in the **same** native session.
+ *   AgentFabric never does this — it belongs to the harness.
+ * - **A handoff summary** is *inter-session*: the current native session
+ *   ends, and a new one (usually on a different harness) starts with this
+ *   text as its only context. It is an explicit user action, recorded as a
+ *   `Handoff`.
+ *
+ * This module only ever produces the second. It borrows pi's *technique*
+ * (pi: packages/coding-agent/src/core/compaction/) because that technique
+ * — structured checkpoint prompts, iterative updates over a previous
+ * summary, file-operation tracking, transient-error retries — is exactly
+ * what a good handoff needs:
  *
  *   RunEvents → serializeConversation → <conversation>…</conversation>
- *             → (+ <previous-summary> from the previous handoff in the
- *                task's run chain, for pi's iterative update flow)
+ *             → (+ <previous-summary> from the last handoff checkpoint in
+ *                the task's run chain, for pi's iterative update flow)
  *             → SUMMARIZATION_PROMPT / UPDATE_SUMMARIZATION_PROMPT
  *             → LLM (retried on transient errors) → structured
  *               checkpoint + <read-files>/<modified-files>
  *             → HandoffContent
  *
- * Deliberate differences from in-session compaction: pi's cut-point
+ * Deliberate differences from pi's in-session compaction: pi's cut-point
  * logic (keepRecentTokens) selects what to keep in the SAME session; a
- * handoff starts a NEW native session where nothing is kept, so the
- * whole run is summarized — exactly like pi's own handoff extension.
+ * handoff starts a NEW native session where nothing is kept, so the whole
+ * covered range is summarized — exactly like pi's own handoff extension.
  * pi forwards the session's thinkingLevel on reasoning models; the
- * standalone completion client here does not (AgentFabric models carry
- * no thinking-level configuration). The summarizer prompt also gains
- * an authoritative <workspace> block pi does not need: pi summarizes
- * within the session's own working directory, while an AgentFabric
- * handoff crosses harnesses — the workspace identity must be stated,
- * never re-inferred from transcript residue. And where a failed
- * compaction fails the pi session, callers here fall back to the
- * heuristic generator so a handoff always exists.
+ * standalone completion client here does not (AgentFabric models carry no
+ * thinking-level configuration). The summarizer prompt also gains an
+ * authoritative <workspace> block pi does not need: pi summarizes within
+ * the session's own working directory, while a handoff crosses harnesses —
+ * the workspace identity must be stated, never re-inferred from transcript
+ * residue.
  */
 import type {
   Artifact,
@@ -46,21 +51,63 @@ import type {
 } from "./types.js";
 
 /* ------------------------------------------------------------------ */
-/* Settings (pi: DEFAULT_COMPACTION_SETTINGS)                          */
+/* Settings (mirrors pi: DEFAULT_COMPACTION_SETTINGS)                  */
 /* ------------------------------------------------------------------ */
 
 /**
- * Compaction settings for handoff summarization. `reserveTokens` mirrors
+ * Settings for handoff summarization. `reserveTokens` mirrors
  * pi's default and drives the summary's max output tokens
  * (⌊0.8 × reserveTokens⌋, pi's generateSummaryWithUsage budget).
+ *
+ * `contextWindow` and `charsPerToken` drive the *input* budget: the
+ * transcript of a long task is chunked so no single summarization call
+ * exceeds the model's context, with each chunk's checkpoint feeding the
+ * next as `<previous-summary>` (pi's iterative update, applied inside one
+ * generation). No tokenizer is bundled, so the budget is a character
+ * estimate — deliberately conservative for CJK (`charsPerToken: 2`).
  */
-export interface CompactionSettings {
+export interface HandoffSummarySettings {
   reserveTokens: number;
+  /** Model context window in tokens; the input budget derives from it. */
+  contextWindow?: number;
+  /**
+   * Characters per token used for budgeting. Lower = more conservative
+   * (fewer characters per call, more chunks). 0 disables chunking.
+   */
+  charsPerToken?: number;
 }
 
-export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
+export const DEFAULT_HANDOFF_SUMMARY_SETTINGS: HandoffSummarySettings = {
   reserveTokens: 16384,
+  contextWindow: 128_000,
+  charsPerToken: 2,
 };
+
+/** Room reserved inside the context window for prompts and chat scaffolding. */
+const PROMPT_OVERHEAD_TOKENS = 2_000;
+
+/**
+ * Output-token cap for one summary call: pi's ⌊0.8 × reserveTokens⌋, never
+ * more than half a known context window (a fixed pi default would not fit
+ * a small-window model).
+ */
+function outputTokenCap(settings: HandoffSummarySettings): number {
+  const base = Math.floor(0.8 * settings.reserveTokens);
+  const window = settings.contextWindow ?? 0;
+  return window > 0 ? Math.min(base, Math.floor(window / 2)) : base;
+}
+
+/**
+ * Character budget for one summarization call's transcript. `0` means
+ * "no limit" (chunking disabled). Exposed for tests and preview tooling.
+ */
+export function summarizationInputBudgetChars(settings: HandoffSummarySettings): number {
+  const charsPerToken = settings.charsPerToken ?? 2;
+  if (charsPerToken <= 0) return 0;
+  const window = settings.contextWindow ?? 128_000;
+  const inputTokens = Math.max(window - outputTokenCap(settings) - PROMPT_OVERHEAD_TOKENS, 1_000);
+  return inputTokens * charsPerToken;
+}
 
 /* ------------------------------------------------------------------ */
 /* Prompts (pi: core/compaction/compaction.ts + utils.ts, verbatim)    */
@@ -220,19 +267,35 @@ function isObj(v: unknown): v is Record<string, unknown> {
  * calls join with `; ` and consecutive thinking parts with `\n`, the way
  * pi renders them within one assistant message. Tool results are
  * truncated to TOOL_RESULT_MAX_CHARS exactly like pi.
+ *
+ * The serialization is split so a handoff can cover several runs as one
+ * transcript: `collectConversationParts` renders a single run's events,
+ * and `serializeRunChain` stitches the runs since the last checkpoint
+ * together (see `SummarizedTurn`).
  */
-export function serializeRunConversation(events: RunEvent[], task?: Task): string {
+
+/** True when a run's own events already echo a user turn. */
+function hasUserMessage(events: RunEvent[]): boolean {
+  return events.some((e) => e.type === "agent.message" && e.data?.role === "user");
+}
+
+/**
+ * One run's contribution to a multi-run handoff transcript.
+ *
+ * `userPrompt` is the run's bare user input (v5 §5). Real harnesses do not
+ * echo the user's turn back as an event — only the `mock` adapter emits a
+ * user-role `agent.message` — so without this the summarizer never sees
+ * what the user actually asked on any turn after the first, and the
+ * handoff can only restate the original task.
+ */
+export interface SummarizedTurn {
+  events: RunEvent[];
+  userPrompt?: string;
+}
+
+/** Collect one run's events as pi-style transcript parts (no leading user turn). */
+function collectConversationParts(events: RunEvent[]): SerializedPart[] {
   const parts: SerializedPart[] = [];
-
-  // The task prompt is the conversation's opening user message; runs
-  // may not echo it back as an agent.message event.
-  const hasUserMessage = events.some(
-    (e) => e.type === "agent.message" && e.data?.role === "user"
-  );
-  if (task && !hasUserMessage) {
-    parts.push({ kind: "user", text: taskLabel(task) });
-  }
-
   let pendingShellOutput: string[] = [];
   const flushShell = () => {
     if (pendingShellOutput.length) {
@@ -307,9 +370,15 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
     }
   }
   flushShell();
+  return parts;
+}
 
-  // Coalesce runs of like parts the way pi renders one assistant
-  // message: thinking blocks join with newlines, tool calls with "; ".
+/**
+ * Coalesce runs of like parts the way pi renders one assistant message
+ * (thinking blocks join with newlines, tool calls with `; `) and render
+ * the transcript labels.
+ */
+function renderConversationParts(parts: SerializedPart[]): string {
   const coalesced: SerializedPart[] = [];
   for (const p of parts) {
     const last = coalesced[coalesced.length - 1];
@@ -335,6 +404,38 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
     }
   });
   return rendered.join("\n\n");
+}
+
+export function serializeRunConversation(events: RunEvent[], task?: Task): string {
+  const parts = collectConversationParts(events);
+  // The task prompt is the conversation's opening user message; runs
+  // may not echo it back as an agent.message event.
+  if (task && !hasUserMessage(events)) {
+    parts.unshift({ kind: "user", text: taskLabel(task) });
+  }
+  return renderConversationParts(parts);
+}
+
+/**
+ * Serialize several runs as ONE pi transcript — the handoff's actual
+ * coverage. Every run contributes its bare user input (`userPrompt`), so
+ * the summarizer sees each intermediate request instead of only the
+ * original task, and the runs read as one continuous conversation exactly
+ * like pi's iterative compaction over a single session.
+ *
+ * `task` is only a fallback for a first turn with no recorded
+ * `userPrompt` (e.g. an imported thread whose turns predate the field).
+ */
+export function serializeRunChain(turns: SummarizedTurn[], task?: Task): string {
+  const parts: SerializedPart[] = [];
+  turns.forEach((turn, index) => {
+    if (!hasUserMessage(turn.events)) {
+      const text = turn.userPrompt?.trim() || (index === 0 && task ? taskLabel(task) : "");
+      if (text) parts.push({ kind: "user", text });
+    }
+    parts.push(...collectConversationParts(turn.events));
+  });
+  return renderConversationParts(parts);
 }
 
 /* ------------------------------------------------------------------ */
@@ -476,7 +577,7 @@ export function createHttpCompletionFn(
   const type = provider.type;
   if (type === "custom") {
     return async () => {
-      throw new Error(`Provider "${provider.name}" has wire format "custom" — cannot generate a compaction summary`);
+      throw new Error(`Provider "${provider.name}" has wire format "custom" — cannot generate a handoff summary`);
     };
   }
 
@@ -598,6 +699,15 @@ export function createHttpCompletionFn(
 
 /** Safety cap for the one-off summary call (pi relies on the caller's signal). */
 const HANDOFF_SUMMARY_TIMEOUT_MS = 120_000;
+
+/**
+ * Default total budget for ONE handoff generation, covering every chunk and
+ * retry. The per-attempt cap above bounds a single call; without a total
+ * budget a chunked generation is unbounded (N sequential calls), and a
+ * `continue` request would hang on it. Overridable per call via
+ * `HandoffSummaryInput.timeoutMs`.
+ */
+export const HANDOFF_GENERATION_BUDGET_MS = 180_000;
 
 /* ------------------------------------------------------------------ */
 /* Retry (pi: pi-ai utils/retry.ts retryAssistantCall + settings.retry */
@@ -815,70 +925,188 @@ export function taskLabel(task: Task): string {
   return task.title === task.prompt ? `#${task.title}` : `#${task.title}: ${task.prompt}`;
 }
 
-export interface CompactionHandoffInput {
+export interface HandoffSummaryInput {
   task: Task;
   run: Run;
+  /**
+   * Every event the summary must cover. With `turns` this is the
+   * concatenation of their events (file-operation tracking runs over it);
+   * without it, a single run's events.
+   */
   events: RunEvent[];
+  /**
+   * The ordered runs this handoff covers — everything since the last
+   * checkpoint, ending with `run`. Omitted for a single-run summary.
+   */
+  turns?: SummarizedTurn[];
   artifacts: Artifact[];
   workspace?: Workspace;
   runtimeName?: string;
-  /** Summary of the handoff the summarized run consumed (iterative update). */
+  /** Checkpoint the covered runs continue from (pi: iterative update). */
   previousSummary?: string;
   /** Optional custom focus (pi: customInstructions). */
   customInstructions?: string;
   complete: CompletionFn;
-  settings?: CompactionSettings;
+  settings?: HandoffSummarySettings;
   /** Retry policy for the summary call (pi: settings.retry; default 3/2s). */
   retry?: SummaryRetryPolicy;
   /** Cap from the model's parameters, when configured (pi: model.maxTokens). */
   modelMaxTokens?: number;
+  /** Model context window, when configured; overrides the settings default. */
+  modelContextWindow?: number;
+  /**
+   * Caller cancellation. Aborting it (client disconnect, explicit cancel)
+   * stops the in-flight summary call and the retry backoff.
+   */
   signal?: AbortSignal;
+  /**
+   * Total wall-clock budget for the whole generation (all chunks, all
+   * retries). `0`/omitted = no total budget beyond the per-call cap.
+   */
+  timeoutMs?: number;
 }
 
-export interface CompactionHandoffResult {
+export interface HandoffSummaryResult {
   /** The raw pi-format checkpoint (structured summary + file XML tags). */
   summary: string;
   content: HandoffContent;
   usage?: { inputTokens: number; outputTokens: number };
+  /** Summarization calls used; > 1 when the covered runs were chunked. */
+  chunks: number;
 }
 
 /**
- * Generate handoff content through pi's compaction pipeline: serialize
- * the run, call the LLM with pi's prompts, enforce pi's failure checks,
- * append tracked file lists and map the checkpoint into HandoffContent.
- * Throws on failure — callers fall back to the heuristic generator.
+ * Split the covered runs into as few chunks as fit the summarization input
+ * budget. Chunking keeps the *order* of runs: each chunk is summarized and
+ * its checkpoint becomes the next chunk's `<previous-summary>`, so the
+ * final checkpoint still covers every run — pi's iterative update applied
+ * within a single generation. A single turn larger than the budget gets a
+ * chunk of its own (the caller truncates it).
  */
-export async function generateCompactionHandoff(input: CompactionHandoffInput): Promise<CompactionHandoffResult> {
+export function chunkTurns(
+  turns: SummarizedTurn[],
+  task: Task | undefined,
+  budgetChars: number
+): SummarizedTurn[][] {
+  if (turns.length === 0) return [];
+  if (budgetChars <= 0) return [turns];
+  const chunks: SummarizedTurn[][] = [];
+  let current: SummarizedTurn[] = [];
+  let size = 0;
+  for (const turn of turns) {
+    const cost = serializeRunChain([turn], task).length;
+    if (current.length > 0 && size + cost > budgetChars) {
+      chunks.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(turn);
+    size += cost;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Generate a handoff summary through pi's compaction technique: serialize
+ * the covered run(s), call the LLM with pi's prompts, enforce pi's failure
+ * checks, append tracked file lists and map the checkpoint into
+ * HandoffContent. Long tasks are summarized in chunks (see `chunkTurns`),
+ * so a large transcript never silently overflows the context.
+ *
+ * The whole generation is cancellable: the caller's `signal` (client
+ * disconnect / explicit cancel) and the total `timeoutMs` budget both
+ * abort the in-flight call and the retry backoff, and the thrown message
+ * says which fired. Other failures throw too — callers decide between
+ * erroring and an explicit degraded mode.
+ */
+export async function generateHandoffSummary(input: HandoffSummaryInput): Promise<HandoffSummaryResult> {
   const { task, run, events, artifacts, workspace, complete } = input;
-  const settings = input.settings ?? DEFAULT_COMPACTION_SETTINGS;
+  const settings: HandoffSummarySettings =
+    input.modelContextWindow && !input.settings?.contextWindow
+      ? { ...(input.settings ?? DEFAULT_HANDOFF_SUMMARY_SETTINGS), contextWindow: input.modelContextWindow }
+      : input.settings ?? DEFAULT_HANDOFF_SUMMARY_SETTINGS;
 
   const modelMax = input.modelMaxTokens ?? 0;
-  const maxTokens = Math.floor(0.8 * settings.reserveTokens); // pi: floor(0.8 × reserveTokens)
+  const baseMax = outputTokenCap(settings);
+  const maxTokens = modelMax > 0 ? Math.min(baseMax, modelMax) : baseMax;
+  const budgetChars = summarizationInputBudgetChars(settings);
 
-  const conversationText = serializeRunConversation(events, task);
-  const prompt = buildSummarizationPrompt(conversationText, input.previousSummary, input.customInstructions, workspace);
+  const turns = input.turns ?? [{ events, userPrompt: run.userPrompt }];
+  if (turns.length === 0) throw new Error("Summarization has no runs to cover");
 
-  const response = await retryCompletion(
-    () =>
-      complete({
-        systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-        prompt,
-        maxTokens: modelMax > 0 ? Math.min(maxTokens, modelMax) : maxTokens,
-        signal: input.signal,
-      }),
-    input.retry ?? DEFAULT_SUMMARY_RETRY_POLICY,
-    input.signal
-  );
+  // One controller for the whole generation, driven by the caller's signal
+  // and the total budget. Without it, a chunked generation had no upper
+  // bound at all: N sequential calls, each capped only individually.
+  const budgetMs = input.timeoutMs ?? 0;
+  const controller = new AbortController();
+  let timedOut = false;
+  const onCallerAbort = () => controller.abort();
+  if (input.signal?.aborted) controller.abort();
+  else input.signal?.addEventListener("abort", onCallerAbort, { once: true });
+  const timer =
+    budgetMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, budgetMs)
+      : undefined;
+  const signal = controller.signal;
+  const abortMessage = () =>
+    timedOut
+      ? `Summarization exceeded its ${budgetMs >= 1000 ? `${Math.round(budgetMs / 1000)}s` : `${budgetMs}ms`} budget`
+      : "Summarization was cancelled";
 
-  const failure = getSummarizationFailure(response, "Summarization");
-  if (failure) throw new Error(failure);
-  if (!response.text.trim()) throw new Error("Summarization returned an empty summary");
+  let summary = input.previousSummary;
+  let chunks = 0;
+  const usage = { inputTokens: 0, outputTokens: 0 };
 
-  const fileOps = extractFileOperations(events, input.previousSummary);
-  const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+  try {
+    for (const chunk of chunkTurns(turns, task, budgetChars)) {
+      if (signal.aborted) throw new Error(abortMessage());
+      let conversationText = serializeRunChain(chunk, task);
+      if (budgetChars > 0 && conversationText.length > budgetChars) {
+        conversationText = truncateForSummary(conversationText, budgetChars);
+      }
+      const prompt = buildSummarizationPrompt(conversationText, summary, input.customInstructions, workspace);
 
-  const summary = stripCheckpointPreamble(response.text) + formatFileOperations(readFiles, modifiedFiles);
-  const content = compactionSummaryToHandoffContent(summary, {
+      const response = await retryCompletion(
+        () =>
+          complete({
+            systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+            prompt,
+            maxTokens,
+            signal,
+          }),
+        input.retry ?? DEFAULT_SUMMARY_RETRY_POLICY,
+        signal
+      );
+      // A cancelled/timed-out call surfaces as an abort, not as a provider
+      // error — report the real reason instead of "operation aborted".
+      if (signal.aborted) throw new Error(abortMessage());
+
+      const failure = getSummarizationFailure(response, "Summarization");
+      if (failure) throw new Error(failure);
+      if (!response.text.trim()) throw new Error("Summarization returned an empty summary");
+      chunks += 1;
+      if (response.usage) {
+        usage.inputTokens += response.usage.inputTokens;
+        usage.outputTokens += response.usage.outputTokens;
+      }
+
+      // File lists accumulate chunk over chunk exactly like pi's iterative
+      // update, because the running checkpoint carries the XML tags forward.
+      const chunkEvents = chunk.flatMap((t) => t.events);
+      const fileOps = extractFileOperations(chunkEvents, summary);
+      const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+      summary = stripCheckpointPreamble(response.text) + formatFileOperations(readFiles, modifiedFiles);
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+    input.signal?.removeEventListener("abort", onCallerAbort);
+  }
+
+  const content = handoffCheckpointToContent(summary!, {
     task,
     run,
     artifacts,
@@ -886,7 +1114,7 @@ export async function generateCompactionHandoff(input: CompactionHandoffInput): 
     runtimeName: input.runtimeName,
   });
 
-  return { summary, content, usage: response.usage };
+  return { summary: summary!, content, usage, chunks };
 }
 
 /* ------------------------------------------------------------------ */
@@ -940,11 +1168,12 @@ function stripXmlTags(summary: string): string {
 /**
  * Map a pi-format checkpoint (plus run metadata that pi tracks
  * separately in its session entries) onto AgentFabric's HandoffContent.
- * `compactionSummary` keeps the full checkpoint verbatim — the rendered
- * handoff prompt embeds it as-is so the next agent receives exactly
- * what pi's compaction would have produced.
+ * `compactionSummary` keeps the full checkpoint verbatim — the field name
+ * is historical (the format is pi's compaction checkpoint); the rendered
+ * handoff prompt embeds it as-is so the next agent receives exactly the
+ * checkpoint text, with no lossy re-rendering.
  */
-export function compactionSummaryToHandoffContent(
+export function handoffCheckpointToContent(
   summary: string,
   meta: {
     task: Task;

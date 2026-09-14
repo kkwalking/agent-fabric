@@ -1,10 +1,11 @@
 import { Store, newId } from "./store.js";
 import { now } from "./services.js";
-import { stripCheckpointPreamble, taskLabel } from "./compaction.js";
+import { stripCheckpointPreamble, taskLabel } from "./handoffSummary.js";
 import type {
   Artifact,
   Handoff,
   HandoffContent,
+  HandoffGeneration,
   HandoffSource,
   ID,
   Run,
@@ -226,6 +227,8 @@ export interface NewHandoffInput {
   toRuntimeKind?: RuntimeKind;
   source: HandoffSource;
   sources?: HandoffSource[];
+  /** How the content was produced (compaction / degraded digest / harness). */
+  generation?: HandoffGeneration;
   content: HandoffContent;
   userNotes?: string;
   workspaceId?: ID;
@@ -265,6 +268,7 @@ export class HandoffService {
       toRuntimeKind: input.toRuntimeKind,
       source: input.source,
       sources,
+      generation: input.generation,
       content: input.content,
       userNotes: input.userNotes,
       workspaceId: input.workspaceId,

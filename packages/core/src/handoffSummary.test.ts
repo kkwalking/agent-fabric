@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DEFAULT_COMPACTION_SETTINGS,
+  DEFAULT_HANDOFF_SUMMARY_SETTINGS,
   SUMMARIZATION_PROMPT,
   SUMMARIZATION_SYSTEM_PROMPT,
   UPDATE_SUMMARIZATION_PROMPT,
@@ -20,13 +20,14 @@ import {
   createFileOps,
   extractFileOperations,
   formatFileOperations,
-  generateCompactionHandoff,
+  generateHandoffSummary,
   getSummarizationFailure,
+  serializeRunChain,
   serializeRunConversation,
   stripCheckpointPreamble,
   type CompletionFn,
   type CompletionRequest,
-} from "./compaction.js";
+} from "./handoffSummary.js";
 import { renderHandoffPrompt } from "./handoff.js";
 import type { Handoff, Run, RunEvent, Task, Workspace } from "./types.js";
 import { freshHarness, makeFixtures, useBins, waitForRun } from "./testkit.js";
@@ -184,6 +185,55 @@ test("serializeRunConversation excludes orchestrator log events (server-side noi
 });
 
 /* ------------------------------------------------------------------ */
+/* serializeRunChain (multi-run handoff coverage)                      */
+/* ------------------------------------------------------------------ */
+
+test("serializeRunChain renders every run's user prompt as one transcript", () => {
+  const text = serializeRunChain(
+    [
+      { events: [ev("agent.message", { role: "assistant", content: "answer one" })], userPrompt: "question one" },
+      { events: [ev("agent.message", { role: "assistant", content: "answer two" })], userPrompt: "question two" },
+      { events: [ev("agent.message", { role: "assistant", content: "answer three" })], userPrompt: "question three" },
+    ],
+    task
+  );
+  const order = [
+    "[User]: question one",
+    "[Assistant]: answer one",
+    "[User]: question two",
+    "[Assistant]: answer two",
+    "[User]: question three",
+    "[Assistant]: answer three",
+  ].map((needle) => text.indexOf(needle));
+  assert.ok(order.every((i) => i >= 0), `all turns must be present:\n${text}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "turns must stay in run order");
+});
+
+test("serializeRunChain never doubles a user turn the run already echoed", () => {
+  const text = serializeRunChain(
+    [
+      {
+        events: [
+          ev("agent.message", { role: "user", content: "only once" }),
+          ev("agent.message", { role: "assistant", content: "ok" }),
+        ],
+        userPrompt: "only once",
+      },
+    ],
+    task
+  );
+  assert.equal(text.split("[User]: only once").length - 1, 1);
+});
+
+test("serializeRunChain falls back to the task label for a first turn with no userPrompt", () => {
+  const text = serializeRunChain(
+    [{ events: [ev("agent.message", { role: "assistant", content: "done" })] }],
+    task
+  );
+  assert.match(text, new RegExp(`\\[User\\]: #${task.title}: ${task.prompt}`));
+});
+
+/* ------------------------------------------------------------------ */
 /* File operations (pi: compaction/utils.ts)                           */
 /* ------------------------------------------------------------------ */
 
@@ -274,12 +324,12 @@ test("getSummarizationFailure reproduces pi's error/length guards", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* generateCompactionHandoff                                           */
+/* generateHandoffSummary                                           */
 /* ------------------------------------------------------------------ */
 
-test("generateCompactionHandoff produces a pi checkpoint mapped onto HandoffContent", async () => {
+test("generateHandoffSummary produces a pi checkpoint mapped onto HandoffContent", async () => {
   const requests: CompletionRequest[] = [];
-  const result = await generateCompactionHandoff({
+  const result = await generateHandoffSummary({
     task,
     run,
     events: [
@@ -298,7 +348,7 @@ test("generateCompactionHandoff produces a pi checkpoint mapped onto HandoffCont
   assert.equal(requests[0].systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
   assert.ok(requests[0].prompt.startsWith("<conversation>\n[User]: fix the tests"));
   assert.ok(requests[0].prompt.includes('<workspace>\nWorkspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.'));
-  assert.equal(requests[0].maxTokens, Math.floor(0.8 * DEFAULT_COMPACTION_SETTINGS.reserveTokens));
+  assert.equal(requests[0].maxTokens, Math.floor(0.8 * DEFAULT_HANDOFF_SUMMARY_SETTINGS.reserveTokens));
 
   // Summary = checkpoint + pi's file XML tags from tracked operations.
   assert.ok(result.summary.startsWith(CHECKPOINT));
@@ -318,9 +368,9 @@ test("generateCompactionHandoff produces a pi checkpoint mapped onto HandoffCont
   assert.ok(c.notesForNextAgent!.includes("handles concurrent refresh"));
 });
 
-test("generateCompactionHandoff passes previousSummary through the pi update flow", async () => {
+test("generateHandoffSummary passes previousSummary through the pi update flow", async () => {
   const requests: CompletionRequest[] = [];
-  await generateCompactionHandoff({
+  await generateHandoffSummary({
     task,
     run,
     events: [],
@@ -332,10 +382,10 @@ test("generateCompactionHandoff passes previousSummary through the pi update flo
   assert.ok(requests[0].prompt.endsWith(UPDATE_SUMMARIZATION_PROMPT));
 });
 
-test("generateCompactionHandoff accumulates file lists across iterative updates (pi)", async () => {
+test("generateHandoffSummary accumulates file lists across iterative updates (pi)", async () => {
   const previousSummary =
     CHECKPOINT + "\n\n<read-files>\nold.ts\n</read-files>\n\n<modified-files>\nmut.ts\n</modified-files>";
-  const result = await generateCompactionHandoff({
+  const result = await generateHandoffSummary({
     task,
     run,
     events: [ev("file.modified", { path: "b.ts" })],
@@ -358,9 +408,9 @@ test("stripCheckpointPreamble drops the summarizer's chain-of-thought preamble",
   assert.equal(stripCheckpointPreamble("just thinking out loud"), "just thinking out loud");
 });
 
-test("generateCompactionHandoff stores and renders a preamble-free checkpoint", async () => {
+test("generateHandoffSummary stores and renders a preamble-free checkpoint", async () => {
   const dirty = `Let me analyze this conversation carefully.\n\nLet me write the structured summary.\n${CHECKPOINT}`;
-  const result = await generateCompactionHandoff({
+  const result = await generateHandoffSummary({
     task,
     run,
     events: [],
@@ -383,7 +433,7 @@ test("parsed fields drop elaborated \"(none …)\" placeholder lines", async () 
     "## Next Steps", "1. Await the user's next instruction.", "",
     "## Critical Context", "- (none)",
   ].join("\n");
-  const result = await generateCompactionHandoff({
+  const result = await generateHandoffSummary({
     task,
     run,
     events: [],
@@ -398,7 +448,7 @@ test("parsed fields drop elaborated \"(none …)\" placeholder lines", async () 
 
 test("taskLabel does not repeat the prompt when the title defaults to it", async () => {
   const sameTask = { id: "task_1", title: "当前项目是什么语言写的", prompt: "当前项目是什么语言写的" } as Task;
-  const result = await generateCompactionHandoff({
+  const result = await generateHandoffSummary({
     task: sameTask,
     run,
     events: [],
@@ -408,14 +458,14 @@ test("taskLabel does not repeat the prompt when the title defaults to it", async
   assert.equal(result.content.originalTask, "#当前项目是什么语言写的");
 });
 
-test("generateCompactionHandoff retries transient summary errors with backoff (pi retryAssistantCall)", async () => {
+test("generateHandoffSummary retries transient summary errors with backoff (pi retryAssistantCall)", async () => {
   let calls = 0;
   const complete: CompletionFn = async () => {
     calls++;
     if (calls < 3) return { text: "", stopReason: "error", errorMessage: "HTTP 503: overloaded" };
     return { text: CHECKPOINT, stopReason: "stop" };
   };
-  const result = await generateCompactionHandoff({
+  const result = await generateHandoffSummary({
     task,
     run,
     events: [],
@@ -427,14 +477,14 @@ test("generateCompactionHandoff retries transient summary errors with backoff (p
   assert.ok(result.summary.startsWith("## Goal"));
 });
 
-test("generateCompactionHandoff fails fast on non-retryable errors (quota/billing)", async () => {
+test("generateHandoffSummary fails fast on non-retryable errors (quota/billing)", async () => {
   let calls = 0;
   const complete: CompletionFn = async () => {
     calls++;
     return { text: "", stopReason: "error", errorMessage: "HTTP 402: insufficient_quota" };
   };
   await assert.rejects(
-    generateCompactionHandoff({
+    generateHandoffSummary({
       task,
       run,
       events: [],
@@ -447,9 +497,9 @@ test("generateCompactionHandoff fails fast on non-retryable errors (quota/billin
   assert.equal(calls, 1, "deterministic quota errors must not be retried");
 });
 
-test("generateCompactionHandoff rejects incomplete summaries (pi failure checks)", async () => {
+test("generateHandoffSummary rejects incomplete summaries (pi failure checks)", async () => {
   await assert.rejects(
-    generateCompactionHandoff({
+    generateHandoffSummary({
       task,
       run,
       events: [],
@@ -459,7 +509,7 @@ test("generateCompactionHandoff rejects incomplete summaries (pi failure checks)
     /token cap/
   );
   await assert.rejects(
-    generateCompactionHandoff({
+    generateHandoffSummary({
       task,
       run,
       events: [],
@@ -585,13 +635,16 @@ test("assisted handoff is generated by the compaction pipeline end-to-end", asyn
     assert.ok(cont.handoff);
     assert.ok(cont.handoff!.content.compactionSummary!.startsWith("## Goal"));
     assert.equal(cont.handoff!.source, "agentfabric");
+    // A model summary, and the record says so (nothing to warn about).
+    assert.equal(cont.handoff!.generation?.method, "summarized");
+    assert.equal(cont.handoff!.generation?.chunks, 1);
     // The initial pi prompt was used (no previous summary for run #1).
     assert.ok(requests[requests.length - 1].prompt.endsWith(SUMMARIZATION_PROMPT));
     // The generation is observable on the summarized run's event log.
     const genEvt = h.runService
       .events(first.run.id)
       .find((e) => e.type === "handoff.generated");
-    assert.equal(genEvt?.data?.method, "compaction");
+    assert.equal(genEvt?.data?.method, "summarized");
     // The next harness receives the checkpoint verbatim in its instruction.
     assert.match(cont.run.inputInstruction!, /## Context checkpoint\n/);
     assert.ok(cont.run.inputInstruction!.includes(CHECKPOINT));
@@ -616,7 +669,7 @@ test("assisted handoff is generated by the compaction pipeline end-to-end", asyn
   }
 });
 
-test("compaction failure falls back to the heuristic generator, handoff still exists", async () => {
+test("a failed summarization errors instead of silently degrading", async () => {
   const fx = makeFixtures();
   const restore = useBins(fx);
   const h = await freshHarness({
@@ -632,23 +685,377 @@ test("compaction failure falls back to the heuristic generator, handoff still ex
     const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
     await waitForRun(h.runService, first.run.id);
 
+    await assert.rejects(
+      () =>
+        h.runService.continueTask(first.task.id, { prompt: "继续", runtimeId: oc.id, mode: "handoff" }),
+      (err: any) => {
+        assert.equal(err?.code, "handoff-unavailable");
+        assert.match(String(err?.message ?? ""), /invalid api key/);
+        return true;
+      }
+    );
+    // Nothing was stored and no run was started — the caller decides.
+    assert.equal(h.runService.forTask(first.task.id).length, 1);
+    assert.equal(h.store.list("handoffs").length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("an explicitly accepted degraded handoff is recorded as heuristic", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const h = await freshHarness({
+    completionFactory: () => async () => ({
+      text: "",
+      stopReason: "error",
+      errorMessage: "HTTP 401: invalid api key",
+    }),
+  });
+  try {
+    const oc = opencodeRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
+    await waitForRun(h.runService, first.run.id);
+
     const cont = await h.runService.continueTask(first.task.id, {
       prompt: "继续",
       runtimeId: oc.id,
       mode: "handoff",
+      allowDegradedHandoff: true,
     });
     assert.equal(cont.continuity, "handoff");
     assert.ok(cont.handoff);
+    // The degraded state rides on the record, not just the event log.
+    assert.equal(cont.handoff!.generation?.method, "heuristic");
+    assert.match(cont.handoff!.generation?.detail ?? "", /invalid api key/);
     assert.equal(cont.handoff!.content.compactionSummary, undefined);
     assert.match(cont.handoff!.content.notesForNextAgent!, /assembled by AgentFabric/);
     const genEvt = h.runService
       .events(first.run.id)
       .find((e) => e.type === "handoff.generated");
     assert.equal(genEvt?.data?.method, "heuristic");
-    assert.match(String(genEvt?.data?.detail ?? ""), /invalid api key/);
     // Structured (non-checkpoint) handoffs still render section-by-section.
     assert.match(cont.run.inputInstruction!, /## Original task/);
     await waitForRun(h.runService, cont.run.id);
+  } finally {
+    restore();
+  }
+});
+
+test("a long transcript is summarized in chunks, each updating the previous checkpoint", async () => {
+  const requests: CompletionRequest[] = [];
+  // Six turns, each far larger than the tiny budget below.
+  const turns = Array.from({ length: 6 }, (_, i) => ({
+    events: [
+      ev("agent.message", { role: "assistant", content: `answer ${i} `.repeat(200) }),
+      ...(i === 0 ? [ev("file.created", { path: "chunked.ts" })] : []),
+    ],
+    userPrompt: `question ${i}`,
+  }));
+  const result = await generateHandoffSummary({
+    task,
+    run,
+    events: turns.flatMap((t) => t.events),
+    turns,
+    artifacts: [],
+    complete: fakeCompletion(CHECKPOINT, requests),
+    // floor(window − output − overhead, 1000) × 1 char/token = 1000 chars.
+    settings: { reserveTokens: 16384, contextWindow: 1_000, charsPerToken: 1 },
+  });
+
+  assert.equal(result.chunks, 6, "one call per oversized turn");
+  assert.equal(requests.length, 6);
+  assert.ok(!requests[0].prompt.includes("<previous-summary>"), "the first chunk starts fresh");
+  assert.ok(requests[1].prompt.includes("<previous-summary>"), "later chunks iterate");
+  assert.ok(requests[5].prompt.endsWith(UPDATE_SUMMARIZATION_PROMPT));
+  // File operations accumulate chunk over chunk, like pi's iterative update.
+  assert.match(result.summary, /<modified-files>\nchunked\.ts\n<\/modified-files>/);
+  // The mapping still points at the final checkpoint.
+  assert.equal(result.content.compactionSummary, result.summary);
+});
+
+test("a small transcript stays a single summarization call", async () => {
+  const requests: CompletionRequest[] = [];
+  const result = await generateHandoffSummary({
+    task,
+    run,
+    events: [ev("agent.message", { role: "assistant", content: "short" })],
+    artifacts: [],
+    complete: fakeCompletion(CHECKPOINT, requests),
+  });
+  assert.equal(result.chunks, 1);
+  assert.equal(requests.length, 1);
+  assert.ok(!requests[0].prompt.includes("<previous-summary>"));
+});
+
+/* ------------------------------------------------------------------ */
+/* Cancellation and the total generation budget                        */
+/* ------------------------------------------------------------------ */
+
+/** A completion that never resolves on its own — only when aborted. */
+function hangingCompletion(onAbort: () => void): CompletionFn {
+  return (req) =>
+    new Promise((resolve) => {
+      req.signal?.addEventListener("abort", () => {
+        onAbort();
+        resolve({ text: "", stopReason: "error" as const, errorMessage: "aborted" });
+      });
+    });
+}
+
+test("the total budget aborts a long generation instead of hanging", async () => {
+  let aborted = false;
+  await assert.rejects(
+    () =>
+      generateHandoffSummary({
+        task,
+        run,
+        events: [],
+        artifacts: [],
+        complete: hangingCompletion(() => { aborted = true; }),
+        timeoutMs: 40,
+      }),
+    /budget/
+  );
+  assert.equal(aborted, true, "the in-flight summary call must receive the abort");
+});
+
+test("a caller abort cancels the generation and reports cancellation", async () => {
+  const controller = new AbortController();
+  let aborted = false;
+  const pending = generateHandoffSummary({
+    task,
+    run,
+    events: [],
+    artifacts: [],
+    complete: hangingCompletion(() => { aborted = true; }),
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(() => pending, /cancelled/);
+  assert.equal(aborted, true);
+});
+
+test("a cancelled continue never stores a degraded handoff", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  // Hangs until aborted, so the caller's signal is the only way out.
+  const h = await freshHarness({
+    completionFactory: () => hangingCompletion(() => {}),
+  });
+  try {
+    const oc = opencodeRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
+    await waitForRun(h.runService, first.run.id);
+
+    const controller = new AbortController();
+    const pending = h.runService.continueTask(
+      first.task.id,
+      { prompt: "继续", runtimeId: oc.id, mode: "handoff", allowDegradedHandoff: true },
+      { signal: controller.signal }
+    );
+    setTimeout(() => controller.abort(), 30);
+    await assert.rejects(
+      () => pending,
+      (err: any) => err?.code === "handoff-unavailable" && /cancelled/i.test(err.message)
+    );
+    // Even with degradation allowed, a gone caller gets no stored context.
+    assert.equal(h.store.list("handoffs").length, 0);
+  } finally {
+    restore();
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Handoff is explicit — never a side effect of sending a message      */
+/* ------------------------------------------------------------------ */
+
+test("sending a message never generates a handoff implicitly", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const requests: CompletionRequest[] = [];
+  const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
+  try {
+    const oc = opencodeRuntimeOf(h);
+    const pi = piRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
+    await waitForRun(h.runService, first.run.id);
+
+    const options = h.runService.continueOptions(first.task.id, pi.id);
+    assert.equal(options.suggestedContinuity, "handoff");
+    assert.equal(options.handoffAvailable, false, "nothing to consume yet");
+
+    await assert.rejects(
+      () => h.runService.continueTask(first.task.id, { prompt: "继续", runtimeId: pi.id }),
+      (err: any) => err?.code === "handoff-required"
+    );
+    // The refusal happens before any model call or stored record.
+    assert.equal(requests.length, 0, "no summarization may happen implicitly");
+    assert.equal(h.store.list("handoffs").length, 0);
+    assert.equal(h.runService.forTask(first.task.id).length, 1, "no run was created");
+  } finally {
+    restore();
+  }
+});
+
+test("an explicit handoff is consumed by the continuation instead of regenerated", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const requests: CompletionRequest[] = [];
+  const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
+  try {
+    const oc = opencodeRuntimeOf(h);
+    const pi = piRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
+    await waitForRun(h.runService, first.run.id);
+
+    // The explicit action (the UI's confirmed handoff) generates it…
+    const handoff = await h.runService.generateHandoff(first.task.id, pi.id);
+    assert.equal(requests.length, 1);
+    assert.equal(h.runService.continueOptions(first.task.id, pi.id).handoffAvailable, true);
+
+    // …and the continuation only consumes it.
+    const cont = await h.runService.continueTask(first.task.id, { prompt: "继续", runtimeId: pi.id });
+    assert.equal(cont.continuity, "handoff");
+    assert.equal(cont.handoff!.id, handoff.id, "reused, not regenerated");
+    assert.equal(requests.length, 1, "no second summarization call");
+    await waitForRun(h.runService, cont.run.id);
+  } finally {
+    restore();
+  }
+});
+
+
+
+/* ------------------------------------------------------------------ */
+/* Coverage across native-resume turns (the resume-chain fix)          */
+/* ------------------------------------------------------------------ */
+
+function piRuntimeOf(h: Awaited<ReturnType<typeof freshHarness>>) {
+  const rt = h.store.list("runtimes").find((r: any) => r.kind === "pi");
+  assert.ok(rt, "seeded pi runtime must exist");
+  return rt as { id: string };
+}
+
+test("the continuation preview is stale until the previous run finished", async () => {
+  // Documents why the *client* must never refuse to send based on its own
+  // resume/handoff preview: taken while the run is still starting, the
+  // preview has no native session ref to resume and reports "handoff",
+  // while the very same continuation resumes once the run completes.
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const h = await freshHarness();
+  try {
+    const pi = piRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "first turn", runtimeId: pi.id });
+    const early = h.runService.continueOptions(first.task.id);
+    if (h.runtimeSessions.list({ taskId: first.task.id }).length === 0) {
+      assert.equal(
+        early.suggestedContinuity,
+        "handoff",
+        "with no session ref yet the preview cannot see the resume"
+      );
+    }
+
+    await waitForRun(h.runService, first.run.id);
+    const late = h.runService.continueOptions(first.task.id);
+    assert.equal(late.suggestedContinuity, "resume", "the finished run resumes natively");
+
+    // The server, which sees the current state, resumes — no handoff is
+    // needed, and none may be generated implicitly.
+    const cont = await h.runService.continueTask(first.task.id, { prompt: "second turn", runtimeId: pi.id });
+    assert.equal(cont.continuity, "resume");
+    await waitForRun(h.runService, cont.run.id);
+  } finally {
+    restore();
+  }
+});
+
+test("a handoff after native-resume turns covers every run, user prompts included", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const requests: CompletionRequest[] = [];
+  const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
+  try {
+    const pi = piRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "MARKER_Q1", runtimeId: pi.id });
+    const run1 = await waitForRun(h.runService, first.run.id);
+    const run1Text = h.runService
+      .events(run1.id)
+      .filter((e) => e.type === "agent.message")
+      .map((e) => String(e.data?.content ?? ""))
+      .join("\n");
+    assert.ok(run1Text, "run 1 must have produced agent text");
+
+    // Same harness → native resume; no handoff is created anywhere.
+    const r2 = await h.runService.continueTask(first.task.id, { prompt: "MARKER_Q2", runtimeId: pi.id });
+    assert.equal(r2.continuity, "resume");
+    await waitForRun(h.runService, r2.run.id);
+
+    // Switching away summarizes runs 1..2 — not just the latest run.
+    const r3 = await h.runService.continueTask(first.task.id, {
+      prompt: "MARKER_Q3",
+      runtimeId: pi.id,
+      mode: "handoff",
+    });
+    await waitForRun(h.runService, r3.run.id);
+
+    const last = requests[requests.length - 1].prompt;
+    assert.ok(last.includes("[User]: MARKER_Q1"), "run 1's request must be covered");
+    assert.ok(last.includes("[User]: MARKER_Q2"), "run 2's request must be covered");
+    assert.ok(last.includes(run1Text), "run 1's work must be covered");
+    // No checkpoint existed before this summary, so nothing to iterate on.
+    assert.ok(!last.includes("<previous-summary>"));
+    // ...and the consuming harness receives the full checkpoint.
+    assert.match(r3.run.inputInstruction!, /## Context checkpoint/);
+  } finally {
+    restore();
+  }
+});
+
+test("the iterative update resumes from the newest checkpoint even across resume turns", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const requests: CompletionRequest[] = [];
+  const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
+  try {
+    const pi = piRuntimeOf(h);
+    const first = await h.runService.submit({ prompt: "MARKER_Q1", runtimeId: pi.id });
+    await waitForRun(h.runService, first.run.id);
+
+    // run 2: forced handoff → checkpoint h1 covers run 1; run 2 consumes it.
+    const r2 = await h.runService.continueTask(first.task.id, {
+      prompt: "MARKER_Q2",
+      runtimeId: pi.id,
+      mode: "handoff",
+    });
+    assert.ok(r2.handoff!.content.compactionSummary);
+    await waitForRun(h.runService, r2.run.id);
+
+    // run 3: plain resume of run 2's native session (never touches a handoff).
+    const r3 = await h.runService.continueTask(first.task.id, { prompt: "MARKER_Q3", runtimeId: pi.id });
+    assert.equal(r3.continuity, "resume");
+    await waitForRun(h.runService, r3.run.id);
+
+    // run 4: handoff again → iterate from h1 and cover runs 2..3.
+    const r4 = await h.runService.continueTask(first.task.id, {
+      prompt: "MARKER_Q4",
+      runtimeId: pi.id,
+      mode: "handoff",
+    });
+    await waitForRun(h.runService, r4.run.id);
+
+    const last = requests[requests.length - 1].prompt;
+    assert.ok(last.includes("<previous-summary>"), "resume turns must not drop the checkpoint");
+    assert.ok(
+      last.includes("Added a retry wrapper around the OAuth mock"),
+      "the previous checkpoint content is carried verbatim"
+    );
+    assert.ok(last.includes("[User]: MARKER_Q2"), "the checkpoint's consuming run is re-covered");
+    assert.ok(last.includes("[User]: MARKER_Q3"), "the resume run is covered");
+    // run 1 already lives inside the checkpoint — re-serializing it doubles it.
+    assert.ok(!last.includes("[User]: MARKER_Q1"), "already-checkpointed runs must not repeat");
+    assert.ok(last.endsWith(UPDATE_SUMMARIZATION_PROMPT));
   } finally {
     restore();
   }

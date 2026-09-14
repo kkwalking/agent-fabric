@@ -20,6 +20,7 @@ import {
 import { HandoffService } from "./handoff.js";
 import { ContainerLeaseManager, resolveLifecycle, type ContainerOps } from "./lifecycle.js";
 import { buildAssistedHandoffContent, renderHandoffPrompt } from "./handoff.js";
+import { testCompletionFactory } from "./testkit.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import type { AgentRuntimeAdapter, RuntimeContext, RuntimeResult } from "./runtime.js";
 import type { Run } from "./types.js";
@@ -75,7 +76,7 @@ async function freshHarness(): Promise<Harness> {
   registry.register(mockAdapter);
   registry.register(customAdapter);
   await seedDefaults(store);
-  const runService = new RunService(store, bus, registry);
+  const runService = new RunService(store, bus, registry, undefined, testCompletionFactory);
   return {
     store,
     runService,
@@ -359,7 +360,6 @@ test("switching harness performs a handoff, not a session migration", async () =
   const options = h.runService.continueOptions(taskId, customRuntime.id);
   assert.equal(options.resumeAvailable, false);
   assert.equal(options.suggestedMode, "handoff");
-  assert.ok(options.handoffPreview);
 
   const result = await h.runService.continueTask(taskId, {
     prompt: "continue with two failing tests",
@@ -401,7 +401,7 @@ test("switching harness performs a handoff, not a session migration", async () =
   // ...and switching back to pi-like harness produces a second handoff
   // from execution records (AgentFabric-assisted, since the custom
   // harness cannot generate handoffs).
-  const back = await h.runService.continueTask(taskId, { prompt: "switch back", runtimeId: mockRuntime.id });
+  const back = await h.runService.continueTask(taskId, { prompt: "switch back", runtimeId: mockRuntime.id, mode: "handoff" });
   assert.equal(back.continuity, "handoff");
   assert.equal(back.handoff!.source, "agentfabric");
   assert.equal(back.handoff!.fromRuntimeKind, "custom");

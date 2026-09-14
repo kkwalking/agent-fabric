@@ -97,7 +97,7 @@ npm run dev:web
 v6（`v6.md`）接入本机 **Codex CLI** 作为 Harness，核心目标是：用户在 Codex 里做到一半（额度耗尽或主动切换），能通过 AgentFabric 把工作自然交接给 Pi / OpenCode，无需重新解释上下文。
 
 > **Harness identity stays native. Codex subscription is used through Codex itself.**
-> **Same Harness means Resume. Different Harness means Handoff.**
+> **A native session only ever resumes on its own harness. A Handoff is an explicit action that carries the task into a new native session.**
 
 * **Codex Local Runtime（`kind: codex`，仅本地执行）**：直接使用本机已安装的 `codex` CLI（`codex exec --json`），执行任务、捕获 thread id、解析事件（agent_message / reasoning / command_execution / file_change / mcp_tool_call / web_search / turn usage）、保存 `RuntimeSessionRef`（`runtimeKind=codex, nativeSessionRef=thread id, executionBackend=local, resumeSupported=true`），并用 `codex exec resume <id>` 原生续接。容器化在本阶段被明确拒绝。
 * **Harness-native 认证（`credentialSource: "harness-native"`）**：Codex 使用自己的 ChatGPT 登录与套餐额度；AgentFabric 只通过 `codex --version` / `codex login status` 检测「已安装 / 已登录 / 可用」，**不读取、不复制、不保存**任何 access token / refresh token / auth 文件，也绝不把 Codex 登录转换成 AgentFabric Provider。未登录时 Run 快速失败并给出 `codex login` 修复指引。
@@ -127,7 +127,7 @@ v7（`v7.md`）以同样的 harness-native 模式接入本机 **Claude Code CLI*
 > **Task 可以跨多个 Run 持续存在，Workspace 保存工作成果，同 Harness 使用 Native Resume，不同 Harness 通过 Handoff 完成交接，而 Runtime Container 根据执行需要动态创建和销毁。**
 
 核心抽象：`Provider · Model · Runtime · Task · Run · Workspace · Handoff · Artifact`。
-设计原则：Containers are disposable；Workspace is durable；Harness sessions stay native；**Same Harness → Resume，Different Harness → Handoff**；Workspace + Handoff 提供跨 Runtime 连续性；AgentFabric 只编排执行，不统一 Agent 认知。
+设计原则：Containers are disposable；Workspace is durable；Harness sessions stay native；**Resume 只在原生那把 Harness 内自动发生，跨会话必须由显式 Handoff 开启**；Workspace + Handoff 提供跨 Runtime 连续性；AgentFabric 只编排执行，不统一 Agent 认知。
 
 ### Runtime Container 生命周期
 
@@ -149,7 +149,10 @@ Workspace 是持久、Runtime-neutral 的一等资源：Task 引用（而非拥�
 * **Runtime Native State**：Harness 用于 Native Resume 的私有状态（Session 存储、内部数据库等）由 AgentFabric 以 Opaque 目录持久化（Create / Mount / Preserve / Reattach / Delete），与 Workspace 严格区分——Workspace 是用户的工作内容，Native State 是 Harness 的私有数据。
 * **Resume**（同 Harness）：`continueTask` 优先用存储的 native ref 恢复 Harness 自己的 Session（本地与容器化执行语义一致）。
 * **Handoff**（跨 Harness 或无法 Resume）：生成语义化的工作交接（不迁移 Session，新 Harness 创建全新 Native Session），并以渲染后的 Handoff + 用户补充说明作为新 Run 的输入指令。
-* **Handoff 来源**：Harness 自产（adapter 声明 `supportsHandoffGeneration` 并在结果中返回内容）/ **AgentFabric 辅助生成 —— 对齐 pi coding agent 的 Context Compaction 实现**（`core/compaction.ts`：把上一个 Run 的事件序列化为 pi 风格对话记录，用 pi 原版的 Summarization System Prompt 与结构化 Checkpoint 模板（Goal / Constraints & Preferences / Progress / Key Decisions / Next Steps / Critical Context）调用任务模型生成摘要；任务链上前一份 Handoff 的摘要作为 `<previous-summary>` 进入 pi 的迭代更新流程；从工具调用与文件变化追踪 read/modified 文件并以 `<read-files>` / `<modified-files>` XML 追加；沿用 pi 的 0.8 × reserveTokens 摘要预算与 error/length 失败检查，失败时回退到旧的启发式提取）/ 用户补充说明（`userNotes`）。带 Checkpoint 的 Handoff（`content.compactionSummary`）在渲染进新 Run 输入指令时逐字嵌入。所有 Handoff 记录 from/to Runtime、来源 Run、Workspace 与 Artifacts，可查询可追踪。
+* **Handoff 来源**：Harness 自产（adapter 声明 `supportsHandoffGeneration` 并在结果中返回内容）/ **AgentFabric 辅助生成 —— 用 pi coding agent 的 Compaction 提示词/格式来写 Handoff 摘要**（`core/handoffSummary.ts`：把**上一次 Checkpoint 之后的所有 Run** 序列化为**一段** pi 风格对话记录——每个 Run 的 bare `userPrompt`（v5 §5）都作为 `[User]` 进入记录，因此中间轮次的用户指令不再丢失；用 pi 原版的 Summarization System Prompt 与结构化 Checkpoint 模板（Goal / Constraints & Preferences / Progress / Key Decisions / Next Steps / Critical Context）调用任务模型生成摘要；已有 Checkpoint 的摘要作为 `<previous-summary>` 进入 pi 的迭代更新流程；超长任务按输入预算**分块增量摘要**（每块的 Checkpoint 作为下一块的 `<previous-summary>`），不会因上下文超限而失败；从工具调用与文件变化追踪 read/modified 文件并以 `<read-files>` / `<modified-files>` XML 跨块累积；沿用 pi 的 0.8 × reserveTokens 摘要预算（且不超过模型上下文窗口的一半）与 error/length 失败检查）/ 用户补充说明（`userNotes`）。带 Checkpoint 的 Handoff（`content.compactionSummary`）在渲染进新 Run 输入指令时逐字嵌入。所有 Handoff 记录 from/to Runtime、来源 Run、Workspace 与 Artifacts，可查询可追踪。
+* **Handoff ≠ Context Compaction（两个必须分清的概念）**：**Context Compaction 是会话内的**——harness（pi / Claude Code）为了让活会话装进模型窗口而摘要较早的轮次，之后**继续用同一个 native session**；AgentFabric 从不做这件事，它属于 harness。**Handoff 是跨会话的**——当前 native session 结束，新的 session（通常换 harness）以这份摘要作为唯一上下文，并落库为一条 `Handoff` 记录。因此：**Handoff 永远只能被显式触发**（UI 的 Generate handoff 按钮 / `POST /api/tasks/:id/handoff` / `mode: "handoff"`），发送消息绝不会「顺手」生成一个——`continueTask` 在需要 handoff 却没有现成的时候抛 `HandoffRequiredError`（`code: "handoff-required"`），由前端弹确认后再生成并发送。
+* **Handoff 生成失败不再静默降级**：摘要模型不可用（未配置 provider/model、调用失败、上下文/失败检查不通过）时，默认**报错**并携带 `code: "handoff-unavailable"`——显式 Handoff 请求（`POST /api/tasks/:id/handoff`、`mode: "handoff"`）直接失败；隐式跨 Harness 继续返回 409，由前端向用户说明原因后，**只有用户显式确认**才以 `allowDegradedHandoff: true` 继续。此时产出结构化摘要（任务 / 文件变更 / 工具 / 末条消息），并在 `handoff.generation.method = "heuristic"` 上标注为**降级**，UI 显著提示「非模型摘要」——降级永远可见、永不冒充摘要。Thread Adoption 属系统路径，自动带 `allowDegraded: true` 以保证接管不被阻塞。
+* **生成可取消、总时长有上界**：整次 handoff 生成（含分块与重试）受总预算约束（`HANDOFF_GENERATION_BUDGET_MS`，默认 180s；单次调用另有 120s 安全上限），超预算即中止并进入上面的失败策略；同时把调用方的 `AbortSignal` 一路透传到模型调用与重试退避——HTTP 客户端断开、或点 Handoff 生成弹层的 Cancel，都会**真正停止服务端工作**，而不是只停止等待。被取消的请求永远按取消处理，不会落成降级 handoff。
 * **Runtime Capability**：adapter 声明 `supportsNativeSession / supportsNativeResume / supportsStreamingEvents / supportsHandoffGeneration / supportsWorkspace / supportsInteractiveExecution`，并可通过 `containerizedCapabilities` 按执行后端收窄——声明的能力必须在当前 Execution Backend 下真实可用；AgentFabric 据此决定 Resume 或 Handoff，`GET /api/tasks/:id/continue-options` 让用户在执行前明确看到即将发生的是 Resume 还是 Handoff。
 
 
@@ -175,7 +178,7 @@ v3（`v3.md`）在不新增核心抽象的前提下，让现有抽象**真正正
   * Local 与 Docker 共用同一个 Harness Parser（事件 / Session Ref / Usage / 错误），Execution Backend 只做传输。
 * **真实 Usage / Cost 进入 Run Usage**：Harness Adapter 从权威事件（Pi `message_end.message.usage`、OpenCode `step_finish` 的 `tokens`+`cost`）解析 Input/Output/Reasoning/Cache tokens 与真实成本，写入 Run Usage（`reasoningTokens` 新增），并产生 `usage.updated` 事件；不再把 Usage 只当普通事件。
 * **容器镜像策略（Harness Execution Contract）**：见 `docs/harness-image-contract.md`。容器化 OpenCode 默认使用当前官方维护镜像 `ghcr.io/anomalyco/opencode`；容器化 Pi 没有官方镜像，未配置镜像（`runtime.image` 或 `AGENTFABRIC_PI_IMAGE`）时**拒绝启动**并提示契约，绝不静默回退到不含 Pi CLI 的普通 Node 镜像——参考镜像见 `docker/pi.Dockerfile`。
-* **Native Resume 条件收紧**：自动 Resume 需要 **Same Harness × Same Workspace × 有效 RuntimeSessionRef × Native State 真实存在（目录在磁盘上）× 当前执行方式下能力成立**。不同 Workspace 不复用旧 Native Session（走 Handoff / 新 Session）；本地与容器化会话不互串。判定集中在一个可扩展的 Resume Gate，为未来（Runtime/Harness/Native State 版本、模型等维度）预留空间。
+* **Native Resume 条件收紧**：自动 Resume 需要 **Same Harness × Same Workspace × 有效 RuntimeSessionRef × Native State 真实存在（目录在磁盘上）× 当前执行方式下能力成立**。不满足时不会自动降级——需要显式 Handoff 才能开新 Session（不同 Workspace、本地与容器化会话都不互串）；判定集中在一个可扩展的 Resume Gate，为未来（Runtime/Harness/Native State 版本、模型等维度）预留空间。
 * **Capability = Harness × Backend × Runtime Config**：容器化 Runtime 未配置可用镜像时，`supportsNativeSession/Resume/StreamingEvents` 自动收窄为 false——声明的能力必须在当前实际执行方式下成立。
 * **Run 级 Policy 生效**：continuation 传入的 `policy`（如 `autoApprove` → OpenCode `--auto`）现在真正传递给 Harness Adapter。
 
@@ -240,8 +243,8 @@ af containers kept
 | Method | Path | 说明 |
 | --- | --- | --- |
 | GET | `/api/tasks/:id` `/api/tasks/:id/runs` | Task 详情 / Run 链 |
-| GET | `/api/tasks/:id/continue-options` | Resume vs Handoff 决策预览（含 Handoff 内容预览） |
-| POST | `/api/tasks/:id/continue` | 继续任务（自动/强制 Resume 或 Handoff） |
+| GET | `/api/tasks/:id/continue-options` | Resume vs Handoff 决策预览（不生成内容） |
+| POST | `/api/tasks/:id/continue` | 继续任务（自动/强制 Resume 或 Handoff）；摘要不可用时返回 409 `handoff-unavailable`，带 `allowDegradedHandoff: true` 可显式降级 |
 | GET | `/api/handoffs?taskId=&runId=` `/api/handoffs/:id` | Handoff 查询 |
 | POST | `/api/handoffs/:id/notes` | 追加用户说明 |
 | GET | `/api/runtime-sessions` `/api/runtime-sessions/:id` | 原生 Session 引用 |

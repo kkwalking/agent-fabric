@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgentFabric Handoff 上下文模型 — 预期 vs 实际</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-2: #1e222d;
+    --line: #2b3040;
+    --text: #e6e9f0;
+    --muted: #9aa3b5;
+    --user: #3b82f6;
+    --agent: #22c55e;
+    --handoff: #a855f7;
+    --resume: #64748b;
+    --bad: #ef4444;
+    --warn: #f59e0b;
+    --ok: #22c55e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    padding: 28px 32px 18px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #141823, #0f1117);
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; letter-spacing: .2px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 32px 64px; }
+
+  nav.tabs { display: flex; gap: 8px; margin: 22px 0 20px; flex-wrap: wrap; }
+  nav.tabs button {
+    background: var(--panel); color: var(--muted); border: 1px solid var(--line);
+    padding: 9px 16px; border-radius: 8px; cursor: pointer; font-size: 13px;
+    font-family: inherit; transition: .15s;
+  }
+  nav.tabs button:hover { color: var(--text); border-color: #3b4254; }
+  nav.tabs button.active {
+    background: #202636; color: #fff; border-color: #3d475e;
+    box-shadow: inset 0 0 0 1px #4b5670;
+  }
+  .scenario { display: none; }
+  .scenario.active { display: block; animation: fade .18s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; } }
+
+  .note {
+    border: 1px solid var(--line); border-left: 3px solid var(--handoff);
+    background: var(--panel); border-radius: 8px; padding: 12px 16px; margin: 0 0 22px;
+    color: #cbd2e0; font-size: 13px;
+  }
+  .note b { color: #fff; }
+
+  /* ---------- lanes / timeline ---------- */
+  .lane {
+    border: 1px solid var(--line); border-radius: 12px;
+    background: var(--panel); padding: 16px 18px 18px; margin-bottom: 0;
+  }
+  .lane-title {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    font-size: 13px; font-weight: 600; margin-bottom: 14px; color: #dfe4ee;
+  }
+  .lane-title .tag {
+    font-size: 11px; font-weight: 500; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
+  }
+  .steps { display: flex; flex-direction: column; gap: 10px; }
+
+  .step { display: grid; grid-template-columns: 26px 1fr; gap: 12px; }
+  .rail { position: relative; display: flex; justify-content: center; }
+  .rail::before {
+    content: ""; position: absolute; top: 0; bottom: -10px; width: 2px; background: var(--line);
+  }
+  .step:last-child .rail::before { bottom: 50%; }
+  .dot {
+    position: relative; z-index: 1; width: 11px; height: 11px; border-radius: 50%;
+    margin-top: 7px; background: var(--resume); box-shadow: 0 0 0 3px var(--panel);
+  }
+  .dot.new { background: #38bdf8; }
+  .dot.resume { background: var(--resume); }
+  .dot.handoff { background: var(--handoff); }
+  .dot.bad { background: var(--bad); }
+
+  .card {
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel-2); padding: 10px 12px;
+  }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .run { font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cdd5e6; }
+  .badge {
+    font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid transparent; letter-spacing: .2px;
+  }
+  .badge.new { color: #7dd3fc; background: #0c2b3d; border-color: #14506d; }
+  .badge.resume { color: #cbd5e1; background: #262b36; border-color: #3a4152; }
+  .badge.handoff { color: #d8b4fe; background: #2c1b40; border-color: #5b2e86; }
+
+  .bubble {
+    border-radius: 8px; padding: 7px 11px; margin-top: 6px; font-size: 13px;
+    border: 1px solid transparent;
+  }
+  .bubble.user { background: #12233d; border-color: #1e3f68; color: #cfe3ff; }
+  .bubble.user::before { content: "👤 "; }
+  .bubble.agent { background: #10261a; border-color: #1e4a2e; color: #cdf1d9; }
+  .bubble.agent::before { content: "🤖 "; }
+  .bubble.ghost { opacity: .45; border-style: dashed; }
+
+  .step-note {
+    margin-top: 7px; font-size: 12px; color: var(--muted);
+  }
+  .step-note.bad { color: #fca5a5; }
+  .step-note.warn { color: #fcd34d; }
+  .step-note.ok { color: #86efac; }
+
+  .switch {
+    display: flex; align-items: center; gap: 12px; padding: 14px 4px;
+    color: var(--muted); font-size: 12.5px;
+  }
+  .switch .bar { flex: 1; height: 1px; background: var(--line); }
+  .switch .pill {
+    border: 1px dashed #5b2e86; color: #d8b4fe; background: #221636;
+    border-radius: 999px; padding: 4px 12px; white-space: nowrap;
+  }
+
+  /* ---------- handoff payload ---------- */
+  .payload {
+    margin-top: 22px; border: 1px solid #4a2b6b; border-radius: 12px;
+    background: #1a1327; overflow: hidden;
+  }
+  .payload-head {
+    padding: 11px 16px; background: #241838; border-bottom: 1px solid #3b2456;
+    font-weight: 600; font-size: 13px; color: #e9d5ff;
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  .payload-head .meta { font-weight: 400; color: #b79cd8; font-size: 12px; }
+  .payload-body { padding: 14px 16px; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .compare { grid-template-columns: 1fr; } }
+  .compare h4 { margin: 0 0 8px; font-size: 12.5px; color: #cbb8e6; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-size: 12px; border-radius: 6px; padding: 3px 9px;
+    border: 1px solid var(--line); background: #20222e; color: #cbd2e0;
+  }
+  .chip.ok { border-color: #1e4a2e; background: #10261a; color: #bbf7d0; }
+  .chip.miss { border-color: #5b2020; background: #2a1414; color: #fca5a5; text-decoration: line-through; }
+  .chip.dim { opacity: .5; }
+
+  pre.body {
+    margin: 12px 0 0; padding: 12px 14px; border-radius: 8px; overflow: auto;
+    background: #0d0b12; border: 1px solid #33234a; color: #d5c9e8;
+    font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  pre.body .c { color: #8b7aa8; }
+
+  /* ---------- defect callouts ---------- */
+  .defects { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 22px; }
+  @media (max-width: 860px) { .defects { grid-template-columns: 1fr; } }
+  .defect {
+    border: 1px solid #5b2020; border-left: 3px solid var(--bad);
+    background: #1c1315; border-radius: 10px; padding: 13px 16px;
+  }
+  .defect h3 { margin: 0 0 6px; font-size: 13.5px; color: #fecaca; }
+  .defect p { margin: 0 0 8px; font-size: 12.5px; color: #e3c9c9; }
+  .defect code, .note code, .payload code {
+    font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #241a1a; border: 1px solid #402020; border-radius: 4px; padding: 1px 5px; color: #f0b9b9;
+  }
+  .note code, .payload code { background: #241d33; border-color: #3b2c52; color: #d8b4fe; }
+  .defect .ref { font-size: 11.5px; color: #b58c8c; }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 4px 0 18px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+  footer {
+    border-top: 1px solid var(--line); margin-top: 40px; padding: 20px 32px 40px;
+    color: var(--muted); font-size: 12px;
+  }
+  footer h2 { font-size: 13px; color: #cbd2e0; margin: 0 0 10px; }
+  footer ul { margin: 0; padding-left: 18px; }
+  footer li { margin-bottom: 5px; }
+  footer code {
+    font: 11.5px ui-monospace, Menlo, monospace; color: #d8b4fe;
+    background: #201a2c; border: 1px solid #372a4c; border-radius: 4px; padding: 1px 5px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgentFabric Handoff 上下文模型：我的预期 vs 代码实际</h1>
+  <p>场景：同一个任务先在一个 harness 上进行了 n 轮对话，然后切换/继续到另一个 harness。</p>
+</header>
+
+<div class="wrap">
+  <nav class="tabs">
+    <button data-tab="expected" class="active">① 我预期的效果</button>
+    <button data-tab="actual">② 修复前：默认路径</button>
+    <button data-tab="contrast">③ 修复前：每轮显式 handoff</button>
+    <button data-tab="fixed">④ 修复后（当前代码）</button>
+    <button data-tab="failure">⑤ 摘要失败策略</button>
+    <button data-tab="concepts">⑥ Handoff ≠ Compaction</button>
+  </nav>
+
+  <div class="note" style="border-left-color:var(--ok)">
+    <b>状态：</b>①②③ 是修复前的诊断快照；<b>④ 是当前代码的真实行为</b>，已经和 ① 的预期一致；⑤ 是摘要不可用时的处理策略；⑥ 是必须分清的两个概念。
+  </div>
+
+  <div class="legend">
+    <span><i style="background:#38bdf8"></i>new（首个 run）</span>
+    <span><i style="background:#64748b"></i>resume（原生会话内，无 handoff）</span>
+    <span><i style="background:#a855f7"></i>handoff（新建原生会话）</span>
+    <span><i style="background:#ef4444"></i>信息缺口</span>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- ① EXPECTED                                                    -->
+  <!-- ============================================================ -->
+  <section class="scenario active" id="expected">
+    <div class="note">
+      <b>你的预期：</b>提问1/回答1 … 提问n/回答n 累积成 <b>handoff 1</b>；目标 harness 开新会话时收到
+      <b>(handoff 1 + 提问n+1)</b> 并产出回答n+1；此后 提问n+2 / 回答n+2 在这个新会话里继续。
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness A · pi <span class="tag">提问 1 … n 都在这里</span></div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot new"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 1</span><span class="badge new">new</span></div>
+            <div class="bubble user">提问 1 · 原始任务</div>
+            <div class="bubble agent">回答 1</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 2</span><span class="badge resume">resume</span></div>
+            <div class="bubble user">提问 2</div>
+            <div class="bubble agent">回答 2</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">…</span><span class="badge resume">resume</span></div>
+            <div class="bubble user">提问 k</div>
+            <div class="bubble agent">回答 k</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card" style="border-color:#4a2b6b">
+            <div class="card-head"><span class="run">run n</span><span class="badge resume">resume</span>
+              <span class="badge handoff">→ 生成 handoff 1</span></div>
+            <div class="bubble user">提问 n</div>
+            <div class="bubble agent">回答 n</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="switch">
+      <span class="bar"></span>
+      <span class="pill">handoff 1 = 提问1/回答1 … 提问n/回答n 的完整摘要</span>
+      <span class="bar"></span>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness B · 新会话 <span class="tag">handoff 注入 = 新会话的唯一上下文</span></div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n+1</span><span class="badge handoff">handoff</span></div>
+            <div class="bubble user" style="border-color:#5b2e86;background:#221636;color:#e9d5ff">
+              handoff 1 + 提问 n+1
+            </div>
+            <div class="bubble agent">回答 n+1</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n+2</span><span class="badge resume">resume</span></div>
+            <div class="bubble user">提问 n+2</div>
+            <div class="bubble agent">回答 n+2</div>
+            <div class="step-note ok">✓ 这一段的行为与预期一致：注入整个 rendered prompt，之后在 B 的原生会话里正常 resume。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="payload">
+      <div class="payload-head">
+        <span>handoff 1 的期望内容</span>
+        <span class="meta">目标：新 harness 不依赖旧 harness 的会话状态也能完整接手</span>
+      </div>
+      <div class="payload-body">
+        <div class="chips">
+          <span class="chip ok">提问 1 / 回答 1</span>
+          <span class="chip ok">提问 2 / 回答 2</span>
+          <span class="chip ok">…</span>
+          <span class="chip ok">提问 n / 回答 n</span>
+          <span class="chip ok">文件改动 / 决策 / 待办</span>
+        </div>
+        <p class="step-note">这正是 pi 的「迭代更新」模型：每一轮在上一次 checkpoint 基础上 <code>&lt;previous-summary&gt;</code> + UPDATE，逐轮累积。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ② ACTUAL                                                      -->
+  <!-- ============================================================ -->
+  <section class="scenario" id="actual">
+    <div class="note" style="border-left-color:var(--bad)">
+      <b>实际发生：</b>提问1..n 之间每次同 harness 继续都走 <b>native resume</b>，全程不产生任何 handoff；
+      切换 harness 时才临时生成 <b>handoff 1</b>。而它只 summarize <b>最后一个 run 的事件</b> —— 前面几轮直接消失。
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness A · pi <span class="tag">run 1 = new，run 2..n = resume</span></div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot new"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 1</span><span class="badge new">new</span>
+              <span class="badge" style="color:#fca5a5;background:#2a1414;border-color:#5b2020">generatedHandoffId: undefined</span></div>
+            <div class="bubble user">提问 1 · 原始任务</div>
+            <div class="bubble agent">回答 1</div>
+            <div class="step-note bad">✗ 此后再也没被任何摘要读到</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot bad"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 2</span><span class="badge resume">resume</span>
+              <span class="badge" style="color:#fca5a5;background:#2a1414;border-color:#5b2020">previousHandoffId: undefined</span></div>
+            <div class="bubble user ghost">提问 2</div>
+            <div class="bubble agent ghost">回答 2</div>
+            <div class="step-note bad">✗ 提问 2 从未写入事件日志；回答 2 不在最后一次摘要的输入里</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot bad"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">…</span><span class="badge resume">resume</span></div>
+            <div class="bubble user ghost">提问 k</div>
+            <div class="bubble agent ghost">回答 k</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card" style="border-color:#4a2b6b">
+            <div class="card-head"><span class="run">run n</span><span class="badge resume">resume</span>
+              <span class="badge handoff">→ 生成 handoff 1</span></div>
+            <div class="bubble user ghost">提问 n</div>
+            <div class="bubble agent">回答 n</div>
+            <div class="step-note warn">只有 run n 的事件 + 原始任务进了摘要输入</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="switch">
+      <span class="bar"></span>
+      <span class="pill" style="border-color:#7f1d1d;color:#fca5a5;background:#2a1414">
+        handoff 1 = 原始任务 + 回答 n（回答1..n-1、提问2..n 全部缺失）
+      </span>
+      <span class="bar"></span>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness B · 新会话 <span class="tag">注入机制本身是正确的</span></div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n+1</span><span class="badge handoff">handoff</span></div>
+            <div class="bubble user" style="border-color:#7f1d1d;background:#2a1414;color:#fecaca">
+              handoff 1（残缺） + 提问 n+1
+            </div>
+            <div class="bubble agent">回答 n+1</div>
+            <div class="step-note ok">✓ 新会话确实只以 handoff 为上下文，注入路径没问题。</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n+2</span><span class="badge resume">resume</span></div>
+            <div class="bubble user">提问 n+2</div>
+            <div class="bubble agent">回答 n+2</div>
+            <div class="step-note ok">✓ 与预期一致。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="payload" style="border-color:#5b2020;background:#1c1315">
+      <div class="payload-head" style="background:#241a1a;border-color:#402020;color:#fecaca">
+        <span>handoff 1 的实际内容（对照）</span>
+        <span class="meta" style="color:#c99b9b">输入 transcript = 2 行</span>
+      </div>
+      <div class="payload-body">
+        <div class="compare">
+          <div>
+            <h4>我的预期包含</h4>
+            <div class="chips">
+              <span class="chip ok">提问 1 / 回答 1</span>
+              <span class="chip ok">提问 2 / 回答 2</span>
+              <span class="chip ok">…</span>
+              <span class="chip ok">提问 n / 回答 n</span>
+            </div>
+          </div>
+          <div>
+            <h4>实际包含</h4>
+            <div class="chips">
+              <span class="chip ok">提问 1（原始任务，taskLabel 兜底）</span>
+              <span class="chip miss">回答 1</span>
+              <span class="chip miss">提问 2</span>
+              <span class="chip miss">回答 2</span>
+              <span class="chip miss">…</span>
+              <span class="chip miss">提问 n</span>
+              <span class="chip ok">回答 n + 工具调用</span>
+            </div>
+          </div>
+        </div>
+        <pre class="body"><span class="c">&lt;!-- 实际送给 summarizer 的全文（真实适配器路径，pi） --&gt;</span>
+&lt;conversation&gt;
+[User]: #&lt;task title&gt;: 提问 1                  <span class="c">← 只有原始任务这一句用户输入</span>
+[Assistant tool calls]: bash(...); bash(ls)
+[Assistant]: 回答 n                          <span class="c">← 只有最后一个 run 的输出</span>
+&lt;/conversation&gt;
+
+&lt;workspace&gt; … &lt;/workspace&gt;
+<span class="c">（没有 &lt;previous-summary&gt;：因为 resume run 没有 previousHandoffId）</span></pre>
+      </div>
+    </div>
+
+    <div class="defects">
+      <div class="defect">
+        <h3>缺口 A · resume 打断累积链</h3>
+        <p>迭代更新的来源只有一跳：<code>previousRun.previousHandoffId</code>。而 resume run 永远没有这个字段，于是
+        <code>&lt;previous-summary&gt;</code> 不出现，之前所有轮次都不再被更新进新 checkpoint。</p>
+        <p class="ref">orchestrator.ts：<code>consumedHandoff = previousRun.previousHandoffId ? … : undefined</code>　·　
+        v1.test.ts：<code>resume must not create a handoff</code></p>
+      </div>
+      <div class="defect">
+        <h3>缺口 B · 中间轮的用户提问根本没进摘要</h3>
+        <p>序列化时只在「没有任何 user 事件」时补一句原始任务。而 pi / opencode / claude-code / codex
+        <b>都只发 assistant 事件</b>，只有 mock 适配器会写 user 事件 —— 所以 提问2..提问n 对 summarizer 完全不可见。</p>
+        <p class="ref">handoffSummary.ts：<code>serializeRunConversation</code> 的 <code>taskLabel(task)</code> 兜底　·　
+        pi.ts / opencode.ts / claudecode.ts / codex.ts 均为 <code>role: "assistant"</code></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ③ CONTRAST                                                    -->
+  <!-- ============================================================ -->
+  <section class="scenario" id="contrast">
+    <div class="note" style="border-left-color:var(--warn)">
+      <b>对照：</b>如果每一轮都<u>显式</u>用 handoff（而不是让它走 native resume），累积链就能接上 ——
+      回答会逐轮累积。但缺口 B 依然存在：<b>提问2..n 在任何路径下都不会进摘要</b>。
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness A · 每轮 continue mode = "handoff"</div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 1</span><span class="badge new">new</span>
+              <span class="badge handoff">→ handoff₁</span></div>
+            <div class="bubble user">提问 1</div>
+            <div class="bubble agent">回答 1</div>
+            <div class="step-note ok">handoff₁ = 提问1 + 回答1</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 2</span><span class="badge handoff">handoff</span>
+              <span class="badge handoff">→ handoff₂ (UPDATE)</span></div>
+            <div class="bubble user">handoff₁ + 提问 2</div>
+            <div class="bubble agent">回答 2</div>
+            <div class="step-note warn">handoff₂ = UPDATE(handoff₁, 回答2) —— 提问 2 仍然不在输入里</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n</span><span class="badge handoff">handoff</span>
+              <span class="badge handoff">→ handoffₙ</span></div>
+            <div class="bubble user">handoffₙ₋₁ + 提问 n</div>
+            <div class="bubble agent">回答 n</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="switch">
+      <span class="bar"></span>
+      <span class="pill" style="border-color:#7c5a12;color:#fcd34d;background:#2a2110">
+        handoffₙ = 提问1 + 回答1..回答n（提问2..n 缺失）
+      </span>
+      <span class="bar"></span>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness B · 新会话</div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n+1</span><span class="badge handoff">handoff</span></div>
+            <div class="bubble user" style="border-color:#5b2e86;background:#221636;color:#e9d5ff">handoffₙ + 提问 n+1</div>
+            <div class="bubble agent">回答 n+1</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="payload" style="border-color:#7c5a12;background:#1e1a10">
+      <div class="payload-head" style="background:#2a2110;border-color:#4a3a12;color:#fde68a">
+        <span>三种路径对比</span>
+      </div>
+      <div class="payload-body">
+        <div class="chips">
+          <span class="chip">默认（resume…→handoff）：只剩 提问1 + 回答n</span>
+          <span class="chip">每轮显式 handoff：提问1 + 回答1..n</span>
+          <span class="chip ok">预期：提问1..n + 回答1..n</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ④ FIXED                                                       -->
+  <!-- ============================================================ -->
+  <section class="scenario" id="fixed">
+    <div class="note" style="border-left-color:var(--ok)">
+      <b>修复后：</b>handoff 覆盖「最后一个 checkpoint 之后的<b>全部 run</b>」，并且每个 run 的 bare user input
+      (<code>run.userPrompt</code>) 都作为 <code>[User]</code> 进入 transcript。resume 轮次不再丢，中间轮提问也可见 —— 与 ① 的预期一致。
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness A · pi <span class="tag">提问 1 … n 全部进入 handoff 1</span></div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot new"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 1</span><span class="badge new">new</span></div>
+            <div class="bubble user">提问 1 · 原始任务</div>
+            <div class="bubble agent">回答 1</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run 2</span><span class="badge resume">resume</span></div>
+            <div class="bubble user">提问 2</div>
+            <div class="bubble agent">回答 2</div>
+            <div class="step-note ok">✓ run.userPrompt 被序列化进 transcript（真实适配器不发 user 事件也不再丢）</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">…</span><span class="badge resume">resume</span></div>
+            <div class="bubble user">提问 k</div>
+            <div class="bubble agent">回答 k</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card" style="border-color:#1e4a2e">
+            <div class="card-head"><span class="run">run n</span><span class="badge resume">resume</span>
+              <span class="badge handoff">→ 生成 handoff 1</span></div>
+            <div class="bubble user">提问 n</div>
+            <div class="bubble agent">回答 n</div>
+            <div class="step-note ok">✓ 从「最后一个 checkpoint 之后」到 run n 的所有 run 一起被摘要</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="switch">
+      <span class="bar"></span>
+      <span class="pill" style="border-color:#1e4a2e;color:#86efac;background:#10261a">
+        handoff 1 = 提问1..n + 回答1..n 的完整累积
+      </span>
+      <span class="bar"></span>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Harness B · 新会话</div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n+1</span><span class="badge handoff">handoff</span></div>
+            <div class="bubble user" style="border-color:#5b2e86;background:#221636;color:#e9d5ff">handoff 1 + 提问 n+1</div>
+            <div class="bubble agent">回答 n+1</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">run n+2</span><span class="badge resume">resume</span></div>
+            <div class="bubble user">提问 n+2</div>
+            <div class="bubble agent">回答 n+2</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="payload" style="border-color:#1e4a2e;background:#101a14">
+      <div class="payload-head" style="background:#10261a;border-color:#1e4a2e;color:#bbf7d0">
+        <span>修复后的摘要输入（示意）</span>
+        <span class="meta" style="color:#86c9a3">多 run 串成一段对话 + 迭代更新</span>
+      </div>
+      <div class="payload-body">
+        <pre class="body">&lt;conversation&gt;
+[User]: 提问 1                     <span class="c">← 现在每一轮的用户输入都在</span>
+[Assistant]: 回答 1
+[Assistant tool calls]: …
+[User]: 提问 2
+[Assistant]: 回答 2
+…
+[User]: 提问 n
+[Assistant]: 回答 n
+&lt;/conversation&gt;
+
+<span class="c">（若此前已有 checkpoint，则不再重复覆盖，走 pi 的迭代更新：）</span>
+&lt;previous-summary&gt;
+## Goal …  &lt;!-- 上次 checkpoint --&gt;
+&lt;/previous-summary&gt;</pre>
+        <div class="chips" style="margin-top:12px">
+          <span class="chip ok">提问 1 / 回答 1</span>
+          <span class="chip ok">提问 2 / 回答 2</span>
+          <span class="chip ok">…</span>
+          <span class="chip ok">提问 n / 回答 n</span>
+          <span class="chip ok">文件改动累积</span>
+        </div>
+        <p class="step-note ok" style="margin-top:10px">
+          锚点规则：从最新的、带 <code>compactionSummary</code> 的 handoff 之后开始覆盖 —— resume 轮次不会再打断累积，
+          已被 checkpoint 覆盖的 run 也不会重复摘要。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ⑤ FAILURE POLICY                                              -->
+  <!-- ============================================================ -->
+  <section class="scenario" id="failure">
+    <div class="note" style="border-left-color:var(--warn)">
+      <b>原则：降级永不静默。</b>摘要模型不可用时不再自动退回启发式 —— 要么给出真正的模型摘要，
+      要么报错并要求用户<u>显式选择</u>使用结构化降级上下文。
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">失败时的两条路径</div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot new"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">显式请求</span><span class="badge new">直接报错</span></div>
+            <div class="bubble user">Handoff 按钮 · <code>mode:"handoff"</code></div>
+            <div class="step-note bad">✗ 返回错误与原因，不产出任何 handoff —— 用户要的是摘要，给个假的等于欺骗</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">隐式跨 Harness</span><span class="badge handoff">409 → 用户确认</span></div>
+            <div class="bubble user">继续任务时自动需要 handoff</div>
+            <div class="step-note warn">⚠ 返回 <code>409 handoff-unavailable</code> + 原因；前端弹窗说明「将收到结构化摘要而非模型摘要」，
+              用户确认后才带 <code>allowDegradedHandoff: true</code> 重试</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">降级结果</span><span class="badge handoff">heuristic</span></div>
+            <div class="bubble agent">任务 / 文件变更 / 工具 / 末条消息</div>
+            <div class="step-note warn">记录 <code>generation.method = "heuristic"</code>：Task Thread banner、Handoff 详情页都标「⚠ 结构化降级（非模型摘要）」</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="defects" style="grid-template-columns:1fr">
+      <div class="defect" style="border-color:#1e4a2e;border-left-color:var(--ok);background:#101a14">
+        <h3 style="color:#bbf7d0">为什么不是「一律报错」</h3>
+        <p style="color:#cfe3d8">长任务恰恰最需要 handoff；纯 harness-native（Codex / Claude Code 跑自己账号、未配 provider）也需要跨 Harness 切换；
+          切换瞬间的 429/5xx 不该把机械操作变成死路。因此：<b>根因用分块摘要消除</b>（长任务不再超限），
+          <b>残余失败用显式选择兜住</b>，而不是把它变成不可完成。</p>
+      </div>
+    </div>
+
+    <div class="payload">
+      <div class="payload-head"><span>代码落点</span></div>
+      <div class="payload-body">
+        <div class="chips">
+          <span class="chip"><code>HandoffUnavailableError</code> · code <code>handoff-unavailable</code></span>
+          <span class="chip"><code>ContinueTaskInput.allowDegradedHandoff</code></span>
+          <span class="chip"><code>Handoff.generation</code>（method / detail / chunks）</span>
+          <span class="chip">server 409 + <code>allowDegraded: true</code></span>
+          <span class="chip">Chunked summarization（输入预算）</span>
+          <span class="chip">总预算 <code>HANDOFF_GENERATION_BUDGET_MS</code>（默认 180s）</span>
+          <span class="chip">AbortSignal 透传到 model call / 重试退避</span>
+        </div>
+        <p class="step-note" style="margin-top:12px">
+          时间边界：单次调用 ≤ 120s（安全上限）→ 整次生成 ≤ 180s（总预算，含分块与重试）。
+          客户端断开或点 Cancel 会通过 <code>AbortSignal</code> 真正中止服务端工作；被取消的请求始终按取消处理，<b>不会</b>落成降级 handoff。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ⑥ CONCEPTS                                                    -->
+  <!-- ============================================================ -->
+  <section class="scenario" id="concepts">
+    <div class="note" style="border-left-color:var(--handoff)">
+      <b>这是两个不同的东西。</b>AgentFabric 只负责 Handoff；会话内的上下文压缩属于 harness。
+    </div>
+
+    <div class="payload">
+      <div class="payload-head"><span>对照</span></div>
+      <div class="payload-body">
+        <div class="compare">
+          <div>
+            <h4>Context Compaction（上下文压缩）</h4>
+            <div class="chips">
+              <span class="chip">作用域：<b>会话内</b></span>
+              <span class="chip">native session：<b>继续用同一个</b></span>
+              <span class="chip">触发：harness 自动（token 超限）</span>
+              <span class="chip">产物：注入回同一会话的 checkpoint</span>
+              <span class="chip">实现者：<b>harness 自己</b>（pi / Claude Code）</span>
+            </div>
+          </div>
+          <div>
+            <h4>Handoff（交接）</h4>
+            <div class="chips">
+              <span class="chip ok">作用域：<b>跨会话</b>（通常跨 harness）</span>
+              <span class="chip ok">native session：<b>旧的结束，新的开始</b></span>
+              <span class="chip ok">触发：<b>用户显式动作</b></span>
+              <span class="chip ok">产物：落库的 <code>Handoff</code>，新会话唯一上下文</span>
+              <span class="chip ok">实现者：<b>AgentFabric</b></span>
+            </div>
+          </div>
+        </div>
+        <p class="step-note" style="margin-top:12px">
+          AgentFabric <b>从不压缩活会话</b>：那是 harness 在它自己的 native session 里做的事。
+          <code>core/handoffSummary.ts</code> 只是<b>借用</b> pi compaction 的提示词与格式来<b>写 handoff</b>。
+        </p>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">显式触发规则（当前代码）</div>
+      <div class="steps">
+        <div class="step"><div class="rail"><span class="dot new"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">发送消息</span><span class="badge new">auto</span></div>
+            <div class="bubble user">跨 harness 提交，但没有现成 handoff</div>
+            <div class="step-note warn">前端先弹确认（不发送）→ 用户确认后生成 handoff → 再发送消息</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot bad"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">服务端守门</span><span class="badge" style="color:#fca5a5;background:#2a1414;border-color:#5b2020">409 handoff-required</span></div>
+            <div class="bubble agent">continueTask（auto）在没有现成 handoff 时<b>拒绝生成</b></div>
+            <div class="step-note bad">✗ 不会发生任何模型调用，也不会落任何记录 —— CLI / 脚本同样绕不过去</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot handoff"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">显式生成</span><span class="badge handoff">mode:"handoff" / POST /handoff</span></div>
+            <div class="bubble user">Generate handoff 按钮 · <code>af tasks continue --mode handoff</code></div>
+            <div class="step-note ok">✓ 这才是唯一会生成 handoff 的入口（成功或失败都按 ⑤ 的策略）</div>
+          </div>
+        </div>
+        <div class="step"><div class="rail"><span class="dot resume"></span></div>
+          <div class="card">
+            <div class="card-head"><span class="run">消费</span><span class="badge resume">reuse</span></div>
+            <div class="bubble agent">已有 handoff（armed 或已附着于上一个 run）→ 直接复用，不重新生成</div>
+            <div class="step-note ok">✓ <code>continue-options.handoffAvailable</code> 让前端提前知道会不会被拦</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="payload" style="border-color:#5b2020;background:#1c1315">
+      <div class="payload-head" style="background:#241a1a;border-color:#402020;color:#fecaca"><span>命名说明</span></div>
+      <div class="payload-body">
+        <div class="chips">
+          <span class="chip ok">模块：<code>core/handoffSummary.ts</code>（原 <code>compaction.ts</code>）</span>
+          <span class="chip ok">函数：<code>generateHandoffSummary</code>（原 <code>generateCompactionHandoff</code>）</span>
+          <span class="chip ok">生成方式枚举：<code>"summarized"</code>（原 <code>"compaction"</code>）</span>
+          <span class="chip">字段 <code>HandoffContent.compactionSummary</code>：<b>保留旧名</b>（已持久化），语义是「handoff 的 checkpoint」，非会话压缩产物</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <h2>代码依据（修复后）</h2>
+  <ul>
+    <li><code>packages/core/src/handoffSummary.ts</code> — 新增 <code>serializeRunChain(turns, task)</code>：把多个 run 串成一段 pi transcript，每个 run 用其 <code>userPrompt</code> 作为 <code>[User]</code>。</li>
+    <li><code>packages/core/src/orchestrator.ts</code> — <code>generateHandoffContent</code> 覆盖「最后一个 checkpoint 之后的所有 run」；<code>handoffCheckpointAnchor</code> 找到该 checkpoint 并回填 <code>previousSummary</code>。</li>
+    <li><code>packages/core/src/handoff.ts</code> — <code>renderHandoffPrompt</code> 注入路径未变，本身符合预期。</li>
+    <li><code>packages/core/src/handoffSummary.test.ts</code> — 新增 <code>serializeRunChain</code> 单测与两条端到端用例（resume 后的覆盖率、迭代更新跨 resume 边界）。</li>
+    <li><code>packages/core/src/handoffSummary.ts</code> — <code>generateHandoffSummary</code> 内部 controller 合并「调用方 signal + 总预算」，透传到每次 model 调用与重试退避；取消/超预算抛出带原因的终止错误。</li>
+    <li><code>packages/server/src/app.ts</code> — <code>requestAbort(res)</code>：客户端断开时 abort，<code>continue</code> / <code>handoff</code> 路由把 signal 交给 RunService。</li>
+  </ul>
+  <p style="margin-top:14px">①②③ 记录修复前的行为，④ 为当前实现。结论由 <code>pi</code> 适配器路径的最小复现实验验证（捕获真实 summarization prompt）。</p>
+</footer>
+
+<script>
+  const buttons = document.querySelectorAll("nav.tabs button");
+  const sections = document.querySelectorAll(".scenario");
+  const show = (id) => {
+    buttons.forEach((x) => x.classList.toggle("active", x.dataset.tab === id));
+    sections.forEach((s) => s.classList.toggle("active", s.id === id));
+  };
+  buttons.forEach((b) => {
+    b.addEventListener("click", () => {
+      show(b.dataset.tab);
+      history.replaceState(null, "", "#" + b.dataset.tab);
+    });
+  });
+  // Deep-linkable tabs: #expected / #actual / #contrast / #fixed / #failure / #concepts
+  const initial = location.hash.slice(1);
+  if (["expected", "actual", "contrast", "fixed", "failure", "concepts"].includes(initial)) show(initial);
+</script>
+</body>
+</html>

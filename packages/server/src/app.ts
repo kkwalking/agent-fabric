@@ -20,8 +20,10 @@ import {
   seedDefaults,
   effectiveCapabilities,
   renderHandoffBody,
-  compactionSummaryToHandoffContent,
+  handoffCheckpointToContent,
   stripCheckpointPreamble,
+  HandoffUnavailableError,
+  HandoffRequiredError,
   type NewTaskInput,
   type ContinueTaskInput,
   type Run,
@@ -40,7 +42,44 @@ function ok(res: Response, data: unknown, status = 200): void {
 
 function fail(res: Response, err: unknown, status = 400): void {
   const message = err instanceof Error ? err.message : String(err);
-  res.status(status).json({ error: message });
+  // Machine-readable code so a client can offer the explicit degraded
+  // fallback instead of just printing the message.
+  const code = (err as { code?: string } | undefined)?.code;
+  res.status(status).json({ error: message, ...(code ? { code } : {}) });
+}
+
+/**
+ * A handoff that could not be produced by the model is a conflict, not a
+ * missing resource: the caller may retry accepting a degraded context.
+ */
+function failContinue(res: Response, err: unknown): void {
+  if (err instanceof HandoffUnavailableError) {
+    // 409 Conflict: the continuation is possible, but the client must
+    // decide whether a degraded context is acceptable.
+    res.status(409).json({ error: err.message, code: err.code, allowDegraded: true });
+    return;
+  }
+  if (err instanceof HandoffRequiredError) {
+    // 409 Conflict: a handoff is an explicit action — the client must
+    // generate one first, then retry the continuation.
+    res.status(409).json({ error: err.message, code: err.code, generateHandoff: true });
+    return;
+  }
+  fail(res, err, 404);
+}
+
+/**
+ * Aborts when the client goes away before the response is sent, so a long
+ * (possibly chunked) handoff generation stops instead of running on for a
+ * caller that will never read the result. `writableEnded` distinguishes a
+ * normal response from a dropped connection.
+ */
+function requestAbort(res: Response): AbortSignal {
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) controller.abort();
+  });
+  return controller.signal;
 }
 
 function sseHeaders(res: Response): void {
@@ -429,21 +468,22 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     try {
       const body = req.body as ContinueTaskInput;
       if (!body?.prompt) throw new Error("prompt is required");
-      ok(res, await runs.continueTask(req.params.id, body), 201);
+      ok(res, await runs.continueTask(req.params.id, body, { signal: requestAbort(res) }), 201);
     } catch (e) {
-      fail(res, e, 404);
+      failContinue(res, e);
     }
   });
 
   // Pre-generate the task's handoff toward a runtime without starting a run
   // (the UI fires this when the user confirms a harness switch). The next
-  // continue reuses the stored summary instead of regenerating it.
+  // continue reuses the stored summary instead of regenerating it. This is
+  // an explicit request: a missing model summary is an error, not a digest.
   app.post("/api/tasks/:id/handoff", async (req, res) => {
     try {
       const body = (req.body ?? {}) as { runtimeId?: string };
-      ok(res, await runs.generateHandoff(req.params.id, body.runtimeId), 201);
+      ok(res, await runs.generateHandoff(req.params.id, body.runtimeId, { signal: requestAbort(res) }), 201);
     } catch (e) {
-      fail(res, e, 404);
+      failContinue(res, e);
     }
   });
 
@@ -524,7 +564,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const run = runs.get(h.fromRunId);
     if (content.compactionSummary && task && run) {
       const workspaceId = h.workspaceId ?? run.workspaceId;
-      content = compactionSummaryToHandoffContent(stripCheckpointPreamble(content.compactionSummary), {
+      content = handoffCheckpointToContent(stripCheckpointPreamble(content.compactionSummary), {
         task,
         run,
         artifacts: artifacts.list(h.fromRunId),

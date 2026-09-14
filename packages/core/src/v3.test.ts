@@ -412,6 +412,9 @@ test("a different workspace never auto-resumes the old native session (v3 §14/�
     const options = h.runService.continueOptions(task.id);
     assert.equal(options.resumeAvailable, true, "same workspace still resumes");
 
+    // A handoff is an explicit action — the harness switch cannot generate
+    // one implicitly, so the client prepares it for the target first.
+    await h.runService.generateHandoff(task.id, runtimeId);
     const switched = await h.runService.continueTask(task.id, {
       prompt: "continue in workspace B",
       workspaceId: wsB.id,
@@ -459,7 +462,9 @@ test("a local session cannot be resumed behind docker and vice versa (v3 §13)",
     const ref = h.runtimeSessions.list({ taskId: task.id })[0];
     assert.equal(ref.executionBackend, "local");
 
-    // Continuing on the containerized runtime cannot attach that session.
+    // Continuing on the containerized runtime cannot attach that session —
+    // the client generates the handoff explicitly for that target.
+    await h.runService.generateHandoff(task.id, containerized.id);
     const toDocker = await h.runService.continueTask(task.id, { prompt: "now in docker", runtimeId: containerized.id });
     assert.equal(toDocker.continuity, "handoff");
     assert.match(toDocker.explanation, /no runtime native state/);
@@ -470,6 +475,7 @@ test("a local session cannot be resumed behind docker and vice versa (v3 §13)",
     const dockerRef = h.runtimeSessions.list({ taskId: task.id }).find((r) => r.executionBackend === "docker")!;
 
     // Continuing back on the local runtime cannot attach it either.
+    await h.runService.generateHandoff(task.id, local.id);
     const toLocal = await h.runService.continueTask(task.id, { prompt: "back to local", runtimeId: local.id });
     assert.equal(toLocal.continuity, "handoff");
     assert.match(toLocal.explanation, /containerized native state/);
