@@ -622,29 +622,89 @@ a:hover {
   text-decoration: underline;
 }
 
-/* ---------- Usage chart ---------- */
+/* ---------- Usage: calendar heatmap ---------- */
 
-.hist-bar {
+.heat-head {
+  align-items: baseline;
+}
+.heat-head h2 {
+  margin-bottom: 0;
+}
+/* The metric switch reuses the /sessions tab look, without its bar. */
+.heat-metric {
+  display: inline-flex;
+  gap: 2px;
+}
+.heat-metric .tab {
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 4px 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.heat-metric .tab:hover {
+  background: var(--sidebar-hover);
+  color: var(--text);
+}
+.heat-metric .tab.active {
+  background: var(--sidebar-active);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.heat-legend {
   display: flex;
-  align-items: flex-end;
-  gap: 4px;
-  height: 120px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  margin-bottom: 10px;
 }
-.hist-bar .bar {
-  flex: 1;
-  background: var(--dark);
-  border-radius: 4px 4px 0 0;
-  min-width: 12px;
-  opacity: 0.8;
+.heat-legend .right {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
 }
-.hist-bar .bar:hover {
-  opacity: 1;
+
+.heat-scroll {
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
-.hist-bar .bar-label {
-  text-align: center;
-  font-size: 10px;
+/* Labels are absolute so a wide month name overflows its own column
+   instead of stretching the grid out of step with the cells. */
+.heat-months {
+  display: grid;
+  position: relative;
+  height: 14px;
+  margin-bottom: 4px;
+}
+.heat-months span {
+  position: absolute;
+  top: 0;
+  font-size: 10.5px;
+  line-height: 14px;
   color: var(--dim);
+  white-space: nowrap;
 }
+.heat-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, var(--heat-cell, 14px));
+  width: max-content;
+}
+.heat-cell {
+  width: var(--heat-cell, 14px);
+  height: var(--heat-cell, 14px);
+  border-radius: 3px;
+  background: #ebedf0;
+}
+/* The activity ramp: empty, then four steps of one hue. */
+.heat-cell.l1 { background: #c6dbfb; }
+.heat-cell.l2 { background: #9dc2f7; }
+.heat-cell.l3 { background: #5f96ee; }
+.heat-cell.l4 { background: #2f6fe0; }
 
 /* ---------- LLM（供应商 + 模型统一配置） ---------- */
 

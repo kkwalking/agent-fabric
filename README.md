@@ -59,7 +59,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Runtime Native State | Harness 私有状态的持久化目录（Opaque），容器销毁后仍可恢复 Native Session |
 | Events & Logs | 统一标准事件，REST 查询 + SSE 实时流 |
 | Artifacts | 代码、Diff、Report、Test Result、Build Output、最终结果 |
-| Usage & Cost | Input/Output/Cached Token、请求数、时长、估算成本，按 Model/Provider/日期聚合 |
+| Usage & Cost | Input/Output/Cached Token、请求数、时长、估算成本，按 Model/Provider/日期聚合；Web UI 以日历热力图展示近 26 周的活动（可按费用 / Token 切换指标）。按日期聚合用的是**本机时区的日历日**，所以 UTC+8 晚上跑的任务算在当天，不会被切到第二天 |
 | Secrets | 统一管理、值不出现在日志/事件、按需注入容器 |
 | Agent Profile | 复用 Runtime/Model/Policy/Env/Tools 组合 |
 | Execution Policy | 最大时长/模型调用/Token/Cost、CPU/Memory、网络、Shell/Tool 权限 |

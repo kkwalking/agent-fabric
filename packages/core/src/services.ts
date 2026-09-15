@@ -30,6 +30,18 @@ export function now(): string {
   return new Date().toISOString();
 }
 
+/**
+ * The calendar day (YYYY-MM-DD) an instant falls on in the host's own time
+ * zone. Usage history is grouped by this: "today" means the user's today,
+ * so a run started at 23:00 in UTC+8 counts there and not on tomorrow.
+ */
+export function localDay(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export function maskSecret(value: string): string {
   if (value.length <= 8) return "***";
   return `${value.slice(0, 3)}***${value.slice(-4)}`;
@@ -909,7 +921,11 @@ export class UsageService {
         byProvider[run.providerId] = p;
       }
 
-      const day = (run.endTime ?? run.updatedAt).slice(0, 10);
+      // The day a run's usage belongs to is a calendar day where the user
+      // is, not a UTC one: slicing the ISO timestamp would file a 23:00
+      // run in UTC+8 under the next day. Derived per read from the same
+      // stored timestamps, like the rest of this summary.
+      const day = localDay(run.endTime ?? run.updatedAt);
       const h = history.get(day) ?? { cost: 0, requests: 0, tokens: 0 };
       h.cost += u.estimatedCost ?? 0;
       h.requests += u.modelRequests;
