@@ -104,6 +104,14 @@ export interface ImportHarnessThreadInput {
   threadId: string;
   /** Explicit workspace to associate; defaults to adopting the thread's cwd. */
   workspaceId?: ID;
+  /**
+   * Name for a workspace record to create for the thread's cwd. The
+   * explicit counterpart to `workspaceId`: the caller (the adoption form)
+   * decides whether the directory deserves a record, so the server never
+   * invents one. Implies "associate the thread's cwd"; without either
+   * field the thread is adopted with no workspace at all.
+   */
+  createWorkspaceName?: string;
   /** Override the task title; defaults to the thread title/preview. */
   title?: string;
   /**

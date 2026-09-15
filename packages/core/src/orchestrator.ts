@@ -1142,13 +1142,19 @@ export class RunService {
     const detail = await source.readThread(input.threadId);
     if (!detail.id) throw new Error(`Thread not found: ${input.threadId}`);
 
-    /* ---- Associate workspace (v6 §8): explicit > cwd match > import cwd ---- */
+    /* ---- Associate workspace (v6 §8): the caller's explicit choice.
+            Importing a directory is a decision — a session run in a scratch
+            or nested directory must not silently become a workspace record —
+            so adoption never guesses one from the cwd. ---- */
     let workspaceId = input.workspaceId;
     if (workspaceId) {
       if (!this.workspaceService().get(workspaceId)) throw new Error(`Workspace not found: ${workspaceId}`);
-    } else if (detail.cwd) {
-      const ws = await this.associateWorkspaceForCwd(detail.cwd, detail.title ?? detail.id);
-      workspaceId = ws?.id;
+    } else if (input.createWorkspaceName?.trim()) {
+      if (!detail.cwd) throw new Error("Cannot create a workspace for this thread: it recorded no working directory");
+      // Imported in place: the record references the directory the session
+      // ran in and never copies user files. It fails loudly when that
+      // directory is gone, rather than degrading to "no workspace".
+      workspaceId = (await this.workspaceService().import({ name: input.createWorkspaceName.trim(), type: "local", path: detail.cwd })).id;
     }
 
     /* ---- Turn grouping: harness-provided boundaries when available,
@@ -1300,23 +1306,6 @@ export class RunService {
     }
 
     return { taskId: task.id, runId: runId!, workspaceId, runtimeSessionRefId, handoffId };
-  }
-
-  /**
-   * Finds a workspace already pointing at `cwd`, or imports the directory
-   * in place (v6 §8 "Associate Workspace"). Adoption never copies user
-   * files — the workspace record references the existing directory.
-   */
-  private async associateWorkspaceForCwd(cwd: string, name: string): Promise<Workspace | undefined> {
-    const ws = this.workspaceService();
-    const existing = ws.list().find((w) => w.path && w.path === cwd);
-    if (existing) return existing;
-    try {
-      return await ws.import({ name: name?.slice(0, 60) || `imported ${cwd}`, type: "local", path: cwd });
-    } catch {
-      // The directory is gone — adopt without a workspace association.
-      return undefined;
-    }
   }
 
   /** Standard-event projections of one imported thread item (v6 §7). */

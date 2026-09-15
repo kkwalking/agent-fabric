@@ -467,8 +467,9 @@ label.check input {
   gap: 6px;
   flex-wrap: wrap;
 }
-/* Codex-style borderless text pills with a small chevron */
-.composer-bar .pill {
+/* Codex-style borderless text pills with a small chevron (.composer-bar
+   and the /sessions workspace filter share them). */
+.pill {
   width: auto;
   margin: 0;
   border: 0;
@@ -486,7 +487,7 @@ label.check input {
   cursor: pointer;
   transition: background-color 0.12s ease, color 0.12s ease;
 }
-.composer-bar .pill:hover {
+.pill:hover {
   background-color: var(--sidebar-hover);
   color: var(--text);
 }
@@ -1700,29 +1701,128 @@ a:hover {
   max-height: 300px;
 }
 
-/* ---------- Local harness threads (v6 §6/§11) ---------- */
+/* ---------- Local harness sessions (/sessions, v6 §6/§11) ---------- */
 
-.threads-panel {
-  margin-top: 32px;
-  border-top: 1px solid var(--border, #2a2a33);
-  padding-top: 20px;
-}
-.threads-panel .section-head {
+.tab-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin: 6px 0 14px;
 }
-.threads-panel .section-head h2 {
-  margin: 0;
-  font-size: 15px;
+.tab-bar .tab {
+  border: 0;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 7px 12px;
+  margin-bottom: -1px;
+  color: var(--muted);
+  font-size: 12.5px;
 }
-.threads-filter {
-  display: inline-flex;
+.tab-bar .tab:hover {
+  background: transparent;
+  color: var(--text);
+}
+.tab-bar .tab.active {
+  color: var(--text);
+  border-bottom-color: var(--text);
+  font-weight: 600;
+}
+
+.sessions-filter {
+  display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sessions-filter .pill {
+  max-width: 320px;
+  flex-shrink: 0;
+}
+.sessions-filter > .muted {
   font-size: 12px;
+  min-width: 0;
+}
+
+/* Adoption form: where the adopted session's work belongs (v6 §8). */
+.adopt-thread {
+  display: grid;
+  gap: 10px;
+}
+.adopt-thread-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.adopt-thread-preview {
+  font-size: 12px;
+  max-height: 60px;
+  overflow: hidden;
+}
+.adopt-thread-cwd {
+  display: grid;
+  gap: 3px;
+  font-size: 12px;
+}
+.adopt-thread-cwd code {
+  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+  color: var(--text);
+}
+.adopt-choice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.adopt-choice > span {
+  display: grid;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.adopt-choice input[type="radio"] {
+  width: auto;
+  margin: 2px 0 0;
+  flex-shrink: 0;
+}
+.adopt-choice input[type="text"],
+.adopt-choice select {
+  margin: 0;
+}
+.adopt-choice .muted {
+  font-weight: 400;
+  font-size: 11.5px;
+}
+.adopt-note {
+  margin: 0;
+  font-size: 11.5px;
+}
+.adopt-actions {
+  margin-top: 2px;
+}
+.adopt-actions .right {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.sessions-pointer {
+  margin-top: 26px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+  font-size: 12.5px;
+}
+.sessions-pointer a {
+  color: var(--blue);
   cursor: pointer;
 }
+
 .auth-hint {
   padding: 10px 12px;
   display: grid;

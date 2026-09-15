@@ -81,7 +81,7 @@ npm run dev:server
 npm run dev:web
 ```
 
-打开 http://localhost:7377 查看 Web UI（New task / Tasks / Dashboard / Task Thread 对话式执行线程 / Run Inspector / Providers / Models / Runtimes / Agents / Workspaces / Handoffs / Artifacts / Usage / Settings）。
+打开 http://localhost:7377 查看 Web UI（New task / Tasks / Dashboard / Task Thread 对话式执行线程 / Run Inspector / Providers / Models / Runtimes / Sessions / Agents / Workspaces / Handoffs / Artifacts / Usage / Settings）。
 
 ## Web 交互模型（v5）
 
@@ -117,6 +117,7 @@ v7（`v7.md`）以同样的 harness-native 模式接入本机 **Claude Code CLI*
 * **不绑定 AgentFabric Model**：Claude Code 使用自己账号与默认模型配置；Usage / Cost 只采用 CLI 自报数字（`total_cost_usd`），绝不按 Anthropic API 定价估算套餐 Run 成本。
 * **本地 Session 发现与读取**：Claude Code 官方只提供 `--resume <id>`（无 list 命令），因此发现走本地 transcript（`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`）——相关解析被严格限制在 Claude Code Adapter 内（`packages/runtimes`），不泄漏进 AgentFabric Core，且防御性处理未知行类型；读取不触发任何模型请求。
 * **接管已有工作（Import / Adopt）**：`POST /api/harness/claude-code/threads/import` — Read Session → 按 cwd 关联（或就地导入）Workspace → 每个 session turn 记录为一个已完成 Run → 注册为可 Resume 的 Native Session →（可选）预生成 Handoff。
+* **接管入口独立成页（Sessions）**：Web UI 侧边栏 Resources 组的 **Sessions**（`/sessions`）就是本地 Harness 会话的发现页——Claude Code Sessions 与 Codex Threads 用页内 Tab 切换，可选 Workspace 过滤（默认全部，按最近更新排序），每个会话带 cwd / 更新时间 / turn 数 / 模型 / 来源与认证状态（检测，不读 credential），**Continue in AgentFabric** 读取该会话并进入 Task Thread。New task 页面只负责描述新任务，底部给一行指向该页。
 * **双向 Handoff**：Claude Code ↔ Codex / Pi / OpenCode 全部走既有 Handoff 流程（Claude Code → 其他 Harness 生成 Context Bundle：Checkpoint 覆盖装不下的历史，最近的用户指令与工作轨迹逐字保留；其他 Harness → Claude Code 注入 Handoff 后新建自己的 Native Session）。额度耗尽时 Task 页面显示 **Claude Code usage limit reached.** 与其他 Harness 的一键 Continue。
 * **Runtime 状态**：Web UI Runtimes 页展示轻量状态（CLI Installed / Authenticated / Credential Source: Harness Native / Execution Backend: Local），不展示任何敏感 credential。
 

@@ -300,13 +300,11 @@ export async function readClaudeSession(
 
   let file: string | undefined;
   let mtimeMs = 0;
-  let projectDir: string | undefined;
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const candidate = join(root, entry.name, `${sessionId}.jsonl`);
     if (existsSync(candidate)) {
       file = candidate;
-      projectDir = join(root, entry.name);
       mtimeMs = statSync(candidate).mtimeMs;
       break;
     }
@@ -447,20 +445,16 @@ export async function readClaudeSession(
 
   return {
     ...scan.summary,
-    cwd: scan.summary.cwd ?? tryDecodeProjectDir(projectDir),
+    // The transcript's own `cwd` is the only workspace signal we accept. The
+    // project directory name cannot stand in for it: it is produced by
+    // replacing every non-alphanumeric character with `-`, so decoding it
+    // back mangles any directory that contains a dash
+    // ("-Users-me-code-bruce-go" → "/Users/me/code/bruce/go"). A wrong cwd
+    // is worse than none — adoption would silently fail to associate a
+    // workspace and the UI would show a path that does not exist.
     items,
     turns: turns.filter((t) => t.userText !== undefined || t.items.length > 0),
   };
-}
-
-/**
- * Best-effort cwd recovery from the encoded project directory name
- * (single-use fallback when no transcript line carries `cwd`).
- */
-function tryDecodeProjectDir(projectDir: string | undefined): string | undefined {
-  if (!projectDir) return undefined;
-  const encoded = projectDir.split(/[\\/]/).pop() ?? "";
-  return encoded.startsWith("-") ? encoded.replace(/-/g, "/") : undefined;
 }
 
 /**

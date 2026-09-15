@@ -287,7 +287,7 @@ test("local claude sessions are discovered by cwd and recency (v7 §9)", async (
     h = await freshHarness();
 
     const all = await h.runService.listHarnessThreads("claude-code");
-    assert.equal(all.length, 2);
+    assert.equal(all.length, 3);
     assert.equal(all[0].id.includes("11111111"), true, "newest first");
     assert.equal(all[0].title, "Fix the login bug");
     assert.equal(all[0].cwd, wsDir);
@@ -296,6 +296,39 @@ test("local claude sessions are discovered by cwd and recency (v7 §9)", async (
     const scoped = await h.runService.listHarnessThreads("claude-code", { cwd: wsDir });
     assert.equal(scoped.length, 1);
     assert.equal(scoped[0].id.includes("11111111"), true);
+  } finally {
+    if (h) await quiesce(h);
+    restore();
+  }
+});
+
+test("a transcript without a cwd never gets a guessed path (v7 §9/§10)", async () => {
+  const fx = makeFixtures();
+  const wsDir = mkdtempSync(join(tmpdir(), "af-claude-ws-"));
+  const fixture = makeClaudeSessionsFixture(wsDir, fx.claudeProjects);
+  const restore = useBins(fx);
+  let h: Harness | undefined;
+  try {
+    h = await freshHarness();
+
+    // Read path: no cwd line means no cwd — in particular not the decoded
+    // project directory ("/Users/me/code/bruce/go"), which does not exist
+    // and would land the adopted task on a silently unassociated workspace.
+    const detail = await h.runService.readHarnessThread("claude-code", fixture.noCwdSessionId);
+    assert.equal(detail.cwd, undefined);
+    assert.ok(detail.items.some((i) => i.kind === "user-message"), "the conversation itself still reads");
+
+    // Discovery reports the same absenteeism, so the list and adoption agree.
+    const listed = (await h.runService.listHarnessThreads("claude-code")).find((t) => t.id === fixture.noCwdSessionId);
+    assert.ok(listed, "a session without a cwd is still discoverable");
+    assert.equal(listed.cwd, undefined);
+
+    // Adoption: without a cwd there is nothing to associate — the task is
+    // created, and no workspace record is invented for a guessed directory.
+    const before = h.workspaces.list().length;
+    const adopted = await h.runService.importHarnessThread({ runtimeKind: "claude-code", threadId: fixture.noCwdSessionId });
+    assert.equal(adopted.workspaceId, undefined);
+    assert.equal(h.workspaces.list().length, before);
   } finally {
     if (h) await quiesce(h);
     restore();
@@ -351,18 +384,21 @@ test("scenario B: adopt an existing claude session, resume same-harness, then ha
   try {
     h = await freshHarness({ completionFactory: offlineCompletion });
     const pi = runtimeOf(h, "pi");
-    // The session's cwd already has an AgentFabric workspace — adoption
-    // must associate it instead of creating a second one.
+    // The session's cwd already has an AgentFabric workspace. Adoption does
+    // not guess that: the caller (the adoption form) resolves it and passes
+    // the id, which is exactly what this models.
     const ws = await h.workspaces.create({ name: "login-bug", type: "local", path: wsDir });
 
     const result = await h.runService.importHarnessThread({
       runtimeKind: "claude-code",
       threadId: fixture.inWorkspaceSessionId,
+      workspaceId: ws.id,
       targetRuntimeId: pi.id,
       userNotes: "watch the auth tests",
     });
 
-    assert.equal(result.workspaceId, ws.id, "workspace associated by cwd match");
+    assert.equal(result.workspaceId, ws.id, "the workspace the caller chose is associated");
+    assert.equal(h.workspaces.list().length, 1, "adoption did not create a second workspace for the same directory");
     assert.ok(result.handoffId, "handoff generated toward Pi during adoption");
     assert.ok(result.runtimeSessionRefId, "session registered as native session");
 
@@ -425,7 +461,7 @@ test("scenario B: adopt an existing claude session, resume same-harness, then ha
   }
 });
 
-test("adoption without a matching workspace imports the session's cwd (v7 §11)", async () => {
+test("adoption creates a workspace record only when the caller asks for one (v7 §11)", async () => {
   const fx = makeFixtures();
   const wsDir = mkdtempSync(join(tmpdir(), "af-claude-ws-"));
   const fixture = makeClaudeSessionsFixture(wsDir, fx.claudeProjects);
@@ -433,14 +469,38 @@ test("adoption without a matching workspace imports the session's cwd (v7 §11)"
   let h: Harness | undefined;
   try {
     h = await freshHarness({ completionFactory: offlineCompletion });
-    const result = await h.runService.importHarnessThread({
+
+    // No workspace named → the history is adopted, nothing is imported.
+    const bare = await h.runService.importHarnessThread({
       runtimeKind: "claude-code",
       threadId: fixture.inWorkspaceSessionId,
     });
-    assert.ok(result.workspaceId);
-    const ws = h.workspaces.get(result.workspaceId!);
+    assert.equal(bare.workspaceId, undefined);
+    assert.equal(h.workspaces.list().length, 0, "adoption never invents a workspace record");
+
+    // Named → the directory is imported in place under that name.
+    const named = await h.runService.importHarnessThread({
+      runtimeKind: "claude-code",
+      threadId: fixture.inWorkspaceSessionId,
+      createWorkspaceName: "scratch-probe",
+    });
+    const ws = h.workspaces.get(named.workspaceId!);
     assert.equal(ws?.path, wsDir);
+    assert.equal(ws?.name, "scratch-probe");
     assert.equal(ws?.source, "import");
+
+    // A directory that no longer exists fails loudly — the caller asked for
+    // this record by name, so silence would be a lie. (The fixture's
+    // "elsewhere" session points at a path that is never created.)
+    await assert.rejects(
+      () =>
+        h!.runService.importHarnessThread({
+          runtimeKind: "claude-code",
+          threadId: fixture.otherSessionId,
+          createWorkspaceName: "gone",
+        }),
+      /Cannot import workspace/
+    );
   } finally {
     if (h) await quiesce(h);
     restore();

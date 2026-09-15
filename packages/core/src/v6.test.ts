@@ -20,7 +20,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -311,8 +311,9 @@ test("scenario B: adopt an existing codex thread, then continue on Pi via handof
   try {
     h = await freshHarness({ completionFactory: offlineCompletion });
     const pi = runtimeOf(h, "pi");
-    // The thread's cwd already has an AgentFabric workspace — adoption must
-    // associate it instead of creating a second one.
+    // The thread's cwd already has an AgentFabric workspace. Adoption does
+    // not guess that: the caller resolves it and passes the id — which is
+    // what the adoption form does — so no second record appears.
     const ws = await h.workspaces.create({ name: "login-bug", type: "local", path: wsDir });
     // Make the adopted thread resumable by the fake codex CLI.
     seedCodexSession(fx, fixture.inWorkspaceThreadId);
@@ -320,11 +321,13 @@ test("scenario B: adopt an existing codex thread, then continue on Pi via handof
     const result = await h.runService.importHarnessThread({
       runtimeKind: "codex",
       threadId: fixture.inWorkspaceThreadId,
+      workspaceId: ws.id,
       targetRuntimeId: pi.id,
       userNotes: "watch the auth tests",
     });
 
-    assert.equal(result.workspaceId, ws.id, "workspace associated by cwd match");
+    assert.equal(result.workspaceId, ws.id, "the workspace the caller chose is associated");
+    assert.equal(h.workspaces.list().length, 1, "no second workspace for the same directory");
     assert.ok(result.handoffId, "handoff generated toward Pi during adoption");
     assert.ok(result.runtimeSessionRefId, "thread registered as native session");
 
@@ -383,7 +386,36 @@ test("scenario B: adopt an existing codex thread, then continue on Pi via handof
   }
 });
 
-test("adoption without a matching workspace imports the thread's cwd (v6 §8)", async () => {
+test("adoption imports the thread's cwd as a workspace when the caller names one (v6 §8)", async () => {
+  const fx = makeFixtures();
+  const wsDir = join(mkdtempSync(join(tmpdir(), "af-codex-ws-")), "codex-work");
+  mkdirSync(wsDir, { recursive: true });
+  const fixture = makeCodexThreadsFixture(wsDir);
+  const threadsFile = join(fx.dir, "codex-threads.json");
+  writeFileSync(threadsFile, fixture.file);
+  const restore = useBins(fx, { FAKE_CODEX_THREADS_FILE: threadsFile });
+  let h: Harness | undefined;
+  try {
+    h = await freshHarness({ completionFactory: offlineCompletion });
+    const result = await h.runService.importHarnessThread({
+      runtimeKind: "codex",
+      threadId: fixture.inWorkspaceThreadId,
+      // The adoption form's "New workspace" path: the name is the caller's,
+      // never the thread title (which is the work, not the directory).
+      createWorkspaceName: "codex-work",
+    });
+    assert.ok(result.workspaceId);
+    const ws = h.workspaces.get(result.workspaceId!);
+    assert.equal(ws?.path, wsDir);
+    assert.equal(ws?.source, "import");
+    assert.equal(ws?.name, "codex-work");
+  } finally {
+    if (h) await quiesce(h);
+    restore();
+  }
+});
+
+test("adoption without a workspace choice associates nothing (v6 §8)", async () => {
   const fx = makeFixtures();
   const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
   const fixture = makeCodexThreadsFixture(wsDir);
@@ -397,10 +429,8 @@ test("adoption without a matching workspace imports the thread's cwd (v6 §8)", 
       runtimeKind: "codex",
       threadId: fixture.inWorkspaceThreadId,
     });
-    assert.ok(result.workspaceId);
-    const ws = h.workspaces.get(result.workspaceId!);
-    assert.equal(ws?.path, wsDir);
-    assert.equal(ws?.source, "import");
+    assert.equal(result.workspaceId, undefined);
+    assert.equal(h.workspaces.list().length, 0, "a session's cwd is not turned into a record on its own");
   } finally {
     if (h) await quiesce(h);
     restore();

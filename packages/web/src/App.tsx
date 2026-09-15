@@ -5,6 +5,7 @@ import { LlmView } from "./views/Llm";
 import { RunsView, RunDetailView } from "./views/Runs";
 import { TasksView } from "./views/Tasks";
 import { NewTaskView } from "./views/NewTask";
+import { SessionsView } from "./views/Sessions";
 import { TaskThreadView } from "./views/TaskThread";
 import { HandoffsView, HandoffDetailView } from "./views/Handoffs";
 import { UsageView } from "./views/Usage";
@@ -35,6 +36,7 @@ const primaryNav: NavEntry[] = [
 const resourceNav: NavEntry[] = [
   { path: "/llm", label: "LLM", icon: "cloud", match: "/llm" },
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
+  { path: "/sessions", label: "Sessions", icon: "terminal", match: "/sessions" },
   { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
   { path: "/workspaces", label: "Workspaces", icon: "folder", match: "/workspaces" },
 ];
@@ -127,6 +129,7 @@ export function App() {
         {route.view === "run" && route.id && <RunDetailView runId={route.id} />}
         {route.view === "llm" && <LlmView />}
         {route.view === "runtimes" && <ResourceView kind="runtimes" />}
+        {route.view === "sessions" && <SessionsView />}
         {route.view === "agents" && <ResourceView kind="agents" />}
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
         {route.view === "handoffs" && <HandoffsView />}

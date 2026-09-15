@@ -299,8 +299,9 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     }
   });
 
-  // Adopt an existing thread into AgentFabric (v6 §8): read → associate
-  // workspace → (optional) generate handoff toward another harness.
+  // Adopt an existing thread into AgentFabric (v6 §8): read → associate the
+  // workspace the caller chose (existing, newly named, or none) →
+  // (optional) generate handoff toward another harness.
   app.post("/api/harness/:kind/threads/import", async (req, res) => {
     try {
       const body = req.body ?? {};
@@ -309,6 +310,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
         runtimeKind: req.params.kind as never,
         threadId: body.threadId,
         workspaceId: typeof body.workspaceId === "string" ? body.workspaceId : undefined,
+        createWorkspaceName: typeof body.createWorkspaceName === "string" ? body.createWorkspaceName : undefined,
         title: typeof body.title === "string" ? body.title : undefined,
         prompt: typeof body.prompt === "string" ? body.prompt : undefined,
         targetRuntimeId: typeof body.targetRuntimeId === "string" ? body.targetRuntimeId : undefined,

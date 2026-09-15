@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { get, post, fmtRelative } from "../api";
+import { get, post } from "../api";
 import { ErrorBox, Icon, useAsync } from "../components";
+import { HARNESS_NATIVE_KINDS, HARNESS_THREAD_SOURCES } from "../harness";
 import { modelOptionLabel } from "../presentation";
 import { navigate } from "../router";
 
@@ -17,21 +18,11 @@ import { navigate } from "../router";
  * (Codex + ChatGPT, Claude Code + Claude.ai — v6 §3/v7 §3), which need
  * neither a provider nor a model.
  *
- * Below the composer, Local Harness Threads (v6 §6/§11, v7 §9/§11) let
- * the user adopt work that started outside AgentFabric: pick a Codex
- * thread or Claude Code session, "Continue in AgentFabric", then work on
- * it in the task thread — where a handoff can be generated explicitly
- * whenever the task needs a new native session.
+ * Discovery of work that started outside AgentFabric lives on its own page
+ * (/sessions, v6 §6/§11, v7 §9/§11): this page is where a task is
+ * described; that one is where existing local harness sessions are found
+ * and adopted.
  */
-
-/** Harnesses exposing local thread/session discovery (v7 §9). */
-const HARNESS_THREAD_SOURCES = [
-  { kind: "claude-code", label: "Claude Code", noun: "Sessions", hint: "in the Claude Code CLI on this machine" },
-  { kind: "codex", label: "Codex", noun: "Threads", hint: "in the Codex CLI or IDE extension" },
-] as const;
-
-/** Harness kinds that authenticate with their own account (v6 §2/v7 §2). */
-const HARNESS_NATIVE_KINDS = new Set(["codex", "claude-code"]);
 
 export function NewTaskView() {
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
@@ -216,151 +207,21 @@ export function NewTaskView() {
         </div>
       </div>
 
-      {HARNESS_THREAD_SOURCES.map((src) => (
-        <LocalHarnessThreadsPanel
-          key={src.kind}
-          kind={src.kind}
-          label={src.label}
-          noun={src.noun}
-          hint={src.hint}
-          enabled={runtimeList.some((r: any) => r.kind === src.kind && r.enabled)}
-          workspaceId={effectiveWorkspaceId}
-        />
-      ))}
-    </div>
-  );
-}
-
-/* ================================================================== */
-/* Local harness thread discovery (v6 §6/§11, v7 §9/§11)               */
-/* ================================================================== */
-
-/**
- * Lists a harness's local threads/sessions that already exist on this
- * machine (created outside AgentFabric) and adopts them: Continue in
- * AgentFabric reads the thread, associates its workspace and lands on
- * the task thread, where a handoff can be generated explicitly to
- * continue in a new native session (v6 §8, v7 §11).
- */
-function LocalHarnessThreadsPanel({
-  kind,
-  label,
-  noun,
-  hint,
-  enabled,
-  workspaceId,
-}: {
-  kind: string;
-  label: string;
-  noun: string;
-  hint: string;
-  enabled: boolean;
-  workspaceId: string;
-}) {
-  const [thisWorkspaceOnly, setThisWorkspaceOnly] = useState(false);
-  const [importing, setImporting] = useState<string | null>(null);
-  const [importError, setImportError] = useState<string | null>(null);
-
-  const auth = useAsync<any>(() => get(`/api/harness/${kind}/auth-status`), [kind, enabled]);
-  const threads = useAsync<any[]>(
-    () =>
-      enabled
-        ? get(`/api/harness/${kind}/threads${thisWorkspaceOnly && workspaceId ? `?workspaceId=${workspaceId}&limit=20` : "?limit=20"}`)
-        : Promise.resolve([]),
-    [kind, enabled, thisWorkspaceOnly, workspaceId]
-  );
-
-  if (!enabled) return null;
-
-  const adopt = async (threadId: string) => {
-    setImporting(threadId);
-    setImportError(null);
-    try {
-      const r = await post<any>(`/api/harness/${kind}/threads/import`, { threadId });
-      navigate(`/tasks/${r.taskId}`);
-    } catch (e) {
-      setImportError(e instanceof Error ? e.message : String(e));
-      setImporting(null);
-    }
-  };
-
-  const list = threads.data ?? [];
-
-  return (
-    <section className="threads-panel">
-      <div className="section-head">
-        <h2>Local {label} {noun}</h2>
-        <label className="muted threads-filter" title="Only threads whose working directory matches the selected workspace">
-          <input
-            type="checkbox"
-            checked={thisWorkspaceOnly}
-            onChange={(e) => setThisWorkspaceOnly(e.target.checked)}
-          />{" "}
-          This workspace only
-        </label>
-        <button className="small right" onClick={threads.reload}>Refresh</button>
-      </div>
-      <p className="muted sub">
-        Work that started {hint}. Adopting a {noun.toLowerCase().replace(/s$/, "")} reads its history — it never
-        re-runs the model — so you can continue it here, and generate a handoff explicitly when it needs a new
-        native session.
+      {/* Existing local harness work lives on its own page (v6 §6, v7 §9) —
+          this page only describes new tasks. */}
+      <p className="sub sessions-pointer">
+        Already working in {HARNESS_THREAD_SOURCES.map((s) => s.label).join(" / ")} on this machine?{" "}
+        <a
+          href="/sessions"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate("/sessions");
+          }}
+        >
+          Local harness sessions
+        </a>{" "}
+        lists what is there and continues it here.
       </p>
-
-      {/* Harness-native auth availability (v6 §2, v7 §2) — detection only, never credentials. */}
-      {auth.data && !auth.data.ok && (
-        <div className="card auth-hint">
-          <strong>{auth.data.installed ? `${label} CLI not logged in` : `${label} CLI not installed`}</strong>
-          <div className="muted">{auth.data.hint ?? `Install the ${label} CLI and sign in to use ${label} Local.`}</div>
-        </div>
-      )}
-      {auth.data?.ok && auth.data.detail && (
-        <p className="muted auth-ok">
-          <Icon name="key" size={12} /> {auth.data.detail}
-          {auth.data.version ? ` · ${auth.data.version}` : ""}
-        </p>
-      )}
-      <ErrorBox message={threads.error ? `${label} thread discovery failed: ${threads.error}` : null} />
-      <ErrorBox message={importError} />
-
-      {threads.loading ? (
-        <div className="muted">Loading local {label} {noun.toLowerCase()}…</div>
-      ) : list.length === 0 && !threads.error ? (
-        <div className="muted">No local {label} {noun.toLowerCase()} found{thisWorkspaceOnly ? " in this workspace" : ""}.</div>
-      ) : (
-        <div className="thread-items">
-          {list.map((t: any) => (
-            <div key={t.id} className={`thread-item${t.adopted ? " adopted" : ""}`}>
-              <div className="thread-item-main">
-                <div className="thread-item-title" title={t.preview ?? t.title ?? t.id}>
-                  {t.title ?? t.id}
-                </div>
-                <div className="thread-item-meta muted">
-                  {t.cwd ? <span title={t.cwd}>{t.cwd.split("/").slice(-2).join("/")}</span> : <span>no workspace</span>}
-                  {t.updatedAt && <span> · updated {fmtRelative(t.updatedAt)}</span>}
-                  {t.turnCount != null && <span> · {t.turnCount} turn{t.turnCount === 1 ? "" : "s"}</span>}
-                  {t.model && <span> · {t.model}</span>}
-                </div>
-              </div>
-              <div className="thread-item-actions">
-                {t.adopted ? (
-                  <button className="small" onClick={() => navigate(`/tasks/${t.adoptedTaskId}`)}>
-                    In AgentFabric ↗
-                  </button>
-                ) : (
-                  <button
-                    className="small primary"
-                    disabled={importing !== null}
-                    title="Read this thread, adopt its workspace and continue it as an AgentFabric task"
-                    onClick={() => adopt(t.id)}
-                  >
-                    {importing === t.id ? <span className="spinner" /> : "Continue in AgentFabric"}
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
+    </div>
   );
 }

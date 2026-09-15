@@ -32,6 +32,7 @@ export interface Route {
     | "run"
     | "llm"
     | "runtimes"
+    | "sessions"
     | "agents"
     | "workspaces"
     | "handoffs"
@@ -49,6 +50,7 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   "/runs": "runs",
   "/llm": "llm",
   "/runtimes": "runtimes",
+  "/sessions": "sessions",
   "/agents": "agents",
   "/workspaces": "workspaces",
   "/handoffs": "handoffs",

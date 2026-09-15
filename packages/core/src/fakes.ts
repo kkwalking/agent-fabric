@@ -648,14 +648,26 @@ process.exit(0);
 export function makeClaudeSessionsFixture(workspaceCwd: string, projectsRoot: string): {
   inWorkspaceSessionId: string;
   otherSessionId: string;
+  /** A real conversation whose transcript never records a cwd. */
+  noCwdSessionId: string;
 } {
   const inWorkspaceSessionId = "11111111-2222-3333-4444-555555555555";
   const otherSessionId = "66666666-7777-8888-9999-000000000000";
+  const noCwdSessionId = "77777777-8888-9999-0000-111111111111";
   const encode = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
   const base = (sessionId: string, cwd: string) => ({
     parentUuid: null,
     isSidechain: false,
     cwd,
+    sessionId,
+    userType: "external",
+    version: "2.1.235-fake",
+    gitBranch: "main",
+  });
+  /** Every line carries a cwd except the ones built from this. */
+  const baseNoCwd = (sessionId: string) => ({
+    parentUuid: null,
+    isSidechain: false,
     sessionId,
     userType: "external",
     version: "2.1.235-fake",
@@ -728,12 +740,30 @@ export function makeClaudeSessionsFixture(workspaceCwd: string, projectsRoot: st
     }),
   ].join("\n");
 
+  // A conversation whose transcript never records a cwd — it lives in a
+  // directory whose name contains dashes, so the encoded project directory
+  // ("-Users-me-code-bruce-go") cannot be decoded back to a path. Nothing
+  // may invent one.
+  const noCwdSession = [
+    line({ ...baseNoCwd(noCwdSessionId), type: "user", uuid: "u1", message: { role: "user", content: "which repo is this" } }),
+    line({
+      ...baseNoCwd(noCwdSessionId),
+      type: "assistant",
+      uuid: "a1",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Somewhere with dashes in the path." }] },
+    }),
+  ].join("\n");
+
   mkdirSync(join(projectsRoot, encode(workspaceCwd)), { recursive: true });
   mkdirSync(join(projectsRoot, encode("/tmp/definitely-not-the-workspace")), { recursive: true });
-  // Written last so its mtime orders the in-workspace session newest.
+  mkdirSync(join(projectsRoot, "-Users-me-code-bruce-go"), { recursive: true });
+  // Written first (and never rewritten) so it stays the oldest by mtime and
+  // the listing order stays deterministic.
+  writeFileSync(join(projectsRoot, "-Users-me-code-bruce-go", noCwdSessionId + ".jsonl"), noCwdSession + "\n");
+  // The in-workspace session is written last so its mtime orders it newest.
   writeFileSync(join(projectsRoot, encode("/tmp/definitely-not-the-workspace"), otherSessionId + ".jsonl"), elsewhere + "\n");
   writeFileSync(join(projectsRoot, encode(workspaceCwd), inWorkspaceSessionId + ".jsonl"), inWorkspace + "\n");
-  return { inWorkspaceSessionId, otherSessionId };
+  return { inWorkspaceSessionId, otherSessionId, noCwdSessionId };
 }
 
 /**
