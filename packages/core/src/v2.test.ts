@@ -425,7 +425,10 @@ test("cross-harness switch still handoffs, never migrates sessions (v2 §16)", a
     const secondRun = h.runService.get(switched.run.id)!;
     assert.ok(secondRun.previousHandoffId);
     assert.equal(secondRun.runtimeSessionRefId, undefined, "handoff runs start without a previous native session");
-    assert.match(secondRun.inputInstruction!, /# Handoff from/);
+    // The handoff is rendered as a context bundle: workspace first, then the
+    // classes of context the previous harness's work was reduced to.
+    assert.match(secondRun.inputInstruction!, /# Workspace/);
+    assert.match(secondRun.inputInstruction!, /# (Handoff checkpoint|Recent working context)/);
 
     const finished = await waitForRun(h.runService, switched.run.id);
     assert.equal(finished.status, "completed");

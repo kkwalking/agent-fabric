@@ -20,6 +20,7 @@ import {
   seedDefaults,
   effectiveCapabilities,
   renderHandoffBody,
+  toHandoffListRow,
   HandoffUnavailableError,
   HandoffRequiredError,
   type NewTaskInput,
@@ -545,14 +546,20 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   /* ---------------- handoffs (spec v1 §4–§8) ---------------- */
 
   // Reads are pure reads. A handoff's content is projected from its
-  // checkpoint once, when it is generated (`handoffCheckpointToContent`);
-  // nothing re-parses, re-projects or repairs a stored record here. A
-  // record that is wrong is discarded and regenerated, never patched at
-  // read time (AGENTS.md: "No compatibility logic for old data").
+  // checkpoint once, when it is generated (`handoffCheckpointToContent` +
+  // `assembleHandoffContextBundle`); nothing re-parses, re-projects or repairs
+  // a stored record here. A record that is wrong is discarded and regenerated,
+  // never patched at read time (AGENTS.md: "No compatibility logic for old
+  // data").
+  //
+  // The list is an index: a handoff carries up to a full handoff budget of
+  // preserved context (150K tokens on a 1M model), which no table needs. The
+  // full record — context bundle, budget accounting, rendered body — is
+  // `GET /api/handoffs/:id`.
   app.get("/api/handoffs", (req, res) => {
     const taskId = typeof req.query.taskId === "string" ? req.query.taskId : undefined;
     const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
-    ok(res, handoffs.list({ taskId, runId }));
+    ok(res, handoffs.list({ taskId, runId }).map(toHandoffListRow));
   });
   app.get("/api/handoffs/:id", (req, res) => {
     const h = handoffs.get(req.params.id);

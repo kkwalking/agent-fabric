@@ -926,6 +926,7 @@ export class RunService {
           previousRun,
           previousRuntime,
           target,
+          this.targetModelIdFor(target, input),
           allowDegraded,
           trigger,
           signal
@@ -951,12 +952,13 @@ export class RunService {
     return handoff;
   }
 
-  /** Generate the summary, store it as the previous run's legacy record, and announce it. */
+  /** Generate the context bundle, store it as this run's handoff, and announce it. */
   private async generateAndStoreHandoff(
     task: Task,
     previousRun: Run,
     previousRuntime: Runtime | undefined,
     target: Runtime | undefined,
+    targetModelId: ID | undefined,
     allowDegraded: boolean,
     trigger: HandoffTrigger,
     signal?: AbortSignal
@@ -967,6 +969,8 @@ export class RunService {
       task,
       previousRun,
       previousRuntime,
+      target,
+      targetModelId,
       artifacts,
       allowDegraded,
       signal
@@ -1383,29 +1387,33 @@ export class RunService {
   }
 
   /**
-   * Generate AgentFabric-assisted handoff content through pi's
-   * compaction pipeline (core/compaction.ts): every run since the last
-   * checkpoint is serialized pi-style as one conversation and summarized
-   * by the task's model into a structured checkpoint, iteratively updated
-   * on top of that earlier checkpoint. Long transcripts are chunked so a
-   * large task does not overflow the model context.
+   * Generate AgentFabric-assisted handoff content: the context bundle
+   * (`core/handoffContext.ts`) plus the checkpoint its selection leaves for the
+   * model (`core/handoffSummary.ts`).
    *
-   * When the model summary is unavailable this throws
-   * `HandoffUnavailableError` — or, if `allowDegraded` is set by a caller
-   * that has asked the user, yields the structured digest instead (recorded
-   * as `method: "heuristic"`). A cancelled `signal` always throws: there is
-   * no caller left to accept a degraded context.
+   * Coverage is every run since the newest checkpoint the task already carries.
+   * Of that coverage, the recent working trajectory and the historical user
+   * instructions cross the boundary verbatim; only the rest is summarized into
+   * the state index — a handoff is not a summary (v8).
+   *
+   * When the checkpoint cannot be written this throws
+   * `HandoffUnavailableError` — or, if `allowDegraded` is set by a caller that
+   * has asked the user, yields the structured digest instead (recorded as
+   * `method: "heuristic"`). A cancelled `signal` always throws: there is no
+   * caller left to accept a degraded context.
    */
   private async generateHandoffContent(
     task: Task,
     previousRun: Run,
     previousRuntime: Runtime | undefined,
+    target: Runtime | undefined,
+    targetModelId: ID | undefined,
     artifacts: Artifact[],
     allowDegraded: boolean,
     signal?: AbortSignal
   ): Promise<{
     content: HandoffContent;
-    method: "summarized" | "heuristic";
+    method: "context-bundle" | "heuristic";
     detail?: string;
     chunks?: number;
     model?: Model;
@@ -1429,6 +1437,7 @@ export class RunService {
     const coveredRuns = covered.slice(fromIndex);
     const coveredRunIds = coveredRuns.map((r) => r.id);
     const turns = coveredRuns.map((r) => ({
+      runId: r.id,
       events: this.events(r.id),
       userPrompt: r.userPrompt,
     }));
@@ -1481,8 +1490,13 @@ export class RunService {
         complete: this.completionFactory({ provider, model, apiKey }),
         modelMaxTokens:
           typeof model.parameters?.maxTokens === "number" ? model.parameters.maxTokens : undefined,
+        // The summarizer's window bounds the checkpoint call only...
         modelContextWindow:
           typeof model.parameters?.contextWindow === "number" ? model.parameters.contextWindow : undefined,
+        // ...while the handoff body is budgeted against the model that will
+        // READ it. Unknown → the task's configured model → the summarizer's
+        // (still a configured window, never a guess from the model name).
+        targetContextWindow: this.handoffTargetContextWindow(task, target, targetModelId, model),
         // Total budget for the whole (possibly chunked) generation, plus the
         // caller's cancellation so a gone client stops the work.
         timeoutMs: HANDOFF_GENERATION_BUDGET_MS,
@@ -1490,45 +1504,83 @@ export class RunService {
       });
       return {
         content: result.content,
-        method: "summarized",
+        method: "context-bundle",
         chunks: result.chunks,
-        model,
-        providerName: provider.name,
+        // A bundle whose whole covered history fit verbatim needs no model:
+        // there is no checkpoint to attribute, and none was written.
+        ...(result.chunks > 0 || result.checkpoint ? { model, providerName: provider.name } : {}),
         coveredRunIds,
         durationMs: Date.now() - startedAt,
         ...(result.usage ? { usage: result.usage } : {}),
       };
     } catch (err) {
-      const detail = `compaction summarization failed: ${err instanceof Error ? err.message : String(err)}`;
+      const detail = `handoff checkpoint generation failed: ${err instanceof Error ? err.message : String(err)}`;
       // A cancelled request must never be turned into a stored handoff: the
       // caller is gone, so there is nobody to accept a degraded context.
       if (signal?.aborted) {
         throw new HandoffUnavailableError("the handoff request was cancelled", detail);
       }
       if (allowDegraded) return heuristic(detail);
-      throw new HandoffUnavailableError("the summarization call failed", detail);
+      throw new HandoffUnavailableError("the checkpoint generation failed", detail);
     }
   }
 
   /**
+   * The model a continuation will run on, resolved exactly the way
+   * `continueTask` resolves it (harness-native targets keep their own account
+   * and model — an AgentFabric model never rides along, v6 §3).
+   */
+  private targetModelIdFor(target: Runtime | undefined, input: ContinueTaskInput): ID | undefined {
+    if (!target || this.isHarnessNative(target)) return undefined;
+    const profile = input.profileId ? this.profileService().get(input.profileId) : undefined;
+    return input.modelId ?? profile?.modelId ?? undefined;
+  }
+
+  /**
+   * The context window the handoff body is budgeted against: the model that
+   * will read it. Only configured values count — the target run's model, else
+   * the task's model, else the model writing the checkpoint. A window that is
+   * not configured anywhere falls back to the documented default inside
+   * `resolveHandoffBudget`; it is never guessed from a model name.
+   */
+  private handoffTargetContextWindow(
+    task: Task,
+    target: Runtime | undefined,
+    targetModelId: ID | undefined,
+    summarizer: Model | undefined
+  ): number | undefined {
+    const configured = (id: ID | undefined): number | undefined => {
+      if (!id) return undefined;
+      const window = this.modelService().get(id)?.parameters?.contextWindow;
+      return typeof window === "number" && window > 0 ? window : undefined;
+    };
+    // Harness-native targets bring their own account and model — an
+    // AgentFabric model never rides along (v6 §3), so nothing is known.
+    if (target && this.isHarnessNative(target)) return undefined;
+    // Every value here is a CONFIGURED window; when none is known the caller
+    // falls back to the documented default. A model name is never consulted.
+    return configured(targetModelId) ?? configured(task.modelId) ?? configured(summarizer?.id);
+  }
+
+  /**
    * Find the newest checkpoint the run chain already carries: the last run
-   * *before* the one being summarized whose generated handoff holds a pi
-   * compaction summary. The runs after it are what the next summary must
-   * cover, and its checkpoint feeds pi's iterative update. A harness
-   * handoff without a checkpoint (only the mock adapter produces one) is
-   * not an anchor — those runs are simply re-covered. Returns
-   * `fromIndex: 0` when nothing has been checkpointed yet.
+   * *before* the one being handed off whose generated handoff holds a
+   * checkpoint. The runs after it are what the next handoff must cover (and
+   * carry verbatim where they fit), and its checkpoint feeds the iterative
+   * update. A handoff without a checkpoint — a bundle whose whole history fit,
+   * a harness handoff, a degraded digest — is not an anchor: those runs are
+   * simply re-covered. Returns `fromIndex: 0` when nothing is checkpointed yet.
    */
   private handoffCheckpointAnchor(chain: Run[]): { previousSummary?: string; fromIndex: number } {
     for (let i = chain.length - 2; i >= 0; i--) {
       // The newest handoff generated from that run that carries a
       // checkpoint — looked up, never taken from the run's
       // `generatedHandoffId`, so a discarded record cannot silently drop
-      // the anchor and make the next summary re-cover runs it already has.
-      const summary = this.handoffService()
+      // the anchor and make the next handoff re-cover runs it already has.
+      const checkpoint = this.handoffService()
         .list({ runId: chain[i].id })
-        .find((h) => h.content.compactionSummary)?.content.compactionSummary;
-      if (summary) return { previousSummary: summary, fromIndex: i + 1 };
+        .find((h) => h.content.contextBundle?.checkpoint)?.content.contextBundle?.checkpoint;
+      if (checkpoint) return { previousSummary: checkpoint, fromIndex: i + 1 };
     }
     return { fromIndex: 0 };
   }

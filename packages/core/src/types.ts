@@ -435,15 +435,18 @@ export type HandoffSource = "harness" | "agentfabric" | "user";
 
 /**
  * How a handoff's context was produced:
- * - `summarized`: the model summarized the covered runs (pi pipeline) — the
- *   real thing.
- * - `heuristic`: the model summary was unavailable and a structured digest
- *   of the run records was used instead. Degraded: callers must surface it
- *   and never present it as a model summary.
- * - `harness`: the previous agent harness produced the summary itself.
+ * - `context-bundle`: the real thing. The covered history was split into an
+ *   old prefix (summarized into a small structured checkpoint by the model)
+ *   and a recent suffix (carried over verbatim as retained context); see
+ *   `core/handoffContext.ts`. A bundle whose whole covered history fit in the
+ *   retained context has no checkpoint at all — that is still a bundle.
+ * - `heuristic`: no bundle could be assembled by the model and a structured
+ *   digest of the run records was used instead. Degraded: callers must
+ *   surface it and never present it as a model-written checkpoint.
+ * - `harness`: the previous agent harness produced the content itself.
  * - `brief`: no previous run existed — the handoff is just the task brief.
  */
-export type HandoffGenerationMethod = "summarized" | "heuristic" | "harness" | "brief";
+export type HandoffGenerationMethod = "context-bundle" | "heuristic" | "harness" | "brief";
 
 /**
  * Why a handoff exists. Audit-only — it never drives behaviour (the
@@ -462,9 +465,9 @@ export interface HandoffGeneration {
   method: HandoffGenerationMethod;
   /** Why it was generated. */
   trigger?: HandoffTrigger;
-  /** Why the model summary was unavailable (degraded handoffs only). */
+  /** Why the checkpoint could not be written (degraded handoffs only). */
   detail?: string;
-  /** Summarization calls used; > 1 when the covered runs were chunked. */
+  /** Summarization calls used; > 1 when the summarized prefix was chunked. */
   chunks?: number;
   /** Model that wrote the checkpoint; absent when no model produced content. */
   modelId?: ID;
@@ -476,6 +479,74 @@ export interface HandoffGeneration {
   durationMs?: number;
   /** Tokens the summarization calls consumed (all chunks). */
   usage?: { inputTokens: number; outputTokens: number };
+}
+
+/**
+ * One piece of preserved context inside a handoff bundle (v8 §7). Slices are
+ * kept as discrete, labelled records — never flattened back into one blob —
+ * so inspection can still answer "what survived, and why".
+ *
+ * `kind` is the *speaker* of the piece: a user turn, an assistant conclusion,
+ * a tool call or a tool result. Tool outputs are observed data, never
+ * instructions (v8 §23).
+ */
+export interface HandoffContextSlice {
+  kind: "user" | "assistant" | "tool-call" | "tool-result";
+  text: string;
+  /** Run the slice came from (absent for synthetic slices like the task brief). */
+  runId?: ID;
+  toolCallId?: string;
+  toolName?: string;
+  /**
+   * The slice is a placeholder for an observation that the new harness can
+   * re-obtain from the shared workspace (a local file read, a `cat`): the body
+   * is deliberately omitted and `text` says how to get it back (v8 §16).
+   */
+  reconstructable?: boolean;
+  /** Why this slice survived selection (v8 §7). */
+  retention: "pinned" | "recent" | "paired" | "oversized-truncated";
+}
+
+/**
+ * Token accounting of one generated handoff (v8 §6.3). No tokenizer is
+ * bundled: `charsPerToken` is the single conservative estimator the whole
+ * handoff path uses (see `estimateTokens` in `core/handoffContext.ts`).
+ */
+export interface HandoffContextBudget {
+  /** Target model context window the budget was derived from. */
+  contextWindow: number;
+  /** Total handoff budget: `min(maxHandoffTokens, floor(window × ratio))`. */
+  maxTokens: number;
+  /** Estimated size of everything the rendered handoff carries. */
+  estimatedTokens: number;
+  checkpointTokens: number;
+  pinnedTokens: number;
+  retainedTokens: number;
+  /** Render scaffolding + workspace/run metadata the checkpoint does not own. */
+  metadataTokens?: number;
+  charsPerToken: number;
+}
+
+/**
+ * The handoff context bundle (v8 §7): what actually crosses the session
+ * boundary. A handoff is NOT a summary — the checkpoint is only the fallback
+ * representation of the history that did not fit verbatim.
+ */
+export interface HandoffContextBundle {
+  version: 2;
+  /**
+   * Structured state index written by the model over the history that was NOT
+   * carried verbatim. Absent when the whole covered history fit in the
+   * retained context (nothing needed summarizing) and no earlier checkpoint
+   * had to be carried forward.
+   */
+  checkpoint?: string;
+  /** High-value older context kept verbatim (historical user instructions). */
+  pinnedContext: HandoffContextSlice[];
+  /** Recent working trajectory kept verbatim, oldest first. */
+  retainedContext: HandoffContextSlice[];
+  /** How the bundle spent the handoff budget. */
+  budget: HandoffContextBudget;
 }
 
 /**
@@ -498,17 +569,15 @@ export interface HandoffContent {
   previousRunResult?: string;
   notesForNextAgent?: string;
   /**
-   * The handoff checkpoint (structured summary + file XML tags) written by
-   * the summarizer in `core/handoffSummary.ts`, which reuses pi's
-   * compaction prompt/format.
-   *
-   * The name is historical: this is NOT an intra-session compaction
-   * artifact (the harness owns those, inside its own native session). It is
-   * the handoff's own text, embedded verbatim in the rendered prompt; the
-   * mapped fields above are a parsed projection for UI/inspection. Absent
-   * on harness-generated and degraded (heuristic) handoffs.
+   * The context bundle this handoff carries: a checkpoint over the history
+   * that did not fit, plus the pinned and retained context that did — all of
+   * it projected from the covered runs once, at generation time
+   * (`core/handoffContext.ts` + `core/handoffSummary.ts`). Rendered verbatim
+   * into the next run's instruction; the mapped fields above are a parsed
+   * projection for UI/inspection. Absent on harness-generated and degraded
+   * (heuristic) handoffs.
    */
-  compactionSummary?: string;
+  contextBundle?: HandoffContextBundle;
 }
 
 export interface Handoff {

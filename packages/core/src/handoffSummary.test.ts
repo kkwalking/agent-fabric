@@ -1,21 +1,27 @@
 /**
- * Tests for the pi-aligned compaction handoff generation
- * (core/compaction.ts): AgentFabric's assisted handoff content is
- * produced by the pi coding agent's context-compaction pipeline —
- * pi-style conversation serialization, verbatim pi prompts (initial +
- * iterative update), pi's token budget and failure checks, tracked file
- * operations appended as XML tags (accumulated across iterative
- * updates), pi's transient-error retry policy, and a
- * verbatim-checkpoint render.
+ * Tests for the checkpoint half of a handoff: the pi-aligned summarization
+ * that covers the history a context bundle could NOT carry verbatim.
+ *
+ * Covered here: pi-style conversation serialization, verbatim pi prompts
+ * (initial + iterative update), pi's failure checks, tracked file operations
+ * appended as XML tags (accumulated across iterative updates), pi's
+ * transient-error retry policy, and the checkpoint → HandoffContent
+ * projection.
+ *
+ * The bundle itself — selection, pins, retained context, budget accounting and
+ * rendering — is covered by `v8.test.ts`. Most tests here force a tiny handoff
+ * budget (`FORCE_SUMMARY`) so the checkpoint path actually runs: with the real
+ * 150K budget these small fixtures are carried verbatim and the model is never
+ * called, which is the whole point of a context bundle.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DEFAULT_HANDOFF_SUMMARY_SETTINGS,
   SUMMARIZATION_PROMPT,
   SUMMARIZATION_SYSTEM_PROMPT,
   UPDATE_SUMMARIZATION_PROMPT,
   buildSummarizationPrompt,
+  checkpointOutputTokenCap,
   computeFileLists,
   createFileOps,
   createHttpCompletionFn,
@@ -54,6 +60,22 @@ const workspace = {
   path: "/Users/zhouzekun/code/bruce-go",
   persistent: true,
 } as Workspace;
+
+/**
+ * A handoff budget far smaller than any covered history in this file, so
+ * selection leaves the whole history to the checkpoint. The metadata and
+ * render scaffolding reserve alone exceeds it, which means nothing is retained
+ * — exactly the summary-only situation these tests are about.
+ */
+const FORCE_SUMMARY = { contextWindow: 1_000_000, maxHandoffTokens: 600 };
+
+/** Shrink the seeded model's window so a handoff cannot retain its history. */
+async function forceSummarization(h: Awaited<ReturnType<typeof freshHarness>>): Promise<void> {
+  const model = h.store.list<{ id: string; parameters?: Record<string, unknown> }>("models")[0];
+  await h.store.update("models", model.id, {
+    parameters: { ...(model.parameters ?? {}), contextWindow: 2_000 },
+  });
+}
 
 const CHECKPOINT = `## Goal
 Fix the three flaky tests in packages/auth/tests/login.test.ts
@@ -151,7 +173,7 @@ test("serializeRunConversation prepends the task prompt when no user message was
   assert.match(text, new RegExp(`\\[User\\]: #${task.title}: ${task.prompt}`));
 });
 
-test("serializeRunConversation accumulates shell output and truncates tool results at 2000 chars (pi)", () => {
+test("serializeRunConversation accumulates shell output and truncates tool results at 2000 chars (summary input only)", () => {
   const long = "x".repeat(3000);
   const text = serializeRunConversation([
     ev("shell.command", { command: "ls -la" }),
@@ -342,22 +364,29 @@ test("generateHandoffSummary produces a pi checkpoint mapped onto HandoffContent
     artifacts: [],
     workspace,
     complete: fakeCompletion(CHECKPOINT, requests),
+    settings: FORCE_SUMMARY,
   });
 
-  // The LLM call used pi's system prompt and budget: floor(0.8 × 16384).
+  // The LLM call used pi's system prompt and the CHECKPOINT output budget —
+  // never the handoff budget (150K is not a summary output size).
   assert.equal(requests.length, 1);
   assert.equal(requests[0].systemPrompt, SUMMARIZATION_SYSTEM_PROMPT);
   assert.ok(requests[0].prompt.startsWith("<conversation>\n[User]: fix the tests"));
   assert.ok(requests[0].prompt.includes('<workspace>\nWorkspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.'));
-  assert.equal(requests[0].maxTokens, Math.floor(0.8 * DEFAULT_HANDOFF_SUMMARY_SETTINGS.reserveTokens));
+  assert.equal(requests[0].maxTokens, checkpointOutputTokenCap({ checkpointMaxTokens: 12_000 }));
 
-  // Summary = checkpoint + pi's file XML tags from tracked operations.
-  assert.ok(result.summary.startsWith(CHECKPOINT));
-  assert.ok(result.summary.includes("<read-files>\na.ts\n</read-files>"));
-  assert.ok(result.summary.includes("<modified-files>\nb.ts\n</modified-files>"));
+  // Checkpoint = model answer + pi's file XML tags from tracked operations.
+  assert.ok(result.checkpoint!.startsWith(CHECKPOINT));
+  assert.ok(result.checkpoint!.includes("<read-files>\na.ts\n</read-files>"));
+  assert.ok(result.checkpoint!.includes("<modified-files>\nb.ts\n</modified-files>"));
+  assert.equal(result.contextBundle.checkpoint, result.checkpoint);
 
   const c = result.content;
-  assert.equal(c.compactionSummary, result.summary);
+  assert.equal(c.contextBundle!.checkpoint, result.checkpoint);
+  assert.equal(c.contextBundle!.budget.maxTokens, 600);
+  // The estimate counts every section of the body, so it is honest even when a
+  // deliberately tiny budget cannot cover the render scaffolding itself.
+  assert.ok(c.contextBundle!.budget.estimatedTokens > c.contextBundle!.budget.retainedTokens);
   assert.ok(c.originalTask!.includes("Fix flaky login tests"));
   assert.deepEqual(c.completedWork, ["Added a retry wrapper around the OAuth mock"]);
   assert.deepEqual(c.userConstraints, ["Do not modify the existing API"]);
@@ -374,10 +403,11 @@ test("generateHandoffSummary passes previousSummary through the pi update flow",
   await generateHandoffSummary({
     task,
     run,
-    events: [],
+    events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
     artifacts: [],
     previousSummary: "PREV SUMMARY",
     complete: fakeCompletion(CHECKPOINT, requests),
+    settings: FORCE_SUMMARY,
   });
   assert.ok(requests[0].prompt.includes("<previous-summary>\nPREV SUMMARY\n</previous-summary>"));
   assert.ok(requests[0].prompt.endsWith(UPDATE_SUMMARIZATION_PROMPT));
@@ -393,10 +423,11 @@ test("generateHandoffSummary accumulates file lists across iterative updates (pi
     artifacts: [],
     previousSummary,
     complete: fakeCompletion(CHECKPOINT),
+    settings: FORCE_SUMMARY,
   });
   // The new checkpoint's tags carry the previous run's files forward.
-  assert.ok(result.summary.includes("<read-files>\nold.ts\n</read-files>"));
-  assert.ok(result.summary.includes("<modified-files>\nb.ts\nmut.ts\n</modified-files>"));
+  assert.ok(result.checkpoint!.includes("<read-files>\nold.ts\n</read-files>"));
+  assert.ok(result.checkpoint!.includes("<modified-files>\nb.ts\nmut.ts\n</modified-files>"));
   assert.deepEqual(result.content.relevantFiles, ["old.ts", "b.ts", "mut.ts"]);
 });
 
@@ -417,9 +448,10 @@ test("generateHandoffSummary refuses an answer that is not a checkpoint", async 
       generateHandoffSummary({
         task,
         run,
-        events: [],
+        events: [ev("agent.message", { role: "assistant", content: "the old implementation summarizes everything" })],
         artifacts: [],
         complete: fakeCompletion("Sure — the project is a Go service with six HTTP endpoints."),
+        settings: FORCE_SUMMARY,
       }),
     /did not return a checkpoint/
   );
@@ -454,13 +486,14 @@ test("generateHandoffSummary stores and renders a preamble-free checkpoint", asy
   const result = await generateHandoffSummary({
     task,
     run,
-    events: [],
+    events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
     artifacts: [],
     complete: fakeCompletion(dirty),
+    settings: FORCE_SUMMARY,
   });
-  assert.ok(result.summary.startsWith("## Goal"));
-  assert.ok(!result.summary.includes("Let me analyze"));
-  assert.equal(result.content.compactionSummary, result.summary);
+  assert.ok(result.checkpoint!.startsWith("## Goal"));
+  assert.ok(!result.checkpoint!.includes("Let me analyze"));
+  assert.equal(result.content.contextBundle!.checkpoint, result.checkpoint);
 });
 
 test("parsed fields drop elaborated \"(none …)\" placeholder lines", async () => {
@@ -477,9 +510,10 @@ test("parsed fields drop elaborated \"(none …)\" placeholder lines", async () 
   const result = await generateHandoffSummary({
     task,
     run,
-    events: [],
+    events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
     artifacts: [],
     complete: fakeCompletion(checkpoint),
+    settings: FORCE_SUMMARY,
   });
   assert.equal(result.content.userConstraints, undefined);
   assert.equal(result.content.importantDecisions, undefined);
@@ -492,9 +526,10 @@ test("taskLabel does not repeat the prompt when the title defaults to it", async
   const result = await generateHandoffSummary({
     task: sameTask,
     run,
-    events: [],
+    events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
     artifacts: [],
     complete: fakeCompletion(CHECKPOINT),
+    settings: FORCE_SUMMARY,
   });
   assert.equal(result.content.originalTask, "#当前项目是什么语言写的");
 });
@@ -509,13 +544,14 @@ test("generateHandoffSummary retries transient summary errors with backoff (pi r
   const result = await generateHandoffSummary({
     task,
     run,
-    events: [],
+    events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
     artifacts: [],
     complete,
     retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 },
+    settings: FORCE_SUMMARY,
   });
   assert.equal(calls, 3);
-  assert.ok(result.summary.startsWith("## Goal"));
+  assert.ok(result.checkpoint!.startsWith("## Goal"));
 });
 
 test("generateHandoffSummary fails fast on non-retryable errors (quota/billing)", async () => {
@@ -528,10 +564,11 @@ test("generateHandoffSummary fails fast on non-retryable errors (quota/billing)"
     generateHandoffSummary({
       task,
       run,
-      events: [],
+      events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
       artifacts: [],
       complete,
       retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 },
+      settings: FORCE_SUMMARY,
     }),
     /insufficient_quota/
   );
@@ -543,9 +580,10 @@ test("generateHandoffSummary rejects incomplete summaries (pi failure checks)", 
     generateHandoffSummary({
       task,
       run,
-      events: [],
+      events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
       artifacts: [],
       complete: fakeCompletion("partial…", undefined, "length"),
+      settings: FORCE_SUMMARY,
     }),
     /token cap/
   );
@@ -553,15 +591,16 @@ test("generateHandoffSummary rejects incomplete summaries (pi failure checks)", 
     generateHandoffSummary({
       task,
       run,
-      events: [],
+      events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
       artifacts: [],
       complete: async () => ({ text: "", stopReason: "stop" }),
+      settings: FORCE_SUMMARY,
     }),
     /empty summary/
   );
 });
 
-test("renderHandoffPrompt embeds the compaction checkpoint verbatim", () => {
+test("renderHandoffPrompt embeds the bundle's checkpoint verbatim", () => {
   const handoff = {
     id: "hoff_1",
     taskId: "task_1",
@@ -573,16 +612,29 @@ test("renderHandoffPrompt embeds the compaction checkpoint verbatim", () => {
     artifactIds: [],
     createdAt: new Date().toISOString(),
     content: {
-      compactionSummary: CHECKPOINT + "\n\n<modified-files>\nb.ts\n</modified-files>",
+      contextBundle: {
+        version: 2,
+        checkpoint: CHECKPOINT + "\n\n<modified-files>\nb.ts\n</modified-files>",
+        pinnedContext: [],
+        retainedContext: [],
+        budget: {
+          contextWindow: 128_000,
+          maxTokens: 19_200,
+          estimatedTokens: 200,
+          checkpointTokens: 200,
+          pinnedTokens: 0,
+          retainedTokens: 0,
+          charsPerToken: 2,
+        },
+      },
       originalTask: "#mapped (not rendered when a checkpoint exists)",
       workspaceStatus: 'Workspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.',
     },
   } as unknown as Handoff;
   const rendered = renderHandoffPrompt(handoff, "continue");
-  // The checkpoint's own sections are the handoff's content: no wrapper
-  // heading stands between them, so `## Goal` is never a sibling of one.
-  assert.ok(!rendered.includes("## Context checkpoint"));
-  assert.match(rendered, /structured checkpoint the previous session was summarized into\.\n\n## Goal\n/);
+  // The checkpoint is a document of its own under its own section: its
+  // `## Goal` … `## Critical Context` headings nest inside that section.
+  assert.match(rendered, /# Handoff checkpoint\n/);
   assert.ok(rendered.includes(CHECKPOINT));
   assert.ok(rendered.includes("<modified-files>"));
   assert.ok(!rendered.includes("#mapped"), "mapped fields must not duplicate the checkpoint");
@@ -607,7 +659,21 @@ test("renderHandoffPrompt embeds a stored checkpoint verbatim, without repairing
     artifactIds: [],
     createdAt: new Date().toISOString(),
     content: {
-      compactionSummary: stored,
+      contextBundle: {
+        version: 2,
+        checkpoint: stored,
+        pinnedContext: [],
+        retainedContext: [],
+        budget: {
+          contextWindow: 128_000,
+          maxTokens: 19_200,
+          estimatedTokens: 200,
+          checkpointTokens: 200,
+          pinnedTokens: 0,
+          retainedTokens: 0,
+          charsPerToken: 2,
+        },
+      },
       workspaceStatus: 'Workspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.',
     },
   } as unknown as Handoff;
@@ -630,7 +696,21 @@ test("renderHandoffPrompt always states the workspace, even for checkpoints", ()
     {
       ...base,
       content: {
-        compactionSummary: CHECKPOINT,
+        contextBundle: {
+          version: 2,
+          checkpoint: CHECKPOINT,
+          pinnedContext: [],
+          retainedContext: [],
+          budget: {
+            contextWindow: 128_000,
+            maxTokens: 19_200,
+            estimatedTokens: 200,
+            checkpointTokens: 200,
+            pinnedTokens: 0,
+            retainedTokens: 0,
+            charsPerToken: 2,
+          },
+        },
         workspaceStatus: 'Workspace "bruce-go" (local) at /Users/zhouzekun/code/bruce-go.',
       },
     } as unknown as Handoff,
@@ -660,7 +740,7 @@ function opencodeRuntimeOf(h: Awaited<ReturnType<typeof freshHarness>>) {
   return rt as { id: string; kind: string };
 }
 
-test("assisted handoff is generated by the compaction pipeline end-to-end", async () => {
+test("assisted handoff is generated by the context-bundle pipeline end-to-end", async () => {
   const fx = makeFixtures();
   const restore = useBins(fx);
   const requests: CompletionRequest[] = [];
@@ -669,6 +749,9 @@ test("assisted handoff is generated by the compaction pipeline end-to-end", asyn
   });
   try {
     const oc = opencodeRuntimeOf(h);
+    // Force the checkpoint path: this short history would otherwise be carried
+    // verbatim (which is the point of the bundle — see v8.test.ts).
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
     const finished = await waitForRun(h.runService, first.run.id);
     assert.equal(finished.status, "completed");
@@ -683,10 +766,10 @@ test("assisted handoff is generated by the compaction pipeline end-to-end", asyn
     });
     assert.equal(cont.continuity, "handoff");
     assert.ok(cont.handoff);
-    assert.ok(cont.handoff!.content.compactionSummary!.startsWith("## Goal"));
+    assert.ok(cont.handoff!.content.contextBundle!.checkpoint!.startsWith("## Goal"));
     assert.equal(cont.handoff!.source, "agentfabric");
-    // A model summary, and the record says so (nothing to warn about).
-    assert.equal(cont.handoff!.generation?.method, "summarized");
+    // A model-written checkpoint, and the record says so (nothing to warn about).
+    assert.equal(cont.handoff!.generation?.method, "context-bundle");
     assert.equal(cont.handoff!.generation?.chunks, 1);
     // The initial pi prompt was used (no previous summary for run #1).
     assert.ok(requests[requests.length - 1].prompt.endsWith(SUMMARIZATION_PROMPT));
@@ -694,9 +777,9 @@ test("assisted handoff is generated by the compaction pipeline end-to-end", asyn
     const genEvt = h.runService
       .events(first.run.id)
       .find((e) => e.type === "handoff.generated");
-    assert.equal(genEvt?.data?.method, "summarized");
+    assert.equal(genEvt?.data?.method, "context-bundle");
     // The next harness receives the checkpoint verbatim in its instruction.
-    assert.match(cont.run.inputInstruction!, /structured checkpoint the previous session was summarized into\.\n\n## Goal\n/);
+    assert.match(cont.run.inputInstruction!, /# Handoff checkpoint\n/);
     assert.ok(cont.run.inputInstruction!.includes(CHECKPOINT));
     assert.match(cont.run.inputInstruction!, /# Your instruction\n继续修剩下的/);
     await waitForRun(h.runService, cont.run.id);
@@ -732,6 +815,7 @@ test("a failed summarization errors instead of silently degrading", async () => 
   });
   try {
     const oc = opencodeRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
     await waitForRun(h.runService, first.run.id);
 
@@ -764,6 +848,7 @@ test("an explicitly accepted degraded handoff is recorded as heuristic", async (
   });
   try {
     const oc = opencodeRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
     await waitForRun(h.runService, first.run.id);
 
@@ -778,7 +863,7 @@ test("an explicitly accepted degraded handoff is recorded as heuristic", async (
     // The degraded state rides on the record, not just the event log.
     assert.equal(cont.handoff!.generation?.method, "heuristic");
     assert.match(cont.handoff!.generation?.detail ?? "", /invalid api key/);
-    assert.equal(cont.handoff!.content.compactionSummary, undefined);
+    assert.equal(cont.handoff!.content.contextBundle, undefined);
     assert.match(cont.handoff!.content.notesForNextAgent!, /assembled by AgentFabric/);
     const genEvt = h.runService
       .events(first.run.id)
@@ -809,8 +894,10 @@ test("a long transcript is summarized in chunks, each updating the previous chec
     turns,
     artifacts: [],
     complete: fakeCompletion(CHECKPOINT, requests),
-    // floor(window − output − overhead, 1000) × 1 char/token = 1000 chars.
-    settings: { reserveTokens: 16384, contextWindow: 1_000, charsPerToken: 1 },
+    // (window − output − overhead, floored at 1000) × 1 char/token = 1000
+    // characters per checkpoint call, and a handoff budget that retains
+    // nothing: every turn is chunked on its own.
+    settings: { maxHandoffTokens: 600, checkpointMaxTokens: 200, contextWindow: 1_000, charsPerToken: 1 },
   });
 
   assert.equal(result.chunks, 6, "one call per oversized turn");
@@ -818,10 +905,10 @@ test("a long transcript is summarized in chunks, each updating the previous chec
   assert.ok(!requests[0].prompt.includes("<previous-summary>"), "the first chunk starts fresh");
   assert.ok(requests[1].prompt.includes("<previous-summary>"), "later chunks iterate");
   assert.ok(requests[5].prompt.endsWith(UPDATE_SUMMARIZATION_PROMPT));
-  // File operations accumulate chunk over chunk, like pi's iterative update.
-  assert.match(result.summary, /<modified-files>\nchunked\.ts\n<\/modified-files>/);
+  // File operations accumulate across the whole covered range.
+  assert.match(result.checkpoint!, /<modified-files>\nchunked\.ts\n<\/modified-files>/);
   // The mapping still points at the final checkpoint.
-  assert.equal(result.content.compactionSummary, result.summary);
+  assert.equal(result.content.contextBundle!.checkpoint, result.checkpoint);
 });
 
 test("a small transcript stays a single summarization call", async () => {
@@ -832,6 +919,7 @@ test("a small transcript stays a single summarization call", async () => {
     events: [ev("agent.message", { role: "assistant", content: "short" })],
     artifacts: [],
     complete: fakeCompletion(CHECKPOINT, requests),
+    settings: FORCE_SUMMARY,
   });
   assert.equal(result.chunks, 1);
   assert.equal(requests.length, 1);
@@ -860,9 +948,10 @@ test("the total budget aborts a long generation instead of hanging", async () =>
       generateHandoffSummary({
         task,
         run,
-        events: [],
+        events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
         artifacts: [],
         complete: hangingCompletion(() => { aborted = true; }),
+        settings: FORCE_SUMMARY,
         timeoutMs: 40,
       }),
     /budget/
@@ -876,9 +965,10 @@ test("a caller abort cancels the generation and reports cancellation", async () 
   const pending = generateHandoffSummary({
     task,
     run,
-    events: [],
+    events: [ev("agent.message", { role: "assistant", content: "some work happened" })],
     artifacts: [],
     complete: hangingCompletion(() => { aborted = true; }),
+    settings: FORCE_SUMMARY,
     signal: controller.signal,
   });
   setTimeout(() => controller.abort(), 20);
@@ -895,6 +985,7 @@ test("a cancelled continue never stores a degraded handoff", async () => {
   });
   try {
     const oc = opencodeRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
     await waitForRun(h.runService, first.run.id);
 
@@ -956,6 +1047,7 @@ test("an explicit handoff is consumed by the continuation instead of regenerated
   try {
     const oc = opencodeRuntimeOf(h);
     const pi = piRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: oc.id });
     await waitForRun(h.runService, first.run.id);
 
@@ -981,6 +1073,11 @@ test("an explicit handoff is consumed by the continuation instead of regenerated
 /* Coverage across native-resume turns (the resume-chain fix)          */
 /* ------------------------------------------------------------------ */
 
+const secondRunId = (h: Awaited<ReturnType<typeof freshHarness>>, taskId: string) =>
+  h.runService.forTask(taskId)[1].id;
+const thirdRunId = (h: Awaited<ReturnType<typeof freshHarness>>, taskId: string) =>
+  h.runService.forTask(taskId)[2].id;
+
 function piRuntimeOf(h: Awaited<ReturnType<typeof freshHarness>>) {
   const rt = h.store.list("runtimes").find((r: any) => r.kind === "pi");
   assert.ok(rt, "seeded pi runtime must exist");
@@ -999,6 +1096,7 @@ test("a handoff records how it was produced and which runs it covers", async () 
   try {
     const oc = opencodeRuntimeOf(h);
     const pi = piRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "MARKER_Q1", runtimeId: oc.id });
     await waitForRun(h.runService, first.run.id);
     // A native-resume turn in between: coverage must include it, even though
@@ -1015,7 +1113,7 @@ test("a handoff records how it was produced and which runs it covers", async () 
       mode: "handoff",
     });
     const g = cont.handoff!.generation!;
-    assert.equal(g.method, "summarized");
+    assert.equal(g.method, "context-bundle");
     assert.equal(g.trigger, "continuation", "a handoff produced by a continue says so");
     assert.equal(g.chunks, 1);
     assert.deepEqual(g.coveredRunIds, [first.run.id, second.run.id], "coverage is recorded, oldest first");
@@ -1028,6 +1126,7 @@ test("a handoff records how it was produced and which runs it covers", async () 
     const evt = h.runService.events(second.run.id).find((e) => e.type === "handoff.generated")!;
     assert.equal(evt.data.handoffId, cont.handoff!.id);
     assert.equal(evt.data.trigger, "continuation");
+    assert.equal(evt.data.method, "context-bundle");
     assert.deepEqual(evt.data.coveredRunIds, [first.run.id, second.run.id]);
     assert.equal(evt.data.modelName, g.modelName);
     assert.equal(evt.data.providerName, g.providerName);
@@ -1045,6 +1144,7 @@ test("the standalone Handoff action records itself as the explicit trigger", asy
   const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
   try {
     const pi = piRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "fix the flaky tests", runtimeId: pi.id });
     await waitForRun(h.runService, first.run.id);
 
@@ -1107,6 +1207,7 @@ test("a handoff after native-resume turns covers every run, user prompts include
   const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
   try {
     const pi = piRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "MARKER_Q1", runtimeId: pi.id });
     const run1 = await waitForRun(h.runService, first.run.id);
     const run1Text = h.runService
@@ -1136,7 +1237,7 @@ test("a handoff after native-resume turns covers every run, user prompts include
     // No checkpoint existed before this summary, so nothing to iterate on.
     assert.ok(!last.includes("<previous-summary>"));
     // ...and the consuming harness receives the full checkpoint.
-    assert.match(r3.run.inputInstruction!, /structured checkpoint the previous session was summarized into\./);
+    assert.match(r3.run.inputInstruction!, /# Handoff checkpoint\n/);
   } finally {
     restore();
   }
@@ -1149,6 +1250,7 @@ test("the iterative update resumes from the newest checkpoint even across resume
   const h = await freshHarness({ completionFactory: () => fakeCompletion(CHECKPOINT, requests) });
   try {
     const pi = piRuntimeOf(h);
+    await forceSummarization(h);
     const first = await h.runService.submit({ prompt: "MARKER_Q1", runtimeId: pi.id });
     await waitForRun(h.runService, first.run.id);
 
@@ -1158,7 +1260,7 @@ test("the iterative update resumes from the newest checkpoint even across resume
       runtimeId: pi.id,
       mode: "handoff",
     });
-    assert.ok(r2.handoff!.content.compactionSummary);
+    assert.ok(r2.handoff!.content.contextBundle!.checkpoint);
     await waitForRun(h.runService, r2.run.id);
 
     // run 3: plain resume of run 2's native session (never touches a handoff).
@@ -1167,6 +1269,7 @@ test("the iterative update resumes from the newest checkpoint even across resume
     await waitForRun(h.runService, r3.run.id);
 
     // run 4: handoff again → iterate from h1 and cover runs 2..3.
+    const before = requests.length;
     const r4 = await h.runService.continueTask(first.task.id, {
       prompt: "MARKER_Q4",
       runtimeId: pi.id,
@@ -1174,16 +1277,24 @@ test("the iterative update resumes from the newest checkpoint even across resume
     });
     await waitForRun(h.runService, r4.run.id);
 
-    const last = requests[requests.length - 1].prompt;
+    // This generation's checkpoint calls (one per chunk of unretained history).
+    const generation = requests.slice(before).map((r) => r.prompt);
+    assert.deepEqual(
+      r4.handoff!.generation!.coveredRunIds,
+      [secondRunId(h, first.task.id), thirdRunId(h, first.task.id)],
+      "coverage starts after the newest checkpoint"
+    );
+    const last = generation[generation.length - 1];
     assert.ok(last.includes("<previous-summary>"), "resume turns must not drop the checkpoint");
     assert.ok(
       last.includes("Added a retry wrapper around the OAuth mock"),
       "the previous checkpoint content is carried verbatim"
     );
-    assert.ok(last.includes("[User]: MARKER_Q2"), "the checkpoint's consuming run is re-covered");
-    assert.ok(last.includes("[User]: MARKER_Q3"), "the resume run is covered");
+    const covered = generation.join("\n");
+    assert.ok(covered.includes("[User]: MARKER_Q2"), "the checkpoint's consuming run is re-covered");
+    assert.ok(covered.includes("[User]: MARKER_Q3"), "the resume run is covered");
     // run 1 already lives inside the checkpoint — re-serializing it doubles it.
-    assert.ok(!last.includes("[User]: MARKER_Q1"), "already-checkpointed runs must not repeat");
+    assert.ok(!covered.includes("[User]: MARKER_Q1"), "already-checkpointed runs must not repeat");
     assert.ok(last.endsWith(UPDATE_SUMMARIZATION_PROMPT));
   } finally {
     restore();

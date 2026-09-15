@@ -19,6 +19,117 @@ const CONTENT_SECTIONS: Array<{ key: string; label: string }> = [
   { key: "notesForNextAgent", label: "Notes for the next agent" },
 ];
 
+/** Why a slice survived selection — the same enum the selector writes. */
+const RETENTION_LABELS: Record<string, string> = {
+  pinned: "pinned — historical user context, kept verbatim",
+  recent: "recent — part of the working trajectory",
+  paired: "paired — kept so its tool result/call stays readable",
+  "oversized-truncated": "oversized — head+tail kept, middle dropped",
+};
+
+interface ContextSlice {
+  kind: string;
+  text: string;
+  runId?: string;
+  toolName?: string;
+  reconstructable?: boolean;
+  retention: string;
+}
+
+interface ContextBundle {
+  version: number;
+  checkpoint?: string;
+  pinnedContext: ContextSlice[];
+  retainedContext: ContextSlice[];
+  budget: {
+    contextWindow: number;
+    maxTokens: number;
+    estimatedTokens: number;
+    checkpointTokens: number;
+    pinnedTokens: number;
+    retainedTokens: number;
+    metadataTokens?: number;
+    charsPerToken: number;
+  };
+}
+
+/** One retained/pinned slice: what it is, why it stayed, and its text. */
+function ContextSliceRow({ slice }: { slice: ContextSlice }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div className="muted">
+        <span className="mono">[{slice.kind}]</span>
+        {slice.toolName ? <> <span className="mono">{slice.toolName}</span></> : null}
+        {" · "}
+        <span title={RETENTION_LABELS[slice.retention] ?? slice.retention}>{slice.retention}</span>
+        {slice.reconstructable ? <> · reconstructable from the workspace</> : null}
+        {slice.runId ? <> · <span className="mono">{shortId(slice.runId)}</span></> : null}
+      </div>
+      <pre style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", margin: "4px 0 0" }}>
+        {slice.text}
+      </pre>
+    </div>
+  );
+}
+
+/**
+ * The context bundle: what crossed the session boundary, and how much of the
+ * handoff budget each class of context spent. A handoff is not a summary — the
+ * checkpoint here is only the fallback representation of what did not fit
+ * verbatim.
+ */
+function ContextBundleCard({ bundle }: { bundle: ContextBundle }) {
+  const b = bundle.budget;
+  const rows: Array<[string, string]> = [
+    ["Target context window", `${b.contextWindow.toLocaleString()} tok`],
+    ["Handoff budget", `${b.maxTokens.toLocaleString()} tok`],
+    ["Estimated size", `${b.estimatedTokens.toLocaleString()} tok`],
+    ["Checkpoint", `${b.checkpointTokens.toLocaleString()} tok`],
+    ["Pinned user context", `${b.pinnedTokens.toLocaleString()} tok`],
+    ["Recent working context", `${b.retainedTokens.toLocaleString()} tok`],
+    ["Render + run metadata", `${(b.metadataTokens ?? 0).toLocaleString()} tok`],
+    ["Estimator", `${b.charsPerToken} chars/token`],
+  ];
+  return (
+    <>
+      <h2>Context bundle — what crossed the session boundary</h2>
+      <p className="sub">
+        A Handoff is not a summary. The checkpoint is only the state index over the history that did not fit; the
+        recent working trajectory and the user's own instructions are carried over word for word. Every slice below
+        records why it survived selection.
+      </p>
+      <div className="card">
+        {rows.map(([label, value]) => (
+          <div key={label} style={{ display: "flex", justifyContent: "space-between", maxWidth: 460 }}>
+            <span className="muted">{label}</span>
+            <span className="mono">{value}</span>
+          </div>
+        ))}
+      </div>
+
+      <h3>Preserved user context ({bundle.pinnedContext.length})</h3>
+      <div className="card">
+        {bundle.pinnedContext.length === 0 ? (
+          <div className="muted">
+            Nothing pinned: every user instruction the handoff covers is already in the recent working context below.
+          </div>
+        ) : (
+          bundle.pinnedContext.map((s, i) => <ContextSliceRow key={i} slice={s} />)
+        )}
+      </div>
+
+      <h3>Recent working context ({bundle.retainedContext.length})</h3>
+      <div className="card">
+        {bundle.retainedContext.length === 0 ? (
+          <div className="muted">No verbatim context was retained — the checkpoint carries the whole handoff.</div>
+        ) : (
+          bundle.retainedContext.map((s, i) => <ContextSliceRow key={i} slice={s} />)
+        )}
+      </div>
+    </>
+  );
+}
+
 function SourceBadge({ source }: { source: string }) {
   const label = source === "harness" ? "harness-generated" : source === "agentfabric" ? "AgentFabric-assisted" : "user-provided";
   return <span className="badge running" title={`Handoff source: ${label}`}>{label}</span>;
@@ -107,6 +218,7 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
         usage?: { inputTokens: number; outputTokens: number };
       }
     | undefined;
+  const bundle = (detail.content?.contextBundle ?? undefined) as ContextBundle | undefined;
   const degraded = g?.method === "heuristic";
   const writtenBy = g?.modelName ? (g.providerName ? `${g.providerName}/${g.modelName}` : g.modelName) : undefined;
   const covered = g?.coveredRunIds ?? [];
@@ -145,10 +257,10 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
       </div>
       {degraded && (
         <div className="card handoff-degraded-card">
-          <b>⚠ Degraded context — not a model summary.</b>{" "}
-          {g?.detail ?? "The summarization model was unavailable."}{" "}
+          <b>⚠ Degraded context — not a model-written checkpoint.</b>{" "}
+          {g?.detail ?? "The model was unavailable."}{" "}
           The next agent receives a structured digest of the run records (task, changed files, tools, last
-          message) rather than a synthesized summary.
+          message) rather than a checkpoint plus preserved context.
         </div>
       )}
 
@@ -177,7 +289,12 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
             <span className="mono">{writtenBy}</span>
           ) : (
             <span className="muted">
-              no model — {g?.method === "harness" ? "the previous harness wrote this content" : "degraded digest"}
+              no model —{" "}
+              {g?.method === "harness"
+                ? "the previous harness wrote this content"
+                : g?.method === "context-bundle"
+                  ? "the whole covered history fit in the preserved context, so no checkpoint was needed"
+                  : "degraded digest"}
             </span>
           )}
         </AuditRow>
@@ -191,7 +308,7 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
                 </span>
               ))}{" "}
               <span className="muted">
-                — the runs summarized into this context; runs already inside an earlier checkpoint are not re-covered.
+                — the runs this handoff carries; runs already inside an earlier checkpoint are not re-covered.
               </span>
             </>
           ) : (
@@ -206,6 +323,8 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
           </AuditRow>
         )}
       </div>
+
+      {bundle && <ContextBundleCard bundle={bundle} />}
 
       <h2>Rendered handoff — what the next agent receives</h2>
       <div className="card">
@@ -232,10 +351,9 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
 
       <h2>Parsed fields (for inspection)</h2>
       <p className="sub">
-        The same handoff content broken into structured fields for inspection. When the handoff carries a
-        written checkpoint (a handoff summary, not a session compaction), these fields are parsed out of it and
-        the rendered prompt above embeds the checkpoint verbatim — the fields below are not sent to the next
-        agent.
+        The handoff content broken into structured fields for inspection. When the handoff carries a written
+        checkpoint, these fields are parsed out of it at generation time and the rendered prompt above embeds
+        the checkpoint verbatim — the fields below are not sent to the next agent.
       </p>
       <div className="card">
         {CONTENT_SECTIONS.map(({ key, label }) => (

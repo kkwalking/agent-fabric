@@ -18,8 +18,8 @@
 
 ### 这条规则在 handoff 上的具体体现
 
-* Handoff 的 `content` 在**生成时**由 `handoffCheckpointToContent()` 从 checkpoint 一次性投影出来并落库；`packages/server/src/app.ts` 的 handoff 读接口原样返回记录。
-* 摘要回答的清洗（`extractCheckpoint()`：丢掉思考前言、只取最后一个 `## Goal` 块）只在**生成时**执行一次（`generateHandoffSummary`）。渲染器 `renderHandoffBody()` 把 `compactionSummary` 原样嵌入。
+* Handoff 的 `content` 在**生成时**一次性投影出来并落库：`selectHandoffContext()` 选出逐字保留的 pinned / retained 上下文，`assembleHandoffContextBundle()` 把 checkpoint 与预算账目组装成 `content.contextBundle`，`handoffCheckpointToContent()` 投影出供 UI 检查的字段；`packages/server/src/app.ts` 的 handoff 读接口原样返回记录（列表接口只返回索引行，不重算任何内容）。
+* 摘要回答的清洗（`extractCheckpoint()`：丢掉思考前言、只取最后一个 `## Goal` 块）只在**生成时**执行一次（`generateHandoffSummary`），且只覆盖**没有被逐字保留**的那部分历史。渲染器 `renderHandoffBody()` 把 `contextBundle.checkpoint` 与 pinned / retained slices 原样嵌入，不重新解析。
 * **验证 handoff 新效果的方式：新开一条链。** 新建 Task（或新开一条不带旧 checkpoint 的会话），显式触发一次 Handoff，看**新生成的记录**。不要拿历史 Handoff 记录判断新逻辑是否生效——历史记录脏是正常的，删掉即可。
 
 ## 提交与推送：等我审查同意，不要主动操作
