@@ -704,6 +704,12 @@ a:hover {
 .hint {
   color: var(--dim);
   font-size: 11.5px;
+}
+/* A hint under a field tucks into that field's own bottom margin; under
+   anything else (a button row, a list) it would overlap it. */
+input + .hint,
+select + .hint,
+textarea + .hint {
   margin-top: -6px;
 }
 
