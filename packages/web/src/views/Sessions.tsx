@@ -57,7 +57,7 @@ export function SessionsView() {
   return (
     <div className="new-task">
       <div className="row" style={{ marginBottom: 4 }}>
-        <h1>Local harness sessions</h1>
+        <h1>Native sessions</h1>
         <span className="right">
           <button className="small" onClick={() => navigate("/new")}>New task</button>
         </span>

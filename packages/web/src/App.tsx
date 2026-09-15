@@ -36,7 +36,7 @@ const primaryNav: NavEntry[] = [
 const resourceNav: NavEntry[] = [
   { path: "/llm", label: "LLM", icon: "cloud", match: "/llm" },
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
-  { path: "/sessions", label: "Sessions", icon: "terminal", match: "/sessions" },
+  { path: "/sessions", label: "Native sessions", icon: "terminal", match: "/sessions" },
   { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
   { path: "/workspaces", label: "Workspaces", icon: "folder", match: "/workspaces" },
 ];
