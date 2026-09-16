@@ -59,18 +59,25 @@ export function TasksView() {
         <div className="task-list">
           {entries.map(({ task, runs: taskRuns, last, status, lastActivity }) => (
             <div key={task.id} className="task-item card" onClick={() => navigate(`/tasks/${task.id}`)}>
-              <div className="task-item-head">
-                <strong className="task-item-title">{task.title}</strong>
-                <StatusBadge status={status} />
+              <div className="task-item-main">
+                <div className="task-item-head">
+                  <strong className="task-item-title">{task.title}</strong>
+                </div>
+                <div className="task-item-meta">
+                  <span className="meta-chip">
+                    {last?.runtimeName ? `${last.runtimeName}` : "—"}
+                    {last ? ` · last run ${last.status}` : " · no runs"}
+                  </span>
+                  <span className="meta-chip"><span className="muted">workspace</span> {wsName(last?.workspaceId ?? task.workspaceId) ?? "—"}</span>
+                  <span className="meta-chip">{taskRuns.length} {taskRuns.length === 1 ? "run" : "runs"}</span>
+                </div>
               </div>
-              <div className="task-item-meta">
-                <span className="meta-chip">
-                  {last?.runtimeName ? `${last.runtimeName}` : "—"}
-                  {last ? ` · last run ${last.status}` : " · no runs"}
-                </span>
-                <span className="meta-chip"><span className="muted">workspace</span> {wsName(last?.workspaceId ?? task.workspaceId) ?? "—"}</span>
-                <span className="meta-chip">{taskRuns.length} {taskRuns.length === 1 ? "run" : "runs"}</span>
-                <span className="meta-chip muted right">{fmtRelative(lastActivity)}</span>
+              {/* Status and recency answer the same question from the same
+                  edge of the row, so they stack there instead of flanking
+                  the title. */}
+              <div className="task-item-side">
+                <StatusBadge status={status} />
+                <span className="muted task-item-time">{fmtRelative(lastActivity)}</span>
               </div>
             </div>
           ))}

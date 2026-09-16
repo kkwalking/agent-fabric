@@ -1723,10 +1723,30 @@ textarea + .hint {
   cursor: pointer;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
   margin-bottom: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
 }
 .task-item:hover {
   border-color: #d7d7d5;
   box-shadow: var(--shadow-pop);
+}
+.task-item-main {
+  flex: 1;
+  min-width: 0;
+}
+/* Status sits above the timestamp at the card's right edge. */
+.task-item-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.task-item-time {
+  font-size: 12px;
+  white-space: nowrap;
 }
 .task-item-head {
   display: flex;
