@@ -60,18 +60,23 @@ import type {
 } from "./types.js";
 import {
   CHECKPOINT_RESERVE_SHARE,
+  DEFAULT_CHARS_PER_TOKEN,
   HANDOFF_RENDER_SCAFFOLDING_CHARS,
   assembleHandoffContextBundle,
   charsForTokens,
   collectHandoffContext,
+  estimateTextTokens,
   eventText,
   formatHandoffMetadataSections,
   formatToolCall,
+  handoffTextCost,
   hasUserMessage,
   isObj,
+  matchPendingToolCall,
   resolveHandoffBudget,
   selectHandoffContext,
   toolArgs,
+  truncateTextByCost,
   unretainedTurns,
   type HandoffBudgetSettings,
   type HandoffContextSelection,
@@ -248,18 +253,36 @@ ${UPDATE_SUMMARIZATION_INSTRUCTIONS}`;
 const SUMMARY_TOOL_RESULT_MAX_CHARS = 2000;
 
 /**
- * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker (pi).
+ * Truncate text to a maximum cost for summarization.
+ *
+ * Keeps the beginning AND the end (head 20% / tail 80%, like the retained
+ * policy) rather than the head alone. An oversized historical turn puts its
+ * conclusion, its final failure and its architecture decision at the END, and
+ * a head-only cut dropped exactly the information the checkpoint exists to
+ * carry (v9 §9). The result never exceeds `maxCost`.
  */
-function truncateForSummary(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  const truncatedChars = text.length - maxChars;
-  return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+function truncateForSummary(
+  text: string,
+  maxCost: number,
+  charsPerToken = DEFAULT_CHARS_PER_TOKEN
+): string {
+  return truncateTextByCost(
+    text,
+    maxCost,
+    charsPerToken,
+    (omitted) => `\n\n[... ${omitted} more characters truncated]\n\n`
+  );
 }
 
 interface SerializedPart {
   kind: "user" | "assistant" | "thinking" | "toolCalls" | "toolResult";
   text: string;
+  /**
+   * The part was only PARTIALLY retained in the handoff, so the checkpoint is
+   * the only representation of what retention dropped. It reaches the
+   * summarizer in full instead of under the summary-only cap (v9 §4).
+   */
+  preserve?: boolean;
 }
 
 /**
@@ -300,23 +323,31 @@ interface SerializedPart {
 export type SummarizedTurn = HandoffContextSourceTurn;
 
 /** Collect one run's events as pi-style transcript parts (no leading user turn). */
-function collectConversationParts(events: RunEvent[]): SerializedPart[] {
+function collectConversationParts(events: RunEvent[], preserveEventIds?: ReadonlySet<string>): SerializedPart[] {
   const parts: SerializedPart[] = [];
   let pendingShellOutput: string[] = [];
+  let pendingShellPreserve = false;
   const flushShell = () => {
     if (pendingShellOutput.length) {
-      parts.push({ kind: "toolResult", text: pendingShellOutput.join("\n") });
+      parts.push({
+        kind: "toolResult",
+        text: pendingShellOutput.join("\n"),
+        ...(pendingShellPreserve ? { preserve: true } : {}),
+      });
       pendingShellOutput = [];
+      pendingShellPreserve = false;
     }
   };
 
-  // toolCallId when the runtime provides one (pi runtime), else the tool
-  // name — enough to pair a completion with its started call.
-  const toolKey = (e: RunEvent, tool: string): string => {
+  // A completion pairs with its started call: by native toolCallId when the
+  // runtime provides one, else by matching the pending call with the same tool
+  // and target (never by tool name alone — two `read`s are two calls).
+  const openNativeIds = new Set<string>();
+  const pendingCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const nativeIdOf = (e: RunEvent): string | undefined => {
     const id = e.data?.toolCallId ?? e.data?.callID ?? e.data?.callId;
-    return typeof id === "string" && id ? `id:${id}` : `name:${tool}`;
+    return typeof id === "string" && id ? `id:${id}` : undefined;
   };
-  const openToolStarts = new Set<string>();
 
   for (const e of events) {
     switch (e.type) {
@@ -344,20 +375,39 @@ function collectConversationParts(events: RunEvent[]): SerializedPart[] {
       case "tool.started": {
         flushShell();
         const tool = eventText(e, ["tool", "toolName"]) ?? "tool";
-        parts.push({ kind: "toolCalls", text: formatToolCall(tool, toolArgs(e)) });
-        openToolStarts.add(toolKey(e, tool));
+        const args = toolArgs(e);
+        parts.push({ kind: "toolCalls", text: formatToolCall(tool, args) });
+        const nativeId = nativeIdOf(e);
+        if (nativeId) openNativeIds.add(nativeId);
+        else pendingCalls.push({ tool, args });
         break;
       }
       case "tool.completed": {
         flushShell();
         const tool = eventText(e, ["tool", "toolName"]) ?? "tool";
-        if (!openToolStarts.delete(toolKey(e, tool)) && !openToolStarts.delete(`name:${tool}`)) {
+        const args = toolArgs(e);
+        const nativeId = nativeIdOf(e);
+        let paired: boolean;
+        if (nativeId) {
+          paired = openNativeIds.delete(nativeId);
+        } else {
+          const match = matchPendingToolCall(pendingCalls, { tool, args });
+          paired = match >= 0;
+          if (paired) pendingCalls.splice(match, 1);
+        }
+        if (!paired) {
           // No matching start (e.g. OpenCode only reports terminal
           // states): the completed event itself carries the call.
-          parts.push({ kind: "toolCalls", text: formatToolCall(tool, toolArgs(e)) });
+          parts.push({ kind: "toolCalls", text: formatToolCall(tool, args) });
         }
         const result = eventText(e, ["output", "result", "error"]);
-        if (result) parts.push({ kind: "toolResult", text: result });
+        if (result) {
+          parts.push({
+            kind: "toolResult",
+            text: result,
+            ...(preserveEventIds?.has(e.id) ? { preserve: true } : {}),
+          });
+        }
         break;
       }
       case "shell.command": {
@@ -368,7 +418,10 @@ function collectConversationParts(events: RunEvent[]): SerializedPart[] {
       }
       case "shell.output": {
         const line = eventText(e, ["line", "message"]);
-        if (line) pendingShellOutput.push(line);
+        if (line) {
+          pendingShellOutput.push(line);
+          if (preserveEventIds?.has(e.id)) pendingShellPreserve = true;
+        }
         break;
       }
       default:
@@ -390,6 +443,7 @@ function renderConversationParts(parts: SerializedPart[]): string {
     const last = coalesced[coalesced.length - 1];
     if (last && last.kind === p.kind && (p.kind === "toolCalls" || p.kind === "thinking")) {
       last.text += (p.kind === "toolCalls" ? "; " : "\n") + p.text;
+      if (p.preserve) last.preserve = true;
     } else {
       coalesced.push({ ...p });
     }
@@ -406,14 +460,20 @@ function renderConversationParts(parts: SerializedPart[]): string {
       case "toolCalls":
         return `[Assistant tool calls]: ${p.text}`;
       case "toolResult":
-        return `[Tool result]: ${truncateForSummary(p.text, SUMMARY_TOOL_RESULT_MAX_CHARS)}`;
+        // A partially-retained result is the checkpoint's only copy of what
+        // retention dropped, so it is not capped here.
+        return `[Tool result]: ${p.preserve ? p.text : truncateForSummary(p.text, SUMMARY_TOOL_RESULT_MAX_CHARS)}`;
     }
   });
   return rendered.join("\n\n");
 }
 
-export function serializeRunConversation(events: RunEvent[], task?: Task): string {
-  const parts = collectConversationParts(events);
+export function serializeRunConversation(
+  events: RunEvent[],
+  task?: Task,
+  preserveEventIds?: ReadonlySet<string>
+): string {
+  const parts = collectConversationParts(events, preserveEventIds);
   // The task prompt is the conversation's opening user message; runs
   // may not echo it back as an agent.message event.
   if (task && !hasUserMessage(events)) {
@@ -432,14 +492,18 @@ export function serializeRunConversation(events: RunEvent[], task?: Task): strin
  * `task` is only a fallback for a first turn with no recorded
  * `userPrompt` (e.g. an imported thread whose turns predate the field).
  */
-export function serializeRunChain(turns: SummarizedTurn[], task?: Task): string {
+export function serializeRunChain(
+  turns: SummarizedTurn[],
+  task?: Task,
+  preserveEventIds?: ReadonlySet<string>
+): string {
   const parts: SerializedPart[] = [];
   turns.forEach((turn, index) => {
     if (!hasUserMessage(turn.events)) {
       const text = turn.userPrompt?.trim() || (index === 0 && task ? taskLabel(task) : "");
       if (text) parts.push({ kind: "user", text });
     }
-    parts.push(...collectConversationParts(turn.events));
+    parts.push(...collectConversationParts(turn.events, preserveEventIds));
   });
   return renderConversationParts(parts);
 }
@@ -494,8 +558,21 @@ export function extractFileOperations(events: RunEvent[], previousSummary?: stri
     for (const f of prev.readFiles) fileOps.read.add(f);
     for (const f of prev.modifiedFiles) fileOps.edited.add(f);
   }
+  /** The file an event acted on, whether it is a top-level or an arg field. */
+  const pathOf = (e: RunEvent): string | undefined => {
+    const direct = eventText(e, ["path", "file"]);
+    if (direct) return direct;
+    // OpenCode/pi carry the path inside the tool input; without this the
+    // checkpoint's file list missed every read and edit on those runtimes.
+    const args = toolArgs(e);
+    for (const key of ["path", "file_path", "filepath", "file", "target"]) {
+      const value = args[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return undefined;
+  };
   for (const e of events) {
-    const path = eventText(e, ["path", "file"]);
+    const path = pathOf(e);
     if (!path) continue;
     switch (e.type) {
       case "file.created":
@@ -988,6 +1065,21 @@ export function taskLabel(task: Task): string {
   return task.title === task.prompt ? `#${task.title}` : `#${task.title}: ${task.prompt}`;
 }
 
+/**
+ * Raised when the handoff's fixed sections (user notes plus render metadata)
+ * cannot fit the configured handoff budget at all. It is a deterministic
+ * configuration/input error, not a provider failure: retrying or degrading to
+ * a heuristic digest would not make the payload fit, so it fails loudly
+ * instead of reporting a size the rendered handoff does not honour (v9 §6).
+ */
+export class HandoffBudgetExceededError extends Error {
+  readonly code = "handoff-budget-exceeded";
+  constructor(readonly detail: string) {
+    super(`Handoff budget exceeded: ${detail}`);
+    this.name = "HandoffBudgetExceededError";
+  }
+}
+
 export interface HandoffSummaryInput {
   task: Task;
   run: Run;
@@ -1028,6 +1120,13 @@ export interface HandoffSummaryInput {
    * budget.
    */
   modelContextWindow?: number;
+  /**
+   * User-provided handoff notes. They are part of the rendered handoff body,
+   * so they are counted in the budget and the selector makes room for them
+   * (v9 §6). Notes that alone exceed the whole handoff budget fail loudly
+   * instead of silently overflowing.
+   */
+  userNotes?: string;
   /**
    * Caller cancellation. Aborting it (client disconnect, explicit cancel)
    * stops the in-flight summary call and the retry backoff.
@@ -1070,7 +1169,8 @@ export interface HandoffSummaryResult {
 export function chunkTurns(
   turns: SummarizedTurn[],
   task: Task | undefined,
-  budgetChars: number
+  budgetChars: number,
+  preserveEventIds?: ReadonlySet<string>
 ): SummarizedTurn[][] {
   if (turns.length === 0) return [];
   if (budgetChars <= 0) return [turns];
@@ -1078,7 +1178,7 @@ export function chunkTurns(
   let current: SummarizedTurn[] = [];
   let size = 0;
   for (const turn of turns) {
-    const cost = serializeRunChain([turn], task).length;
+    const cost = serializeRunChain([turn], task, preserveEventIds).length;
     if (current.length > 0 && size + cost > budgetChars) {
       chunks.push(current);
       current = [];
@@ -1117,6 +1217,7 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
     ...(input.settings ?? {}),
     ...(input.settings?.contextWindow ? {} : { contextWindow: input.targetContextWindow }),
   });
+  const charsPerToken = budget.charsPerToken;
   const summarizer = summarizerBudget(budget, input.modelContextWindow, input.modelMaxTokens);
   const budgetChars = summarizationInputBudgetChars(summarizer);
 
@@ -1136,26 +1237,51 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
   // than its cap simply leaves the handoff below budget, and one whose cap
   // would swallow the whole handoff is bounded by CHECKPOINT_RESERVE_SHARE —
   // the fallback representation may never crowd out the trajectory itself.
-  const totalChars = charsForTokens(budget.maxTokens, budget.charsPerToken);
+  const totalChars = charsForTokens(budget.maxTokens, charsPerToken);
+  const previousSummaryCost = input.previousSummary ? handoffTextCost(input.previousSummary, charsPerToken) : 0;
   const checkpointReserveChars = Math.min(
-    Math.max(charsForTokens(budget.checkpointMaxTokens, budget.charsPerToken), input.previousSummary?.length ?? 0),
+    Math.max(charsForTokens(budget.checkpointMaxTokens, charsPerToken), previousSummaryCost),
     Math.floor(totalChars * CHECKPOINT_RESERVE_SHARE)
   );
   // The other non-bundle sections the renderer writes (workspace, previous
   // run, artifacts) are generation-time facts, so the reserve is exact for
   // them, plus a fixed allowance for the render scaffolding itself.
   const metadataChars =
-    formatHandoffMetadataSections(
-      handoffMetadataFields({ run, artifacts, workspace, runtimeName: input.runtimeName })
-    ).length + HANDOFF_RENDER_SCAFFOLDING_CHARS;
+    handoffTextCost(
+      formatHandoffMetadataSections(
+        handoffMetadataFields({ run, artifacts, workspace, runtimeName: input.runtimeName })
+      ),
+      charsPerToken
+    ) + HANDOFF_RENDER_SCAFFOLDING_CHARS;
+  // User notes are rendered into the body, so they are reserved here and the
+  // selector must leave room for them (v9 §6). Notes that alone exceed the
+  // whole budget cannot be honoured by any selection, and failing loudly is
+  // the only honest outcome.
+  const userNotesText = input.userNotes?.trim();
+  const userNotesChars = userNotesText ? handoffTextCost(userNotesText, charsPerToken) : 0;
+  if (userNotesChars >= totalChars) {
+    throw new HandoffBudgetExceededError(
+      `user notes need ~${estimateTextTokens(userNotesText!, charsPerToken)} tokens, ` +
+        `which is the whole ${budget.maxTokens}-token handoff budget`
+    );
+  }
   const selection = selectHandoffContext({
     items: collected.items,
     budget,
-    reservedChars: checkpointReserveChars + metadataChars,
+    reservedChars: checkpointReserveChars + metadataChars + userNotesChars,
   });
 
   // 2. Summarize exactly what was NOT carried verbatim.
   const summaryTurns = unretainedTurns(turns, collected, selection);
+  // Items that were only PARTIALLY retained still need checkpoint coverage, so
+  // their events reach the summarizer in full rather than under the summary
+  // cap (v9 §4).
+  const partialEventIds = new Set<string>();
+  for (const item of collected.items) {
+    if (selection.retentionByItemId.get(item.id) === "partial") {
+      for (const id of item.eventIds) partialEventIds.add(id);
+    }
+  }
 
   // One controller for the whole generation, driven by the caller's signal
   // and the total budget. Without it, a chunked generation had no upper
@@ -1189,11 +1315,11 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
       // chunks (pi's iterative update), so the last chunk's answer is the
       // complete state index.
       let running = input.previousSummary;
-      for (const chunk of chunkTurns(summaryTurns, task, budgetChars)) {
+      for (const chunk of chunkTurns(summaryTurns, task, budgetChars, partialEventIds)) {
         if (signal.aborted) throw new Error(abortMessage());
-        let conversationText = serializeRunChain(chunk, task);
-        if (budgetChars > 0 && conversationText.length > budgetChars) {
-          conversationText = truncateForSummary(conversationText, budgetChars);
+        let conversationText = serializeRunChain(chunk, task, partialEventIds);
+        if (budgetChars > 0 && handoffTextCost(conversationText, charsPerToken) > budgetChars) {
+          conversationText = truncateForSummary(conversationText, budgetChars, charsPerToken);
         }
         const prompt = buildSummarizationPrompt(conversationText, running, input.customInstructions, workspace);
 
@@ -1258,12 +1384,13 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
   // selection is re-run against the real size: the rendered handoff must obey
   // the total budget even then. What this second pass drops was part of the
   // checkpoint's own input, so the state index still covers it.
+  const checkpointCost = checkpoint ? handoffTextCost(checkpoint, charsPerToken) : 0;
   let finalSelection = selection;
-  if (checkpoint && checkpoint.length > checkpointReserveChars) {
+  if (checkpoint && checkpointCost > checkpointReserveChars) {
     finalSelection = selectHandoffContext({
       items: collected.items,
       budget,
-      reservedChars: checkpoint.length + metadataChars,
+      reservedChars: checkpointCost + metadataChars + userNotesChars,
     });
   }
 
@@ -1272,6 +1399,7 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
     budget,
     ...(checkpoint ? { checkpoint } : {}),
     metadataChars,
+    userNotesChars,
   });
   const content: HandoffContent = {
     ...handoffCheckpointToContent(checkpoint, {

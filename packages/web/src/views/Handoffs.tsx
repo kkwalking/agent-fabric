@@ -49,6 +49,7 @@ interface ContextBundle {
     pinnedTokens: number;
     retainedTokens: number;
     metadataTokens?: number;
+    userNotesTokens?: number;
     charsPerToken: number;
   };
 }
@@ -88,6 +89,7 @@ function ContextBundleCard({ bundle }: { bundle: ContextBundle }) {
     ["Pinned user context", `${b.pinnedTokens.toLocaleString()} tok`],
     ["Recent working context", `${b.retainedTokens.toLocaleString()} tok`],
     ["Render + run metadata", `${(b.metadataTokens ?? 0).toLocaleString()} tok`],
+    ["User notes", `${(b.userNotesTokens ?? 0).toLocaleString()} tok`],
     ["Estimator", `${b.charsPerToken} chars/token`],
   ];
   return (

@@ -315,13 +315,17 @@ test("T4 — a recent tool result larger than 10K chars is retained in full", ()
 
 test("T5 — the summary representation and the retained representation are different policies", () => {
   const output = `${"x".repeat(3_000)}\nFAIL at the very end`;
-  // Summary path: pi's summary-only cap, head-first (it feeds a state index).
+  // Summary path: pi's summary-only cap, bounded and marked. It keeps the tail
+  // as well as the head, because the end of a transcript carries the final
+  // failure (v9 §9); it is still far shorter than the raw text.
   const summaryText = serializeRunConversation([
     ev("tool.started", { tool: "bash", toolCallId: "t1", args: { command: "npm test" } }),
     ev("tool.completed", { tool: "bash", toolCallId: "t1", output }),
   ]);
   assert.match(summaryText, /\[\.\.\. \d+ more characters truncated\]/);
-  assert.ok(!summaryText.includes("FAIL at the very end"), "the summary cap is head-first by design");
+  assert.ok(summaryText.includes("FAIL at the very end"), "the summary cap keeps the execution tail");
+  assert.ok(summaryText.includes("x".repeat(100)), "and a meaningful head");
+  assert.ok(!summaryText.includes(output), "the summary is still a reduced representation");
 
   // Retained path: verbatim when it fits.
   const turns = [

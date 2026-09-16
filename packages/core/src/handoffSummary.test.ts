@@ -183,10 +183,18 @@ test("serializeRunConversation accumulates shell output and truncates tool resul
   ]);
   assert.match(text, /\[Assistant tool calls\]: bash\(command="ls -la"\)/);
   assert.match(text, /\[Tool result\]: README\.md\nsrc/);
-  const resultMatch = text.match(/\[Tool result\]: (x+)\n\n\[\.\.\. (\d+) more characters truncated\]/);
-  assert.ok(resultMatch, "long tool result must carry pi's truncation marker");
-  assert.equal(resultMatch[1].length, 2000);
-  assert.equal(Number(resultMatch[2]), 1000);
+  // The cap is bounded and marked; it keeps a head AND the tail (v9 §9), so it
+  // is no longer a plain prefix.
+  const resultMatch = text.match(
+    /\[Tool result\]: (x+)\n\n\[\.\.\. (\d+) more characters truncated\]\n\n(x+)/
+  );
+  assert.ok(resultMatch, "long tool result must carry a middle truncation marker");
+  const head = resultMatch[1].length;
+  const tail = resultMatch[3].length;
+  assert.ok(head > 0 && tail > 0, "both ends survive");
+  assert.ok(tail > head, "the tail gets the larger share");
+  assert.ok(head + tail < 3000, "the result is still reduced");
+  assert.equal(Number(resultMatch[2]), 3000 - head - tail);
 });
 
 test("serializeRunConversation excludes orchestrator log events (server-side noise)", () => {

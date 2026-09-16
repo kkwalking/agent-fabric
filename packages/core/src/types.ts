@@ -147,6 +147,13 @@ export interface RuntimeCapability {
   supportsWorkspace: boolean;
   /** Harness supports interactive (multi-turn) execution. */
   supportsInteractiveExecution: boolean;
+  /**
+   * Context window of the model this harness actually runs, when the operator
+   * declares it. Explicit capability metadata — the handoff budget for a
+   * harness-native target is derived from it. Never guessed from a model name
+   * and never looked up over the network (v9 §5).
+   */
+  contextWindow?: number;
 }
 
 export interface Runtime {
@@ -179,6 +186,13 @@ export interface Runtime {
   lifecycle?: RuntimeLifecycle;
   /** Declared capabilities; falls back to the adapter's declared set. */
   capabilities?: Partial<RuntimeCapability>;
+  /**
+   * Explicit context window of the model this runtime runs (v9 §5). The
+   * handoff budget for a harness-native target is resolved from this — or from
+   * `capabilities.contextWindow` / `config.contextWindow` — before any
+   * configured model window. Never guessed from a model name, never fetched.
+   */
+  contextWindow?: number;
   resourceLimits?: ResourceLimits;
   env?: Record<string, string>;
   secretIds?: string[];
@@ -517,13 +531,19 @@ export interface HandoffContextBudget {
   contextWindow: number;
   /** Total handoff budget: `min(maxHandoffTokens, floor(window × ratio))`. */
   maxTokens: number;
-  /** Estimated size of everything the rendered handoff carries. */
+  /**
+   * Estimated size of the handoff BODY: checkpoint, pinned context, retained
+   * context, metadata/scaffolding and user notes. The receiving harness's own
+   * instruction is appended outside this budget (see `renderHandoffPrompt`).
+   */
   estimatedTokens: number;
   checkpointTokens: number;
   pinnedTokens: number;
   retainedTokens: number;
   /** Render scaffolding + workspace/run metadata the checkpoint does not own. */
   metadataTokens?: number;
+  /** User-provided handoff notes, counted in the same accounting (v9 §6). */
+  userNotesTokens?: number;
   charsPerToken: number;
 }
 

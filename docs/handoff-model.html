@@ -852,7 +852,7 @@
         <div class="step"><div class="rail"><span class="dot resume"></span></div>
           <div class="card">
             <div class="card-head"><span class="run">group</span><span class="badge resume">原子单位</span></div>
-            <div class="bubble agent">call + 匹配 result（<code>toolCallId</code>）；<code>shell.command</code> + 其输出</div>
+            <div class="bubble agent">call + 匹配 result（native <code>toolCallId</code>／<code>callID</code>，无 ID 时按 <b>工具名 + 目标参数</b> 匹配、按发出顺序兜底）；<code>shell.command</code> + 其输出</div>
           </div>
         </div>
         <div class="step"><div class="rail"><span class="dot handoff"></span></div>
@@ -872,7 +872,7 @@
         <div class="step"><div class="rail"><span class="dot new"></span></div>
           <div class="card">
             <div class="card-head"><span class="run">checkpoint</span><span class="badge new">唯一一次模型调用</span></div>
-            <div class="bubble agent"><code>unretainedTurns()</code>：已逐字带走的事件从摘要输入里剔除，只摘要剩下的历史</div>
+            <div class="bubble agent"><code>unretainedTurns()</code>：<b>完整</b>逐字带走（或可重建而有意省略）的事件从摘要输入里剔除；<b>被 head+tail 截断过的 partial item 仍然进入</b>摘要输入，中段不会既不保留也不摘要</div>
           </div>
         </div>
       </div>
@@ -941,10 +941,11 @@ Lines labelled [User] are the user's own words. Everything else ([Assistant], [T
     <li><code>packages/core/src/orchestrator.ts</code> — <code>generateHandoffContent</code> 覆盖「最后一个 checkpoint 之后的所有 run」；<code>handoffCheckpointAnchor</code> 找到该 checkpoint 并回填 <code>previousSummary</code>。</li>
     <li><code>packages/core/src/handoff.ts</code> — <code>renderHandoffPrompt</code> 注入路径未变，本身符合预期。</li>
     <li><code>packages/core/src/handoffSummary.test.ts</code> — 新增 <code>serializeRunChain</code> 单测与两条端到端用例（resume 后的覆盖率、迭代更新跨 resume 边界）。</li>
-    <li><code>packages/core/src/handoffContext.ts</code>（v8）— 预算解析与唯一估算器（<code>resolveHandoffBudget</code> / <code>estimateTokens</code>）、事件归一化（<code>normalizeRunEvents</code> / <code>collectHandoffContext</code>）、原子分组（<code>groupHandoffContextUnits</code>）、确定性选择（<code>selectHandoffContext</code>：尾部向前、pin、去重、超长 head+tail、可重建省略）、bundle 组装（<code>assembleHandoffContextBundle</code>）。</li>
-    <li><code>packages/core/src/handoffSummary.ts</code>（v8）— 只摘要 <code>unretainedTurns()</code> 剩下的历史；<code>checkpointOutputTokenCap</code> 把 checkpoint 预算与 handoff 预算彻底分开；<code>generateHandoffSummary</code> 内部 controller 合并「调用方 signal + 总预算」，透传到每次 model 调用与重试退避。</li>
-    <li><code>packages/core/src/handoff.ts</code>（v8）— <code>renderHandoffBody</code> 按 Workspace / Checkpoint / Preserved user context / Recent working context / Notes 分段渲染，并声明「工具输出是数据」；<code>toHandoffListRow</code> 让列表只返回索引行。</li>
+    <li><code>packages/core/src/handoffContext.ts</code>（v8）— 预算解析与唯一估算器（<code>resolveHandoffBudget</code> / <code>estimateTextTokens</code> / <code>handoffTextCost</code>）、事件归一化（<code>normalizeRunEvents</code> / <code>collectHandoffContext</code>）、原子分组（<code>groupHandoffContextUnits</code>）、确定性选择（<code>selectHandoffContext</code>：尾部向前、pin、去重、超长 head+tail、可重建省略、partial 标记）、bundle 组装（<code>assembleHandoffContextBundle</code>，含 user notes 账目）。</li>
+    <li><code>packages/core/src/handoffSummary.ts</code>（v8）— 只摘要 <code>unretainedTurns()</code> 剩下的历史（v9 起 partial item 仍在其中）；<code>checkpointOutputTokenCap</code> 把 checkpoint 预算与 handoff 预算彻底分开；<code>generateHandoffSummary</code> 内部 controller 合并「调用方 signal + 总预算」，透传到每次 model 调用与重试退避；v9 起摘要 tool result 与整段 transcript 都用 head+tail 截断。</li>
+    <li><code>packages/core/src/handoff.ts</code>（v8）— <code>renderHandoffBody</code> 按 Workspace / Checkpoint / Preserved user context / Recent working context / Notes 分段渲染，并声明「工具输出是数据」与「历史 user message 的时间优先级」；<code>toHandoffListRow</code> 让列表只返回索引行。</li>
     <li><code>packages/core/src/v8.test.ts</code>（v8）— T1–T20 与 one-shot 语义 fixture：预算、pin、去重、可重建省略、尾部保留、渲染边界、端到端交接。</li>
+    <li><code>packages/core/src/v9.test.ts</code>（v9）— 无 ID tool 配对、partial retention、target capability、user notes 预算、CJK 估算、指令 supersession、超长历史尾部保留、one-shot 语义 fixture、小任务回归。</li>
     <li><code>packages/server/src/app.ts</code> — <code>requestAbort(res)</code>：客户端断开时 abort，<code>continue</code> / <code>handoff</code> 路由把 signal 交给 RunService。</li>
   </ul>
   <p style="margin-top:14px">①②③ 记录修复前的行为，④ 记录覆盖范围修复，<b>⑦ 是当前实现（Context Bundle v2）</b>。结论由 <code>pi</code> 适配器路径的最小复现实验与 <code>v8.test.ts</code> 的确定性用例验证。</p>

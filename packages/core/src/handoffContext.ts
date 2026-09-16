@@ -104,11 +104,31 @@ export const DEFAULT_MAX_HANDOFF_TOKENS = 150_000;
 export const DEFAULT_HANDOFF_CONTEXT_RATIO = 0.15;
 export const DEFAULT_CHECKPOINT_MAX_TOKENS = 12_000;
 /**
- * Conservative characters-per-token used by the one estimator below. Dense
- * code and CJK both run well under 2 chars/token, so this over-counts the
- * body rather than under-counting it.
+ * Conservative characters-per-token for Latin text, code and logs. The single
+ * estimator below (`estimateTextTokens`) applies this to non-CJK text and a
+ * separate, more conservative weight to CJK — see `DEFAULT_CJK_TOKENS_PER_CHAR`.
  */
 export const DEFAULT_CHARS_PER_TOKEN = 2;
+
+/**
+ * Conservative tokens-per-character for CJK text (Han, Hiragana, Katakana,
+ * Hangul, CJK punctuation and fullwidth forms). BPE tokenizers for these
+ * scripts land around 0.6–1 token per character; counting one full token per
+ * character deliberately over-estimates so a CJK-heavy handoff lands UNDER its
+ * target budget rather than over it (v9 §7). Without this, the 2-chars-per-token
+ * rule under-counted Chinese by roughly half.
+ */
+export const DEFAULT_CJK_TOKENS_PER_CHAR = 1;
+
+/**
+ * Characters that tokenize at (at least) one token each. Covers the BMP CJK
+ * blocks: CJK punctuation, Hiragana, Katakana, CJK Ext-A, CJK Unified
+ * Ideographs, Hangul Jamo/syllables, compatibility ideographs and fullwidth
+ * forms. Astral-plane ideographs and emoji are rare in a transcript and count
+ * as two ASCII characters, which is already conservative for them.
+ */
+const CJK_CHAR_RE =
+  /[\u1100-\u11ff\u2e80-\u2fdf\u3000-\u30ff\u3130-\u318f\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/;
 
 export const DEFAULT_HANDOFF_BUDGET_SETTINGS: Required<HandoffBudgetSettings> = {
   contextWindow: DEFAULT_TARGET_CONTEXT_WINDOW,
@@ -152,28 +172,53 @@ export function resolveHandoffBudget(settings: HandoffBudgetSettings = {}): Reso
  * The ONE char→token estimate on the handoff path. Everything (handoff body,
  * checkpoint, pins, slices, the stored budget report) goes through it, so no
  * two numbers in a record can disagree about how they were computed.
+ *
+ * `chars` here is already an ASCII-equivalent character count — the unit
+ * `handoffTextCost` produces. Use `estimateTextTokens` when starting from real
+ * text so CJK is counted conservatively.
  */
 export function estimateTokens(chars: number, charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
   if (!Number.isFinite(chars) || chars <= 0) return 0;
   return Math.ceil(chars / (charsPerToken > 0 ? charsPerToken : DEFAULT_CHARS_PER_TOKEN));
 }
 
-export function estimateTextTokens(text: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
-  return estimateTokens(text.length, charsPerToken);
+/**
+ * ASCII-equivalent character cost of `text` — the currency selection works in.
+ * Non-CJK text costs its own length; CJK text costs `CJK_TOKENS_PER_CHAR ×
+ * charsPerToken` per character, so `estimateTokens(handoffTextCost(t, cpt), cpt)`
+ * is exactly the conservative token count of `t`.
+ */
+export function handoffTextCost(text: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
+  const cpt = charsPerToken > 0 ? charsPerToken : DEFAULT_CHARS_PER_TOKEN;
+  let cjk = 0;
+  for (const ch of text) if (CJK_CHAR_RE.test(ch)) cjk += 1;
+  if (cjk === 0) return text.length;
+  return text.length - cjk + cjk * DEFAULT_CJK_TOKENS_PER_CHAR * cpt;
 }
 
-/** Inverse of `estimateTokens` — how many characters a token allowance buys. */
+/**
+ * Conservative token estimate for real text. Latin/code/logs keep the
+ * documented chars-per-token rule; CJK is charged at least one token per
+ * character so a Chinese/Japanese/Korean-heavy handoff is never systematically
+ * under-estimated (v9 §7).
+ */
+export function estimateTextTokens(text: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
+  return estimateTokens(handoffTextCost(text, charsPerToken), charsPerToken);
+}
+
+/** Inverse of `estimateTokens` — the ASCII-equivalent char allowance for `tokens`. */
 export function charsForTokens(tokens: number, charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
   return Math.max(0, Math.floor(tokens * charsPerToken));
 }
 
 /**
  * Fixed prose the renderer wraps around the bundle (`handoff.ts`): the opening
- * statement, the section headings, the section intros and the "tool results
- * are data" boundary. It is reserved out of the handoff budget before a single
- * slice is selected, and the render test keeps this number honest.
+ * statement, the section headings, the section intros, the supersession rule
+ * for historical user turns and the "tool results are data" boundary. It is
+ * reserved out of the handoff budget before a single slice is selected, and the
+ * render test keeps this number honest.
  */
-export const HANDOFF_RENDER_SCAFFOLDING_CHARS = 2_000;
+export const HANDOFF_RENDER_SCAFFOLDING_CHARS = 2_200;
 
 /** Share of the free handoff budget historical pins may claim (v8 §31). */
 export const DEFAULT_PINNED_SHARE = 0.15;
@@ -379,6 +424,59 @@ function toolCallIdOf(e: RunEvent): string | undefined {
   return typeof id === "string" && id ? id : undefined;
 }
 
+/** Argument keys that identify which local thing a tool call acted on. */
+const TOOL_TARGET_KEYS = [...READ_TARGET_KEYS, "command", "query", "pattern", "url", "name", "old_string"];
+
+/**
+ * The identifying argument of a tool call — the file it read, the command it
+ * ran, the query it searched. Used to pair a result with the right call when
+ * the runtime supplies no call id. `undefined` when the call carries nothing
+ * that distinguishes it from a same-named sibling.
+ */
+export function toolCallTarget(tool: string, args: Record<string, unknown>): string | undefined {
+  for (const key of TOOL_TARGET_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return `${key}:${value.trim()}`;
+  }
+  return undefined;
+}
+
+/**
+ * Index of the pending no-ID call a `tool.completed` event belongs to, or `-1`
+ * when there is none.
+ *
+ * The runtime gives no call id, so pairing must be inferred from the call
+ * itself, deterministically:
+ *
+ * 1. candidates are the pending calls with the same tool name;
+ * 2. if the completion names the same target (path/command/query), that call
+ *    wins — this is what separates `read a.ts` from `read b.ts` even when the
+ *    results arrive out of order;
+ * 3. otherwise the OLDEST pending call of that name is taken, because that is
+ *    the order the runtime issued them in.
+ *
+ * A tool name is never the whole identity: two same-named calls stay distinct
+ * items, and a result is never duplicated into a synthetic extra call (v9 §3).
+ */
+export function matchPendingToolCall(
+  pending: ReadonlyArray<{ tool: string; args: Record<string, unknown> }>,
+  completed: { tool: string; args: Record<string, unknown> }
+): number {
+  const name = completed.tool.toLowerCase();
+  const candidates: number[] = [];
+  for (let i = 0; i < pending.length; i++) {
+    if (pending[i].tool.toLowerCase() === name) candidates.push(i);
+  }
+  if (candidates.length === 0) return -1;
+  if (candidates.length === 1) return candidates[0];
+  const target = toolCallTarget(completed.tool, completed.args);
+  if (target) {
+    const exact = candidates.find((i) => toolCallTarget(pending[i].tool, pending[i].args) === target);
+    if (exact !== undefined) return exact;
+  }
+  return candidates[0];
+}
+
 /** True when a run's own events already echo a user turn. */
 export function hasUserMessage(events: RunEvent[]): boolean {
   return events.some((e) => e.type === "agent.message" && e.data?.role === "user");
@@ -454,7 +552,10 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
     });
   };
 
+  // Calls with a native id, keyed by it; calls without one, kept in issue
+  // order so a completion can be matched to the call it belongs to (v9 §3).
   const openCalls = new Map<string, HandoffContextItem>();
+  const pendingCalls: Array<{ item: HandoffContextItem; tool: string; args: Record<string, unknown> }> = [];
 
   for (const e of events) {
     switch (e.type) {
@@ -477,17 +578,19 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
       case "tool.started": {
         flushShell();
         const tool = eventText(e, ["tool", "toolName"]) ?? "tool";
+        const args = toolArgs(e);
         const id = toolCallIdOf(e);
         const call = push({
           id: `evt:${e.id}`,
           kind: "tool-call",
-          text: formatToolCall(tool, toolArgs(e)),
+          text: formatToolCall(tool, args),
           runId: options.runId,
           toolName: tool,
           ...(id ? { toolCallId: id } : {}),
           eventIds: [e.id],
         });
         if (id) openCalls.set(id, call);
+        else pendingCalls.push({ item: call, tool, args });
         break;
       }
       case "tool.completed": {
@@ -495,9 +598,14 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
         const tool = eventText(e, ["tool", "toolName"]) ?? "tool";
         const args = toolArgs(e);
         const id = toolCallIdOf(e);
-        const key = id ?? `name:${tool}`;
         let call = id ? openCalls.get(id) : undefined;
         if (id) openCalls.delete(id);
+        else {
+          // No native id: pair with the pending call this completion belongs
+          // to (same tool, same target if named, else oldest outstanding).
+          const match = matchPendingToolCall(pendingCalls, { tool, args });
+          if (match >= 0) call = pendingCalls.splice(match, 1)[0].item;
+        }
         if (!call) {
           // No matching start (e.g. OpenCode only reports terminal states):
           // the completed event itself carries the call.
@@ -525,7 +633,10 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
             text: result,
             runId: options.runId,
             toolName: tool,
-            toolCallId: id ?? key,
+            // The paired call's own id, so grouping is by identity rather than
+            // by tool name (a runtime with no call ids must not collapse
+            // same-named calls into one another).
+            toolCallId: id ?? call.toolCallId ?? call.id,
             ...(read.reconstructable
               ? { reconstructable: true, omissionMarker: reconstructableOmissionMarker(read.target, read.kind) }
               : {}),
@@ -636,10 +747,12 @@ export function collectHandoffContext(
 
 /**
  * Group items into the units selection treats as indivisible (v8 §10): a tool
- * call pairs with its matching result by `toolCallId` (falling back to the
- * runtime's name/order when a harness reports no ids), a shell command with
- * its accumulated output. A result whose call was never recorded is a unit of
- * its own — it is still an observation the next agent needs.
+ * call pairs with its matching result, a shell command with its accumulated
+ * output. Pairing uses the call's identity — the runtime's native call id when
+ * it has one, otherwise the call item's own id, which normalization stamped on
+ * the result so two same-named calls never collapse into one. A result whose
+ * call was never recorded is a unit of its own — it is still an observation the
+ * next agent needs.
  */
 export function groupHandoffContextUnits(items: HandoffContextItem[]): HandoffContextUnit[] {
   const units: HandoffContextUnit[] = [];
@@ -650,6 +763,7 @@ export function groupHandoffContextUnits(items: HandoffContextItem[]): HandoffCo
       const unit: HandoffContextUnit = { id: item.id, kind: "tool", items: [item] };
       units.push(unit);
       if (item.toolCallId) byCallId.set(item.toolCallId, unit);
+      byCallId.set(item.id, unit);
       continue;
     }
     if (item.kind === "tool-result") {
@@ -688,13 +802,18 @@ export function renderContextSlices(slices: HandoffContextSlice[]): string {
   return slices.map(renderSlice).join("\n\n");
 }
 
-/** Characters one slice costs in the rendered handoff (label + separator). */
-export function sliceChars(slice: HandoffContextSlice): number {
-  return renderSlice(slice).length + 2;
+/**
+ * ASCII-equivalent cost of one slice in the rendered handoff (label +
+ * separator), in the same currency as the budget's `charsPerToken` allowance.
+ * CJK text costs more per character, so a CJK-heavy slice is never
+ * under-charged against the budget.
+ */
+export function sliceChars(slice: HandoffContextSlice, charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
+  return handoffTextCost(renderSlice(slice), charsPerToken) + 2;
 }
 
-function slicesChars(slices: HandoffContextSlice[]): number {
-  return slices.reduce((sum, s) => sum + sliceChars(s), 0);
+function slicesChars(slices: HandoffContextSlice[], charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
+  return slices.reduce((sum, s) => sum + sliceChars(s, charsPerToken), 0);
 }
 
 function itemToSlice(item: HandoffContextItem, retention: HandoffContextSlice["retention"]): HandoffContextSlice {
@@ -717,48 +836,120 @@ function omissionMarker(omitted: number): string {
   return `\n\n[... ${omitted} characters omitted from the middle during handoff retention ...]\n\n`;
 }
 
-/** Upper bound on the marker's length for a text of `length` chars. */
-function markerBudget(length: number): number {
-  return omissionMarker(length).length;
+/** Cost of one code point in the estimator's ASCII-equivalent currency. */
+function charCost(ch: string, charsPerToken: number): number {
+  return CJK_CHAR_RE.test(ch) ? DEFAULT_CJK_TOKENS_PER_CHAR * charsPerToken : ch.length;
+}
+
+/** Longest prefix of `text` whose cost fits `budget`, split by code point. */
+function headByCost(text: string, budget: number, charsPerToken: number): string {
+  let cost = 0;
+  let plainEnd = 0;
+  let i = 0;
+  while (i < text.length) {
+    const cp = text.codePointAt(i)!;
+    const ch = String.fromCodePoint(cp);
+    const next = cost + charCost(ch, charsPerToken);
+    if (next > budget) break;
+    cost = next;
+    i += ch.length;
+    plainEnd = i;
+  }
+  return text.slice(0, plainEnd);
+}
+
+/** Longest suffix of `text` whose cost fits `budget`, split by code point. */
+function tailByCost(text: string, budget: number, charsPerToken: number): string {
+  const chars = [...text];
+  let cost = 0;
+  let start = chars.length;
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const next = cost + charCost(chars[i], charsPerToken);
+    if (next > budget) break;
+    cost = next;
+    start = i;
+  }
+  return chars.slice(start).join("");
+}
+
+/**
+ * Bounded head+tail reduction in the estimator's cost currency, never
+ * head-only and never exceeding `maxCost`. `marker(omittedChars)` renders the
+ * middle marker; the result's cost is bounded by construction (head and tail
+ * budgets plus the marker's own length).
+ */
+export function truncateTextByCost(
+  text: string,
+  maxCost: number,
+  charsPerToken: number,
+  marker: (omittedChars: number) => string,
+  headShare = OVERSIZED_HEAD_SHARE
+): string {
+  if (maxCost <= 0) return "";
+  if (handoffTextCost(text, charsPerToken) <= maxCost) return text;
+  const reserve = marker(text.length).length;
+  // Too small for the marker: a bounded prefix is still better than nothing.
+  if (maxCost <= reserve + 2) return headByCost(text, maxCost, charsPerToken);
+  const remaining = maxCost - reserve;
+  const headBudget = Math.max(1, Math.floor(remaining * headShare));
+  const tailBudget = Math.max(0, remaining - headBudget);
+  const head = headByCost(text, headBudget, charsPerToken);
+  const tail = tailBudget > 0 ? tailByCost(text, tailBudget, charsPerToken) : "";
+  const omitted = text.length - head.length - tail.length;
+  return `${head}${marker(omitted)}${tail}`;
 }
 
 /**
  * Shorten text for retention, keeping a head AND the tail, tail-biased
  * (v8 §17). Never the head alone: for tests, compilers, builds and shell
  * output the end of the text carries the failure, the stack trace, the summary
- * and the exit status — the execution frontier. The result never exceeds
- * `maxChars`.
+ * and the exit status — the execution frontier.
+ *
+ * `maxCost` is in the estimator's ASCII-equivalent currency (see
+ * `handoffTextCost`), so a CJK-heavy result cannot quietly consume more budget
+ * than it was charged. The result's cost never exceeds `maxCost`.
  */
-export function truncateForHandoffRetention(text: string, maxChars: number): string {
-  if (maxChars <= 0) return "";
-  if (text.length <= maxChars) return text;
-  const reserve = markerBudget(text.length);
-  // Too small for the marker: a bounded prefix is still better than nothing.
-  if (maxChars <= reserve + 2) return text.slice(0, maxChars);
-  const headChars = Math.max(1, Math.floor((maxChars - reserve) * OVERSIZED_HEAD_SHARE));
-  const tailChars = Math.max(0, maxChars - reserve - headChars);
-  const omitted = text.length - headChars - tailChars;
-  const out = `${text.slice(0, headChars)}${omissionMarker(omitted)}${
-    tailChars > 0 ? text.slice(text.length - tailChars) : ""
-  }`;
-  return out.length <= maxChars ? out : out.slice(0, maxChars);
+export function truncateForHandoffRetention(
+  text: string,
+  maxCost: number,
+  charsPerToken = DEFAULT_CHARS_PER_TOKEN
+): string {
+  return truncateTextByCost(text, maxCost, charsPerToken, omissionMarker);
 }
 
 /* ------------------------------------------------------------------ */
 /* Selection                                                           */
 /* ------------------------------------------------------------------ */
 
+/**
+ * How one context item was carried into the bundle (v9 §4). Only `full` and
+ * `reconstructable-omitted` items may be excluded from the checkpoint's
+ * summarization source: a `partial` item's omitted middle exists nowhere else,
+ * so the checkpoint must still be able to represent it.
+ */
+export type HandoffRetentionClass = "full" | "partial" | "reconstructable-omitted";
+
 export interface HandoffContextSelection {
   pinned: HandoffContextSlice[];
   retained: HandoffContextSlice[];
-  /** Chars the pinned slices occupy in the rendered handoff. */
+  /** ASCII-equivalent chars the pinned slices occupy in the rendered handoff. */
   pinnedChars: number;
-  /** Chars the retained slices occupy in the rendered handoff. */
+  /** ASCII-equivalent chars the retained slices occupy in the rendered handoff. */
   retainedChars: number;
-  /** RunEvent ids carried verbatim — excluded from the checkpoint's input. */
-  coveredEventIds: Set<string>;
-  /** Item ids carried verbatim (including pins without source events). */
+  /**
+   * Item id → how the item was carried. `full` and `reconstructable-omitted`
+   * items are complete representations; `partial` items were shortened, so the
+   * checkpoint stays responsible for what they lost.
+   */
+  retentionByItemId: Map<string, HandoffRetentionClass>;
+  /** Item ids carried in any form (including pins without source events). */
   coveredItemIds: Set<string>;
+  /**
+   * RunEvent ids that need no checkpoint representation — the item was carried
+   * verbatim, or it was intentionally dropped as reconstructable. Partially
+   * retained items are deliberately NOT in this set (v9 §4).
+   */
+  excludedFromSummaryEventIds: Set<string>;
   /** Items the budget dropped, oldest first — the checkpoint must cover them. */
   omittedItemIds: string[];
 }
@@ -767,8 +958,9 @@ export interface SelectHandoffContextInput {
   items: HandoffContextItem[];
   budget: ResolvedHandoffBudget;
   /**
-   * Chars held back before any context is selected: the checkpoint's
-   * allowance, the render scaffolding and the workspace/run metadata.
+   * ASCII-equivalent chars held back before any context is selected: the
+   * checkpoint's allowance, the render scaffolding, the workspace/run metadata
+   * and the user notes.
    */
   reservedChars: number;
   /** Share of the free budget historical pins may claim. */
@@ -791,10 +983,13 @@ export interface SelectHandoffContextInput {
  *    a model's paraphrase.
  * 5. **No duplicates.** What the recent walk already retained is not pinned a
  *    second time (v8 §14).
+ * 6. **No black hole.** A reduced item is reported as `partial`, so the part
+ *    that did not fit still reaches the checkpoint (v9 §4).
  */
 export function selectHandoffContext(input: SelectHandoffContextInput): HandoffContextSelection {
   const { items, budget } = input;
-  const totalChars = charsForTokens(budget.maxTokens, budget.charsPerToken);
+  const charsPerToken = budget.charsPerToken;
+  const totalChars = charsForTokens(budget.maxTokens, charsPerToken);
   const available = Math.max(0, totalChars - Math.max(0, input.reservedChars));
   const pinAllowance = Math.floor(available * (input.pinnedShare ?? DEFAULT_PINNED_SHARE));
 
@@ -802,10 +997,10 @@ export function selectHandoffContext(input: SelectHandoffContextInput): HandoffC
   // need; whatever they do not claim goes to the recent trajectory, which
   // outranks them (v8 §31). The plan is re-run after the walk, once it is
   // known which user turns the walk already kept.
-  const plannedPins = planPinnedContext(items, new Set(), pinAllowance);
+  const plannedPins = planPinnedContext(items, new Set(), pinAllowance, charsPerToken);
   const retainedBudget = Math.max(0, available - plannedPins.chars);
 
-  const recent = selectRecentTrajectory(items, retainedBudget);
+  const recent = selectRecentTrajectory(items, retainedBudget, charsPerToken);
   // The second plan can pin a different set than the first (the walk has taken
   // some user turns), so its allowance is re-clamped to what the trajectory
   // actually left over. This is what makes `pinned + retained <= available`
@@ -813,12 +1008,16 @@ export function selectHandoffContext(input: SelectHandoffContextInput): HandoffC
   const pinned = planPinnedContext(
     items,
     recent.coveredItemIds,
-    Math.max(0, Math.min(pinAllowance, available - recent.chars))
+    Math.max(0, Math.min(pinAllowance, available - recent.chars)),
+    charsPerToken
   );
 
-  const coveredEventIds = new Set<string>();
+  const excludedFromSummaryEventIds = new Set<string>();
   for (const item of items) {
-    if (recent.coveredItemIds.has(item.id)) for (const id of item.eventIds) coveredEventIds.add(id);
+    const cls = recent.retentionByItemId.get(item.id);
+    if (cls === "full" || cls === "reconstructable-omitted") {
+      for (const id of item.eventIds) excludedFromSummaryEventIds.add(id);
+    }
   }
 
   return {
@@ -826,10 +1025,25 @@ export function selectHandoffContext(input: SelectHandoffContextInput): HandoffC
     retained: recent.slices,
     pinnedChars: pinned.chars,
     retainedChars: recent.chars,
-    coveredEventIds,
+    retentionByItemId: recent.retentionByItemId,
     coveredItemIds: recent.coveredItemIds,
+    excludedFromSummaryEventIds,
     omittedItemIds: recent.omittedItemIds,
   };
+}
+
+/** Classify a slice against the item it was rendered from. */
+function classifyItem(item: HandoffContextItem, sliceText: string): HandoffRetentionClass {
+  if (item.reconstructable && item.omissionMarker && sliceText === item.omissionMarker) {
+    return "reconstructable-omitted";
+  }
+  return sliceText === item.text ? "full" : "partial";
+}
+
+interface UnitSlices {
+  slices: HandoffContextSlice[];
+  chars: number;
+  classes: Map<string, HandoffRetentionClass>;
 }
 
 /**
@@ -841,18 +1055,27 @@ export function selectHandoffContext(input: SelectHandoffContextInput): HandoffC
  * tells it exactly what to re-read. Small reads are kept — re-reading costs a
  * tool call, and the content is cheap.
  */
-function unitSlices(unit: HandoffContextUnit): HandoffContextSlice[] {
+function unitSlices(unit: HandoffContextUnit, charsPerToken: number): UnitSlices {
   const result = unit.items.find((i) => i.kind === "tool-result");
   const omitBody =
     result?.reconstructable === true &&
     typeof result.omissionMarker === "string" &&
-    result.text.length > RECONSTRUCTABLE_BODY_KEEP_MAX_CHARS;
-  return unit.items.map((item) => {
-    if (omitBody && item === result) return itemToSlice({ ...item, text: item.omissionMarker! }, "recent");
-    // The call only survives to make the reduced/omitted result readable.
-    if (omitBody && item.kind === "tool-call") return itemToSlice(item, "paired");
-    return itemToSlice(item, "recent");
+    handoffTextCost(result.text, charsPerToken) > RECONSTRUCTABLE_BODY_KEEP_MAX_CHARS;
+  const classes = new Map<string, HandoffRetentionClass>();
+  const slices = unit.items.map((item) => {
+    let slice: HandoffContextSlice;
+    if (omitBody && item === result) {
+      slice = itemToSlice({ ...item, text: item.omissionMarker! }, "recent");
+    } else if (omitBody && item.kind === "tool-call") {
+      // The call only survives to make the reduced/omitted result readable.
+      slice = itemToSlice(item, "paired");
+    } else {
+      slice = itemToSlice(item, "recent");
+    }
+    classes.set(item.id, classifyItem(item, slice.text));
+    return slice;
   });
+  return { slices, chars: slicesChars(slices, charsPerToken), classes };
 }
 
 /**
@@ -862,37 +1085,48 @@ function unitSlices(unit: HandoffContextUnit): HandoffContextSlice[] {
  */
 function selectRecentTrajectory(
   items: HandoffContextItem[],
-  budgetChars: number
-): { slices: HandoffContextSlice[]; chars: number; coveredItemIds: Set<string>; omittedItemIds: string[] } {
+  budgetChars: number,
+  charsPerToken: number
+): {
+  slices: HandoffContextSlice[];
+  chars: number;
+  retentionByItemId: Map<string, HandoffRetentionClass>;
+  coveredItemIds: Set<string>;
+  omittedItemIds: string[];
+} {
   const units = groupHandoffContextUnits(items);
   const slices: HandoffContextSlice[] = [];
   const coveredItemIds = new Set<string>();
+  const retentionByItemId = new Map<string, HandoffRetentionClass>();
   let chars = 0;
   let cut = units.length;
 
+  const carry = (result: UnitSlices) => {
+    slices.unshift(...result.slices);
+    for (const [id, cls] of result.classes) retentionByItemId.set(id, cls);
+    chars += result.chars;
+  };
+
   for (let i = units.length - 1; i >= 0; i--) {
     const unit = units[i];
-    const full = unitSlices(unit);
-    const fullCost = slicesChars(full);
+    const full = unitSlices(unit, charsPerToken);
     const room = budgetChars - chars;
-    if (fullCost <= room) {
-      slices.unshift(...full);
+    if (full.chars <= room) {
+      carry(full);
       for (const item of unit.items) coveredItemIds.add(item.id);
-      chars += fullCost;
       cut = i;
       continue;
     }
-    const reduced = reduceOversizedUnit(unit, room);
+    const reduced = reduceOversizedUnit(unit, room, charsPerToken);
     if (!reduced) break;
-    slices.unshift(...reduced.slices);
+    carry(reduced);
     for (const item of unit.items) coveredItemIds.add(item.id);
-    chars += reduced.chars;
     cut = i;
     if (room - reduced.chars < MIN_USEFUL_CHARS) break;
   }
 
   const omittedItemIds = units.slice(0, cut).flatMap((u) => u.items.map((i) => i.id));
-  return { slices, chars, coveredItemIds, omittedItemIds };
+  return { slices, chars, retentionByItemId, coveredItemIds, omittedItemIds };
 }
 
 /**
@@ -902,10 +1136,17 @@ function selectRecentTrajectory(
  */
 function reduceOversizedUnit(
   unit: HandoffContextUnit,
-  room: number
-): { slices: HandoffContextSlice[]; chars: number } | undefined {
+  room: number,
+  charsPerToken: number
+): UnitSlices | undefined {
   const call = unit.items.find((i) => i.kind === "tool-call");
   const result = unit.items.find((i) => i.kind === "tool-result");
+  const classes = new Map<string, HandoffRetentionClass>();
+
+  const build = (item: HandoffContextItem, text: string, retention: HandoffContextSlice["retention"]) => {
+    classes.set(item.id, classifyItem(item, text));
+    return itemToSlice({ ...item, text }, retention);
+  };
 
   // A local file body the new harness can re-read is never worth tens of
   // thousands of handoff characters (v8 §16): keep the call that names it and
@@ -913,10 +1154,11 @@ function reduceOversizedUnit(
   // truncated into the budget either — the marker or nothing.
   if (result?.reconstructable && result.omissionMarker) {
     const callSlice = call ? itemToSlice(call, "paired") : undefined;
-    const markerSlice = itemToSlice({ ...result, text: result.omissionMarker }, "recent");
+    if (call && callSlice) classes.set(call.id, "full");
+    const markerSlice = build(result, result.omissionMarker, "recent");
     const slices = callSlice ? [callSlice, markerSlice] : [markerSlice];
-    const chars = slicesChars(slices);
-    return chars <= room ? { slices, chars } : undefined;
+    const chars = slicesChars(slices, charsPerToken);
+    return chars <= room ? { slices, chars, classes } : undefined;
   }
 
   // Everything else — test output, compiler output, a long assistant
@@ -925,18 +1167,21 @@ function reduceOversizedUnit(
   const target = result ?? unit.items[0];
   const paired = call && call !== target ? call : undefined;
   let callSlice = paired ? itemToSlice(paired, "paired") : undefined;
-  if (callSlice && room - sliceChars(callSlice) < MIN_USEFUL_CHARS) {
+  if (callSlice) classes.set(paired!.id, "full");
+  if (callSlice && room - sliceChars(callSlice, charsPerToken) < MIN_USEFUL_CHARS) {
     const callRoom = Math.max(0, room - MIN_USEFUL_CHARS - sliceLabel("tool-call").length - 4);
-    callSlice = itemToSlice({ ...paired!, text: truncateForHandoffRetention(paired!.text, callRoom) }, "paired");
+    callSlice = build(paired!, truncateForHandoffRetention(paired!.text, callRoom, charsPerToken), "paired");
   }
-  const bodyRoom = room - (callSlice ? sliceChars(callSlice) : 0);
+  const bodyOverhead = sliceLabel(target.kind).length + 4;
+  const bodyRoom = room - (callSlice ? sliceChars(callSlice, charsPerToken) : 0) - bodyOverhead;
   if (bodyRoom < MIN_USEFUL_CHARS) return undefined;
-  const bodySlice = itemToSlice(
-    { ...target, text: truncateForHandoffRetention(target.text, bodyRoom) },
+  const bodySlice = build(
+    target,
+    truncateForHandoffRetention(target.text, bodyRoom, charsPerToken),
     "oversized-truncated"
   );
   const slices = callSlice ? [callSlice, bodySlice] : [bodySlice];
-  return { slices, chars: slicesChars(slices) };
+  return { slices, chars: slicesChars(slices, charsPerToken), classes };
 }
 
 /**
@@ -950,7 +1195,8 @@ function reduceOversizedUnit(
 function planPinnedContext(
   items: HandoffContextItem[],
   alreadyCovered: Set<string>,
-  allowanceChars: number
+  allowanceChars: number,
+  charsPerToken: number
 ): { slices: HandoffContextSlice[]; chars: number } {
   const candidates = items.filter((i) => i.kind === "user" && !alreadyCovered.has(i.id));
   const original = candidates.find((i) => i.originalTask);
@@ -960,7 +1206,7 @@ function planPinnedContext(
   const pinned: HandoffContextItem[] = [];
   let used = 0;
   for (const item of ordered) {
-    const cost = sliceChars(itemToSlice(item, "pinned"));
+    const cost = sliceChars(itemToSlice(item, "pinned"), charsPerToken);
     if (used + cost <= allowanceChars) {
       pinned.push(item);
       used += cost;
@@ -970,9 +1216,9 @@ function planPinnedContext(
       const overhead = sliceLabel("user").length + 4;
       const room = allowanceChars - used - overhead;
       if (room >= MIN_USEFUL_CHARS) {
-        const text = truncateForHandoffRetention(item.text, room);
+        const text = truncateForHandoffRetention(item.text, room, charsPerToken);
         pinned.push({ ...item, text });
-        used += sliceChars(itemToSlice({ ...item, text }, "pinned"));
+        used += sliceChars(itemToSlice({ ...item, text }, "pinned"), charsPerToken);
       }
     }
   }
@@ -1009,30 +1255,47 @@ export interface AssembleBundleInput {
   selection: HandoffContextSelection;
   budget: ResolvedHandoffBudget;
   checkpoint?: string;
-  /** Chars the renderer adds outside checkpoint/pins/retained. */
+  /**
+   * ASCII-equivalent cost of everything the renderer writes outside
+   * checkpoint/pins/retained: the workspace/run metadata and the fixed render
+   * scaffolding.
+   */
   metadataChars: number;
+  /**
+   * ASCII-equivalent cost of the user notes the renderer appends. Counted in
+   * the same accounting as every other section, so the reported handoff size
+   * covers what is actually sent (v9 §6).
+   */
+  userNotesChars?: number;
 }
 
 /**
  * Assemble the stored bundle and its budget accounting. Written once, at
  * generation time: what the record says is what the next harness gets, and
  * nothing downstream recomputes it (AGENTS.md).
+ *
+ * `budget.estimatedTokens` covers the handoff BODY only — checkpoint, pins,
+ * retained trajectory, metadata, scaffolding and user notes. The receiving
+ * harness's own instruction is appended outside this budget
+ * (`renderHandoffPrompt`), which is a separate execution runway (v9 §6).
  */
 export function assembleHandoffContextBundle(input: AssembleBundleInput): HandoffContextBundle {
   const { budget, selection } = input;
-  const checkpointChars = input.checkpoint?.length ?? 0;
   const charsPerToken = budget.charsPerToken;
+  const checkpointCost = input.checkpoint ? handoffTextCost(input.checkpoint, charsPerToken) : 0;
+  const userNotesChars = Math.max(0, input.userNotesChars ?? 0);
   const accounting: HandoffContextBudget = {
     contextWindow: budget.contextWindow,
     maxTokens: budget.maxTokens,
     estimatedTokens: estimateTokens(
-      checkpointChars + selection.pinnedChars + selection.retainedChars + input.metadataChars,
+      checkpointCost + selection.pinnedChars + selection.retainedChars + input.metadataChars + userNotesChars,
       charsPerToken
     ),
-    checkpointTokens: estimateTokens(checkpointChars, charsPerToken),
+    checkpointTokens: estimateTokens(checkpointCost, charsPerToken),
     pinnedTokens: estimateTokens(selection.pinnedChars, charsPerToken),
     retainedTokens: estimateTokens(selection.retainedChars, charsPerToken),
     metadataTokens: estimateTokens(input.metadataChars, charsPerToken),
+    ...(userNotesChars > 0 ? { userNotesTokens: estimateTokens(userNotesChars, charsPerToken) } : {}),
     charsPerToken,
   };
   return {
@@ -1049,10 +1312,14 @@ export function assembleHandoffContextBundle(input: AssembleBundleInput): Handof
 /* ------------------------------------------------------------------ */
 
 /**
- * The covered turns with the RETAINED trajectory removed: what remains is the
- * checkpoint's job (v8 §20/§30). A turn whose events were all retained
- * contributes nothing; a turn whose user input was retained keeps only its
- * remaining events.
+ * The covered turns with the fully-carried trajectory removed: what remains is
+ * the checkpoint's job (v8 §20/§30).
+ *
+ * Only items classified `full` or `reconstructable-omitted` are excluded. A
+ * `partial` item was shortened for retention, so its event stays in the
+ * checkpoint's input — the omitted middle exists nowhere else and must not
+ * become an information black hole (v9 §4). A turn whose user input was
+ * retained keeps only its remaining events.
  *
  * Pinned user turns deliberately stay in: the checkpoint is the state index,
  * and it must be able to say what the user's constraints are (its
@@ -1069,7 +1336,7 @@ export function unretainedTurns(
   turns.forEach((turn, index) => {
     const userItemId = collected.turnUserItemIds.get(index);
     const userRetained = userItemId ? selection.coveredItemIds.has(userItemId) : false;
-    const events = turn.events.filter((e) => !selection.coveredEventIds.has(e.id));
+    const events = turn.events.filter((e) => !selection.excludedFromSummaryEventIds.has(e.id));
     const userPrompt = userRetained ? undefined : turn.userPrompt;
     if (events.length === 0 && !userPrompt?.trim()) return;
     out.push({ ...turn, events, userPrompt });

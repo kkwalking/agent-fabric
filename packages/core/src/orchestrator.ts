@@ -28,6 +28,7 @@ import type {
 import {
   createHttpCompletionFn,
   generateHandoffSummary,
+  HandoffBudgetExceededError,
   HANDOFF_GENERATION_BUDGET_MS,
   type CompletionFn,
 } from "./handoffSummary.js";
@@ -249,6 +250,19 @@ export class HandoffRequiredError extends Error {
     );
     this.name = "HandoffRequiredError";
   }
+}
+
+/**
+ * A context window the runtime itself declares, if any (v9 §5). Explicit
+ * capability metadata beats every configured fallback and is the only way a
+ * harness-native target's real window can reach the handoff budget.
+ */
+export function declaredRuntimeContextWindow(runtime: Runtime | undefined): number | undefined {
+  if (!runtime) return undefined;
+  for (const value of [runtime.contextWindow, runtime.capabilities?.contextWindow, runtime.config?.contextWindow]) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
 }
 
 /** Input for continuing an existing Task (spec v1 §15/§18/§20). */
@@ -904,6 +918,7 @@ export class RunService {
     // summarizing it again — a pre-generated (armed or targeted) handoff is
     // exactly this run's cached summary.
     let handoff = this.latestHandoffFrom(previousRun.id);
+    const notes = input.userNotes?.trim();
 
     if (!handoff) {
       // Handoff vs context compaction: a handoff crosses from one native
@@ -914,11 +929,11 @@ export class RunService {
       if (input.mode !== "handoff") throw new HandoffRequiredError();
       // Concurrent callers (UI pre-generate + a racing continue) share one
       // generation so only one summary is produced and one record stored.
-      // The degradation policy is part of the key: a caller that accepts a
-      // digest must not inherit a strict caller's rejection (and vice
-      // versa) when the same summary is requested twice.
+      // The degradation policy AND the notes are part of the key: two callers
+      // with different notes need different budgets, and a caller that accepts
+      // a digest must not inherit a strict caller's rejection (and vice versa).
       const allowDegraded = input.allowDegradedHandoff === true;
-      const key = `${previousRun.id}:${allowDegraded ? "degraded" : "strict"}`;
+      const key = `${previousRun.id}:${allowDegraded ? "degraded" : "strict"}:${notes ?? ""}`;
       let pending = this.handoffGenerations.get(key);
       if (!pending) {
         pending = this.generateAndStoreHandoff(
@@ -929,6 +944,7 @@ export class RunService {
           this.targetModelIdFor(target, input),
           allowDegraded,
           trigger,
+          notes,
           signal
         );
         this.handoffGenerations.set(key, pending);
@@ -937,8 +953,10 @@ export class RunService {
       handoff = await pending;
     }
 
-    if (input.userNotes?.trim()) {
-      handoff = (await handoffService.addUserNotes(handoff.id, input.userNotes)) ?? handoff;
+    // A freshly generated handoff already carries the notes (and budgeted for
+    // them); only a REUSED handoff needs them attached here.
+    if (notes && handoff.userNotes !== notes) {
+      handoff = (await handoffService.addUserNotes(handoff.id, notes)) ?? handoff;
     }
 
     // Point the handoff at the concrete target runtime. A pre-generation
@@ -961,6 +979,7 @@ export class RunService {
     targetModelId: ID | undefined,
     allowDegraded: boolean,
     trigger: HandoffTrigger,
+    userNotes: string | undefined,
     signal?: AbortSignal
   ): Promise<Handoff> {
     const handoffService = this.handoffService();
@@ -973,6 +992,7 @@ export class RunService {
       targetModelId,
       artifacts,
       allowDegraded,
+      userNotes,
       signal
     );
     // The generation's provenance is written once and carried by both the
@@ -1001,6 +1021,7 @@ export class RunService {
       source: "agentfabric",
       generation,
       content: generated.content,
+      ...(userNotes ? { userNotes } : {}),
       workspaceId: previousRun.workspaceId,
       artifactIds: artifacts.map((a) => a.id),
     });
@@ -1033,7 +1054,7 @@ export class RunService {
   async generateHandoff(
     taskId: ID,
     runtimeId?: ID,
-    options?: { allowDegraded?: boolean; signal?: AbortSignal }
+    options?: { allowDegraded?: boolean; signal?: AbortSignal; userNotes?: string }
   ): Promise<Handoff> {
     const task = this.taskService().get(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
@@ -1054,6 +1075,7 @@ export class RunService {
         // The standalone action is itself the explicit handoff request.
         mode: "handoff",
         allowDegradedHandoff: options?.allowDegraded === true,
+        userNotes: options?.userNotes,
       },
       // Without a target harness this is the user asking for a handoff; with
       // one it is a pre-generation cached for that harness (Continue with X,
@@ -1292,12 +1314,13 @@ export class RunService {
     /* ---- Optional handoff toward another harness (v6 §8/§9). ---- */
     let handoffId: ID | undefined;
     if (input.targetRuntimeId) {
-      let handoff: Handoff | undefined;
       try {
-        handoff = await this.generateHandoff(task.id, input.targetRuntimeId, { allowDegraded: true });
-        if (input.userNotes?.trim()) {
-          handoff = (await this.handoffService().addUserNotes(handoff.id, input.userNotes)) ?? handoff;
-        }
+        // Notes are folded into the generation so the budget accounts for
+        // them; `prepareHandoff` handles the reused-handoff case.
+        const handoff = await this.generateHandoff(task.id, input.targetRuntimeId, {
+          allowDegraded: true,
+          ...(input.userNotes?.trim() ? { userNotes: input.userNotes } : {}),
+        });
         handoffId = handoff?.id;
       } catch {
         // Adoption must succeed even when summary generation fails — the
@@ -1399,6 +1422,7 @@ export class RunService {
     targetModelId: ID | undefined,
     artifacts: Artifact[],
     allowDegraded: boolean,
+    userNotes: string | undefined,
     signal?: AbortSignal
   ): Promise<{
     content: HandoffContent;
@@ -1486,6 +1510,9 @@ export class RunService {
         // READ it. Unknown → the task's configured model → the summarizer's
         // (still a configured window, never a guess from the model name).
         targetContextWindow: this.handoffTargetContextWindow(task, target, targetModelId, model),
+        // User notes are rendered into the handoff body, so they are budgeted
+        // with it (v9 §6).
+        ...(userNotes ? { userNotes } : {}),
         // Total budget for the whole (possibly chunked) generation, plus the
         // caller's cancellation so a gone client stops the work.
         timeoutMs: HANDOFF_GENERATION_BUDGET_MS,
@@ -1504,6 +1531,12 @@ export class RunService {
       };
     } catch (err) {
       const detail = `handoff checkpoint generation failed: ${err instanceof Error ? err.message : String(err)}`;
+      // Notes that cannot fit ANY selection are an input/config error, not a
+      // provider outage: degrading to a digest would silently ship the
+      // overflow the budget exists to prevent. Fail loudly, always (v9 §6).
+      if (err instanceof HandoffBudgetExceededError) {
+        throw new HandoffUnavailableError("the handoff budget cannot hold the user notes", err.message);
+      }
       // A cancelled request must never be turned into a stored handoff: the
       // caller is gone, so there is nobody to accept a degraded context.
       if (signal?.aborted) {
@@ -1527,10 +1560,19 @@ export class RunService {
 
   /**
    * The context window the handoff body is budgeted against: the model that
-   * will read it. Only configured values count — the target run's model, else
-   * the task's model, else the model writing the checkpoint. A window that is
-   * not configured anywhere falls back to the documented default inside
-   * `resolveHandoffBudget`; it is never guessed from a model name.
+   * will read it. Resolution order is explicit and never guesses (v9 §5):
+   *
+   * 1. **explicit target/runtime capability** — `runtime.contextWindow`,
+   *    `runtime.capabilities.contextWindow` or `runtime.config.contextWindow`.
+   *    This is what lets a harness-native target (Codex, Claude Code, Pi,
+   *    OpenCode) declare its real window instead of falling back to 128K.
+   * 2. **configured fallback** — the target run's AgentFabric model, else the
+   *    task's model, else the model writing the checkpoint. Only configured
+   *    values count.
+   * 3. **safe default** — `undefined`, which `resolveHandoffBudget` turns into
+   *    the documented `DEFAULT_TARGET_CONTEXT_WINDOW`.
+   *
+   * A model name is never consulted and nothing is fetched over the network.
    */
   private handoffTargetContextWindow(
     task: Task,
@@ -1538,13 +1580,15 @@ export class RunService {
     targetModelId: ID | undefined,
     summarizer: Model | undefined
   ): number | undefined {
+    const explicit = declaredRuntimeContextWindow(target);
+    if (explicit) return explicit;
     const configured = (id: ID | undefined): number | undefined => {
       if (!id) return undefined;
       const window = this.modelService().get(id)?.parameters?.contextWindow;
       return typeof window === "number" && window > 0 ? window : undefined;
     };
     // Harness-native targets bring their own account and model — an
-    // AgentFabric model never rides along (v6 §3), so nothing is known.
+    // AgentFabric model never rides along (v6 §3), so nothing is known here.
     if (target && this.isHarnessNative(target)) return undefined;
     // Every value here is a CONFIGURED window; when none is known the caller
     // falls back to the documented default. A model name is never consulted.

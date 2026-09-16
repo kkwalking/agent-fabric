@@ -250,6 +250,8 @@ export interface NewRuntimeInput {
   ephemeral?: boolean;
   lifecycle?: Runtime["lifecycle"];
   capabilities?: Runtime["capabilities"];
+  /** Explicit context window of the model this runtime runs (v9 §5). */
+  contextWindow?: number;
   resourceLimits?: ResourceLimits;
   env?: Record<string, string>;
   secretIds?: ID[];
@@ -291,6 +293,7 @@ export class RuntimeService {
       ephemeral: input.ephemeral ?? lifecycle.mode === "ephemeral",
       lifecycle,
       capabilities: input.capabilities,
+      contextWindow: input.contextWindow,
       resourceLimits: input.resourceLimits,
       env: input.env,
       secretIds: input.secretIds,
