@@ -152,9 +152,11 @@ function Heatmap({ history, metric, onMetric }: { history: DayBucket[]; metric: 
     <>
       <div className="row heat-head">
         <h2>Cost history</h2>
-        <span className="right heat-metric">
-          <button className={`tab ${metric === "cost" ? "active" : ""}`} onClick={() => onMetric("cost")}>费用</button>
-          <button className={`tab ${metric === "tokens" ? "active" : ""}`} onClick={() => onMetric("tokens")}>Tokens</button>
+        {/* Segmented control: one grey track, the chosen metric lifted onto
+            a white pill. */}
+        <span className="right segmented">
+          <button aria-pressed={metric === "cost"} onClick={() => onMetric("cost")}>费用</button>
+          <button aria-pressed={metric === "tokens"} onClick={() => onMetric("tokens")}>Tokens</button>
         </span>
       </div>
       <div className="card">
