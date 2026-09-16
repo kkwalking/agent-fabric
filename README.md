@@ -311,7 +311,7 @@ af usage  # 或 af config / af secrets / af tasks
 | Method | Path | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/dashboard` | 统计 + 最近 Runs + Usage |
+| GET | `/api/dashboard` | 统计 + Usage（Recent runs 已移除，任务/Run 列表看 Tasks 与 Runs 页） |
 | CRUD | `/api/providers` `/api/models` `/api/runtimes` `/api/workspaces` `/api/secrets` `/api/agents` | 各资源管理 |
 | POST | `/api/runtimes/:id/enable` `/disable` | 启用/禁用 |
 | GET/POST | `/api/tasks` | Task |

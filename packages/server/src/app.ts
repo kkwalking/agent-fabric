@@ -141,7 +141,6 @@ export async function createApp(options: ServerOptions): Promise<Express> {
         runtimeSessions: runtimeSessions.list().length,
         nativeStates: nativeStates.list().length,
       },
-      recentRuns: runs.list().slice(0, 10),
       usage: usage.summary(),
     });
   });

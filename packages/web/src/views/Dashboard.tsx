@@ -1,16 +1,14 @@
 import { useEffect, useState } from "react";
-import { get, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
-import { StatusBadge, useAsync, ErrorBox } from "../components";
-import { navigate } from "../router";
+import { get, subscribeSSE } from "../api";
+import { useAsync, ErrorBox } from "../components";
 
 interface DashboardData {
   counts: Record<string, number>;
-  recentRuns: any[];
   usage: any;
 }
 
 export function Dashboard() {
-  const { data, error, reload } = useAsync<DashboardData>(() => get("/api/dashboard"), []);
+  const { data, error } = useAsync<DashboardData>(() => get("/api/dashboard"), []);
   const [live, setLive] = useState<any[]>([]);
 
   useEffect(() => {
@@ -50,34 +48,6 @@ export function Dashboard() {
         <div className="stat">
           <div className="num">${data.usage.estimatedCost.toFixed(4)}</div>
           <div className="lbl">Total cost</div>
-        </div>
-      </div>
-
-      <h2>Recent runs</h2>
-      <div className="card">
-        <table>
-          <thead>
-            <tr><th>Run</th><th>Title</th><th>Status</th><th>Runtime</th><th>Model</th><th>Cost</th><th>Created</th></tr>
-          </thead>
-          <tbody>
-            {data.recentRuns.length === 0 && (
-              <tr><td colSpan={7} className="muted">No runs yet — create a <a onClick={() => navigate("/new")}>New task</a> or run <span className="mono">af run "…"</span>.</td></tr>
-            )}
-            {data.recentRuns.map((r) => (
-              <tr key={r.id}>
-                <td className="mono"><a onClick={() => navigate(`/runs/${r.id}`)}>{shortId(r.id)}</a></td>
-                <td><a onClick={() => navigate(`/tasks/${r.taskId}`)}>{r.taskTitle}</a></td>
-                <td><StatusBadge status={r.status} /></td>
-                <td>{r.runtimeName ?? "-"}</td>
-                <td>{r.modelName ?? "-"}</td>
-                <td>{fmtCost(r.cost)}</td>
-                <td className="muted">{fmtTime(r.createdAt)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="row" style={{ marginTop: 10 }}>
-          <button className="small" onClick={reload}>refresh</button>
         </div>
       </div>
 
