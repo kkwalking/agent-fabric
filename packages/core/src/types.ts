@@ -504,6 +504,41 @@ export interface HandoffGeneration {
  * a tool call or a tool result. Tool outputs are observed data, never
  * instructions (v8 §23).
  */
+/**
+ * Where the handoff budget's target context window came from (v10 §23). This is
+ * a human/audit fact for the Inspector — the receiving model never needs it.
+ */
+export type HandoffContextWindowSource = "runtime-capability" | "configured-model" | "default";
+
+/**
+ * Provenance of user-role text (v10 §6/§7): user authority depends on where
+ * the text was recorded, not just on a "user" role label.
+ *
+ * - `user-authored`: recorded by the orchestration layer as the user's bare
+ *   input (no harness framing) — the user's own words.
+ * - `user-context`: arrived through the source harness's user-facing turn
+ *   (a harness echo of the turn, or an adopted native thread). The source
+ *   harness may have wrapped it with framing or attachment metadata, so it is
+ *   not guaranteed to be the user's literal words.
+ */
+export type HandoffUserProvenance = "user-authored" | "user-context";
+
+/**
+ * Where a covered run's bare user prompt was RECORDED (v10 §6) — the
+ * input-side fact that maps onto slice provenance:
+ * `user-authored` → `[User-authored]`, `harness-reported` → `[User-context]`.
+ */
+export type HandoffUserPromptOrigin = "user-authored" | "harness-reported";
+
+/**
+ * Explicit outcome semantics for a slice that states a tool outcome instead of
+ * carrying result data (v10 §13/§14). Distinguishes "no textual result",
+ * "omitted reconstructable body" (that one is `reconstructable`), "failed" and
+ * "result unavailable" — an orphan tool call with no outcome state at all is
+ * an ambiguous handoff.
+ */
+export type HandoffToolOutcome = "failed" | "completed-no-output" | "result-unavailable";
+
 export interface HandoffContextSlice {
   kind: "user" | "assistant" | "tool-call" | "tool-result";
   text: string;
@@ -512,11 +547,34 @@ export interface HandoffContextSlice {
   toolCallId?: string;
   toolName?: string;
   /**
+   * Provenance of user-role text (v10 §6/§7); only ever set on `user` slices.
+   * Absent means the default, `user-authored`.
+   */
+  provenance?: HandoffUserProvenance;
+  /**
+   * A source-harness wrapper/framing pattern was positively detected inside
+   * user-context text (e.g. "# Files mentioned by the user", "## My request:")
+   * — the label warns the receiver that only part of the text may be the
+   * user's own words.
+   */
+  harnessWrapper?: boolean;
+  /**
+   * The slice states a tool outcome rather than carrying result data
+   * (v10 §13/§14). Rendered under the `[Tool result status]` label.
+   */
+  outcome?: HandoffToolOutcome;
+  /**
    * The slice is a placeholder for an observation that the new harness can
    * re-obtain from the shared workspace (a local file read, a `cat`): the body
    * is deliberately omitted and `text` says how to get it back (v8 §16).
    */
   reconstructable?: boolean;
+  /**
+   * The slice is a local-mutation tool call whose large body arguments were
+   * semantically projected away (v10 §9/§10): the final workspace state is
+   * authoritative, so the call keeps only tool/path/operation semantics.
+   */
+  mutationProjected?: boolean;
   /** Why this slice survived selection (v8 §7). */
   retention: "pinned" | "recent" | "paired" | "oversized-truncated";
 }
@@ -529,6 +587,11 @@ export interface HandoffContextSlice {
 export interface HandoffContextBudget {
   /** Target model context window the budget was derived from. */
   contextWindow: number;
+  /**
+   * Where `contextWindow` came from (v10 §23): runtime capability, configured
+   * model, or the documented default. Inspector-only diagnostics.
+   */
+  contextWindowSource?: HandoffContextWindowSource;
   /** Total handoff budget: `min(maxHandoffTokens, floor(window × ratio))`. */
   maxTokens: number;
   /**
@@ -540,6 +603,8 @@ export interface HandoffContextBudget {
   checkpointTokens: number;
   pinnedTokens: number;
   retainedTokens: number;
+  /** The derived current-frontier section (v10 §5), when present. */
+  frontierTokens?: number;
   /** Render scaffolding + workspace/run metadata the checkpoint does not own. */
   metadataTokens?: number;
   /** User-provided handoff notes, counted in the same accounting (v9 §6). */
@@ -559,8 +624,19 @@ export interface HandoffContextBundle {
    * carried verbatim. Absent when the whole covered history fit in the
    * retained context (nothing needed summarizing) and no earlier checkpoint
    * had to be carried forward.
+   *
+   * Temporal semantics (v10 §2/§3): the checkpoint describes the state BEFORE
+   * the retained recent context — it is explicitly historical, never the
+   * final current state. The renderer states this framing.
    */
   checkpoint?: string;
+  /**
+   * The current frontier (v10 §5): a small, deterministic derivation from the
+   * END of the retained context (the latest assistant conclusion), so the
+   * receiving harness can tell "where the work actually stands now" without
+   * re-reading past a stale checkpoint. Absent when nothing was retained.
+   */
+  frontier?: string;
   /** High-value older context kept verbatim (historical user instructions). */
   pinnedContext: HandoffContextSlice[];
   /** Recent working trajectory kept verbatim, oldest first. */

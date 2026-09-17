@@ -50,7 +50,9 @@
 import type {
   Artifact,
   HandoffContextBundle,
+  HandoffContextWindowSource,
   HandoffContent,
+  HandoffUserPromptOrigin,
   Model,
   Provider,
   Run,
@@ -65,12 +67,15 @@ import {
   assembleHandoffContextBundle,
   charsForTokens,
   collectHandoffContext,
+  deriveHandoffFrontier,
   estimateTextTokens,
   eventText,
   formatHandoffMetadataSections,
   formatToolCall,
+  frontierReserveChars,
   handoffTextCost,
   hasUserMessage,
+  isEphemeralPath,
   isObj,
   matchPendingToolCall,
   resolveHandoffBudget,
@@ -170,7 +175,7 @@ Use this EXACT format:
 [What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
 
 ## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
+- [Any constraints, preferences, or requirements mentioned by user — as SHORT references only (e.g. "start/upload must take -P; see preserved user constraints"), never copied out in full: the handoff carries the user's own words verbatim in a separate preserved section, so restating them wastes the checkpoint]
 - [Or "(none)" if none were mentioned]
 
 ## Progress
@@ -193,14 +198,18 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+This checkpoint is the HISTORICAL state index: it will be read together with a more recent verbatim trajectory that supersedes its status. Record what was true at this point in the history.
+
+Keep each section concise. Preserve exact repository-relative file paths, function names, and error messages. Omit ephemeral temporary paths (/tmp/…, /var/folders/… scratch files) unless the work still depends on them. Text labelled [User] in the transcript arrived through the source harness's user turn and may include harness-generated wrappers or attachment metadata — attribute only clear requests to the user.`;
 
 export const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summary with new information. RULES:
 - PRESERVE all existing information from the previous summary
 - ADD new progress, decisions, and context from the new messages
 - UPDATE the Progress section: move items from "In Progress" to "Done" when completed
 - UPDATE "Next Steps" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
+- In "Constraints & Preferences", keep constraints as SHORT references only (the handoff carries the user's own words verbatim in a separate preserved section; never copy them out in full)
+- PRESERVE exact repository-relative file paths, function names, and error messages
+- Omit ephemeral temporary paths (/tmp/…, /var/folders/… scratch files) unless the work still depends on them
 - If something is no longer relevant, you may remove it
 
 Use this EXACT format:
@@ -209,7 +218,7 @@ Use this EXACT format:
 [Preserve existing goals, add new ones if the task expanded]
 
 ## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
+- [Preserve existing, add new ones discovered — as short references, never full copies]
 
 ## Progress
 ### Done
@@ -230,7 +239,7 @@ Use this EXACT format:
 ## Critical Context
 - [Preserve important context, add new if needed]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+This checkpoint is the HISTORICAL state index: it will be read together with a more recent verbatim trajectory that supersedes its status. Keep each section concise.`;
 
 export const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -599,10 +608,14 @@ export function extractFileOperations(events: RunEvent[], previousSummary?: stri
 /**
  * Compute final file lists from file operations (pi: verbatim).
  * Returns readFiles (files only read, not modified) and modifiedFiles.
+ * Ephemeral paths (OS temp dirs, runtime scratch) are dropped (v10 §22): they
+ * exist only in the source environment and would pollute the checkpoint with
+ * paths the receiving harness can do nothing with.
  */
 export function computeFileLists(fileOps: FileOperations): { readFiles: string[]; modifiedFiles: string[] } {
-  const modified = new Set([...fileOps.edited, ...fileOps.written]);
-  const readOnly = [...fileOps.read].filter((f) => !modified.has(f)).sort();
+  const durable = (paths: Set<string>) => [...paths].filter((f) => !isEphemeralPath(f));
+  const modified = new Set(durable(fileOps.edited).concat(durable(fileOps.written)));
+  const readOnly = durable(fileOps.read).filter((f) => !modified.has(f)).sort();
   const modifiedFiles = [...modified].sort();
   return { readFiles: readOnly, modifiedFiles };
 }
@@ -1110,6 +1123,18 @@ export interface HandoffSummaryInput {
    * the configured default; never guessed from a model name.
    */
   targetContextWindow?: number;
+  /**
+   * Where the target context window came from (v10 §23), resolved by the
+   * caller beside the window itself; recorded in the budget for Inspector
+   * diagnostics. Overridden by an explicit `settings.contextWindowSource`.
+   */
+  contextWindowSource?: HandoffContextWindowSource;
+  /**
+   * Provenance of the task brief (v10 §6): harness-reported when the task was
+   * adopted from a source harness's native thread (its brief may embed
+   * harness wrappers), user-authored otherwise.
+   */
+  taskPromptProvenance?: HandoffUserPromptOrigin;
   /** Retry policy for the summary call (pi: settings.retry; default 3/2s). */
   retry?: SummaryRetryPolicy;
   /** Cap from the model's parameters, when configured (pi: model.maxTokens). */
@@ -1216,6 +1241,11 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
   const budget = resolveHandoffBudget({
     ...(input.settings ?? {}),
     ...(input.settings?.contextWindow ? {} : { contextWindow: input.targetContextWindow }),
+    ...(input.settings?.contextWindowSource
+      ? {}
+      : input.contextWindowSource
+        ? { contextWindowSource: input.contextWindowSource }
+        : {}),
   });
   const charsPerToken = budget.charsPerToken;
   const summarizer = summarizerBudget(budget, input.modelContextWindow, input.modelMaxTokens);
@@ -1229,8 +1259,10 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
   //    checkpoint's input below, so no context is both kept and summarized.
   const collected = collectHandoffContext(turns, {
     taskPrompt: task.prompt,
+    ...(input.taskPromptProvenance ? { taskPromptProvenance: input.taskPromptProvenance } : {}),
     // Only a shared workspace makes a local read reconstructable (v8 §16/§25).
     sharedWorkspace: Boolean(workspace),
+    charsPerToken,
   });
   // The checkpoint allowance is reserved at its CAP, not at its (unknown)
   // final size: selection happens before the model call. A checkpoint smaller
@@ -1243,6 +1275,10 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
     Math.max(charsForTokens(budget.checkpointMaxTokens, charsPerToken), previousSummaryCost),
     Math.floor(totalChars * CHECKPOINT_RESERVE_SHARE)
   );
+  // The current frontier (v10 §5) is derived AFTER selection, so its (small,
+  // capped) allowance is reserved up front exactly like the checkpoint's —
+  // scaled down for small budgets so the trajectory keeps its room.
+  const frontierReserve = frontierReserveChars(totalChars);
   // The other non-bundle sections the renderer writes (workspace, previous
   // run, artifacts) are generation-time facts, so the reserve is exact for
   // them, plus a fixed allowance for the render scaffolding itself.
@@ -1268,7 +1304,7 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
   const selection = selectHandoffContext({
     items: collected.items,
     budget,
-    reservedChars: checkpointReserveChars + metadataChars + userNotesChars,
+    reservedChars: checkpointReserveChars + frontierReserve + metadataChars + userNotesChars,
   });
 
   // 2. Summarize exactly what was NOT carried verbatim.
@@ -1390,14 +1426,20 @@ export async function generateHandoffSummary(input: HandoffSummaryInput): Promis
     finalSelection = selectHandoffContext({
       items: collected.items,
       budget,
-      reservedChars: checkpointCost + metadataChars + userNotesChars,
+      reservedChars: checkpointCost + frontierReserve + metadataChars + userNotesChars,
     });
   }
+
+  // The current frontier (v10 §5): the newest state, derived deterministically
+  // from the end of the retained trajectory. Capped at (and reserved as) the
+  // frontier reserve, so it can never push the body past its budget.
+  const frontier = deriveHandoffFrontier(finalSelection.retained, charsPerToken, frontierReserve);
 
   const contextBundle = assembleHandoffContextBundle({
     selection: finalSelection,
     budget,
     ...(checkpoint ? { checkpoint } : {}),
+    ...(frontier ? { frontier } : {}),
     metadataChars,
     userNotesChars,
   });
@@ -1475,6 +1517,10 @@ function stripXmlTags(summary: string): string {
  * which workspace the work happened in, how the previous run ended, what it
  * produced. One source of truth for both the renderer and the context
  * budget's metadata reserve.
+ *
+ * Observability noise stays out (v10 §21): token usage, cost and billing are
+ * audit facts — they remain on the Run record and in the Inspector, but the
+ * receiving model's working context never needs them.
  */
 export function handoffMetadataFields(meta: {
   run: Run;
@@ -1488,8 +1534,7 @@ export function handoffMetadataFields(meta: {
       ? `Workspace "${workspace.name}" (${workspace.type}) at ${workspace.path ?? workspace.repoUrl ?? "unknown"}.`
       : "No workspace was attached to the previous run.",
     previousRunResult:
-      `Run ${run.id} finished with status "${run.status}"${run.error ? `, error: ${run.error}` : ""}` +
-      `; usage: ${run.usage?.inputTokens ?? 0} in / ${run.usage?.outputTokens ?? 0} out tokens, cost ${run.cost ?? 0}.`,
+      `Run ${run.id} finished with status "${run.status}"${run.error ? `, error: ${run.error}` : ""}.`,
     ...(artifacts.length ? { artifacts: artifacts.map((a) => `${a.name} (${a.kind})`) } : {}),
   };
 }
@@ -1518,9 +1563,10 @@ export function handoffCheckpointToContent(
   const base: HandoffContent = {
     originalTask: taskLabel(task).slice(0, 2000),
     currentObjective: task.title,
+    // Observability facts (model-call counts, token usage, cost) stay off the
+    // LLM-facing projection (v10 §21); the Run record and Inspector keep them.
     progressSummary:
-      `Run ${run.id} on ${meta.runtimeName ?? run.runtimeName ?? "previous runtime"} ${run.status}` +
-      ` (${run.usage?.modelRequests ?? 0} model calls).`,
+      `Run ${run.id} on ${meta.runtimeName ?? run.runtimeName ?? "previous runtime"} ${run.status}.`,
     ...metadata,
   };
   if (!summary) return base;

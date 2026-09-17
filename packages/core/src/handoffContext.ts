@@ -56,6 +56,9 @@ import type {
   HandoffContextBudget,
   HandoffContextBundle,
   HandoffContextSlice,
+  HandoffContextWindowSource,
+  HandoffUserPromptOrigin,
+  HandoffUserProvenance,
   ID,
   RunEvent,
 } from "./types.js";
@@ -81,6 +84,11 @@ export interface HandoffBudgetSettings {
    * is never guessed from a model name and never looked up over the network.
    */
   contextWindow?: number;
+  /**
+   * Where `contextWindow` came from (v10 §23), for the budget diagnostics the
+   * Inspector shows: runtime capability, a configured model, or the default.
+   */
+  contextWindowSource?: HandoffContextWindowSource;
   /** Absolute cap on the handoff body. */
   maxHandoffTokens?: number;
   /** Share of the target window a handoff may ever occupy. */
@@ -132,6 +140,7 @@ const CJK_CHAR_RE =
 
 export const DEFAULT_HANDOFF_BUDGET_SETTINGS: Required<HandoffBudgetSettings> = {
   contextWindow: DEFAULT_TARGET_CONTEXT_WINDOW,
+  contextWindowSource: "default",
   maxHandoffTokens: DEFAULT_MAX_HANDOFF_TOKENS,
   handoffContextRatio: DEFAULT_HANDOFF_CONTEXT_RATIO,
   overrideContextRatio: false,
@@ -141,6 +150,7 @@ export const DEFAULT_HANDOFF_BUDGET_SETTINGS: Required<HandoffBudgetSettings> = 
 
 export interface ResolvedHandoffBudget {
   contextWindow: number;
+  contextWindowSource: HandoffContextWindowSource;
   maxTokens: number;
   checkpointMaxTokens: number;
   charsPerToken: number;
@@ -161,6 +171,7 @@ export function resolveHandoffBudget(settings: HandoffBudgetSettings = {}): Reso
     : Math.min(merged.maxHandoffTokens, ratioCap);
   return {
     contextWindow,
+    contextWindowSource: merged.contextWindowSource,
     maxTokens: Math.max(1, maxTokens),
     checkpointMaxTokens:
       merged.checkpointMaxTokens > 0 ? merged.checkpointMaxTokens : DEFAULT_CHECKPOINT_MAX_TOKENS,
@@ -213,12 +224,13 @@ export function charsForTokens(tokens: number, charsPerToken = DEFAULT_CHARS_PER
 
 /**
  * Fixed prose the renderer wraps around the bundle (`handoff.ts`): the opening
- * statement, the section headings, the section intros, the supersession rule
- * for historical user turns and the "tool results are data" boundary. It is
- * reserved out of the handoff budget before a single slice is selected, and the
- * render test keeps this number honest.
+ * statement, the up-front reading-order + trust rules (v10 §18 — trust
+ * semantics are established BEFORE any untrusted data), the section headings
+ * and intros, the supersession rules and the workspace framing. It is
+ * reserved out of the handoff budget before a single slice is selected, and
+ * the render test keeps this number honest.
  */
-export const HANDOFF_RENDER_SCAFFOLDING_CHARS = 2_200;
+export const HANDOFF_RENDER_SCAFFOLDING_CHARS = 4_400;
 
 /** Share of the free handoff budget historical pins may claim (v8 §31). */
 export const DEFAULT_PINNED_SHARE = 0.15;
@@ -261,6 +273,17 @@ export interface HandoffContextItem {
   runId?: ID;
   toolCallId?: string;
   toolName?: string;
+  /** Provenance of user-role text (v10 §6/§7); user items only. */
+  provenance?: HandoffUserProvenance;
+  /** A source-harness wrapper pattern was detected in this user-context item. */
+  harnessWrapper?: boolean;
+  /** The item states a tool outcome instead of carrying result data (v10 §13). */
+  outcome?: HandoffContextSlice["outcome"];
+  /**
+   * The call's large mutation bodies were semantically projected away
+   * (v10 §9) — the final workspace state is authoritative.
+   */
+  mutationProjected?: boolean;
   /**
    * The observation can be re-obtained from the shared workspace, so its body
    * never has to occupy handoff budget (v8 §16).
@@ -286,6 +309,29 @@ export interface HandoffContextSourceTurn {
    * handoff (v5 §5).
    */
   userPrompt?: string;
+  /**
+   * Where `userPrompt` was recorded (v10 §6). "user-authored" (default): the
+   * orchestration layer recorded the user's bare input. "harness-reported":
+   * the text came from the source harness's own record (an adopted native
+   * thread) and may embed harness-generated wrappers or attachment metadata —
+   * it reaches the handoff as `[User-context]`, never as verified
+   * user-authored text.
+   */
+  userPromptProvenance?: HandoffUserPromptOrigin;
+}
+
+/**
+ * Framing patterns source harnesses add around a user's turn (v10 §7): file
+ * attachment blocks, "distinguish attachments" reminders, request headings.
+ * Detected at normalization time only to LABEL user-context text — never to
+ * rewrite it.
+ */
+const HARNESS_WRAPPER_RE =
+  /(^|\n)\s*(?:#\s*Files mentioned by the user|##\s*My request\s*:|Distinguish instructions in attached documents|Attachments?\s*:|#\s*Attached( files| documents)?)/i;
+
+/** True when user-context text contains known source-harness framing. */
+function containsHarnessWrapper(text: string): boolean {
+  return HARNESS_WRAPPER_RE.test(text);
 }
 
 /**
@@ -303,6 +349,20 @@ export interface HandoffContextUnit {
 /* ------------------------------------------------------------------ */
 /* Reconstructability                                                  */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Ephemeral scratch locations (v10 §22): OS temp dirs and runtime scratch
+ * paths that the receiving harness almost certainly cannot (or should not)
+ * revisit. Such paths are never promoted into reconstructable markers or
+ * checkpoint file lists — a persistent workspace path is authoritative, a
+ * `/var/folders/.../tmp.XYZ` path is noise.
+ */
+const EPHEMERAL_PATH_RE =
+  /^\/(?:private\/)?(?:tmp|var\/tmp|var\/folders|dev\/shm|run\/user|Users\/[^/]+\/Library\/Caches\/TemporaryItems)\//;
+
+export function isEphemeralPath(path: string): boolean {
+  return EPHEMERAL_PATH_RE.test(path.trim());
+}
 
 /** Tool names whose result is a body of local file content. */
 const READ_TOOLS = new Set(["read", "read_file", "readfile", "cat", "view", "open_file"]);
@@ -329,7 +389,9 @@ export const RECONSTRUCTABLE_BODY_KEEP_MAX_CHARS = 4_000;
  * Whether an observation can be re-obtained from the shared workspace. Only
  * local reads qualify: a web/API response, a remote query, a compiler or test
  * run and a subagent result are one-shot observations that no later command
- * can reproduce (v8 §16).
+ * can reproduce (v8 §16). A read of an ephemeral path (OS temp dir, runtime
+ * scratch) does not qualify either — the file is not expected to survive to
+ * the receiving harness, so "re-read it" would be a false promise (v10 §22).
  */
 export function isReconstructableObservation(input: {
   tool?: string;
@@ -342,7 +404,7 @@ export function isReconstructableObservation(input: {
   const tool = (input.tool ?? "").toLowerCase();
   if (READ_TOOLS.has(tool)) {
     const target = readTargetOf(input.args);
-    if (target) return { reconstructable: true, target, kind: "path" };
+    if (target && !isEphemeralPath(target)) return { reconstructable: true, target, kind: "path" };
   }
   const command = input.command?.trim();
   if (command && LOCAL_READ_COMMAND.test(command) && !REMOTE_COMMAND.test(command)) {
@@ -375,6 +437,168 @@ export function reconstructableOmissionMarker(target?: string, kind: "path" | "c
   return kind === "command"
     ? `[Tool result omitted from the handoff: its output is reconstructable from the shared workspace. Re-run \`${target}\` if it matters.]`
     : `[Tool result omitted from the handoff: local file content is reconstructable from the shared workspace. Re-read ${target} if it matters.]`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Local mutation projection (v10 §9–§12)                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Tools whose arguments mutate the shared workspace: edit/write/apply_patch
+ * and their harness-specific spellings. Their large old/new bodies are usually
+ * reconstructable from the final workspace state, so carrying them verbatim
+ * spends handoff budget on replayable data.
+ */
+const MUTATION_TOOLS = new Set([
+  "edit",
+  "edit_file",
+  "editfile",
+  "apply_patch",
+  "str_replace",
+  "str_replace_based_edit",
+  "replace",
+  "replace_file",
+  "insert",
+  "write",
+  "write_file",
+  "writefile",
+  "create_file",
+  "multiedit",
+  "multi_edit",
+]);
+
+/**
+ * Argument keys that carry the mutation BODY (the replayable payload).
+ * Everything else — path/command/flags — is identity and stays verbatim.
+ */
+const MUTATION_BODY_ARG_KEYS = new Set([
+  "oldText",
+  "newText",
+  "old_string",
+  "new_string",
+  "oldStr",
+  "newStr",
+  "old_str",
+  "new_str",
+  "content",
+  "contents",
+  "body",
+  "text",
+  "patch",
+  "diff",
+  "edits",
+  "replacement",
+  "code",
+]);
+
+/**
+ * A successful mutation whose bodies cost more than this is projected to its
+ * semantics; smaller ones stay verbatim (they are cheap and often useful).
+ */
+export const MUTATION_BODY_PROJECT_THRESHOLD_CHARS = 800;
+
+/** Head kept per body argument of a FAILED mutation (v10 §12/§31). */
+const FAILED_MUTATION_BODY_HEAD_CHARS = 240;
+
+/** Argument keys that identify what a mutation acted on. */
+const MUTATION_TARGET_KEYS = ["path", "file_path", "filepath", "file", "target"];
+
+export function isLocalMutationTool(tool: string): boolean {
+  return MUTATION_TOOLS.has(tool.toLowerCase());
+}
+
+function mutationTargetOf(args: Record<string, unknown>): string | undefined {
+  for (const key of MUTATION_TARGET_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+/** ASCII-equivalent cost of the mutation body arguments (v10 §9). */
+function mutationBodyCost(args: Record<string, unknown>, charsPerToken: number): number {
+  let cost = 0;
+  for (const [key, value] of Object.entries(args)) {
+    if (!MUTATION_BODY_ARG_KEYS.has(key)) continue;
+    if (typeof value === "string") cost += handoffTextCost(value, charsPerToken);
+    else if (Array.isArray(value) || (value && typeof value === "object")) {
+      cost += handoffTextCost(safeJsonStringify(value), charsPerToken);
+    }
+  }
+  return cost;
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Head-clip one body argument of a failed mutation, keeping "what was attempted". */
+function clipFailedBody(value: string, charsPerToken: number): string {
+  if (handoffTextCost(value, charsPerToken) <= FAILED_MUTATION_BODY_HEAD_CHARS) return value;
+  const head = headByCost(value, FAILED_MUTATION_BODY_HEAD_CHARS, charsPerToken);
+  return `${head}…[…truncated: ${value.length - head.length} chars omitted…]`;
+}
+
+/**
+ * Project a local-mutation tool call's arguments (v10 §9–§12), computed once
+ * at normalization time when the call's outcome is known.
+ *
+ * - **Succeeded + shared workspace + large bodies**: keep the semantics —
+ *   tool, target path, edit count — and state that the bodies are omitted
+ *   because the final file state is reconstructable from the workspace. The
+ *   workspace is the authoritative state; a 90K old/new pair is replayable
+ *   data (v10 §10).
+ * - **Failed**: keep identity arguments verbatim and head-clip the bodies.
+ *   A failed mutation is NOT reconstructable from the workspace — what was
+ *   attempted and why it failed is exactly the context the next agent needs
+ *   (v10 §12), so failures are never semantically elided.
+ * - Anything else (small bodies, no workspace, non-mutation tools) returns
+ *   `undefined` and the call keeps its full verbatim arguments — high-value
+ *   arguments like shell commands and queries are never projected away
+ *   (v10 §11).
+ */
+export function projectMutationCall(
+  tool: string,
+  args: Record<string, unknown>,
+  opts: { failed: boolean; sharedWorkspace: boolean; charsPerToken: number }
+): { text: string; projected: boolean } | undefined {
+  if (!isLocalMutationTool(tool)) return undefined;
+  const large = mutationBodyCost(args, opts.charsPerToken) > MUTATION_BODY_PROJECT_THRESHOLD_CHARS;
+  if (!large) return undefined;
+
+  const target = mutationTargetOf(args);
+  if (!opts.failed && opts.sharedWorkspace) {
+    const editCount = Array.isArray(args.edits) ? args.edits.length : undefined;
+    const op = /^write|^create/.test(tool.toLowerCase()) ? "write" : "edit";
+    const parts = [
+      `${tool}${target ? ` ${target}` : ""}`,
+      editCount ? `${editCount} ${editCount === 1 ? "edit" : "edits"}` : undefined,
+      op === "write"
+        ? "large content body omitted — final file state is reconstructable from the shared workspace (re-read the file)"
+        : "large old/new bodies omitted — final file state is reconstructable from the shared workspace (re-read the file)",
+    ].filter(Boolean);
+    return { text: parts.join("; "), projected: true };
+  }
+
+  if (opts.failed) {
+    // Keep every identity argument verbatim and head-clip each body so the
+    // next agent can see what was attempted without paying for full bodies.
+    const rendered = Object.entries(args).map(([key, value]) => {
+      if (typeof value === "string" && MUTATION_BODY_ARG_KEYS.has(key)) {
+        return `${key}=${JSON.stringify(clipFailedBody(value, opts.charsPerToken))}`;
+      }
+      return `${key}=${JSON.stringify(value)}`;
+    });
+    return { text: `${tool}(${rendered.join(", ")})`, projected: false };
+  }
+
+  // Large mutation without a shared workspace is not reconstructable: keep it
+  // verbatim and let the oversized-retention policy bound it.
+  return undefined;
 }
 
 /* ------------------------------------------------------------------ */
@@ -492,7 +716,21 @@ export interface NormalizeEventsOptions {
   sharedWorkspace: boolean;
   /** First `order` value handed out (callers keep one global order). */
   orderStart?: number;
+  /** The estimator's chars-per-token, for mutation-body cost decisions. */
+  charsPerToken?: number;
 }
+
+/** Whether a tool.completed event reports a failed call (adapter conventions). */
+function toolCompletedFailed(e: RunEvent): boolean {
+  if (e.data?.isError === true) return true;
+  const status = e.data?.status;
+  return status === "error" || status === "failed";
+}
+
+/** Outcome status text for a tool call whose completion carried no payload. */
+const COMPLETED_NO_OUTPUT_TEXT = "completed — no textual result payload was captured";
+/** Outcome status text for a call whose completion never reached the events. */
+const RESULT_UNAVAILABLE_TEXT = "result unavailable in the normalized source events (no completion was recorded)";
 
 /** A shell command plus the output lines that belong to it. */
 interface PendingShellOutput {
@@ -517,8 +755,20 @@ interface PendingShellOutput {
  *
  * Adjacent `shell.output` lines accumulate into one result item, because the
  * harness emitted them as one command's output (v8 §10).
+ *
+ * Every retained tool call leaves with explicit outcome semantics (v10 §13):
+ * a completion with a textual result pairs normally; a completion with no
+ * payload yields a `completed-no-output` status item; a call whose completion
+ * never appeared yields a `result-unavailable` status item; a failed
+ * completion is stamped `failed`. Nothing is ever fabricated (v10 §15).
+ *
+ * Successful large local mutations are projected to their semantics here
+ * (v10 §9): tool + target + "bodies omitted, reconstructable from the
+ * workspace". Failed mutations keep head-clipped bodies — failure context is
+ * not reconstructable (v10 §12).
  */
 export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsOptions): HandoffContextItem[] {
+  const charsPerToken = options.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN;
   const items: HandoffContextItem[] = [];
   let order = options.orderStart ?? 0;
   const push = (item: Omit<HandoffContextItem, "order">): HandoffContextItem => {
@@ -530,10 +780,27 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
 
   let shell: PendingShellOutput | undefined;
   let shellSeq = 0;
-  const flushShell = () => {
+  const flushShell = (atStreamEnd = false) => {
     const pending = shell;
     shell = undefined;
-    if (!pending || pending.lines.length === 0) return;
+    if (!pending) return;
+    if (pending.lines.length === 0) {
+      // The command ran but no output line ever followed it. Only say so at
+      // the stream's end — mid-stream, later lines may still belong to it.
+      if (atStreamEnd && pending.command) {
+        push({
+          id: `${pending.callId}:result`,
+          kind: "tool-result",
+          text: COMPLETED_NO_OUTPUT_TEXT,
+          runId: options.runId,
+          toolName: "bash",
+          toolCallId: pending.callId,
+          outcome: "completed-no-output",
+          eventIds: [],
+        });
+      }
+      return;
+    }
     const read = isReconstructableObservation({
       command: pending.command,
       sharedWorkspace: options.sharedWorkspace,
@@ -554,8 +821,22 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
 
   // Calls with a native id, keyed by it; calls without one, kept in issue
   // order so a completion can be matched to the call it belongs to (v9 §3).
-  const openCalls = new Map<string, HandoffContextItem>();
+  // Both keep the call's ORIGINAL arguments — completions may echo only
+  // identity args, and mutation projection needs the bodies (v10 §9).
+  const openCalls = new Map<string, { item: HandoffContextItem; tool: string; args: Record<string, unknown> }>();
   const pendingCalls: Array<{ item: HandoffContextItem; tool: string; args: Record<string, unknown> }> = [];
+
+  /** Project a paired call in place when its outcome allows it (v10 §9). */
+  const projectCall = (call: HandoffContextItem, tool: string, args: Record<string, unknown>, failed: boolean) => {
+    const projection = projectMutationCall(tool, args, {
+      failed,
+      sharedWorkspace: options.sharedWorkspace,
+      charsPerToken,
+    });
+    if (!projection) return;
+    call.text = projection.text;
+    if (projection.projected) call.mutationProjected = true;
+  };
 
   for (const e of events) {
     switch (e.type) {
@@ -563,13 +844,27 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
         flushShell();
         const content = eventText(e, ["content", "text", "message"]);
         if (!content) break;
-        push({
-          id: `evt:${e.id}`,
-          kind: e.data?.role === "user" ? "user" : "assistant",
-          text: content,
-          runId: options.runId,
-          eventIds: [e.id],
-        });
+        if (e.data?.role === "user") {
+          // A harness-echoed user turn: authorship cannot be verified from a
+          // role label alone (v10 §6) — conservative provenance.
+          push({
+            id: `evt:${e.id}`,
+            kind: "user",
+            text: content,
+            runId: options.runId,
+            provenance: "user-context",
+            ...(containsHarnessWrapper(content) ? { harnessWrapper: true } : {}),
+            eventIds: [e.id],
+          });
+        } else {
+          push({
+            id: `evt:${e.id}`,
+            kind: "assistant",
+            text: content,
+            runId: options.runId,
+            eventIds: [e.id],
+          });
+        }
         break;
       }
       case "agent.thinking":
@@ -589,7 +884,7 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
           ...(id ? { toolCallId: id } : {}),
           eventIds: [e.id],
         });
-        if (id) openCalls.set(id, call);
+        if (id) openCalls.set(id, { item: call, tool, args });
         else pendingCalls.push({ item: call, tool, args });
         break;
       }
@@ -598,13 +893,19 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
         const tool = eventText(e, ["tool", "toolName"]) ?? "tool";
         const args = toolArgs(e);
         const id = toolCallIdOf(e);
-        let call = id ? openCalls.get(id) : undefined;
+        const failed = toolCompletedFailed(e);
+        let call = id ? openCalls.get(id)?.item : undefined;
+        let callArgs = args;
         if (id) openCalls.delete(id);
         else {
           // No native id: pair with the pending call this completion belongs
           // to (same tool, same target if named, else oldest outstanding).
           const match = matchPendingToolCall(pendingCalls, { tool, args });
-          if (match >= 0) call = pendingCalls.splice(match, 1)[0].item;
+          if (match >= 0) {
+            const paired = pendingCalls.splice(match, 1)[0];
+            call = paired.item;
+            callArgs = paired.args;
+          }
         }
         if (!call) {
           // No matching start (e.g. OpenCode only reports terminal states):
@@ -630,9 +931,12 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
           push({
             id: `${call.id}:result`,
             kind: "tool-result",
-            text: result,
+            // A failed call keeps its diagnostic text, prefixed with the
+            // explicit failure state (v10 §12) — never a bare orphan output.
+            text: failed ? `FAILED — ${result}` : result,
             runId: options.runId,
             toolName: tool,
+            ...(failed ? { outcome: "failed" as const } : {}),
             // The paired call's own id, so grouping is by identity rather than
             // by tool name (a runtime with no call ids must not collapse
             // same-named calls into one another).
@@ -642,6 +946,35 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
               : {}),
             eventIds: [e.id],
           });
+          // Projection happens only once the outcome is known (v10 §9/§12):
+          // success + workspace elides bodies, failure head-clips them.
+          projectCall(call, tool, callArgs, failed);
+        } else if (failed) {
+          push({
+            id: `${call.id}:result`,
+            kind: "tool-result",
+            text: "FAILED — no error text was captured",
+            runId: options.runId,
+            toolName: tool,
+            outcome: "failed",
+            toolCallId: id ?? call.toolCallId ?? call.id,
+            eventIds: [e.id],
+          });
+          projectCall(call, tool, callArgs, true);
+        } else {
+          // The runtime reported completion but exposed no textual payload —
+          // say exactly that; never invent output (v10 §13/§14).
+          push({
+            id: `${call.id}:result`,
+            kind: "tool-result",
+            text: COMPLETED_NO_OUTPUT_TEXT,
+            runId: options.runId,
+            toolName: tool,
+            outcome: "completed-no-output",
+            toolCallId: id ?? call.toolCallId ?? call.id,
+            eventIds: [e.id],
+          });
+          projectCall(call, tool, callArgs, false);
         }
         break;
       }
@@ -674,7 +1007,26 @@ export function normalizeRunEvents(events: RunEvent[], options: NormalizeEventsO
         break;
     }
   }
-  flushShell();
+  flushShell(true);
+  // Calls whose completion never appeared in the normalized events (v10 §14):
+  // state that explicitly instead of leaving an ambiguous orphan call. Never
+  // claimed as success or failure.
+  const unresolved = [
+    ...[...openCalls.values()].map((c) => c.item),
+    ...pendingCalls.map((p) => p.item),
+  ];
+  for (const call of unresolved) {
+    push({
+      id: `${call.id}:result`,
+      kind: "tool-result",
+      text: RESULT_UNAVAILABLE_TEXT,
+      runId: options.runId,
+      toolName: call.toolName,
+      outcome: "result-unavailable",
+      toolCallId: call.toolCallId ?? call.id,
+      eventIds: [],
+    });
+  }
   return items;
 }
 
@@ -695,11 +1047,18 @@ export interface CollectedHandoffContext {
  *
  * `taskPrompt` is the task's own brief. It is seeded whenever no covered user
  * turn already carries it, so the original request still reaches the handoff
- * when coverage starts after an earlier checkpoint (v8 §13).
+ * when coverage starts after an earlier checkpoint (v8 §13). Its provenance
+ * follows `taskPromptProvenance` (an adopted native thread's brief is
+ * harness-reported text, not verbatim user input — v10 §6).
  */
 export function collectHandoffContext(
   turns: HandoffContextSourceTurn[],
-  options: { taskPrompt?: string; sharedWorkspace: boolean }
+  options: {
+    taskPrompt?: string;
+    taskPromptProvenance?: HandoffUserPromptOrigin;
+    sharedWorkspace: boolean;
+    charsPerToken?: number;
+  }
 ): CollectedHandoffContext {
   const items: HandoffContextItem[] = [];
   const turnUserItemIds = new Map<number, string>();
@@ -710,7 +1069,21 @@ export function collectHandoffContext(
       const text = turn.userPrompt?.trim();
       if (text) {
         const id = turnUserItemId(turn, index);
-        items.push({ id, kind: "user", text, runId: turn.runId, eventIds: [], order: order++ });
+        // Origin → provenance: a harness-reported turn is user-context (the
+        // source harness's own framing may be inside), never verified
+        // user-authored text (v10 §6).
+        const provenance: HandoffUserProvenance =
+          turn.userPromptProvenance === "harness-reported" ? "user-context" : "user-authored";
+        items.push({
+          id,
+          kind: "user",
+          text,
+          runId: turn.runId,
+          provenance,
+          ...(provenance === "user-context" && containsHarnessWrapper(text) ? { harnessWrapper: true } : {}),
+          eventIds: [],
+          order: order++,
+        });
         turnUserItemIds.set(index, id);
       }
     }
@@ -718,6 +1091,7 @@ export function collectHandoffContext(
       runId: turn.runId,
       sharedWorkspace: options.sharedWorkspace,
       orderStart: order,
+      charsPerToken: options.charsPerToken,
     })) {
       items.push(item);
       order = item.order + 1;
@@ -727,13 +1101,18 @@ export function collectHandoffContext(
   const taskPrompt = options.taskPrompt?.trim();
   if (taskPrompt) {
     const existing = items.find((i) => i.kind === "user" && i.text.trim() === taskPrompt);
-    if (existing) existing.originalTask = true;
-    else
+    if (existing) {
+      existing.originalTask = true;
+      // An explicitly user-authored brief outranks a harness-reported echo of
+      // the same text; a harness-reported brief never upgrades one.
+      if (options.taskPromptProvenance === "user-authored") existing.provenance = "user-authored";
+    } else
       items.unshift({
         id: "task:original",
         kind: "user",
         text: taskPrompt,
         originalTask: true,
+        provenance: options.taskPromptProvenance === "harness-reported" ? "user-context" : "user-authored",
         eventIds: [],
         order: -1,
       });
@@ -781,20 +1160,67 @@ export function groupHandoffContextUnits(items: HandoffContextItem[]): HandoffCo
 /* Slice rendering + cost                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Role labels (v10 §19): each slice names its speaker, and user-role text is
+ * further split by provenance — `[User-authored]` is the user's own words as
+ * recorded by the orchestration layer; `[User-context]` arrived through the
+ * source harness's user-facing turn and may contain harness wrappers. Outcome
+ * status lines render under their own `[Tool result status]` label so a
+ * stated outcome can never be mistaken for result data.
+ */
 const SLICE_LABELS: Record<HandoffContextKind, string> = {
-  user: "[User]",
+  user: "[User-authored]",
   assistant: "[Assistant]",
   "tool-call": "[Tool call]",
   "tool-result": "[Tool result]",
 };
 
-function sliceLabel(kind: HandoffContextKind): string {
-  return SLICE_LABELS[kind];
+function sliceLabel(slice: Pick<HandoffContextSlice, "kind" | "provenance" | "outcome">): string {
+  if (slice.outcome) return "[Tool result status]";
+  if (slice.kind === "user" && slice.provenance === "user-context") return "[User-context]";
+  return SLICE_LABELS[slice.kind];
 }
 
-/** One slice line as it reaches the next harness. */
+/**
+ * Line-start markers that would let preserved content impersonate handoff
+ * structure: markdown headings, role labels, quote/fence/HTML-comment
+ * openers (v10 §16/§17). Any such content — or any multiline content — is
+ * rendered inside a code fence so it stays data.
+ */
+const BOUNDARY_TRIGGER_RE = /^\s*(?:#{1,6}\s|\[(?:User|Assistant|Tool|System)|>|```|<!--)/;
+
+/** Longest backtick run inside `text`, so containment fences can outrun it. */
+function longestFenceRun(text: string): number {
+  let longest = 0;
+  for (const match of text.matchAll(/`{3,}/g)) longest = Math.max(longest, match[0].length);
+  return longest;
+}
+
+function fenceFor(text: string): string {
+  return "`".repeat(Math.max(3, longestFenceRun(text) + 1));
+}
+
+/** Wrap `text` in a code fence that no backtick run inside it can break. */
+function fenceBody(text: string): string {
+  const fence = fenceFor(text);
+  return `${fence}\n${text}\n${fence}`;
+}
+
+/**
+ * One slice line as it reaches the next harness. Content that could
+ * impersonate handoff structure (headings, `[User]:` markers, fences,
+ * multiline text) is fenced — historical content can never masquerade as a
+ * top-level handoff section (v10 §16/§17). Short plain content stays inline
+ * after the label for readability.
+ */
 function renderSlice(slice: HandoffContextSlice): string {
-  return `${sliceLabel(slice.kind)}: ${slice.text}`;
+  const label = sliceLabel(slice);
+  const body = slice.text;
+  if (!body) return label;
+  if (body.includes("\n") || BOUNDARY_TRIGGER_RE.test(body)) {
+    return `${label}:\n${fenceBody(body)}`;
+  }
+  return `${label}: ${body}`;
 }
 
 /** Render slices in order, blank-line separated — the exact retained text. */
@@ -803,10 +1229,10 @@ export function renderContextSlices(slices: HandoffContextSlice[]): string {
 }
 
 /**
- * ASCII-equivalent cost of one slice in the rendered handoff (label +
- * separator), in the same currency as the budget's `charsPerToken` allowance.
- * CJK text costs more per character, so a CJK-heavy slice is never
- * under-charged against the budget.
+ * ASCII-equivalent cost of one slice in the rendered handoff (label + any
+ * containment fence + separator), in the same currency as the budget's
+ * `charsPerToken` allowance. CJK text costs more per character, so a
+ * CJK-heavy slice is never under-charged against the budget.
  */
 export function sliceChars(slice: HandoffContextSlice, charsPerToken = DEFAULT_CHARS_PER_TOKEN): number {
   return handoffTextCost(renderSlice(slice), charsPerToken) + 2;
@@ -823,6 +1249,10 @@ function itemToSlice(item: HandoffContextItem, retention: HandoffContextSlice["r
     ...(item.runId ? { runId: item.runId } : {}),
     ...(item.toolCallId ? { toolCallId: item.toolCallId } : {}),
     ...(item.toolName ? { toolName: item.toolName } : {}),
+    ...(item.provenance ? { provenance: item.provenance } : {}),
+    ...(item.harnessWrapper ? { harnessWrapper: true } : {}),
+    ...(item.outcome ? { outcome: item.outcome } : {}),
+    ...(item.mutationProjected ? { mutationProjected: true } : {}),
     ...(item.reconstructable ? { reconstructable: true } : {}),
     retention,
   };
@@ -1166,13 +1596,19 @@ function reduceOversizedUnit(
   // readable but never crowds the body out of the allowance.
   const target = result ?? unit.items[0];
   const paired = call && call !== target ? call : undefined;
+  /** Render overhead (label + possible containment fence) for a body. */
+  const sliceOverhead = (item: HandoffContextItem): number => {
+    const label = sliceLabel(item).length;
+    // fenceFor of the FULL text bounds any fence the truncated body needs.
+    return Math.max(label + 4, label + fenceFor(item.text).length * 2 + 6);
+  };
   let callSlice = paired ? itemToSlice(paired, "paired") : undefined;
   if (callSlice) classes.set(paired!.id, "full");
   if (callSlice && room - sliceChars(callSlice, charsPerToken) < MIN_USEFUL_CHARS) {
-    const callRoom = Math.max(0, room - MIN_USEFUL_CHARS - sliceLabel("tool-call").length - 4);
+    const callRoom = Math.max(0, room - MIN_USEFUL_CHARS - sliceOverhead(paired!));
     callSlice = build(paired!, truncateForHandoffRetention(paired!.text, callRoom, charsPerToken), "paired");
   }
-  const bodyOverhead = sliceLabel(target.kind).length + 4;
+  const bodyOverhead = sliceOverhead(target);
   const bodyRoom = room - (callSlice ? sliceChars(callSlice, charsPerToken) : 0) - bodyOverhead;
   if (bodyRoom < MIN_USEFUL_CHARS) return undefined;
   const bodySlice = build(
@@ -1213,7 +1649,7 @@ function planPinnedContext(
       continue;
     }
     if (item.originalTask && pinned.length === 0) {
-      const overhead = sliceLabel("user").length + 4;
+      const overhead = sliceLabel(item).length + 4;
       const room = allowanceChars - used - overhead;
       if (room >= MIN_USEFUL_CHARS) {
         const text = truncateForHandoffRetention(item.text, room, charsPerToken);
@@ -1231,6 +1667,45 @@ function planPinnedContext(
 /* ------------------------------------------------------------------ */
 /* Bundle assembly                                                     */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Cost cap for the derived current frontier (v10 §5). The frontier must stay
+ * small: it exists so the receiving harness can orient quickly, never to
+ * re-summarize the session. Reserved out of the budget before selection, at
+ * `frontierReserveChars` (this cap, scaled down for small budgets).
+ */
+export const FRONTIER_MAX_CHARS = 1_600;
+
+/** Share of the handoff budget the frontier reserve may never exceed. */
+export const FRONTIER_RESERVE_SHARE = 0.04;
+
+/**
+ * The frontier's budget reserve: its cap, scaled down so a small handoff
+ * budget keeps room for the trajectory itself.
+ */
+export function frontierReserveChars(totalChars: number): number {
+  return Math.min(FRONTIER_MAX_CHARS, Math.max(0, Math.floor(totalChars * FRONTIER_RESERVE_SHARE)));
+}
+
+/**
+ * Derive the current frontier (v10 §5) from the END of the retained
+ * trajectory: the latest assistant conclusion, tail-clipped to stay small.
+ *
+ * Deterministic by construction — no second model call decides "where the
+ * work stands". The latest assistant message is the previous agent's own
+ * statement of the state it stopped at; the renderer frames it as the newest
+ * state that supersedes stale checkpoint status. Absent when nothing was
+ * retained (the checkpoint is then the whole story).
+ */
+export function deriveHandoffFrontier(
+  retained: HandoffContextSlice[],
+  charsPerToken = DEFAULT_CHARS_PER_TOKEN,
+  maxChars = FRONTIER_MAX_CHARS
+): string | undefined {
+  const lastAssistant = [...retained].reverse().find((s) => s.kind === "assistant" && s.text.trim());
+  if (!lastAssistant) return undefined;
+  return truncateForHandoffRetention(lastAssistant.text.trim(), maxChars, charsPerToken);
+}
 
 /**
  * The generation-time facts the rendered handoff states next to the bundle:
@@ -1256,9 +1731,14 @@ export interface AssembleBundleInput {
   budget: ResolvedHandoffBudget;
   checkpoint?: string;
   /**
+   * The derived current frontier (v10 §5), from `deriveHandoffFrontier`.
+   * Accounted in the budget like every other rendered section.
+   */
+  frontier?: string;
+  /**
    * ASCII-equivalent cost of everything the renderer writes outside
-   * checkpoint/pins/retained: the workspace/run metadata and the fixed render
-   * scaffolding.
+   * checkpoint/frontier/pins/retained: the workspace/run metadata and the
+   * fixed render scaffolding.
    */
   metadataChars: number;
   /**
@@ -1274,26 +1754,34 @@ export interface AssembleBundleInput {
  * generation time: what the record says is what the next harness gets, and
  * nothing downstream recomputes it (AGENTS.md).
  *
- * `budget.estimatedTokens` covers the handoff BODY only — checkpoint, pins,
- * retained trajectory, metadata, scaffolding and user notes. The receiving
- * harness's own instruction is appended outside this budget
+ * `budget.estimatedTokens` covers the handoff BODY only — checkpoint,
+ * frontier, pins, retained trajectory, metadata, scaffolding and user notes.
+ * The receiving harness's own instruction is appended outside this budget
  * (`renderHandoffPrompt`), which is a separate execution runway (v9 §6).
  */
 export function assembleHandoffContextBundle(input: AssembleBundleInput): HandoffContextBundle {
   const { budget, selection } = input;
   const charsPerToken = budget.charsPerToken;
   const checkpointCost = input.checkpoint ? handoffTextCost(input.checkpoint, charsPerToken) : 0;
+  const frontierCost = input.frontier ? handoffTextCost(input.frontier, charsPerToken) : 0;
   const userNotesChars = Math.max(0, input.userNotesChars ?? 0);
   const accounting: HandoffContextBudget = {
     contextWindow: budget.contextWindow,
+    ...(budget.contextWindowSource ? { contextWindowSource: budget.contextWindowSource } : {}),
     maxTokens: budget.maxTokens,
     estimatedTokens: estimateTokens(
-      checkpointCost + selection.pinnedChars + selection.retainedChars + input.metadataChars + userNotesChars,
+      checkpointCost +
+        frontierCost +
+        selection.pinnedChars +
+        selection.retainedChars +
+        input.metadataChars +
+        userNotesChars,
       charsPerToken
     ),
     checkpointTokens: estimateTokens(checkpointCost, charsPerToken),
     pinnedTokens: estimateTokens(selection.pinnedChars, charsPerToken),
     retainedTokens: estimateTokens(selection.retainedChars, charsPerToken),
+    ...(frontierCost > 0 ? { frontierTokens: estimateTokens(frontierCost, charsPerToken) } : {}),
     metadataTokens: estimateTokens(input.metadataChars, charsPerToken),
     ...(userNotesChars > 0 ? { userNotesTokens: estimateTokens(userNotesChars, charsPerToken) } : {}),
     charsPerToken,
@@ -1301,6 +1789,7 @@ export function assembleHandoffContextBundle(input: AssembleBundleInput): Handof
   return {
     version: 2,
     ...(input.checkpoint ? { checkpoint: input.checkpoint } : {}),
+    ...(input.frontier ? { frontier: input.frontier } : {}),
     pinnedContext: selection.pinned,
     retainedContext: selection.retained,
     budget: accounting,

@@ -320,7 +320,11 @@ test("T5 — a fully retained item is not redundantly summarized", async () => {
     },
   ];
   const fixture = await runFixture(turns, {
-    settings: { contextWindow: 1_000_000, maxHandoffTokens: 2_000, checkpointMaxTokens: 400 },
+    // A small but realistic budget: the v10 render scaffolding (~2.2K tokens
+    // of fixed trust/temporal prose) is part of the body, so the trajectory
+    // needs room beyond it for anything to be retained at all — but the old
+    // prefix must still NOT fit, or nothing gets summarized.
+    settings: { contextWindow: 1_000_000, maxHandoffTokens: 6_000, checkpointMaxTokens: 400 },
   });
   assert.ok(fixture.requests.length > 0, "the old prefix was summarized");
   assert.ok(
@@ -600,7 +604,7 @@ test("T17 — the current instruction has the highest recency", () => {
     "Please update the tests as part of this task."
   );
   assert.match(prompt, /# Your instruction\nPlease update the tests as part of this task\./);
-  assert.match(SUPERSEDE_BODY, /"# Your instruction" is the NEWEST user instruction/i);
+  assert.match(SUPERSEDE_BODY, /"# Your instruction".*the NEWEST user instruction/);
   assert.match(SUPERSEDE_BODY, /outranks every preserved historical user message/i);
 });
 

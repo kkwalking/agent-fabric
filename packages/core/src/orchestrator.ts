@@ -60,6 +60,7 @@ import type {
   ExecutionPolicy,
   Handoff,
   HandoffContent,
+  HandoffContextWindowSource,
   HandoffGeneration,
   HandoffTrigger,
   ID,
@@ -1449,10 +1450,19 @@ export class RunService {
     // re-deriving the anchor from the chain later.
     const coveredRuns = covered.slice(fromIndex);
     const coveredRunIds = coveredRuns.map((r) => r.id);
+    // User-prompt provenance (v10 §6): a task adopted from a source harness's
+    // native thread recorded the harness's own view of each user turn, which
+    // may embed wrappers or attachment metadata — it must not be handed to the
+    // next agent as verified user-authored text.
+    const imported = task.metadata?.imported === true;
+    const userPromptProvenance: "user-authored" | "harness-reported" = imported
+      ? "harness-reported"
+      : "user-authored";
     const turns = coveredRuns.map((r) => ({
       runId: r.id,
       events: this.events(r.id),
       userPrompt: r.userPrompt,
+      userPromptProvenance,
     }));
     const events = turns.flatMap((t) => t.events);
     const startedAt = Date.now();
@@ -1491,6 +1501,8 @@ export class RunService {
     }
 
     try {
+      // Where the target window came from (v10 §23), resolved beside it.
+      const targetWindow = this.handoffTargetContextWindow(task, target, targetModelId, model);
       const result = await generateHandoffSummary({
         task,
         run: previousRun,
@@ -1509,7 +1521,11 @@ export class RunService {
         // ...while the handoff body is budgeted against the model that will
         // READ it. Unknown → the task's configured model → the summarizer's
         // (still a configured window, never a guess from the model name).
-        targetContextWindow: this.handoffTargetContextWindow(task, target, targetModelId, model),
+        targetContextWindow: targetWindow.window,
+        contextWindowSource: targetWindow.source,
+        // Task-brief provenance follows the same rule as the turns' prompts
+        // (an adopted thread's brief is harness-reported, v10 §6).
+        taskPromptProvenance: imported ? "harness-reported" : "user-authored",
         // User notes are rendered into the handoff body, so they are budgeted
         // with it (v9 §6).
         ...(userNotes ? { userNotes } : {}),
@@ -1572,6 +1588,10 @@ export class RunService {
    * 3. **safe default** — `undefined`, which `resolveHandoffBudget` turns into
    *    the documented `DEFAULT_TARGET_CONTEXT_WINDOW`.
    *
+   * The returned `source` records which branch won, so the budget diagnostics
+   * can state where the target window came from (v10 §23) — a human/audit
+   * fact for the Inspector, never part of the receiving model's context.
+   *
    * A model name is never consulted and nothing is fetched over the network.
    */
   private handoffTargetContextWindow(
@@ -1579,9 +1599,9 @@ export class RunService {
     target: Runtime | undefined,
     targetModelId: ID | undefined,
     summarizer: Model | undefined
-  ): number | undefined {
+  ): { window?: number; source: HandoffContextWindowSource } {
     const explicit = declaredRuntimeContextWindow(target);
-    if (explicit) return explicit;
+    if (explicit) return { window: explicit, source: "runtime-capability" };
     const configured = (id: ID | undefined): number | undefined => {
       if (!id) return undefined;
       const window = this.modelService().get(id)?.parameters?.contextWindow;
@@ -1589,10 +1609,11 @@ export class RunService {
     };
     // Harness-native targets bring their own account and model — an
     // AgentFabric model never rides along (v6 §3), so nothing is known here.
-    if (target && this.isHarnessNative(target)) return undefined;
+    if (target && this.isHarnessNative(target)) return { source: "default" };
     // Every value here is a CONFIGURED window; when none is known the caller
     // falls back to the documented default. A model name is never consulted.
-    return configured(targetModelId) ?? configured(task.modelId) ?? configured(summarizer?.id);
+    const window = configured(targetModelId) ?? configured(task.modelId) ?? configured(summarizer?.id);
+    return window ? { window, source: "configured-model" } : { source: "default" };
   }
 
   /**

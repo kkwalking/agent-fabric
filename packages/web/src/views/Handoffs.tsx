@@ -27,27 +27,41 @@ const RETENTION_LABELS: Record<string, string> = {
   "oversized-truncated": "oversized — head+tail kept, middle dropped",
 };
 
+/** Where the budget's target context window came from (v10 §23). */
+const WINDOW_SOURCE_LABELS: Record<string, string> = {
+  "runtime-capability": "runtime capability",
+  "configured-model": "configured model",
+  default: "assumed default (128K)",
+};
+
 interface ContextSlice {
   kind: string;
   text: string;
   runId?: string;
   toolName?: string;
+  provenance?: string;
+  harnessWrapper?: boolean;
+  outcome?: string;
   reconstructable?: boolean;
+  mutationProjected?: boolean;
   retention: string;
 }
 
 interface ContextBundle {
   version: number;
   checkpoint?: string;
+  frontier?: string;
   pinnedContext: ContextSlice[];
   retainedContext: ContextSlice[];
   budget: {
     contextWindow: number;
+    contextWindowSource?: string;
     maxTokens: number;
     estimatedTokens: number;
     checkpointTokens: number;
     pinnedTokens: number;
     retainedTokens: number;
+    frontierTokens?: number;
     metadataTokens?: number;
     userNotesTokens?: number;
     charsPerToken: number;
@@ -63,6 +77,10 @@ function ContextSliceRow({ slice }: { slice: ContextSlice }) {
         {slice.toolName ? <> <span className="mono">{slice.toolName}</span></> : null}
         {" · "}
         <span title={RETENTION_LABELS[slice.retention] ?? slice.retention}>{slice.retention}</span>
+        {slice.provenance ? <> · {slice.provenance === "user-context" ? "user-context (harness-delivered, not verified user words)" : "user-authored"}</> : null}
+        {slice.harnessWrapper ? <> · <span title="Known source-harness wrapper framing detected inside this text">wrapper detected</span></> : null}
+        {slice.outcome ? <> · outcome: {slice.outcome}</> : null}
+        {slice.mutationProjected ? <> · mutation body projected (reconstructable from workspace)</> : null}
         {slice.reconstructable ? <> · reconstructable from the workspace</> : null}
         {slice.runId ? <> · <span className="mono">{shortId(slice.runId)}</span></> : null}
       </div>
@@ -83,11 +101,13 @@ function ContextBundleCard({ bundle }: { bundle: ContextBundle }) {
   const b = bundle.budget;
   const rows: Array<[string, string]> = [
     ["Target context window", `${b.contextWindow.toLocaleString()} tok`],
-    ["Handoff budget", `${b.maxTokens.toLocaleString()} tok`],
-    ["Estimated size", `${b.estimatedTokens.toLocaleString()} tok`],
+    ["Window source", WINDOW_SOURCE_LABELS[b.contextWindowSource ?? "default"] ?? b.contextWindowSource ?? "—"],
+    ["Handoff budget (max)", `${b.maxTokens.toLocaleString()} tok`],
+    ["Actual handoff (estimated)", `${b.estimatedTokens.toLocaleString()} tok`],
     ["Checkpoint", `${b.checkpointTokens.toLocaleString()} tok`],
     ["Pinned user context", `${b.pinnedTokens.toLocaleString()} tok`],
     ["Recent working context", `${b.retainedTokens.toLocaleString()} tok`],
+    ["Current frontier", `${(b.frontierTokens ?? 0).toLocaleString()} tok`],
     ["Render + run metadata", `${(b.metadataTokens ?? 0).toLocaleString()} tok`],
     ["User notes", `${(b.userNotesTokens ?? 0).toLocaleString()} tok`],
     ["Estimator", `${b.charsPerToken} chars/token`],
@@ -96,9 +116,10 @@ function ContextBundleCard({ bundle }: { bundle: ContextBundle }) {
     <>
       <h2>Context bundle — what crossed the session boundary</h2>
       <p className="sub">
-        A Handoff is not a summary. The checkpoint is only the state index over the history that did not fit; the
-        recent working trajectory and the user's own instructions are carried over word for word. Every slice below
-        records why it survived selection.
+        A Handoff is not a summary. The checkpoint is only the state index over the history that did not fit — it is
+        explicitly HISTORICAL: the recent working trajectory below happened after it and supersedes its status. The
+        user's own instructions and the recent trajectory are carried over word for word. Every slice below records
+        why it survived selection.
       </p>
       <div className="card">
         {rows.map(([label, value]) => (
@@ -108,6 +129,19 @@ function ContextBundleCard({ bundle }: { bundle: ContextBundle }) {
           </div>
         ))}
       </div>
+
+      {bundle.frontier && (
+        <>
+          <h3>Current frontier</h3>
+          <div className="card">
+            <p className="muted" style={{ margin: "0 0 6px" }}>
+              The newest state, derived from the end of the retained trajectory — it supersedes any conflicting older
+              status in the checkpoint above.
+            </p>
+            <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{bundle.frontier}</pre>
+          </div>
+        </>
+      )}
 
       <h3>Preserved user context ({bundle.pinnedContext.length})</h3>
       <div className="card">
