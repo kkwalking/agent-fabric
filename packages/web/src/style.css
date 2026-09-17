@@ -47,7 +47,7 @@ body {
 
 .app {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
 }
 
 /* ---------- Sidebar ---------- */
@@ -209,6 +209,9 @@ body {
   flex: 1;
   padding: 30px 40px 60px;
   overflow-x: auto;
+  /* 页面纵向滚动发生在 .main 内而不是 body：sticky 的吸顶头（编辑页）
+     相对它定位；fullbleed 页（任务线程）自己滚动，不受影响。 */
+  overflow-y: auto;
   max-width: 1180px;
 }
 
@@ -735,18 +738,37 @@ a:hover {
   flex-wrap: wrap;
 }
 
+/* 编辑页吸顶头：sticky 的基准是滚容器 padding box 的内缩区域，top 负值
+   抵消 .main 的 30px 顶部留白让条贴住可视区顶；负 margin + 等量 padding
+   让静止时与原布局一致，不透明的上下 padding 让内容从条下滑过时不露出。 */
 .editor-head {
+  position: sticky;
+  top: -30px;
+  z-index: 10;
+  background: var(--bg);
+  margin: -30px 0 0;
+  padding: 30px 0 8px;
+}
+.editor-head-bar {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 18px;
 }
-.editor-head h1 {
+.editor-head-bar h1 {
   margin: 0;
 }
+.editor-head-bar .right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.editor-head .card {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
 .back-btn {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   padding: 0;
   display: grid;

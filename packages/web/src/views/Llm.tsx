@@ -272,11 +272,19 @@ function ProviderEditor({
 
   return (
     <div>
+      {/* 吸顶头：保存与结果反馈都在这一条上，滚到页面任何位置都可见。 */}
       <div className="editor-head">
-        <button className="back-btn" onClick={onBack} title="返回列表">
-          <Icon name="arrowLeft" size={17} />
-        </button>
-        <h1>{isNew ? "新增供应商" : "编辑供应商"}</h1>
+        <div className="editor-head-bar">
+          <button className="back-btn" onClick={onBack} title="返回列表">
+            <Icon name="arrowLeft" size={17} />
+          </button>
+          <h1>{isNew ? "新增供应商" : "编辑供应商"}</h1>
+          <span className="right">
+            {savedMsg && <span className="muted">已保存 ✓</span>}
+            <button className="primary" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存"}</button>
+          </span>
+        </div>
+        <ErrorBox message={error} />
       </div>
 
       <div className="card">
@@ -346,11 +354,6 @@ function ProviderEditor({
           />
           <div className="hint">随每个模型请求附加的 HTTP 头（支持的 Harness 会原样传递）</div>
         </label>
-        <div className="row" style={{ marginTop: 6 }}>
-          <button className="primary" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存"}</button>
-          {savedMsg && <span className="muted">已保存 ✓</span>}
-        </div>
-        <ErrorBox message={error} />
       </div>
 
       {effectiveId ? (
