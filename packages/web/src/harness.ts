@@ -14,13 +14,11 @@ export interface HarnessThreadSourceMeta {
   label: string;
   /** What the harness calls them — Claude Code "Sessions", Codex "Threads". */
   noun: string;
-  /** Where the user's own work came from. */
-  hint: string;
 }
 
 export const HARNESS_THREAD_SOURCES: readonly HarnessThreadSourceMeta[] = [
-  { kind: "codex", label: "Codex", noun: "Threads", hint: "in the Codex CLI or IDE extension" },
-  { kind: "claude-code", label: "Claude Code", noun: "Sessions", hint: "in the Claude Code CLI on this machine" },
+  { kind: "codex", label: "Codex", noun: "Threads" },
+  { kind: "claude-code", label: "Claude Code", noun: "Sessions" },
 ];
 
 /** Harness kinds that authenticate with their own account (v6 §2/v7 §2). */

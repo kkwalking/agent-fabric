@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { get, post, fmtRelative } from "../api";
-import { ErrorBox, Icon, Modal, useAsync } from "../components";
+import { ErrorBox, Modal, useAsync } from "../components";
 import { HARNESS_THREAD_LIMIT, HARNESS_THREAD_SOURCES, type HarnessThreadSourceMeta } from "../harness";
 import { navigate } from "../router";
 
@@ -40,6 +40,8 @@ export function workspaceLabels(workspaces: any[]): Map<string, string> {
 export function SessionsView() {
   const [kind, setKind] = useState<string>(HARNESS_THREAD_SOURCES[0].kind);
   const [workspaceChoice, setWorkspaceChoice] = useState("");
+  /** 递增触发当前 tab 的 threads / auth 重新读取。 */
+  const [reloadSeq, setReloadSeq] = useState(0);
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
   const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
 
@@ -56,12 +58,7 @@ export function SessionsView() {
 
   return (
     <div className="new-task">
-      <div className="row" style={{ marginBottom: 4 }}>
-        <h1>Native sessions</h1>
-        <span className="right">
-          <button className="small" onClick={() => navigate("/new")}>New task</button>
-        </span>
-      </div>
+      <h1>Native sessions</h1>
       <p className="sub">
         Work that started outside AgentFabric, in a harness installed on this machine. Adopting a session reads
         its history — it never re-runs the model — so you can continue it here, and generate a handoff explicitly
@@ -98,10 +95,8 @@ export function SessionsView() {
             </option>
           ))}
         </select>
-        <span className="muted">
-          {workspaceId
-            ? `Only sessions whose working directory is ${labels.get(workspaceId)}.`
-            : `Newest local ${active.noun.toLowerCase()} across every workspace.`}
+        <span className="right">
+          <button className="small" onClick={() => setReloadSeq((s) => s + 1)}>Refresh</button>
         </span>
       </div>
 
@@ -112,6 +107,7 @@ export function SessionsView() {
         enabled={enabledFor(active.kind)}
         workspaceId={workspaceId}
         workspaces={workspaceList}
+        reloadSeq={reloadSeq}
         onAdopted={() => workspaces.reload()}
       />
     </div>
@@ -127,15 +123,18 @@ function HarnessThreadsPanel({
   enabled,
   workspaceId,
   workspaces,
+  reloadSeq,
   onAdopted,
 }: {
   source: HarnessThreadSourceMeta;
   enabled: boolean;
   workspaceId: string;
   workspaces: any[];
+  /** 父级 Refresh 按钮的递增序号，进入 deps 触发重读。 */
+  reloadSeq: number;
   onAdopted: () => void;
 }) {
-  const { kind, label, noun, hint } = source;
+  const { kind, label, noun } = source;
   const [importing, setImporting] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   // Adoption asks where the work belongs before it commits (v6 §8): the
@@ -143,7 +142,7 @@ function HarnessThreadsPanel({
   // not silently become a new workspace record.
   const [adopting, setAdopting] = useState<any | null>(null);
 
-  const auth = useAsync<any>(() => get(`/api/harness/${kind}/auth-status`), [kind, enabled]);
+  const auth = useAsync<any>(() => get(`/api/harness/${kind}/auth-status`), [kind, enabled, reloadSeq]);
   const threads = useAsync<any[]>(
     () =>
       enabled
@@ -151,7 +150,7 @@ function HarnessThreadsPanel({
             `/api/harness/${kind}/threads?limit=${HARNESS_THREAD_LIMIT}${workspaceId ? `&workspaceId=${workspaceId}` : ""}`
           )
         : Promise.resolve([]),
-    [kind, enabled, workspaceId]
+    [kind, enabled, workspaceId, reloadSeq]
   );
 
   if (!enabled) {
@@ -187,27 +186,12 @@ function HarnessThreadsPanel({
 
   return (
     <div>
-      <div className="row">
-        <span className="muted">
-          Work that started {hint}.
-        </span>
-        <span className="right">
-          <button className="small" onClick={() => { threads.reload(); auth.reload(); }}>Refresh</button>
-        </span>
-      </div>
-
       {/* Harness-native auth availability — detection only, never credentials. */}
       {auth.data && !auth.data.ok && (
         <div className="card auth-hint">
           <strong>{auth.data.installed ? `${label} CLI not logged in` : `${label} CLI not installed`}</strong>
           <div className="muted">{auth.data.hint ?? `Install the ${label} CLI and sign in to use ${label} Local.`}</div>
         </div>
-      )}
-      {auth.data?.ok && auth.data.detail && (
-        <p className="muted auth-ok">
-          <Icon name="key" size={12} /> {auth.data.detail}
-          {auth.data.version ? ` · ${auth.data.version}` : ""}
-        </p>
       )}
       <ErrorBox message={threads.error ? `${label} thread discovery failed: ${threads.error}` : null} />
       <ErrorBox message={importError} />

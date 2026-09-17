@@ -1940,12 +1940,6 @@ textarea + .hint {
   display: grid;
   gap: 4px;
 }
-.auth-ok {
-  margin: 4px 0 8px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
 .thread-items {
   display: grid;
   gap: 6px;
