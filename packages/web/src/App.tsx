@@ -37,13 +37,13 @@ const resourceNav: NavEntry[] = [
   { path: "/llm", label: "LLM", icon: "cloud", match: "/llm" },
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
   { path: "/sessions", label: "Native sessions", icon: "terminal", match: "/sessions" },
+  { path: "/handoffs", label: "Handoffs", icon: "archive", match: "/handoffs" },
   { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
   { path: "/workspaces", label: "Workspaces", icon: "folder", match: "/workspaces" },
 ];
 
 const systemNav: NavEntry[] = [
   { path: "/runs", label: "Runs", icon: "play", match: "/runs" },
-  { path: "/handoffs", label: "Handoffs", icon: "archive", match: "/handoffs" },
   { path: "/usage", label: "Usage", icon: "chart", match: "/usage" },
   { path: "/proxy", label: "Proxy", icon: "cloud", match: "/proxy" },
   { path: "/settings", label: "Settings", icon: "gear", match: "/settings" },
