@@ -160,6 +160,16 @@ function AuditRow({ label, children }: { label: string; children: React.ReactNod
   );
 }
 
+/** Download the rendered handoff body — exactly what the next agent receives — as a .md file. */
+function downloadMarkdown(filename: string, markdown: string) {
+  const url = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export function HandoffsView() {
   const { data, error, reload } = useAsync<any[]>(() => get("/api/handoffs"), []);
 
@@ -243,6 +253,14 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
         {" "}· {fmtTime(detail.createdAt)}
       </p>
       <div className="row">
+        {/* The exported file is the same rendered body shown below — a pure
+            download of what the record already carries, nothing re-rendered. */}
+        <button
+          className="small"
+          onClick={() => downloadMarkdown(`handoff-${shortId(detail.id)}.md`, detail.renderedPrompt)}
+        >
+          Export as Markdown
+        </button>
         {/* Wrong context is discarded, never repaired in place: a handoff is
             whatever the model produced at generation time, so a bad one is
             deleted and regenerated from the task thread (AGENTS.md). */}
