@@ -19,8 +19,8 @@ export interface HarnessThreadSourceMeta {
 }
 
 export const HARNESS_THREAD_SOURCES: readonly HarnessThreadSourceMeta[] = [
-  { kind: "claude-code", label: "Claude Code", noun: "Sessions", hint: "in the Claude Code CLI on this machine" },
   { kind: "codex", label: "Codex", noun: "Threads", hint: "in the Codex CLI or IDE extension" },
+  { kind: "claude-code", label: "Claude Code", noun: "Sessions", hint: "in the Claude Code CLI on this machine" },
 ];
 
 /** Harness kinds that authenticate with their own account (v6 §2/v7 §2). */
