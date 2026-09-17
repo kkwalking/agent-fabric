@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { get, subscribeSSE } from "../api";
+import { get } from "../api";
 import { useAsync, ErrorBox } from "../components";
 
 interface DashboardData {
@@ -9,14 +8,6 @@ interface DashboardData {
 
 export function Dashboard() {
   const { data, error } = useAsync<DashboardData>(() => get("/api/dashboard"), []);
-  const [live, setLive] = useState<any[]>([]);
-
-  useEffect(() => {
-    const unsub = subscribeSSE("/api/events/stream", (evt) => {
-      setLive((prev) => [evt, ...prev].slice(0, 30));
-    });
-    return unsub;
-  }, []);
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <div className="muted">Loading…</div>;
@@ -49,11 +40,6 @@ export function Dashboard() {
           <div className="num">${data.usage.estimatedCost.toFixed(4)}</div>
           <div className="lbl">Total cost</div>
         </div>
-      </div>
-
-      <h2>Live event stream</h2>
-      <div className="card">
-        <pre>{live.length === 0 ? "(waiting for events…)" : live.map((e) => `${e.timestamp}  ${e.type}  ${JSON.stringify(e.data)}`).join("\n")}</pre>
       </div>
     </div>
   );
