@@ -24,6 +24,7 @@ import type {
   ImportHarnessThreadInput,
   ImportHarnessThreadResult,
   LocalHarnessThreadSource,
+  SyncHarnessThreadResult,
 } from "./harnessThreads.js";
 import {
   createHttpCompletionFn,
@@ -82,6 +83,25 @@ import type {
 } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 min safety net
+
+/**
+ * Turn grouping for a native thread (v6 §8): harness-provided boundaries
+ * when available, else the flattened history split at each user message.
+ */
+function groupHarnessThreadTurns(detail: HarnessThreadDetail): Array<{ userText?: string; items: HarnessThreadItem[] }> {
+  if (detail.turns && detail.turns.length > 0) return detail.turns;
+  const turns: Array<{ userText?: string; items: HarnessThreadItem[] }> = [];
+  for (const item of detail.items) {
+    if (item.kind === "user-message") {
+      turns.push({ userText: item.text, items: [] });
+    } else {
+      if (turns.length === 0) turns.push({ userText: undefined, items: [] });
+      turns[turns.length - 1].items.push(item);
+    }
+  }
+  if (turns.length === 0) turns.push({ userText: undefined, items: [] });
+  return turns;
+}
 
 /* ------------------------------------------------------------------ */
 /* Resume compatibility (v3 §13–§15)                                    */
@@ -1182,21 +1202,7 @@ export class RunService {
 
     /* ---- Turn grouping: harness-provided boundaries when available,
             else split the flattened history at each user message. ---- */
-    let turns: Array<{ userText?: string; items: HarnessThreadItem[] }>;
-    if (detail.turns && detail.turns.length > 0) {
-      turns = detail.turns;
-    } else {
-      turns = [];
-      for (const item of detail.items) {
-        if (item.kind === "user-message") {
-          turns.push({ userText: item.text, items: [] });
-        } else {
-          if (turns.length === 0) turns.push({ userText: undefined, items: [] });
-          turns[turns.length - 1].items.push(item);
-        }
-      }
-      if (turns.length === 0) turns.push({ userText: undefined, items: [] });
-    }
+    const turns = groupHarnessThreadTurns(detail);
 
     const firstUser = turns.find((t) => t.userText?.trim())?.userText;
     const title =
@@ -1224,65 +1230,7 @@ export class RunService {
 
     // Backdated, strictly increasing timestamps keep forTask() ordering
     // stable even when turns are recorded within the same millisecond.
-    const baseMs = Date.now() - turns.length;
-    let runId: ID | undefined;
-    let budget = 4000; // hard cap on synthesized events per import
-    for (let i = 0; i < turns.length; i++) {
-      const turn = turns[i];
-      const run = await this.createRunFromTask(
-        task,
-        {
-          continuity: "new",
-          inputInstruction: turn.userText ?? "(turn without user input)",
-          userPrompt: turn.userText,
-          runtimeId: runtime.id,
-          workspaceId,
-        },
-        turn.userText ?? prompt
-      );
-      runId = run.id;
-      const stamp = new Date(baseMs + i).toISOString();
-      await this.store.update<Run>("runs", run.id, { createdAt: stamp, updatedAt: stamp });
-
-      await this.emitImportEvent(run.id, "run.started", {
-        runtime: runtime.name,
-        imported: true,
-        threadId: detail.id,
-        turn: i + 1,
-        turnCount: turns.length,
-      });
-      // Stand-in for the harness launch line so the thread view's turn
-      // header shows where this run came from (and later command items
-      // render as activity rows, not as the launch command).
-      await this.emitImportEvent(run.id, "shell.command", {
-        command: `${kind} (imported thread)`,
-        cwd: detail.cwd,
-        backend: "local",
-        harnessInvocation: true,
-        imported: true,
-      });
-      let used = 0;
-      for (const item of turn.items) {
-        if (budget-- <= 0) {
-          await this.emitImportEvent(run.id, "log", { line: "import truncated: too many thread items" }, "warn");
-          break;
-        }
-        const emitted = this.importItemEvents(item);
-        for (const ev of emitted) {
-          await this.emitImportEvent(run.id, ev.type as EventType, ev.data, ev.level as LogLevel | undefined);
-          used++;
-        }
-      }
-      await this.emitImportEvent(run.id, "run.completed", { exitCode: 0, imported: true });
-      await this.store.update<Run>("runs", run.id, {
-        status: "completed",
-        startTime: stamp,
-        endTime: stamp,
-        modelName: detail.model,
-        eventCount: used + 3,
-        updatedAt: stamp,
-      });
-    }
+    const runId = await this.appendImportedTurns(task, runtime, detail, turns, workspaceId, { startIndex: 0 });
 
     /* ---- Register the thread as the task's native session (v6 §4):
             same harness resumes it, other harnesses go through Handoff. ---- */
@@ -1330,6 +1278,146 @@ export class RunService {
     }
 
     return { taskId: task.id, runId: runId!, workspaceId, runtimeSessionRefId, handoffId };
+  }
+
+  /**
+   * Re-reads a task's adopted native thread and appends the turns that
+   * happened in the harness after adoption (v6 §8). This is the explicit
+   * refresh behind the task page's Refresh button — never a background
+   * poll — and a no-op when the native thread has not grown.
+   *
+   * Turn accounting decides what "already here" means: every native turn
+   * is represented exactly once when it is either an imported projection
+   * (continuity "new" — adoption and earlier syncs) or a run that resumed
+   * this very thread (continuity "resume" on the thread's session ref).
+   * Handoff runs never consumed a turn of this thread: they start their
+   * own native sessions.
+   */
+  async syncImportedThread(taskId: ID): Promise<SyncHarnessThreadResult> {
+    const task = this.taskService().get(taskId);
+    if (!task) throw new Error("Task not found");
+    const kind = task.metadata?.importedFromHarness;
+    const threadId = task.metadata?.importedThreadId;
+    if (typeof kind !== "string" || typeof threadId !== "string") {
+      throw new Error("Task did not adopt a native session — nothing to sync");
+    }
+
+    // A run in flight may still append its own turn to the native thread;
+    // syncing under it would miscount. Fail loudly instead.
+    const taskRuns = this.forTask(taskId);
+    const active = taskRuns.find((r) => !["completed", "failed", "cancelled", "timeout"].includes(r.status));
+    if (active) throw new Error(`Task has an active run (${active.id}) — sync after it finishes`);
+
+    const runtime = this.runtimeService().enabled().find((r) => r.kind === kind);
+    if (!runtime) throw new Error(`No enabled "${kind}" runtime available to sync its thread`);
+
+    const detail = await this.threadSource(kind).readThread(threadId);
+    if (!detail.id) throw new Error(`Thread not found: ${threadId}`);
+    const turns = groupHarnessThreadTurns(detail);
+
+    const threadRef = this.runtimeSessionService()
+      .list({ taskId })
+      .find((r) => r.nativeSessionRef === threadId);
+    const accounted =
+      taskRuns.filter((r) => r.continuity === "new").length +
+      taskRuns.filter((r) => r.continuity === "resume" && threadRef && r.runtimeSessionRefId === threadRef.id).length;
+    const delta = turns.slice(accounted);
+
+    const disarmedHandoffIds: ID[] = [];
+    if (delta.length > 0) {
+      await this.appendImportedTurns(task, runtime, detail, turns, task.workspaceId, { startIndex: accounted });
+      // An armed handoff was generated from a snapshot the appended turns
+      // no longer cover; consuming it would silently ignore the new work.
+      // Disarm it — regenerating is one explicit action.
+      for (const handoff of this.handoffService().list({ taskId })) {
+        if (handoff.awaitingNextTurn) {
+          await this.store.update<Handoff>("handoffs", handoff.id, { awaitingNextTurn: false });
+          disarmedHandoffIds.push(handoff.id);
+        }
+      }
+    }
+    if (detail.updatedAt) {
+      await this.taskService().update(taskId, {
+        metadata: { ...task.metadata, threadUpdatedAt: detail.updatedAt },
+      });
+    }
+    return { appendedTurns: delta.length, disarmedHandoffIds };
+  }
+
+  /**
+   * Records native-thread turns as completed imported Runs (v6 §7 →
+   * standard events) — the shared write path of adoption and native-thread
+   * sync. Turns are backdated so appended runs always sort after the
+   * existing ones in forTask().
+   */
+  private async appendImportedTurns(
+    task: Task,
+    runtime: Runtime,
+    detail: HarnessThreadDetail,
+    turns: Array<{ userText?: string; items: HarnessThreadItem[] }>,
+    workspaceId: ID | undefined,
+    opts: { startIndex: number }
+  ): Promise<ID | undefined> {
+    const baseMs = Date.now() - (turns.length - opts.startIndex);
+    let runId: ID | undefined;
+    let budget = 4000; // hard cap on synthesized events per append
+    for (let i = opts.startIndex; i < turns.length; i++) {
+      const turn = turns[i];
+      const run = await this.createRunFromTask(
+        task,
+        {
+          continuity: "new",
+          inputInstruction: turn.userText ?? "(turn without user input)",
+          userPrompt: turn.userText,
+          runtimeId: runtime.id,
+          workspaceId,
+        },
+        turn.userText ?? task.prompt
+      );
+      runId = run.id;
+      const stamp = new Date(baseMs + i).toISOString();
+      await this.store.update<Run>("runs", run.id, { createdAt: stamp, updatedAt: stamp });
+
+      await this.emitImportEvent(run.id, "run.started", {
+        runtime: runtime.name,
+        imported: true,
+        threadId: detail.id,
+        turn: i + 1,
+        turnCount: turns.length,
+      });
+      // Stand-in for the harness launch line so the thread view's turn
+      // header shows where this run came from (and later command items
+      // render as activity rows, not as the launch command).
+      await this.emitImportEvent(run.id, "shell.command", {
+        command: `${runtime.kind} (imported thread)`,
+        cwd: detail.cwd,
+        backend: "local",
+        harnessInvocation: true,
+        imported: true,
+      });
+      let used = 0;
+      for (const item of turn.items) {
+        if (budget-- <= 0) {
+          await this.emitImportEvent(run.id, "log", { line: "import truncated: too many thread items" }, "warn");
+          break;
+        }
+        const emitted = this.importItemEvents(item);
+        for (const ev of emitted) {
+          await this.emitImportEvent(run.id, ev.type as EventType, ev.data, ev.level as LogLevel | undefined);
+          used++;
+        }
+      }
+      await this.emitImportEvent(run.id, "run.completed", { exitCode: 0, imported: true });
+      await this.store.update<Run>("runs", run.id, {
+        status: "completed",
+        startTime: stamp,
+        endTime: stamp,
+        modelName: detail.model,
+        eventCount: used + 3,
+        updatedAt: stamp,
+      });
+    }
+    return runId;
   }
 
   /** Standard-event projections of one imported thread item (v6 §7). */

@@ -489,6 +489,19 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     }
   });
 
+  // Explicit native-thread sync for a task that adopted a harness session
+  // (v6 §8): re-read the harness's own thread and append the turns that
+  // happened there after adoption. The task page's Refresh button is the
+  // only trigger — there is no background polling.
+  app.post("/api/tasks/:id/sync-thread", async (req, res) => {
+    if (!tasks.get(req.params.id)) return fail(res, new Error("Task not found"), 404);
+    try {
+      ok(res, await runs.syncImportedThread(req.params.id));
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
   /* ---------------- runs ---------------- */
 
   app.get("/api/runs", (_req, res) => ok(res, runs.list()));

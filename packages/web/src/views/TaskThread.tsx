@@ -99,12 +99,36 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const providerList = providers.data ?? [];
 
   const bump = () => setReloadTick((t) => t + 1);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  /** Guards the refresh button against a second sync while one is in flight. */
+  const syncingRef = useRef(false);
+
+  // Refresh is explicit on an adopted task: it first re-reads the native
+  // session in the harness (appending turns that happened there since
+  // adoption), then refetches the stored thread. A sync failure stays
+  // visible but never blocks the local refetch.
+  const refresh = async () => {
+    if (syncingRef.current) return;
+    if (thread?.task?.metadata?.importedFromHarness) {
+      syncingRef.current = true;
+      try {
+        await post(`/api/tasks/${taskId}/sync-thread`);
+        setSyncError(null);
+      } catch (e) {
+        setSyncError(e instanceof Error ? e.message : String(e));
+      } finally {
+        syncingRef.current = false;
+      }
+    }
+    bump();
+  };
 
   // Reset only when switching tasks — a refresh (bump) refetches in the
   // background so the timeline stays put while the new state arrives.
   useEffect(() => {
     setThread(null);
     setError(null);
+    setSyncError(null);
   }, [taskId]);
   useEffect(() => {
     let alive = true;
@@ -283,7 +307,13 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           <h1 className="thread-title">{thread.task.title}</h1>
           <StatusBadge status={taskStatus} />
           <span className="right thread-actions">
-            <button className="icon-btn" title="Refresh" onClick={bump}><Icon name="refresh" /></button>
+            <button
+              className="icon-btn"
+              title={thread.task.metadata?.importedFromHarness ? "Refresh — re-reads the adopted native session first" : "Refresh"}
+              onClick={refresh}
+            >
+              <Icon name="refresh" />
+            </button>
           </span>
         </div>
         <div className="thread-meta">
@@ -299,6 +329,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           </a>
           <span className="meta-chip muted">{thread.runs.length} {thread.runs.length === 1 ? "run" : "runs"}</span>
         </div>
+        {syncError && <ErrorBox message={`Native session sync failed: ${syncError}`} />}
       </header>
 
       {/* ---------- Timeline (v5 §11: each run is one assistant turn) ---------- */}

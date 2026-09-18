@@ -104,6 +104,7 @@ v6（`v6.md`）接入本机 **Codex CLI** 作为 Harness，核心目标是：用
 * **不绑定 AgentFabric Model**：harness-native Runtime 不注入模型默认值（显式传入也会被忽略）——Codex 使用自己账号的默认模型；UI 上模型选择器替换为说明提示。
 * **本地 Thread 发现与读取（官方接口）**：通过 `codex app-server` 的 JSON-RPC（`thread/list` / `thread/read` / `thread/turns/list`）发现本机已有 Codex Threads（按 cwd / 最近更新过滤，包含 cli / vscode / exec 三类来源），只读地取出用户输入、Agent 回复与 Tool Activity——**不解析 `~/.codex` 内部文件**，也绝不触发新的模型请求。
 * **接管已有工作（Import / Adopt）**：`POST /api/harness/codex/threads/import` — Read Thread → 按 cwd 关联（或就地导入）Workspace → 每个 Codex turn 记录为一个已完成 Run（事件由 thread 内容投影）→ 注册 thread 为可 Resume 的 Native Session →（可选）预生成指向目标 Harness 的 Handoff。不把 Codex Thread 转换成统一 Session。
+* **已接管会话的显式同步（Sync，Codex 与 Claude Code 通用）**：接管是一次性快照；之后用户可能继续在原 Harness 里对话。`POST /api/tasks/:id/sync-thread` 重读原生会话，把新增的 turn 用与接管相同的投影路径**追加**为 Run，并更新 Task 上的 `threadUpdatedAt`。已入账的 turn = 接管/历次同步投影的 Run（`continuity: "new"`）+ 本任务在这条原生会话上 Resume 过的 Run（`continuity: "resume"`），因此不会把 AgentFabric 自己续跑的 turn 重复导入。同步会**解除**在此之前武装（`awaitingNextTurn`）的 Handoff——它基于过期快照生成，下一轮不该悄悄消费（`disarmedHandoffIds` 可见）。触发只有两个入口：该 REST 接口，以及 Task 页面的 Refresh 按钮（对已接管 Task 先同步再重读）；**没有后台轮询，也没有"有 N 个新 turn"之类的提示**。任务有进行中的 Run 时同步直接报错；非接管 Task 调用同步同样报错。
 * **额度耗尽 UX（`errorKind: "usage-limit"`）**：识别 Codex 的配额错误（"You've hit your usage limit…"），Task 页面显示 **Codex usage limit reached.** 与 **Continue with Pi / Continue with OpenCode**，一键预选目标 Harness 并立即生成 Handoff，新 Harness 建立自己的新 Native Session 继续任务。
 
 ## Claude Code Local Harness（v7）
@@ -303,6 +304,7 @@ af containers kept
 | GET | `/api/tasks/:id` `/api/tasks/:id/runs` | Task 详情 / Run 链 |
 | GET | `/api/tasks/:id/continue-options` | Resume vs Handoff 决策预览（不生成内容） |
 | POST | `/api/tasks/:id/continue` | 继续任务（自动/强制 Resume 或 Handoff）；Checkpoint 生成失败时返回 409 `handoff-unavailable`，带 `allowDegradedHandoff: true` 可显式降级 |
+| POST | `/api/tasks/:id/sync-thread` | 重读已接管 Task 的原生会话，把接管（或上次同步）之后发生在 Harness 里的新 turn 追加为 Run（显式触发，无后台轮询） |
 | GET | `/api/handoffs?taskId=&runId=` | Handoff 索引列表（id / 来源 / generation / 覆盖的 Run；不含 context bundle） |
 | GET | `/api/handoffs/:id` | Handoff 完整记录（Context Bundle、每个 slice 的 retention、预算账目、渲染正文、被哪些 Run 消费） |
 | POST | `/api/handoffs/:id/notes` | 追加用户说明 |

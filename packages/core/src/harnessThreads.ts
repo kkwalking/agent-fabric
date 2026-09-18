@@ -135,3 +135,18 @@ export interface ImportHarnessThreadResult {
   /** Handoff generated toward the target runtime, when requested. */
   handoffId?: ID;
 }
+
+/**
+ * Result of re-reading a task's adopted native thread (v6 §8): turns that
+ * happened in the harness after adoption, appended to the task.
+ */
+export interface SyncHarnessThreadResult {
+  /** Native turns appended as runs; 0 when the thread has not grown. */
+  appendedTurns: number;
+  /**
+   * Armed handoffs disarmed by this sync: they were generated from a
+   * snapshot the appended turns no longer cover, so the next turn must not
+   * consume them silently.
+   */
+  disarmedHandoffIds: ID[];
+}

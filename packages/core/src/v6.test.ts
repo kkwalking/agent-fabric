@@ -386,6 +386,155 @@ test("scenario B: adopt an existing codex thread, then continue on Pi via handof
   }
 });
 
+/** Appends native turns to the fake codex threads file — the user kept
+    talking in the harness after adoption (or after an AgentFabric resume). */
+function growCodexThread(threadsFile: string, threadId: string, turns: Array<Record<string, unknown>>): void {
+  const db = JSON.parse(readFileSync(threadsFile, "utf8")) as { threads: Array<{ id: string; updatedAt?: number }> };
+  const thread = db.threads.find((t) => t.id === threadId);
+  assert.ok(thread, "fixture thread must exist");
+  (thread as { turns?: unknown[] }).turns ??= [];
+  (thread as { turns: unknown[] }).turns.push(...turns);
+  thread.updatedAt = (thread.updatedAt ?? 0) + 100;
+  writeFileSync(threadsFile, JSON.stringify(db));
+}
+
+test("syncing an adopted thread appends turns that happened in codex after adoption (v6 §8)", async () => {
+  const fx = makeFixtures();
+  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const fixture = makeCodexThreadsFixture(wsDir);
+  const threadsFile = join(fx.dir, "codex-threads.json");
+  writeFileSync(threadsFile, fixture.file);
+  const restore = useBins(fx, { FAKE_CODEX_THREADS_FILE: threadsFile });
+  let h: Harness | undefined;
+  try {
+    h = await freshHarness({ completionFactory: offlineCompletion });
+    const result = await h.runService.importHarnessThread({
+      runtimeKind: "codex",
+      threadId: fixture.inWorkspaceThreadId,
+    });
+    assert.equal(h.runService.forTask(result.taskId).length, 2, "both fixture turns imported");
+
+    // The user keeps working in codex: the native thread grows a turn.
+    growCodexThread(threadsFile, fixture.inWorkspaceThreadId, [
+      {
+        id: "turn-3",
+        items: [
+          { type: "userMessage", content: [{ type: "text", text: "one more thing" }] },
+          { type: "agentMessage", text: "Done with the extra thing." },
+        ],
+      },
+    ]);
+
+    const sync = await h.runService.syncImportedThread(result.taskId);
+    assert.equal(sync.appendedTurns, 1);
+    assert.deepEqual(sync.disarmedHandoffIds, []);
+
+    // Appended as one completed run carrying the native turn's user input,
+    // sorted after the runs imported earlier.
+    const runs = h.runService.forTask(result.taskId);
+    assert.equal(runs.length, 3);
+    assert.equal(runs[2].status, "completed");
+    assert.equal(runs[2].userPrompt, "one more thing");
+    assert.ok(runs[2].createdAt >= runs[1].createdAt);
+    assert.ok(
+      h.runService.events(runs[2].id).some((e) => e.type === "agent.message" && /extra thing/.test(String(e.data.content)))
+    );
+    // The adoption marker moved to the thread's new last-update time.
+    const task = h.store.get<any>("tasks", result.taskId);
+    assert.equal(task.metadata.threadUpdatedAt, new Date((1780002000 + 100) * 1000).toISOString());
+
+    // Sync is idempotent: nothing new in the harness → nothing appended.
+    const again = await h.runService.syncImportedThread(result.taskId);
+    assert.equal(again.appendedTurns, 0);
+    assert.equal(h.runService.forTask(result.taskId).length, 3);
+  } finally {
+    if (h) await quiesce(h);
+    restore();
+  }
+});
+
+test("sync counts resumed turns as already present and disarms a stale armed handoff (v6 §8)", async () => {
+  const fx = makeFixtures();
+  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const fixture = makeCodexThreadsFixture(wsDir);
+  const threadsFile = join(fx.dir, "codex-threads.json");
+  writeFileSync(threadsFile, fixture.file);
+  const restore = useBins(fx, {
+    FAKE_CODEX_THREADS_FILE: threadsFile,
+    FAKE_CODEX_DUMP: join(fx.dir, "codex-dump.jsonl"),
+  });
+  let h: Harness | undefined;
+  try {
+    h = await freshHarness({ completionFactory: offlineCompletion });
+    const ws = await h.workspaces.create({ name: "login-bug", type: "local", path: wsDir });
+    seedCodexSession(fx, fixture.inWorkspaceThreadId);
+    const result = await h.runService.importHarnessThread({
+      runtimeKind: "codex",
+      threadId: fixture.inWorkspaceThreadId,
+      workspaceId: ws.id,
+    });
+
+    // An AgentFabric resume appends its own turn to the native thread.
+    const codex = runtimeOf(h, "codex");
+    const resume = await h.runService.continueTask(result.taskId, { prompt: "add a regression test", runtimeId: codex.id });
+    assert.equal(resume.continuity, "resume");
+    const resumedRun = await waitForRun(h.runService, resume.run.id);
+    assert.equal(resumedRun.status, "completed", resumedRun.error);
+
+    // The native thread now holds the resume's turn plus one newer turn the
+    // user added directly in codex. Only the newer one is new to the task.
+    growCodexThread(threadsFile, fixture.inWorkspaceThreadId, [
+      {
+        id: "turn-resume",
+        items: [{ type: "userMessage", content: [{ type: "text", text: "add a regression test" }] }],
+      },
+      {
+        id: "turn-new",
+        items: [
+          { type: "userMessage", content: [{ type: "text", text: "renamed the script" }] },
+          { type: "agentMessage", text: "Renamed it." },
+        ],
+      },
+    ]);
+
+    // A handoff armed before the sync was generated from the stale
+    // snapshot — the sync must disarm it instead of letting the next turn
+    // consume outdated context.
+    const armed = await h.runService.generateHandoff(result.taskId, undefined, { allowDegraded: true });
+    assert.equal(armed.awaitingNextTurn, true);
+
+    const sync = await h.runService.syncImportedThread(result.taskId);
+    assert.equal(sync.appendedTurns, 1, "the resume's turn is accounted, only the newer turn is appended");
+    assert.deepEqual(sync.disarmedHandoffIds, [armed.id]);
+    assert.equal(h.store.get<any>("handoffs", armed.id).awaitingNextTurn, false);
+
+    // 2 imported + 1 resume + 1 synced, in order.
+    const runs = h.runService.forTask(result.taskId);
+    assert.equal(runs.length, 4);
+    assert.equal(runs[3].userPrompt, "renamed the script");
+  } finally {
+    if (h) await quiesce(h);
+    restore();
+  }
+});
+
+test("sync refuses tasks that never adopted a native session", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await freshHarness({ completionFactory: offlineCompletion });
+    const plain = await h.store.insert<any>("tasks", {
+      id: "task_plain",
+      title: "plain",
+      prompt: "p",
+      createdAt: new Date().toISOString(),
+    });
+    await assert.rejects(h.runService.syncImportedThread(plain.id), /did not adopt a native session/);
+    await assert.rejects(h.runService.syncImportedThread("task_missing"), /Task not found/);
+  } finally {
+    if (h) await quiesce(h);
+  }
+});
+
 test("adoption imports the thread's cwd as a workspace when the caller names one (v6 §8)", async () => {
   const fx = makeFixtures();
   const wsDir = join(mkdtempSync(join(tmpdir(), "af-codex-ws-")), "codex-work");
