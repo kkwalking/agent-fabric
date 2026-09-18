@@ -114,3 +114,34 @@ export function fmtRelative(iso?: string): string {
 export function shortId(id: string): string {
   return id.length > 14 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
 }
+
+/**
+ * Copy text to the clipboard. The async Clipboard API only exists in
+ * secure contexts (localhost counts, plain-http LAN access doesn't), so
+ * fall back to a temporary textarea + execCommand there. Returns whether
+ * the copy actually landed — callers must surface failures instead of
+ * dropping them silently.
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through to the execCommand path */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const copied = document.execCommand("copy");
+    ta.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}

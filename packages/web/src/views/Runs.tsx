@@ -1,7 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { get, post, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
-import { StatusBadge, useAsync, ErrorBox } from "../components";
+import { StatusBadge, useAsync, ErrorBox, CopyButton } from "../components";
 import { navigate } from "../router";
+
+/** How each harness resumes a native session by id (matches runtimes' buildArgs). */
+const NATIVE_RESUME_CMD: Record<string, string> = {
+  "claude-code": "claude --resume <id>",
+  codex: "codex exec resume <id>",
+  pi: "pi --session <id>",
+  opencode: "opencode --session <id>",
+};
 
 /**
  * Runs (v5 §33): the operations / run-history view. Users create Tasks,
@@ -10,11 +18,17 @@ import { navigate } from "../router";
  */
 export function RunsView() {
   const { data, error, loading, reload } = useAsync<any[]>(() => get("/api/runs"), []);
+  const { data: sessionRefs, reload: reloadSessions } = useAsync<any[]>(() => get("/api/runtime-sessions"), []);
+  const sessionById = useMemo(
+    () => new Map((sessionRefs ?? []).map((s) => [s.id as string, s])),
+    [sessionRefs]
+  );
+  const reloadAll = () => { reload(); reloadSessions(); };
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}>
         <h1>Runs</h1>
-        <span className="right"><button className="small" onClick={reload}>refresh</button></span>
+        <span className="right"><button className="small" onClick={reloadAll}>refresh</button></span>
       </div>
       <p className="sub">
         Every task execution produces an independent Run. This is the operations view — the conversation
@@ -28,7 +42,10 @@ export function RunsView() {
               <tr><th>Run</th><th>Task</th><th>Status</th><th>Runtime</th><th>Continuity</th><th>Model</th><th>Cost</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
-              {data.map((r) => (
+              {data.map((r) => {
+                const sessionRef = r.runtimeSessionRefId ? sessionById.get(r.runtimeSessionRefId) : undefined;
+                const resumeCmd = sessionRef && NATIVE_RESUME_CMD[sessionRef.runtimeKind];
+                return (
                 <tr key={r.id}>
                   <td className="mono"><a onClick={() => navigate(`/runs/${r.id}`)}>{shortId(r.id)}</a></td>
                   <td><a onClick={() => navigate(`/tasks/${r.taskId}`)}>{r.taskTitle}</a></td>
@@ -39,12 +56,23 @@ export function RunsView() {
                   <td>{fmtCost(r.cost)}</td>
                   <td className="muted">{fmtTime(r.createdAt)}</td>
                   <td>
+                    {sessionRef && (
+                      <CopyButton
+                        label="copy session id"
+                        text={sessionRef.nativeSessionRef}
+                        title={
+                          `${sessionRef.nativeSessionRef} (${sessionRef.runtimeKind})` +
+                          (resumeCmd ? `\nresume in the native harness: ${resumeCmd.replace("<id>", sessionRef.nativeSessionRef)}` : "")
+                        }
+                      />
+                    )}{" "}
                     {["pending", "starting", "running"].includes(r.status) && (
-                      <button className="small danger" onClick={async () => { await post(`/api/runs/${r.id}/cancel`); reload(); }}>cancel</button>
+                      <button className="small danger" onClick={async () => { await post(`/api/runs/${r.id}/cancel`); reloadAll(); }}>cancel</button>
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         ) : (
@@ -189,6 +217,11 @@ export function RunDetailView({ runId }: { runId: string }) {
             {sessionRef && (
               <span>
                 native session: <span className="mono" title={sessionRef.nativeSessionRef}>{sessionRef.nativeSessionRef}</span>{" "}
+                <CopyButton
+                  label="copy"
+                  text={sessionRef.nativeSessionRef}
+                  title={`Copy the native harness session id${NATIVE_RESUME_CMD[sessionRef.runtimeKind] ? ` — resume with \`${NATIVE_RESUME_CMD[sessionRef.runtimeKind]}\`` : ""}`}
+                />{" "}
                 <span className="muted">
                   ({sessionRef.runtimeKind}
                   {sessionRef.runtimeVersion ? ` ${sessionRef.runtimeVersion}` : ""}

@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useState } from "react";
+import { copyText } from "./api";
 
 export type IconName =
   | "grid"
@@ -273,6 +274,33 @@ export function Modal({
 export function ErrorBox({ message }: { message: string | null }) {
   if (!message) return null;
   return <div className="card" style={{ borderColor: "var(--red)", color: "var(--red)" }}>Error: {message}</div>;
+}
+
+/**
+ * Copy-to-clipboard button with visible feedback: the label swaps to
+ * "copied ✓" briefly, or to "copy failed" when the clipboard write
+ * fails (possible outside secure contexts) — never silently.
+ */
+export function CopyButton({ text, label, title, className = "small" }: {
+  text: string;
+  label: string;
+  title?: string;
+  className?: string;
+}) {
+  const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
+  return (
+    <button
+      className={className}
+      title={title}
+      onClick={async () => {
+        const ok = await copyText(text);
+        setState(ok ? "ok" : "fail");
+        window.setTimeout(() => setState("idle"), 1500);
+      }}
+    >
+      {state === "ok" ? "copied ✓" : state === "fail" ? "copy failed" : label}
+    </button>
+  );
 }
 
 export function emptyTableHint(loading: boolean, error: string | null) {
