@@ -63,6 +63,7 @@ import type {
   HandoffContent,
   HandoffContextWindowSource,
   HandoffGeneration,
+  HandoffModelSource,
   HandoffTrigger,
   ID,
   LogLevel,
@@ -1026,6 +1027,7 @@ export class RunService {
       ...(generated.chunks ? { chunks: generated.chunks } : {}),
       ...(generated.model ? { modelId: generated.model.id, modelName: generated.model.name } : {}),
       ...(generated.providerName ? { providerName: generated.providerName } : {}),
+      ...(generated.modelSource ? { modelSource: generated.modelSource } : {}),
       ...(generated.coveredRunIds.length ? { coveredRunIds: generated.coveredRunIds } : {}),
       durationMs: generated.durationMs,
       ...(generated.usage ? { usage: generated.usage } : {}),
@@ -1520,6 +1522,7 @@ export class RunService {
     chunks?: number;
     model?: Model;
     providerName?: string;
+    modelSource?: HandoffModelSource;
     coveredRunIds: ID[];
     durationMs: number;
     usage?: { inputTokens: number; outputTokens: number };
@@ -1575,13 +1578,33 @@ export class RunService {
 
     // Degradation is never implicit: either the model produced the context,
     // or the caller explicitly accepted the digest after seeing the reason.
-    const modelId = previousRun.modelId ?? this.modelService().list().find((m) => m.enabled)?.id;
+    // The summarizer model follows an explicit-priority order, recorded on
+    // the generation for audit: the configured handoff model (Handoffs
+    // page) wins; otherwise the covered run's own model, else the first
+    // enabled model. A configured model that has become unusable is a loud
+    // failure — the user explicitly chose it, so it never silently falls
+    // back to another model.
+    const configuredModelId = this.store.config().handoff?.modelId || undefined;
+    const enabledModels = this.modelService().list().filter((m) => m.enabled);
+    const modelId = configuredModelId ?? previousRun.modelId ?? enabledModels[0]?.id;
+    const modelSource: HandoffModelSource = configuredModelId
+      ? "configured"
+      : previousRun.modelId
+        ? "previous-run"
+        : "first-enabled";
     const model = modelId ? this.modelService().get(modelId) : undefined;
     const provider = model ? this.providerService().get(model.providerId) : undefined;
-    if (!model || !provider || !provider.enabled) {
-      const detail = "no enabled model/provider for summarization";
+    if (!model || !provider || !provider.enabled || (configuredModelId !== undefined && !model.enabled)) {
+      const detail = !configuredModelId
+        ? "no enabled model/provider for summarization"
+        : model
+          ? "the configured handoff model's provider is missing or disabled"
+          : "the configured handoff model is missing or disabled";
       if (allowDegraded) return heuristic(detail);
-      throw new HandoffUnavailableError("no summarization model is configured", detail);
+      throw new HandoffUnavailableError(
+        configuredModelId ? "the configured handoff model is unavailable" : "no summarization model is configured",
+        detail
+      );
     }
     let apiKey: string | undefined;
     if (provider.apiKeySecretId) {
@@ -1628,7 +1651,9 @@ export class RunService {
         chunks: result.chunks,
         // A bundle whose whole covered history fit verbatim needs no model:
         // there is no checkpoint to attribute, and none was written.
-        ...(result.chunks > 0 || result.checkpoint ? { model, providerName: provider.name } : {}),
+        ...(result.chunks > 0 || result.checkpoint
+          ? { model, providerName: provider.name, modelSource }
+          : {}),
         coveredRunIds,
         durationMs: Date.now() - startedAt,
         ...(result.usage ? { usage: result.usage } : {}),

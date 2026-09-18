@@ -575,6 +575,38 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
     ok(res, handoffs.list({ taskId, runId }).map(toHandoffListRow));
   });
+  // NOTE: registered before "/api/handoffs/:id" so "model" is never read as an id.
+  //
+  // The handoff summarizer model (Handoffs page). Stored in config
+  // (`handoff.modelId`); unset = the covered run's own model, else the first
+  // enabled model. Setting one validates loudly: a model the handoff path
+  // could not use is rejected here, and one that turns unusable later fails
+  // generation loudly instead of silently falling back (orchestrator).
+  app.get("/api/handoffs/model", (_req, res) => {
+    const modelId = store.config().handoff?.modelId;
+    const model = modelId ? models.get(modelId) : undefined;
+    const provider = model ? providers.get(model.providerId) : undefined;
+    ok(res, {
+      modelId: modelId ?? null,
+      modelName: model ? (model.alias ?? model.name) : undefined,
+      providerName: provider?.name,
+      // Only meaningful when something is configured.
+      ...(modelId ? { usable: Boolean(model?.enabled && provider?.enabled) } : {}),
+    });
+  });
+  app.put("/api/handoffs/model", async (req, res) => {
+    const { modelId } = (req.body ?? {}) as { modelId?: string | null };
+    if (modelId == null || modelId === "") {
+      await store.updateConfig({ handoff: {} });
+      return ok(res, { modelId: null });
+    }
+    const model = models.get(modelId);
+    if (!model || !model.enabled) return fail(res, `Model not found or disabled: ${modelId}`, 404);
+    const provider = providers.get(model.providerId);
+    if (!provider || !provider.enabled) return fail(res, `The model's provider is missing or disabled: ${modelId}`, 400);
+    await store.updateConfig({ handoff: { modelId } });
+    ok(res, { modelId: model.id, modelName: model.alias ?? model.name, providerName: provider.name, usable: true });
+  });
   app.get("/api/handoffs/:id", (req, res) => {
     const h = handoffs.get(req.params.id);
     if (!h) return fail(res, new Error("Handoff not found"), 404);

@@ -487,6 +487,8 @@ export interface HandoffGeneration {
   modelId?: ID;
   modelName?: string;
   providerName?: string;
+  /** Why this model was chosen (audit only); absent with the model itself. */
+  modelSource?: HandoffModelSource;
   /** Runs the checkpoint covers, oldest first. */
   coveredRunIds?: ID[];
   /** Wall-clock time the summarization took. */
@@ -879,6 +881,12 @@ export interface ProxyConfig {
   port?: number;
 }
 
+/**
+ * Which model writes a handoff's checkpoint. Unset, generation follows the
+ * run chain: the covered run's own model, else the first enabled model.
+ */
+export type HandoffModelSource = "configured" | "previous-run" | "first-enabled";
+
 export interface AppConfig {
   server?: {
     host?: string;
@@ -903,4 +911,14 @@ export interface AppConfig {
     projectsDir?: string;
   };
   proxy?: ProxyConfig;
+  handoff?: {
+    /**
+     * The model that writes handoff checkpoints (Handoffs page). Explicitly
+     * configured: when it exists but is unusable (model or provider
+     * disabled/missing), generation fails loudly — it never silently falls
+     * back to another model. Unset = the covered run's model, else the
+     * first enabled model.
+     */
+    modelId?: string;
+  };
 }

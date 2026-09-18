@@ -1,4 +1,5 @@
-import { get, del, fmtTime, shortId } from "../api";
+import { useState } from "react";
+import { get, del, put, fmtTime, shortId } from "../api";
 import { useAsync, ErrorBox } from "../components";
 import { HANDOFF_TRIGGERS } from "../presentation";
 import { navigate } from "../router";
@@ -166,6 +167,13 @@ function ContextBundleCard({ bundle }: { bundle: ContextBundle }) {
   );
 }
 
+/** Where a written checkpoint's model came from (audit, not content). */
+const MODEL_SOURCE_LABELS: Record<string, string> = {
+  configured: "the configured handoff model",
+  "previous-run": "the source run's model",
+  "first-enabled": "first enabled model (fallback)",
+};
+
 function SourceBadge({ source }: { source: string }) {
   const label = source === "harness" ? "harness-generated" : source === "agentfabric" ? "AgentFabric-assisted" : "user-provided";
   return <span className="badge running" title={`Handoff source: ${label}`}>{label}</span>;
@@ -204,6 +212,104 @@ function downloadMarkdown(filename: string, markdown: string) {
   URL.revokeObjectURL(url);
 }
 
+interface ModelRow {
+  id: string;
+  providerId: string;
+  name: string;
+  alias?: string;
+  enabled: boolean;
+}
+
+interface ProviderRow {
+  id: string;
+  name: string;
+  enabled: boolean;
+}
+
+/** GET/PUT /api/handoffs/model — the summarizer model for handoff generation. */
+interface HandoffModelConfig {
+  modelId: string | null;
+  modelName?: string;
+  providerName?: string;
+  usable?: boolean;
+}
+
+/**
+ * Which model writes handoff checkpoints. An explicit choice is strict: if
+ * it turns unusable (model/provider disabled or deleted), generation fails
+ * loudly instead of silently using another model — the warning here says so.
+ */
+function HandoffModelCard() {
+  const models = useAsync<ModelRow[]>(() => get("/api/models"), []);
+  const providers = useAsync<ProviderRow[]>(() => get("/api/providers"), []);
+  const current = useAsync<HandoffModelConfig>(() => get("/api/handoffs/model"), []);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  const enabledModels = (models.data ?? []).filter((m) => m.enabled);
+  const providerName = (id: string) => providers.data?.find((p) => p.id === id)?.name;
+  const configuredId = current.data?.modelId ?? null;
+  const configuredUnavailable =
+    configuredId != null && !enabledModels.some((m) => m.id === configuredId);
+
+  const select = async (value: string) => {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await put("/api/handoffs/model", { modelId: value || null });
+      setSaved(true);
+      current.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Handoff model</h2>
+      <p className="sub" style={{ marginBottom: 10 }}>
+        The model that writes a handoff's checkpoint when one is generated. Auto follows each task's source
+        run model, falling back to the first enabled model.
+      </p>
+      <div className="row">
+        <select
+          value={configuredId ?? ""}
+          disabled={saving || models.data == null || current.data == null}
+          onChange={(e) => void select(e.target.value)}
+          style={{ minWidth: 320 }}
+        >
+          <option value="">Auto — follow each task's source model</option>
+          {enabledModels.map((m) => (
+            <option key={m.id} value={m.id}>
+              {providerName(m.providerId) ?? "?"} · {m.alias || m.name}
+            </option>
+          ))}
+          {/* A configured model that has become unusable still represents the
+              stored choice — hiding it would make the select disagree with
+              what generation will actually do. */}
+          {configuredUnavailable && (
+            <option value={configuredId}>
+              {current.data?.modelName ?? configuredId} (unavailable)
+            </option>
+          )}
+        </select>
+        {saved && <span className="muted">saved ✓</span>}
+        {saving && <span className="muted">saving…</span>}
+      </div>
+      {configuredUnavailable && (
+        <p className="hint" style={{ color: "var(--red)" }}>
+          The configured handoff model is unavailable — handoff generation will fail until you pick another one.
+        </p>
+      )}
+      <ErrorBox message={error} />
+    </div>
+  );
+}
+
 export function HandoffsView() {
   const { data, error, reload } = useAsync<any[]>(() => get("/api/handoffs"), []);
 
@@ -215,6 +321,8 @@ export function HandoffsView() {
         same harness or a different one — and generating it is an explicit action. Sessions are never migrated.
       </p>
       <ErrorBox message={error} />
+
+      <HandoffModelCard />
 
       <div className="card">
         {data && data.length > 0 ? (
@@ -259,6 +367,7 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
         chunks?: number;
         modelName?: string;
         providerName?: string;
+        modelSource?: string;
         coveredRunIds?: string[];
         durationMs?: number;
         usage?: { inputTokens: number; outputTokens: number };
@@ -340,7 +449,12 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
         </AuditRow>
         <AuditRow label="Written by">
           {writtenBy ? (
-            <span className="mono">{writtenBy}</span>
+            <>
+              <span className="mono">{writtenBy}</span>
+              {g?.modelSource ? (
+                <span className="muted"> · {MODEL_SOURCE_LABELS[g.modelSource] ?? g.modelSource}</span>
+              ) : null}
+            </>
           ) : (
             <span className="muted">
               no model —{" "}
