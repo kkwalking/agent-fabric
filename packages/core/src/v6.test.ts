@@ -143,7 +143,7 @@ test("scenario A: codex run needs no provider/model, captures the thread id and 
     assert.equal(ref.executionBackend, "local");
 
     // §5: events were parsed from the exec JSONL protocol.
-    const events = h.runService.events(run.id);
+    const events = await h.runService.events(run.id);
     assert.ok(events.some((e) => e.type === "agent.message" && String(e.data.content).includes("tests pass")));
     assert.ok(events.some((e) => e.type === "file.created" && e.data.path === "src/a.ts"));
     assert.ok(events.some((e) => e.type === "file.modified" && e.data.path === "src/b.ts"));
@@ -186,7 +186,7 @@ test("quota exhaustion is classified as usage-limit, then hands off to Pi (v6 §
     assert.equal(finished.errorKind, "usage-limit", `error was: ${finished.error}`);
     assert.match(finished.error ?? "", /usage limit/i);
     // The failure event carries the classification for the Task page.
-    const failed = h.runService.events(run.id).find((e) => e.type === "run.failed");
+    const failed = (await h.runService.events(run.id)).find((e) => e.type === "run.failed");
     assert.equal(failed?.data?.errorKind, "usage-limit");
 
     // The workspace stays and the thread is readable — switch to Pi.
@@ -343,10 +343,10 @@ test("scenario B: adopt an existing codex thread, then continue on Pi via handof
     assert.equal(runs.length, 2);
     assert.ok(runs.every((r) => r.status === "completed"));
     assert.equal(runs[0].userPrompt, "Please fix the login bug in auth.ts");
-    const events = h.runService.events(runs[0].id);
+    const events = await h.runService.events(runs[0].id);
     assert.ok(events.some((e) => e.type === "shell.command" && e.data.command === "npm test"));
     assert.ok(events.some((e) => e.type === "agent.message"));
-    const turn2 = h.runService.events(runs[1].id);
+    const turn2 = await h.runService.events(runs[1].id);
     assert.ok(turn2.some((e) => e.type === "file.modified" && e.data.path === "src/auth.ts"));
 
     // Discovery now marks the thread as already adopted (v6 §11).
@@ -437,7 +437,7 @@ test("syncing an adopted thread appends turns that happened in codex after adopt
     assert.equal(runs[2].userPrompt, "one more thing");
     assert.ok(runs[2].createdAt >= runs[1].createdAt);
     assert.ok(
-      h.runService.events(runs[2].id).some((e) => e.type === "agent.message" && /extra thing/.test(String(e.data.content)))
+      (await h.runService.events(runs[2].id)).some((e) => e.type === "agent.message" && /extra thing/.test(String(e.data.content)))
     );
     // The adoption marker moved to the thread's new last-update time.
     const task = h.store.get<any>("tasks", result.taskId);

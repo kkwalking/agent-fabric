@@ -433,6 +433,7 @@ packages/
 ## 数据与安全
 
 * 数据保存在 `~/.fabric/db.json`（可用 `AGENTFABRIC_DATA_DIR` 覆盖到任意目录），原子写入。
+* Run 事件不进 db.json：事件负载按 run 分片，append-only 追加到 `~/.fabric/events/<runId>.jsonl`；db.json 只保留每 run 一行的索引（`eventShards`：文件、条数、字节数、`lastSeq` 高水位，`lastSeq` 同时用于重启后恢复全局 seq 计数器）。读取按需从分片文件载入。
 * `git` 类型 Workspace 在创建时克隆到 `AGENTFABRIC_DATA_DIR/workspaces/<id>`，Run 时挂载真实目录。
 * Secrets 值仅在创建时返回一次，其余接口返回掩码；Secrets 不进入日志与事件；按 `secretIds` 注入 Runtime 环境变量。
 * API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码。

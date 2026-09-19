@@ -128,17 +128,15 @@ async function waitForRunReal(runService: RunService, runId: string): Promise<Ru
   return current;
 }
 
-function agentMessages(runService: RunService, runId: string): string {
-  return runService
-    .events(runId)
+async function agentMessages(runService: RunService, runId: string): Promise<string> {
+  return (await runService.events(runId))
     .filter((e) => e.type === "agent.message")
     .map((e) => String(e.data?.content ?? ""))
     .join("\n");
 }
 
-function configInjectionEvent(runService: RunService, runId: string): Record<string, unknown> | undefined {
-  const evt = runService
-    .events(runId)
+async function configInjectionEvent(runService: RunService, runId: string): Promise<Record<string, unknown> | undefined> {
+  const evt = (await runService.events(runId))
     .find((e) => e.type === "log" && (e.data as Record<string, unknown>)?.kind === "config-injected");
   return evt?.data as Record<string, unknown> | undefined;
 }
@@ -185,10 +183,10 @@ test(
     });
     const finished = await waitForRunReal(h.runService, run.id);
     assert.equal(finished.status, "completed", finished.error);
-    assert.match(agentMessages(h.runService, run.id), /OK/, "pi replied");
+    assert.match(await agentMessages(h.runService, run.id), /OK/, "pi replied");
 
     // The provider config really was injected (v4 §1/§3).
-    const injected = configInjectionEvent(h.runService, run.id);
+    const injected = await configInjectionEvent(h.runService, run.id);
     assert.ok(injected, "config-injected event present");
     assert.equal(injected!.slug, "af-real-ds");
     assert.equal(injected!.baseUrl, "https://api.deepseek.com");
@@ -240,8 +238,8 @@ test(
     });
     const finished = await waitForRunReal(h.runService, run.id);
     assert.equal(finished.status, "completed", finished.error);
-    assert.match(agentMessages(h.runService, run.id), /PONG/, "opencode replied through the custom provider");
-    const injected = configInjectionEvent(h.runService, run.id);
+    assert.match(await agentMessages(h.runService, run.id), /PONG/, "opencode replied through the custom provider");
+    const injected = await configInjectionEvent(h.runService, run.id);
     assert.ok(injected, "config-injected event present");
     assert.equal(injected!.slug, "af-real-oc");
     assert.ok((finished.usage?.inputTokens ?? 0) > 0, "usage recorded through the generated config");
@@ -282,7 +280,7 @@ test(
     const finished = await waitForRunReal(h.runService, run.id);
     assert.equal(finished.status, "completed", finished.error);
     assert.ok(finished.containerId, "ran inside a real container");
-    assert.match(agentMessages(h.runService, run.id), /DOCK-OK/, "containerized opencode used the injected provider");
+    assert.match(await agentMessages(h.runService, run.id), /DOCK-OK/, "containerized opencode used the injected provider");
     assert.ok((finished.usage?.inputTokens ?? 0) > 0, "usage recorded across the container boundary");
   }
 );
@@ -326,7 +324,7 @@ test(
     // The only way PROF-OK appears is if the system instructions reached
     // the model through the harness (v4 §10).
     assert.match(
-      agentMessages(h.runService, run.id),
+      await agentMessages(h.runService, run.id),
       /PROF-OK/,
       "profile system instructions visibly shaped the model's reply"
     );
@@ -375,8 +373,7 @@ test(
     const finished = await waitForRunReal(h.runService, run.id);
     assert.equal(finished.status, "completed", finished.error);
 
-    const out = h.runService
-      .events(run.id)
+    const out = (await h.runService.events(run.id))
       .filter((e) => e.type === "shell.output")
       .map((e) => String(e.data?.line ?? ""))
       .join("\n");
@@ -418,7 +415,7 @@ test(
     assert.equal(first.status, "completed", first.error);
     assert.ok(first.containerId, "container id recorded");
     assert.ok(
-      h.runService.events(run.id).some((e) => e.type === "container.retained"),
+      (await h.runService.events(run.id)).some((e) => e.type === "container.retained"),
       "container retained (v4 §30)"
     );
     const name = `af-keep-${runtime.id}-${task.id}`;
@@ -430,7 +427,7 @@ test(
     const second = await waitForRunReal(h.runService, cont.run.id);
     assert.equal(second.status, "completed", second.error);
     assert.ok(
-      h.runService.events(cont.run.id).some((e) => e.type === "container.reused"),
+      (await h.runService.events(cont.run.id)).some((e) => e.type === "container.reused"),
       "same-task continuation reused the container"
     );
     assert.equal(second.containerId, first.containerId, "same physical container");
@@ -448,7 +445,7 @@ test(
     const third = await waitForRunReal(h.runService, other.run.id);
     assert.equal(third.status, "completed", third.error);
     assert.ok(
-      !h.runService.events(other.run.id).some((e) => e.type === "container.reused"),
+      !(await h.runService.events(other.run.id)).some((e) => e.type === "container.reused"),
       "an unrelated task never reuses task A's container (v4 §21/§22)"
     );
     assert.notEqual(third.containerId, first.containerId);
@@ -475,7 +472,7 @@ test(
     const { stdout: gone } = await exec("docker", ["ps", "-a", "--filter", `name=^/${slowName}$`, "-q"]);
     assert.equal(gone.trim(), "", "the aborted container was destroyed (v4 §24)");
     assert.ok(
-      !h.runService.events(slow.run.id).some((e) => e.type === "container.retained"),
+      !(await h.runService.events(slow.run.id)).some((e) => e.type === "container.retained"),
       "aborted keep-alive run never retains its container"
     );
 

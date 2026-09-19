@@ -285,7 +285,7 @@ test("continue on the same harness resumes the native session", async () => {
   const second = await waitForRun(h.runService, result.run.id);
   assert.equal(second.status, "completed");
 
-  const events = h.runService.events(second.id).map((e) => e.type);
+  const events = (await h.runService.events(second.id)).map((e) => e.type);
   assert.ok(events.includes("runtime.session.resumed"), `expected runtime.session.resumed in ${events.join(",")}`);
 });
 
@@ -496,7 +496,7 @@ test("switching harness performs a handoff, not a session migration", async () =
 
   // The handoff content must actually reach the new harness as its
   // instruction (spec v1 §20 Inject Handoff) — not stay a stored field.
-  const userMessages = h.runService.events(finished.id)
+  const userMessages = (await h.runService.events(finished.id))
     .filter((e) => e.type === "agent.message" && e.data?.role === "user")
     .map((e) => String(e.data?.content ?? ""));
   assert.ok(
@@ -540,7 +540,7 @@ test("assisted handoff generator extracts files, tests and run result", async ()
   const content = buildAssistedHandoffContent({
     task: h.store.get("tasks", taskId) as any,
     run,
-    events: h.runService.events(run.id),
+    events: await h.runService.events(run.id),
     artifacts: h.store.list("artifacts").filter((a: any) => a.runId === run.id),
   });
   assert.match(content.originalTask!, /Payment Refund|implement the payment refund feature/);
@@ -573,8 +573,8 @@ test("task, run history, artifacts, logs, handoff and session refs outlive conta
   await h.store.update<Run>("runs", run.id, { containerId: undefined });
   assert.ok(h.store.get("tasks", taskId));
   assert.equal(h.runService.forTask(taskId).length, 1);
-  assert.ok(h.runService.events(run.id).length > 5);
-  assert.ok(h.runService.logs(run.id).length > 0);
+  assert.ok((await h.runService.events(run.id)).length > 5);
+  assert.ok((await h.runService.logs(run.id)).length > 0);
   assert.ok(h.runtimeSessions.list({ taskId }).length === 1);
   assert.ok(h.handoffs.list({ taskId }).length >= 1);
 });

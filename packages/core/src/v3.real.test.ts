@@ -176,9 +176,8 @@ async function waitForRunReal(runService: RunService, runId: string): Promise<Ru
   return current;
 }
 
-function agentMessages(runService: RunService, runId: string): string {
-  return runService
-    .events(runId)
+async function agentMessages(runService: RunService, runId: string): Promise<string> {
+  return (await runService.events(runId))
     .filter((e) => e.type === "agent.message")
     .map((e) => String(e.data?.content ?? ""))
     .join("\n");
@@ -227,7 +226,7 @@ test("REAL: pi local native resume continues Run #1's context (v3 §19/§23)", {
   assert.equal(cont.continuity, "resume");
   const second = await waitForRunReal(h.runService, cont.run.id);
   assert.equal(second.status, "completed", second.error);
-  assert.match(agentMessages(h.runService, cont.run.id), /ZEPHYR-42/, "resumed pi continues Run #1's context");
+  assert.match(await agentMessages(h.runService, cont.run.id), /ZEPHYR-42/, "resumed pi continues Run #1's context");
 });
 
 /* ------------------------------------------------------------------ */
@@ -264,7 +263,7 @@ test("REAL: pi docker native resume across destroyed containers (v3 §19/§23)",
   const state = h.nativeStates.get(ref.nativeStateId!)!;
   assert.ok(existsSync(join(state.path, "agent", "sessions")), "session persisted in the opaque native state");
   assert.ok((first.usage?.inputTokens ?? 0) > 0, "usage survived the container boundary");
-  assert.ok(h.runService.events(run.id).some((e) => e.type === "agent.message" && e.source === "pi"));
+  assert.ok((await h.runService.events(run.id)).some((e) => e.type === "agent.message" && e.source === "pi"));
 
   /* Run #2: a NEW container attaches workspace + state and resumes. */
   const cont = await h.runService.continueTask(task.id, { prompt: "What was the secret word I told you? Reply with just the word." });
@@ -273,7 +272,7 @@ test("REAL: pi docker native resume across destroyed containers (v3 §19/§23)",
   assert.equal(second.status, "completed", second.error);
   assert.notEqual(second.containerId, first.containerId, "containers are disposable — a new one ran Run #2");
   assert.equal(second.nativeStateId, state.id, "Run #2 reattached the exact native state");
-  assert.match(agentMessages(h.runService, cont.run.id), /ORBIT-17/, "containerized pi native resume continues Run #1's context");
+  assert.match(await agentMessages(h.runService, cont.run.id), /ORBIT-17/, "containerized pi native resume continues Run #1's context");
 });
 
 /* ------------------------------------------------------------------ */
@@ -310,7 +309,7 @@ test("REAL: opencode local native resume continues Run #1's context (v3 §20/§2
   assert.equal(cont.continuity, "resume");
   const second = await waitForRunReal(h.runService, cont.run.id);
   assert.equal(second.status, "completed", second.error);
-  assert.match(agentMessages(h.runService, cont.run.id), /MANGO-9/, "resumed opencode continues Run #1's context");
+  assert.match(await agentMessages(h.runService, cont.run.id), /MANGO-9/, "resumed opencode continues Run #1's context");
 });
 
 /* ------------------------------------------------------------------ */
@@ -357,7 +356,7 @@ test("REAL: opencode docker native resume across destroyed containers (v3 §20/�
   assert.equal(second.status, "completed", second.error);
   assert.notEqual(second.containerId, first.containerId);
   assert.equal(second.nativeStateId, state.id);
-  assert.match(agentMessages(h.runService, cont.run.id), /NEBULA-5/, "containerized opencode resume continues Run #1's context");
+  assert.match(await agentMessages(h.runService, cont.run.id), /NEBULA-5/, "containerized opencode resume continues Run #1's context");
 });
 
 /* ------------------------------------------------------------------ */
@@ -397,5 +396,5 @@ test("REAL: pi → opencode cross-harness continuation is a handoff (v3 §21/§2
   const second = await waitForRunReal(h.runService, switched.run.id);
   assert.equal(second.status, "completed", second.error);
   // The handoff prompt plus the shared workspace carried the context.
-  assert.match(agentMessages(h.runService, switched.run.id), /HARBOR-21/);
+  assert.match(await agentMessages(h.runService, switched.run.id), /HARBOR-21/);
 });

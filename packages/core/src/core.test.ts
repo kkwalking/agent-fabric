@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, newId } from "./store.js";
@@ -33,22 +33,46 @@ test("event sequence numbers keep increasing across a store reload", async () =>
   const dir = mkdtempSync(join(tmpdir(), "af-test-"));
   const store1 = await Store.open(dir);
   const first = store1.nextSeq();
-  await store1.insert("events", {
+  await store1.appendEvent({
     id: newId("evt"), runId: "run_1", seq: first, type: "run.started", timestamp: "", data: {},
   });
-  await store1.commit();
 
   const store2 = await Store.open(dir);
   const second = store2.nextSeq();
   assert.equal(second, first + 1, "the counter resumes above the stored events");
-  await store2.insert("events", {
+  await store2.appendEvent({
     id: newId("evt"), runId: "run_1", seq: second, type: "run.completed", timestamp: "", data: {},
   });
-  await store2.commit();
 
   const reloaded = await Store.open(dir);
-  const seqs = reloaded.list<{ seq: number }>("events").map((e) => e.seq);
+  const seqs = (await reloaded.readEvents("run_1")).map((e) => e.seq);
   assert.deepEqual(seqs, [first, first + 1], "appended, never colliding");
+});
+
+test("event payloads shard per run; db.json keeps only the index", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "af-test-"));
+  const store = await Store.open(dir);
+  await store.appendEvent({ id: newId("evt"), runId: "run_a", seq: store.nextSeq(), type: "run.started", timestamp: "", data: {} });
+  await store.appendEvent({ id: newId("evt"), runId: "run_a", seq: store.nextSeq(), type: "log", timestamp: "", data: { line: "x" } });
+  await store.appendEvent({ id: newId("evt"), runId: "run_b", seq: store.nextSeq(), type: "run.started", timestamp: "", data: {} });
+
+  // Payloads live in per-run JSONL files; the raw database carries only
+  // one index row per run, never the event bodies.
+  const raw = JSON.parse(readFileSync(join(dir, "db.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(raw.events, undefined, "no event payloads in db.json");
+  const shards = raw.eventShards as Array<{ runId: string; count: number }>;
+  assert.deepEqual(
+    shards.map((s) => [s.runId, s.count]),
+    [["run_a", 2], ["run_b", 1]]
+  );
+  assert.equal(existsSync(join(dir, "events", "run_a.jsonl")), true);
+  assert.equal(existsSync(join(dir, "events", "run_b.jsonl")), true);
+
+  // Reads come back from the shard, sorted by seq, scoped to the run.
+  const a = await store.readEvents("run_a");
+  assert.deepEqual(a.map((e) => e.type), ["run.started", "log"]);
+  assert.deepEqual((await store.readEvents("run_b")).map((e) => e.runId), ["run_b"]);
+  assert.deepEqual(await store.readEvents("run_missing"), []);
 });
 
 test("masked secrets never expose plaintext", async () => {

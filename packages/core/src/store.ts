@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile, rename, rm } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   ID,
@@ -26,7 +26,7 @@ export type CollectionName =
   | "workspaces"
   | "tasks"
   | "runs"
-  | "events"
+  | "eventShards"
   | "artifacts"
   | "secrets"
   | "profiles"
@@ -35,6 +35,23 @@ export type CollectionName =
   | "nativeStates"
   | "config";
 
+/**
+ * Per-run index row for the event shards. Event payloads never enter
+ * db.json — they live append-only in `events/<runId>.jsonl` under the
+ * data dir; this row is all db.json carries.
+ */
+export interface EventShardIndex {
+  runId: ID;
+  /** Shard file path relative to the data dir. */
+  file: string;
+  count: number;
+  bytes: number;
+  /** Highest event seq in the shard; recovers the global seq counter on load. */
+  lastSeq: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Database {
   providers: Provider[];
   models: Model[];
@@ -42,7 +59,7 @@ export interface Database {
   workspaces: Workspace[];
   tasks: Task[];
   runs: Run[];
-  events: RunEvent[];
+  eventShards: EventShardIndex[];
   artifacts: Artifact[];
   secrets: Secret[];
   profiles: AgentProfile[];
@@ -65,7 +82,7 @@ export function emptyDatabase(): Database {
     workspaces: [],
     tasks: [],
     runs: [],
-    events: [],
+    eventShards: [],
     artifacts: [],
     secrets: [],
     profiles: [],
@@ -109,8 +126,15 @@ export class Store {
       const parsed = JSON.parse(raw) as Partial<Database> & {
         /** Legacy unified sessions (v2 §1–§5): dropped on load. */
         sessions?: unknown;
+        /**
+         * Legacy in-db event payloads (pre-shard): dropped on load —
+         * events live in per-run JSONL shards, db.json keeps only the
+         * eventShards index.
+         */
+        events?: unknown;
       };
       delete parsed.sessions;
+      delete parsed.events;
       this.db = { ...emptyDatabase(), ...parsed };
       if (!Array.isArray(this.db.providers)) this.db.providers = [];
       if (!Array.isArray(this.db.models)) this.db.models = [];
@@ -118,7 +142,7 @@ export class Store {
       if (!Array.isArray(this.db.workspaces)) this.db.workspaces = [];
       if (!Array.isArray(this.db.tasks)) this.db.tasks = [];
       if (!Array.isArray(this.db.runs)) this.db.runs = [];
-      if (!Array.isArray(this.db.events)) this.db.events = [];
+      if (!Array.isArray(this.db.eventShards)) this.db.eventShards = [];
       if (!Array.isArray(this.db.artifacts)) this.db.artifacts = [];
       if (!Array.isArray(this.db.secrets)) this.db.secrets = [];
       if (!Array.isArray(this.db.profiles)) this.db.profiles = [];
@@ -130,7 +154,6 @@ export class Store {
       // referencing the removed AgentFabric Session abstraction.
       for (const t of this.db.tasks) delete (t as { sessionId?: unknown }).sessionId;
       for (const r of this.db.runs) delete (r as { sessionId?: unknown }).sessionId;
-      for (const e of this.db.events) delete (e as { sessionId?: unknown }).sessionId;
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         this.db = emptyDatabase();
@@ -143,8 +166,9 @@ export class Store {
     // load and hands out seq numbers that already exist — and since a run's
     // events are read back sorted by seq, a freshly written event (a
     // handoff row, a tool result) silently renders *before* the work that
-    // preceded it instead of appending to it.
-    this.seq = this.db.events.reduce((max, e) => Math.max(max, e.seq ?? 0), 0) + 1;
+    // preceded it instead of appending to it. The counter recovers from the
+    // shards' lastSeq high-water marks.
+    this.seq = this.db.eventShards.reduce((max, s) => Math.max(max, s.lastSeq), 0) + 1;
   }
 
   private async persist(): Promise<void> {
@@ -179,6 +203,73 @@ export class Store {
     this.db.config = { ...this.db.config, ...patch };
     await this.persist();
     return this.db.config;
+  }
+
+  /* ---------- events: per-run JSONL shards, indexed in db.json ---------- */
+
+  private shardPath(runId: ID): string {
+    return join(this.dataDir, "events", `${runId}.jsonl`);
+  }
+
+  /**
+   * Appends one event to its run's shard file and upserts the run's index
+   * row. The append is the payload write; only the (small) index row is
+   * persisted into db.json.
+   */
+  async appendEvent(event: RunEvent): Promise<void> {
+    const line = JSON.stringify(event);
+    await mkdir(dirname(this.shardPath(event.runId)), { recursive: true });
+    await appendFile(this.shardPath(event.runId), line + "\n", "utf8");
+    const bytes = Buffer.byteLength(line) + 1;
+    const now = new Date().toISOString();
+    const shard = this.db.eventShards.find((s) => s.runId === event.runId);
+    if (shard) {
+      shard.count += 1;
+      shard.bytes += bytes;
+      shard.lastSeq = Math.max(shard.lastSeq, event.seq);
+      shard.updatedAt = now;
+    } else {
+      this.db.eventShards.push({
+        runId: event.runId,
+        file: join("events", `${event.runId}.jsonl`),
+        count: 1,
+        bytes,
+        lastSeq: event.seq,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    await this.persist();
+  }
+
+  /**
+   * A run's events, read back from its shard file sorted by seq. Returns
+   * [] for runs without a shard (no events yet, or a dropped legacy
+   * database).
+   */
+  async readEvents(runId: ID): Promise<RunEvent[]> {
+    const shard = this.db.eventShards.find((s) => s.runId === runId);
+    if (!shard) return [];
+    let raw: string;
+    try {
+      raw = await readFile(join(this.dataDir, shard.file), "utf8");
+    } catch {
+      return [];
+    }
+    const events: RunEvent[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        events.push(JSON.parse(line) as RunEvent);
+      } catch {
+        /* a torn tail line from a crash mid-append is skipped */
+      }
+    }
+    return events.sort((a, b) => a.seq - b.seq);
+  }
+
+  listEventShards(): EventShardIndex[] {
+    return this.db.eventShards;
   }
 
   /* ---------- generic collection helpers ---------- */
@@ -231,10 +322,7 @@ export class Store {
     this.db = emptyDatabase();
     this.seq = 1;
     await this.persist();
-    try {
-      await rm(this.file, { force: true });
-    } catch {
-      /* ignore */
-    }
+    await rm(this.file, { force: true });
+    await rm(join(this.dataDir, "events"), { recursive: true, force: true });
   }
 }

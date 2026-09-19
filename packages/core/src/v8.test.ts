@@ -1044,7 +1044,7 @@ test("T20 — an explicit handoff still carries the task into the next harness",
     assert.ok(instruction.includes("[User-authored]: fix the flaky tests"), "the user's own words cross the boundary");
 
     // The generation is auditable on the summarized run's event log.
-    const genEvt = h.runService.events(first.run.id).find((e) => e.type === "handoff.generated")!;
+    const genEvt = (await h.runService.events(first.run.id)).find((e) => e.type === "handoff.generated")!;
     assert.equal(genEvt.data.method, "context-bundle");
     await waitForRun(h.runService, cont.run.id);
   } finally {

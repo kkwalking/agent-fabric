@@ -411,15 +411,12 @@ export class RunService {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  events(runId: string): RunEvent[] {
-    return this.store
-      .list<RunEvent>("events")
-      .filter((e) => e.runId === runId)
-      .sort((a, b) => a.seq - b.seq);
+  async events(runId: string): Promise<RunEvent[]> {
+    return this.store.readEvents(runId);
   }
 
-  logs(runId: string): string[] {
-    return this.events(runId)
+  async logs(runId: string): Promise<string[]> {
+    return (await this.events(runId))
       .filter((e) => e.type === "log" || e.type === "shell.output" || e.type === "agent.message")
       .map((e) => {
         const line = String(e.data?.line ?? e.data?.message ?? e.data?.text ?? e.data?.content ?? "");
@@ -769,7 +766,7 @@ export class RunService {
       data,
       source: "core",
     };
-    await this.store.insert("events", event);
+    await this.store.appendEvent(event);
     if (run) {
       run.eventCount += 1;
       run.updatedAt = now();
@@ -1497,7 +1494,7 @@ export class RunService {
       level,
       source: "import",
     };
-    await this.store.insert("events", event);
+    await this.store.appendEvent(event);
     const run = this.store.get<Run>("runs", runId);
     if (run) {
       run.eventCount += 1;
@@ -1567,12 +1564,14 @@ export class RunService {
     const userPromptProvenance: "user-authored" | "harness-reported" = imported
       ? "harness-reported"
       : "user-authored";
-    const turns = coveredRuns.map((r) => ({
-      runId: r.id,
-      events: this.events(r.id),
-      userPrompt: r.userPrompt,
-      userPromptProvenance,
-    }));
+    const turns = await Promise.all(
+      coveredRuns.map(async (r) => ({
+        runId: r.id,
+        events: await this.events(r.id),
+        userPrompt: r.userPrompt,
+        userPromptProvenance,
+      }))
+    );
     const events = turns.flatMap((t) => t.events);
     const startedAt = Date.now();
 
@@ -2255,7 +2254,7 @@ export class RunService {
         level: eventOpts?.level,
         source: eventOpts?.source ?? "core",
       };
-      await store.insert("events", event);
+      await store.appendEvent(event);
       const r = store.get<Run>("runs", run.id);
       if (r) {
         r.eventCount += 1;

@@ -425,7 +425,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   // thread page renders — task, workspace, and per-run events, artifacts
   // and consumed handoff. Pure projection over existing records; no new
   // Message/Conversation/Session domain model.
-  app.get("/api/tasks/:id/thread", (req, res) => {
+  app.get("/api/tasks/:id/thread", async (req, res) => {
     const task = tasks.get(req.params.id);
     if (!task) return fail(res, new Error("Task not found"), 404);
     const taskRuns = runs.forTask(task.id);
@@ -444,12 +444,14 @@ export async function createApp(options: ServerOptions): Promise<Express> {
       task,
       workspace: currentWorkspaceId ? workspaces.get(currentWorkspaceId) ?? null : null,
       pendingHandoff,
-      runs: taskRuns.map((run) => ({
-        run,
-        events: runs.events(run.id),
-        artifacts: artifacts.list(run.id),
-        previousHandoff: run.previousHandoffId ? handoffs.get(run.previousHandoffId) ?? null : null,
-      })),
+      runs: await Promise.all(
+        taskRuns.map(async (run) => ({
+          run,
+          events: await runs.events(run.id),
+          artifacts: artifacts.list(run.id),
+          previousHandoff: run.previousHandoffId ? handoffs.get(run.previousHandoffId) ?? null : null,
+        }))
+      ),
     });
   });
 
@@ -521,16 +523,16 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const r = await runs.cancel(req.params.id);
     r ? ok(res, r) : fail(res, new Error("Run not found"), 404);
   });
-  app.get("/api/runs/:id/events", (req, res) => ok(res, runs.events(req.params.id)));
-  app.get("/api/runs/:id/logs", (req, res) => {
-    res.type("text/plain").send(runs.logs(req.params.id).join("\n"));
+  app.get("/api/runs/:id/events", async (req, res) => ok(res, await runs.events(req.params.id)));
+  app.get("/api/runs/:id/logs", async (req, res) => {
+    res.type("text/plain").send((await runs.logs(req.params.id)).join("\n"));
   });
 
   // SSE: real-time events for a single run.
-  app.get("/api/runs/:id/events/stream", (req, res) => {
+  app.get("/api/runs/:id/events/stream", async (req, res) => {
     const runId = req.params.id;
     sseHeaders(res);
-    const initial = runs.events(runId);
+    const initial = await runs.events(runId);
     for (const evt of initial) {
       res.write(`data: ${JSON.stringify(evt)}\n\n`);
     }

@@ -151,8 +151,7 @@ test("v4 §26: Provider → Model → Run — key, base URL and headers reach th
     assert.deepEqual(entry!.models, [{ id: "ds-flash-e2e", maxTokens: 4096 }]);
 
     // Unsupported model parameters are warned about, never silent (v4 §8).
-    const warned = h.runService
-      .events(run.id)
+    const warned = (await h.runService.events(run.id))
       .some(
         (e) =>
           e.type === "log" &&
@@ -555,7 +554,7 @@ test("v4 §30: keep-alive — same task reuses the container, another task does 
     });
     await waitCompleted(h, run.id);
     assert.ok(
-      h.runService.events(run.id).some((e) => e.type === "container.retained"),
+      (await h.runService.events(run.id)).some((e) => e.type === "container.retained"),
       "container retained after run #1"
     );
     assert.equal(h.runService.keptContainers().length, 1);
@@ -571,7 +570,7 @@ test("v4 §30: keep-alive — same task reuses the container, another task does 
     const cont = await h.runService.continueTask(task.id, { prompt: "The word?" });
     await waitCompleted(h, cont.run.id);
     assert.ok(
-      h.runService.events(cont.run.id).some((e) => e.type === "container.reused"),
+      (await h.runService.events(cont.run.id)).some((e) => e.type === "container.reused"),
       "same-task continuation reused the container"
     );
     assert.equal(
@@ -594,7 +593,7 @@ test("v4 §30: keep-alive — same task reuses the container, another task does 
     });
     await waitCompleted(h, other.run.id);
     assert.ok(
-      !h.runService.events(other.run.id).some((e) => e.type === "container.reused"),
+      !(await h.runService.events(other.run.id)).some((e) => e.type === "container.reused"),
       "an unrelated task must not reuse task A's container (v4 §21/§22)"
     );
     assert.equal(
@@ -651,7 +650,7 @@ test("v4 §23/§24: cancelling a keep-alive run stops the in-container harness a
     const rm = calls.find((c) => c[0] === "rm" && c.includes("-f"));
     assert.ok(rm, "the keep-alive container was destroyed after the abort");
     assert.ok(
-      !h.runService.events(run.id).some((e) => e.type === "container.retained"),
+      !(await h.runService.events(run.id)).some((e) => e.type === "container.retained"),
       "an aborted keep-alive run never retains its container"
     );
     assert.equal(h.runService.keptContainers().length, 0, "no lease left behind");
@@ -719,8 +718,7 @@ test("v4 §7: supported model parameters reach the pi harness", async () => {
     assert.equal(dump.argv[thinkIdx + 1], "high");
     // temperature remains explicitly warned (never silently ignored).
     assert.ok(
-      h.runService
-        .events(run.id)
+      (await h.runService.events(run.id))
         .some((e) => e.level === "warn" && ((e.data as any)?.unsupported ?? []).includes("temperature"))
     );
   } finally {

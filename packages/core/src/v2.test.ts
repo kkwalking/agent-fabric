@@ -67,10 +67,11 @@ test("legacy unified session data is dropped when the store loads (v2 §3)", asy
   const store = await Store.open(dir);
   const snap = store.snapshot() as Record<string, any>;
   assert.equal(snap.sessions, undefined, "the sessions collection is gone");
+  assert.equal(snap.events, undefined, "legacy in-db event payloads are gone (events shard per run)");
+  assert.ok(Array.isArray(snap.eventShards), "the eventShards index exists");
   assert.ok(Array.isArray(snap.nativeStates), "the nativeStates collection exists");
   assert.equal(snap.tasks[0].sessionId, undefined, "tasks no longer carry a unified sessionId");
   assert.equal(snap.runs[0].sessionId, undefined, "runs no longer carry a unified sessionId");
-  assert.equal(snap.events[0].sessionId, undefined, "events no longer carry a unified sessionId");
 });
 
 test("native state service creates, preserves, updates and deletes opaque state (v2 §13/§14)", async () => {
@@ -189,9 +190,9 @@ test("local opencode captures the native session through the shared parser (v2 �
     assert.equal(ref.executionBackend, "local");
     assert.equal(ref.nativeStateId, undefined, "local harness state lives in its own home — nothing to manage");
 
-    const messages = h.runService.events(run.id).filter((e) => e.type === "agent.message");
+    const messages = (await h.runService.events(run.id)).filter((e) => e.type === "agent.message");
     assert.ok(messages.length >= 1, "structured opencode output must be parsed, not logged as shell output");
-    assert.ok(h.runService.events(run.id).some((e) => e.type === "runtime.session.created"));
+    assert.ok((await h.runService.events(run.id)).some((e) => e.type === "runtime.session.created"));
   } finally {
     restore();
   }
@@ -226,7 +227,7 @@ test("containerized opencode native-resumes across destroyed ephemeral container
     assert.match(first.containerId ?? "", /^fakectr_/, "container id captured from the containerized backend");
 
     // Structured protocol survived the container boundary (v2 §7/§8).
-    const events1 = h.runService.events(run.id);
+    const events1 = await h.runService.events(run.id);
     const types1 = events1.map((e) => e.type);
     assert.ok(types1.includes("runtime.session.created"));
     assert.ok(types1.includes("native.state.attached"));
@@ -271,7 +272,7 @@ test("containerized opencode native-resumes across destroyed ephemeral container
     assert.match(second.containerId ?? "", /^fakectr_/);
     assert.notEqual(second.containerId, first.containerId, "a new disposable container is used");
 
-    const types2 = h.runService.events(cont.run.id).map((e) => e.type);
+    const types2 = (await h.runService.events(cont.run.id)).map((e) => e.type);
     assert.ok(types2.includes("runtime.session.resumed"));
     assert.ok(types2.includes("native.state.attached"));
     assert.equal(second.nativeStateId, state.id, "run #2 reattached the exact native state (v2 §15)");
@@ -284,8 +285,7 @@ test("containerized opencode native-resumes across destroyed ephemeral container
     assert.notEqual(sessionIdx, -1, "resume passes the native session reference into the container");
     assert.equal(run2Call[sessionIdx + 1], refId);
     assert.ok(run2Call.includes(`${state.path}:/root/.local/share/opencode:rw`), "native state reattached");
-    const resumedMessages = h.runService
-      .events(cont.run.id)
+    const resumedMessages = (await h.runService.events(cont.run.id))
       .filter((e) => e.type === "agent.message")
       .map((e) => String(e.data?.content ?? ""));
     assert.ok(
@@ -345,8 +345,7 @@ test("containerized pi native-resumes with the same semantics as local (v2 §10)
     );
 
     // Containerized structured output is parsed by the same mapper.
-    const messages1 = h.runService
-      .events(run.id)
+    const messages1 = (await h.runService.events(run.id))
       .filter((e) => e.type === "agent.message")
       .map((e) => String(e.data?.content ?? ""));
     assert.ok(messages1.some((c) => c.includes("pi fresh session")));
@@ -366,8 +365,7 @@ test("containerized pi native-resumes with the same semantics as local (v2 §10)
     assert.equal(run2Call[sessionIdx + 1], refId);
     assert.ok(!run2Call.includes("--no-session"), "resume replaces the no-session default");
 
-    const messages2 = h.runService
-      .events(cont.run.id)
+    const messages2 = (await h.runService.events(cont.run.id))
       .filter((e) => e.type === "agent.message")
       .map((e) => String(e.data?.content ?? ""));
     assert.ok(messages2.some((c) => c.includes(`pi resumed session ${refId}`)));

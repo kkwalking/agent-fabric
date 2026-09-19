@@ -248,11 +248,11 @@ test("pi local run persists a native session, resumes it, and records real usage
     assert.equal(first.usage?.byModel?.["fake-pi-model"]?.requests, 2);
 
     // Structured events were produced (v3 §5), including usage.updated.
-    const types = h.runService.events(run.id).map((e) => e.type);
+    const types = (await h.runService.events(run.id)).map((e) => e.type);
     for (const expected of ["agent.message", "tool.started", "tool.progress", "tool.completed", "run.progress", "usage.updated"]) {
       assert.ok(types.includes(expected as never), `pi must produce ${expected}, got: ${types.join(",")}`);
     }
-    const usageEvents = h.runService.events(run.id).filter((e) => e.type === "usage.updated");
+    const usageEvents = (await h.runService.events(run.id)).filter((e) => e.type === "usage.updated");
     assert.equal(usageEvents.length, 2, "one usage event per model request");
 
     /* ---- Run #2: native resume on the same harness + workspace ---- */
@@ -260,8 +260,7 @@ test("pi local run persists a native session, resumes it, and records real usage
     assert.equal(cont.continuity, "resume");
     const second = await waitForRun(h.runService, cont.run.id);
     assert.equal(second.status, "completed");
-    const messages = h.runService
-      .events(cont.run.id)
+    const messages = (await h.runService.events(cont.run.id))
       .filter((e) => e.type === "agent.message")
       .map((e) => String(e.data?.content ?? ""));
     assert.ok(messages.some((c) => c.includes("pi resumed session " + ref.nativeSessionRef)));
@@ -304,7 +303,7 @@ test("opencode local run persists a native session, resumes it, and records real
     assert.equal(first.usage?.modelRequests, 1);
     assert.ok(Math.abs((first.usage?.estimatedCost ?? 0) - 0.0031) < 1e-9);
 
-    const types = h.runService.events(run.id).map((e) => e.type);
+    const types = (await h.runService.events(run.id)).map((e) => e.type);
     for (const expected of ["agent.message", "tool.completed", "run.progress", "usage.updated"]) {
       assert.ok(types.includes(expected as never), `opencode must produce ${expected}, got: ${types.join(",")}`);
     }
@@ -313,8 +312,7 @@ test("opencode local run persists a native session, resumes it, and records real
     assert.equal(cont.continuity, "resume");
     const second = await waitForRun(h.runService, cont.run.id);
     assert.equal(second.status, "completed");
-    const messages = h.runService
-      .events(cont.run.id)
+    const messages = (await h.runService.events(cont.run.id))
       .filter((e) => e.type === "agent.message")
       .map((e) => String(e.data?.content ?? ""));
     assert.ok(messages.some((c) => c.includes(`opencode resumed session ${ref.nativeSessionRef}`)));
@@ -368,9 +366,9 @@ test("pi resume fails when the native state lost the session — success cannot 
     assert.equal(second.status, "failed");
     // The harness itself rejected the resume — its stderr is captured in
     // the run logs (success cannot be faked, v3 §3).
-    const logLines = h.runService.logs(cont.run.id).join("\n");
+    const logLines = (await h.runService.logs(cont.run.id)).join("\n");
     assert.match(logLines, /Session not found/);
-    assert.ok(h.runService.events(cont.run.id).some((e) => e.type === "run.failed"));
+    assert.ok((await h.runService.events(cont.run.id)).some((e) => e.type === "run.failed"));
   } finally {
     restore();
   }
@@ -507,7 +505,7 @@ test("containerized pi without an image refuses to run (v3 §10 plan A)", async 
     const finished = await waitForRun(h.runService, run.id);
     assert.equal(finished.status, "failed");
     assert.match(finished.error ?? "", /Pi Runtime Image/);
-    assert.ok(h.runService.events(run.id).some((e) => e.type === "runtime.error" && String(e.data?.error ?? "").includes("Pi Runtime Image")));
+    assert.ok((await h.runService.events(run.id)).some((e) => e.type === "runtime.error" && String(e.data?.error ?? "").includes("Pi Runtime Image")));
 
     // v3 §16/§17: without a usable image the runtime must not claim
     // native-resume capability.
@@ -587,16 +585,16 @@ test("pi produces the same structured events on local and docker execution (v3 �
       config: { containerCommand: ["node", fx.fakePi] },
     });
 
-    const eventsOf = (run: Run): Set<string> =>
-      new Set(h.runService.events(run.id).filter((e) => e.source === "pi").map((e) => e.type));
+    const eventsOf = async (run: Run): Promise<Set<string>> =>
+      new Set((await h.runService.events(run.id)).filter((e) => e.source === "pi").map((e) => e.type));
 
     const a = await h.runService.submit({ prompt: "local", runtimeId: local.id, workspaceId: ws.id });
     await waitForRun(h.runService, a.run.id);
     const b = await h.runService.submit({ prompt: "docker", runtimeId: containerized.id, workspaceId: ws.id });
     await waitForRun(h.runService, b.run.id);
 
-    const localEvents = eventsOf(a.run);
-    const dockerEvents = eventsOf(b.run);
+    const localEvents = await eventsOf(a.run);
+    const dockerEvents = await eventsOf(b.run);
     assert.deepEqual(
       [...localEvents].sort(),
       [...dockerEvents].sort(),

@@ -154,7 +154,7 @@ test("scenario A: claude-code run needs no provider/model, captures the session 
     assert.equal(ref.executionBackend, "local");
 
     // §7: events were parsed from the stream-json protocol.
-    const events = h.runService.events(run.id);
+    const events = await h.runService.events(run.id);
     assert.ok(events.some((e) => e.type === "agent.message" && String(e.data.content).includes("tests pass")));
     assert.ok(events.some((e) => e.type === "agent.thinking"));
     assert.ok(events.some((e) => e.type === "shell.command" && e.data.command === "npm test"));
@@ -215,7 +215,7 @@ test("scenario C: claude quota exhaustion is usage-limit, then hands off to Pi (
     assert.equal(finished.errorKind, "usage-limit", `error was: ${finished.error}`);
     assert.match(finished.error ?? "", /usage limit/i);
     // The failure event carries the classification for the Task page.
-    const failed = h.runService.events(run.id).find((e) => e.type === "run.failed");
+    const failed = (await h.runService.events(run.id)).find((e) => e.type === "run.failed");
     assert.equal(failed?.data?.errorKind, "usage-limit");
 
     // The workspace stays and the session context is readable — switch to Pi.
@@ -414,7 +414,7 @@ test("scenario B: adopt an existing claude session, resume same-harness, then ha
     assert.equal(runs.length, 1);
     assert.equal(runs[0].status, "completed");
     assert.equal(runs[0].userPrompt, "Please fix the login bug in auth.ts");
-    const events = h.runService.events(runs[0].id);
+    const events = await h.runService.events(runs[0].id);
     assert.ok(events.some((e) => e.type === "shell.command" && e.data.command === "npm test"));
     assert.ok(events.some((e) => e.type === "agent.message"));
     assert.ok(events.some((e) => e.type === "file.modified" && e.data.path === "src/auth.ts"));
