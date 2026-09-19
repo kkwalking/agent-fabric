@@ -28,7 +28,14 @@ import {
   type Run,
   type Task,
 } from "@agentfabric/core";
-import { buildRegistry, codexThreadSource, claudeCodeThreadSource, createDockerContainerOps } from "@agentfabric/runtimes";
+import {
+  buildRegistry,
+  codexThreadSource,
+  claudeCodeThreadSource,
+  zcodeThreadSource,
+  piThreadSource,
+  createDockerContainerOps,
+} from "@agentfabric/runtimes";
 
 export interface ServerOptions {
   dataDir: string;
@@ -113,6 +120,8 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
     codex: codexThreadSource,
     "claude-code": claudeCodeThreadSource,
+    zcode: zcodeThreadSource,
+    pi: piThreadSource,
   });
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();
@@ -213,7 +222,16 @@ export async function createApp(options: ServerOptions): Promise<Express> {
 
   /* ---------------- runtimes ---------------- */
 
-  app.get("/api/runtimes", (_req, res) => ok(res, runtimes.list()));
+  // `?usableInTask=true` serves the task composers' runtime list: enabled
+  // runtimes the product allows to execute a task. The list is the server's
+  // decision — the client renders it, it does not re-derive it; submit and
+  // continue enforce the same rule server-side.
+  app.get("/api/runtimes", (req, res) => {
+    if (req.query.usableInTask === "true") {
+      return ok(res, runtimes.enabled().filter((r) => r.usableInTask));
+    }
+    ok(res, runtimes.list());
+  });
   app.post("/api/runtimes", async (req, res) => {
     try {
       ok(res, await runtimes.create(req.body), 201);

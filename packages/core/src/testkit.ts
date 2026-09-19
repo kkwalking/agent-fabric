@@ -16,7 +16,9 @@ import {
   RuntimeSessionService,
   WorkspaceService,
   seedDefaults,
+  type NewRuntimeInput,
 } from "./services.js";
+import type { Runtime } from "./types.js";
 import { opencodeAdapter } from "../../runtimes/src/opencode.js";
 import { piAdapter } from "../../runtimes/src/pi.js";
 import { codexAdapter } from "../../runtimes/src/codex.js";
@@ -167,6 +169,18 @@ export const testCompletionFactory: CompletionFactory = () => async () => ({
   usage: { inputTokens: 10, outputTokens: 20 },
 });
 
+/**
+ * Runtimes created through the harness default to usable in tasks: these
+ * suites exercise run semantics, and product-level usability defaults are
+ * covered by their own tests. An explicit `usableInTask` in the input
+ * still wins.
+ */
+class HarnessRuntimes extends RuntimeService {
+  override async create(input: NewRuntimeInput): Promise<Runtime> {
+    return super.create({ usableInTask: true, ...input });
+  }
+}
+
 export async function freshHarness(opts?: { completionFactory?: CompletionFactory }): Promise<Harness> {
   const store = await Store.open(mkdtempSync(join(tmpdir(), "af-test-")));
   const bus = new EventBus();
@@ -177,6 +191,14 @@ export async function freshHarness(opts?: { completionFactory?: CompletionFactor
   registry.register(codexAdapter);
   registry.register(claudeCodeAdapter);
   await seedDefaults(store);
+  // Suites exercise run semantics: mark the seeded runtimes usable for
+  // tasks so tests target run behavior, not the product's usability
+  // defaults (those are covered by their own tests). Runtimes created
+  // through the harness default to usable via HarnessRuntimes below.
+  const runtimes = new HarnessRuntimes(store);
+  for (const r of runtimes.list()) {
+    if (!r.usableInTask) await runtimes.update(r.id, { usableInTask: true });
+  }
   // Real docker ops (routed at the fake docker binary by useBins) so
   // keep-alive abort destroys are observable in the docker call log.
   // The codex/claude-code thread sources are the real clients pointed at
@@ -192,7 +214,7 @@ export async function freshHarness(opts?: { completionFactory?: CompletionFactor
   return {
     store,
     runService,
-    runtimes: new RuntimeService(store),
+    runtimes,
     workspaces: new WorkspaceService(store),
     runtimeSessions: new RuntimeSessionService(store),
     nativeStates: new NativeStateService(store),

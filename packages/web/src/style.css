@@ -1672,6 +1672,28 @@ textarea + .hint {
   gap: 8px;
   margin-top: 4px;
 }
+/* ---------- Resource detail modal (clickable table rows) ---------- */
+tr.clickable {
+  cursor: pointer;
+}
+tr.clickable:hover td {
+  background: var(--panel-2);
+}
+.detail-list {
+  margin: 0 0 16px;
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 7px 16px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.detail-list dt {
+  color: var(--muted);
+}
+.detail-list dd {
+  margin: 0;
+  word-break: break-word;
+}
 .handoff-confirm p {
   margin: 0 0 14px;
   color: var(--muted);

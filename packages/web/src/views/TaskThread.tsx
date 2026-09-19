@@ -95,6 +95,9 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   /** In-flight pre-generation request, so the banner Cancel can abort it. */
   const handoffAbortRef = useRef<AbortController | null>(null);
   const runtimeCatalog = useAsync<any[]>(() => get("/api/runtimes"), [taskId]);
+  // The server's decision on which runtimes may execute a task — the pool
+  // the "Continue with X" escape hatches draw from.
+  const usableRuntimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), [taskId]);
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
   const providerList = providers.data ?? [];
 
@@ -256,10 +259,9 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   };
 
   // Cross-harness escape hatches offered when the current harness cannot
-  // continue (v6 §10, v7 §14): the other coding harnesses registered on
-  // this box. Each turn filters out its own harness kind.
-  const switchTargets = (runtimeCatalog.data ?? [])
-    .filter((r: any) => r.enabled && ["pi", "opencode", "codex", "claude-code"].includes(r.kind))
+  // continue (v6 §10, v7 §14): drawn from the runtime list the server
+  // serves as usable for tasks. Each turn filters out its own harness kind.
+  const switchTargets = (usableRuntimes.data ?? [])
     .map((r: any) => ({ id: r.id, name: r.name, kind: r.kind }));
   // runtimeId → kind lookup so each turn can exclude its own harness.
   const runtimeKinds = Object.fromEntries(
@@ -1090,7 +1092,10 @@ function Composer({
   /** Armed/generating handoff lifecycle, so the resume-vs-handoff preview stays truthful. */
   handoffState?: "generating" | "ready";
 }) {
-  const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
+  // The composer's runtime list is served, not derived: `?usableInTask=true`
+  // returns the enabled runtimes the product allows to execute a task.
+  // Submit and continue enforce the same rule server-side.
+  const runtimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
   const profiles = useAsync<any[]>(() => get("/api/agents"), []);
@@ -1108,6 +1113,7 @@ function Composer({
   const [handoffGate, setHandoffGate] = useState(false);
 
   const runtimeList = runtimes.data ?? [];
+  const inSelectable = (id?: string) => Boolean(id && runtimeList.some((r: any) => r.id === id));
   const modelList = models.data ?? [];
   const providerList = providers.data ?? [];
   const profile = (profiles.data ?? []).find((p: any) => p.id === profileId);
@@ -1127,15 +1133,16 @@ function Composer({
   );
 
   // Visible defaults — the submitted ids are always the concrete values on
-  // screen: same-runtime continue when possible, else the built-in Pi
-  // runtime; last used model, else first model of the first provider.
+  // screen: same-runtime continue when possible (and only ever a runtime
+  // that may execute tasks), else the first usable runtime; last used
+  // model, else first model of the first provider.
   const effectiveRuntimeId = runtimeTouched
     ? runtimeChoice
-    : inList(runtimeList, options.data?.targetRuntime?.id)
+    : inSelectable(options.data?.targetRuntime?.id)
       ? options.data.targetRuntime.id
-      : inList(runtimeList, previousRuntimeId)
+      : inSelectable(previousRuntimeId)
         ? previousRuntimeId
-        : runtimeList.find((r: any) => r.kind === "pi")?.id ?? runtimeList[0]?.id ?? "";
+        : runtimeList[0]?.id ?? "";
   const effectiveRuntime = runtimeList.find((r: any) => r.id === effectiveRuntimeId);
   // Harness-native targets (v6 §3, v7 §3) run on their own account/model
   // — the AgentFabric model selector does not apply.

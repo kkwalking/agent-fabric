@@ -70,6 +70,18 @@ export {
   encodeClaudeProjectDir,
 } from "./claudeCodeThreads.js";
 export {
+  zcodeThreadSource,
+  listZcodeSessions,
+  readZcodeSession,
+  zcodeDbDir,
+} from "./zcodeThreads.js";
+export {
+  piThreadSource,
+  listPiSessions,
+  readPiSession,
+  piSessionsRoot,
+} from "./piThreads.js";
+export {
   dockerAdapter,
   runDockerContainer,
   runDockerWithLifecycle,

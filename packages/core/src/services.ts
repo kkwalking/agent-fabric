@@ -248,6 +248,8 @@ export interface NewRuntimeInput {
   credentialSource?: Runtime["credentialSource"];
   defaultModelId?: ID;
   enabled?: boolean;
+  /** See `Runtime.usableInTask`; defaults to the kind-level table below. */
+  usableInTask?: boolean;
   ephemeral?: boolean;
   lifecycle?: Runtime["lifecycle"];
   capabilities?: Runtime["capabilities"];
@@ -259,6 +261,28 @@ export interface NewRuntimeInput {
   networkPolicy?: Runtime["networkPolicy"];
   filesystemPolicy?: Runtime["filesystemPolicy"];
   config?: Record<string, unknown>;
+}
+
+/**
+ * Kind-level default for `Runtime.usableInTask` — which runtime kinds can
+ * execute AgentFabric tasks today. Discovery-only kinds (zcode: sessions
+ * are found and adopted, but no runner adapter exists yet) and the mock
+ * default to false; the Runtimes page toggles the per-record value, so
+ * this table only decides what a *new* runtime record starts at.
+ */
+const USABLE_IN_TASK_BY_KIND: Record<Runtime["kind"], boolean> = {
+  opencode: true,
+  pi: true,
+  codex: false,
+  "claude-code": false,
+  zcode: false,
+  docker: false,
+  mock: false,
+  custom: false,
+};
+
+export function defaultUsableInTask(kind: Runtime["kind"]): boolean {
+  return USABLE_IN_TASK_BY_KIND[kind] ?? false;
 }
 
 export class RuntimeService {
@@ -291,6 +315,7 @@ export class RuntimeService {
       credentialSource: input.credentialSource,
       defaultModelId: input.defaultModelId,
       enabled: input.enabled ?? true,
+      usableInTask: input.usableInTask ?? defaultUsableInTask(input.kind),
       ephemeral: input.ephemeral ?? lifecycle.mode === "ephemeral",
       lifecycle,
       capabilities: input.capabilities,
@@ -962,9 +987,10 @@ export async function seedDefaults(store: Store): Promise<void> {
   // Existing installs (pre-v6/v7) get the harness-native local runtimes
   // seeded too — idempotent, keyed by kind.
   const existing = store.list<Runtime>("runtimes");
+  const runtimeService = new RuntimeService(store);
   if (existing.length > 0) {
     if (!existing.some((r) => r.kind === "codex")) {
-      await new RuntimeService(store).create({
+      await runtimeService.create({
         name: "Codex (ChatGPT)",
         kind: "codex",
         description: "Codex CLI on this machine — runs on its own ChatGPT login and subscription (no AgentFabric provider needed)",
@@ -975,7 +1001,7 @@ export async function seedDefaults(store: Store): Promise<void> {
       });
     }
     if (!existing.some((r) => r.kind === "claude-code")) {
-      await new RuntimeService(store).create({
+      await runtimeService.create({
         name: "Claude Code (Claude.ai)",
         kind: "claude-code",
         description: "Claude Code CLI on this machine — runs on its own Claude.ai login and subscription (no AgentFabric provider needed)",
@@ -985,12 +1011,30 @@ export async function seedDefaults(store: Store): Promise<void> {
         env: {},
       });
     }
+    if (!existing.some((r) => r.kind === "zcode")) {
+      await runtimeService.create({
+        name: "ZCode",
+        kind: "zcode",
+        description: "ZCode sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no ZCode runner adapter yet)",
+        credentialSource: "harness-native",
+        enabled: true,
+        ephemeral: true,
+        env: {},
+      });
+    }
+    // `usableInTask` postdates the seeded runtimes: write the kind default
+    // once, at boot, so every record carries a definite value. This is a
+    // write-time seeding step — reads never derive or repair the field.
+    for (const r of existing) {
+      if (r.usableInTask === undefined) {
+        await runtimeService.update(r.id, { usableInTask: defaultUsableInTask(r.kind) });
+      }
+    }
     return;
   }
 
   const providerService = new ProviderService(store);
   const modelService = new ModelService(store);
-  const runtimeService = new RuntimeService(store);
 
   // A generic OpenAI-compatible provider with no key; users fill in their own.
   const provider = await providerService.create({
@@ -1041,6 +1085,15 @@ export async function seedDefaults(store: Store): Promise<void> {
     name: "Claude Code (Claude.ai)",
     kind: "claude-code",
     description: "Claude Code CLI on this machine — runs on its own Claude.ai login and subscription (no AgentFabric provider needed)",
+    credentialSource: "harness-native",
+    enabled: true,
+    ephemeral: true,
+    env: {},
+  });
+  await runtimeService.create({
+    name: "ZCode",
+    kind: "zcode",
+    description: "ZCode sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no ZCode runner adapter yet)",
     credentialSource: "harness-native",
     enabled: true,
     ephemeral: true,

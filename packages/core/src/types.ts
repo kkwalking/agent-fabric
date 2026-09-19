@@ -76,6 +76,7 @@ export type RuntimeKind =
   | "pi"
   | "codex"
   | "claude-code"
+  | "zcode"
   | "docker"
   | "mock"
   | "custom";
@@ -177,6 +178,14 @@ export interface Runtime {
   credentialSource?: CredentialSource;
   defaultModelId?: ID;
   enabled: boolean;
+  /**
+   * Whether this runtime may be picked as a task's execution target. The
+   * task page's runtime selectors filter on it: a runtime without a
+   * working runner adapter (e.g. zcode — its sessions are discovered and
+   * adopted, but it cannot execute here yet) defaults to false, and the
+   * Runtimes page toggles the per-record value.
+   */
+  usableInTask: boolean;
   /**
    * Ephemeral runtime: container destroyed after the run.
    * Superseded by `lifecycle.mode`; kept for backward compatibility —

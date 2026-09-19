@@ -76,12 +76,18 @@ async function freshHarness(): Promise<Harness> {
   registry.register(mockAdapter);
   registry.register(customAdapter);
   await seedDefaults(store);
+  // Suites exercise run semantics: seeded runtimes are marked usable for
+  // tasks (the product default is covered by its own tests).
+  const runtimes = new RuntimeService(store);
+  for (const r of runtimes.list()) {
+    if (!r.usableInTask) await runtimes.update(r.id, { usableInTask: true });
+  }
   const runService = new RunService(store, bus, registry, undefined, testCompletionFactory);
   return {
     store,
     runService,
     workspaces: new WorkspaceService(store),
-    runtimes: new RuntimeService(store),
+    runtimes,
     runtimeSessions: new RuntimeSessionService(store),
     handoffs: new HandoffService(store),
   };
@@ -306,7 +312,7 @@ test("continue on the same harness without a resumable session falls back to han
 test("an untouched continue targets the latest run's runtime, not the task's original one", async () => {
   const h = await freshHarness();
   const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
-  const second = await h.runtimes.create({ name: "Mock B", kind: "mock", enabled: true, ephemeral: true });
+  const second = await h.runtimes.create({ name: "Mock B", kind: "mock", enabled: true, ephemeral: true, usableInTask: true });
   // The task starts on the mock runtime (its default), then one turn runs on
   // a different runtime via an explicit composer-style switch.
   const { taskId } = await startTaskOn(h, mockRuntime.id);
@@ -455,7 +461,7 @@ test("a handoff left armed by another client cannot hijack a later turn", async 
 test("switching harness performs a handoff, not a session migration", async () => {
   const h = await freshHarness();
   const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
-  const customRuntime = await h.runtimes.create({ name: "Custom B", kind: "custom" });
+  const customRuntime = await h.runtimes.create({ name: "Custom B", kind: "custom", usableInTask: true });
   const wsDir = mkdtempSync(join(tmpdir(), "af-hoff-"));
   const ws = await h.workspaces.import({ name: "payment-service", type: "local", path: wsDir });
 
@@ -551,7 +557,7 @@ test("assisted handoff generator extracts files, tests and run result", async ()
 test("rendered handoff prompt instructs a new session explicitly", async () => {
   const h = await freshHarness();
   const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
-  const customRuntime = await h.runtimes.create({ name: "Custom B", kind: "custom" });
+  const customRuntime = await h.runtimes.create({ name: "Custom B", kind: "custom", usableInTask: true });
   const { taskId } = await startTaskOn(h, mockRuntime.id);
   const result = await h.runService.continueTask(taskId, { prompt: "go", runtimeId: customRuntime.id });
   const prompt = renderHandoffPrompt(result.handoff!, "go");
@@ -659,7 +665,7 @@ test("keep-alive containers are re-armed from docker labels after a restart", as
 test("continuation without any previous run still records an originating handoff", async () => {
   const h = await freshHarness();
   const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
-  const customRuntime = await h.runtimes.create({ name: "Custom B", kind: "custom" });
+  const customRuntime = await h.runtimes.create({ name: "Custom B", kind: "custom", usableInTask: true });
   // Create the task via the public API, wait for its run to settle, then
   // remove the runs to simulate a task that has no execution history.
   const { task } = await h.runService.submit({ prompt: "fresh", runtimeId: mockRuntime.id });

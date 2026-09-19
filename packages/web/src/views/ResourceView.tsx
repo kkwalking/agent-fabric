@@ -1,6 +1,6 @@
 import { ReactNode, useState } from "react";
 import { del, get, post, put, fmtTime, shortId } from "../api";
-import { StatusBadge, useAsync, ErrorBox, Field } from "../components";
+import { StatusBadge, useAsync, ErrorBox, Field, Modal } from "../components";
 
 interface Column {
   key: string;
@@ -23,6 +23,13 @@ interface Config {
   columns: Column[];
   createFields: CreateField[];
   rowActions?: (row: any, reload: () => void) => ReactNode;
+  /**
+   * Row click opens a detail modal — for resources whose attributes don't
+   * fit the table. `reload` refreshes the list (the modal re-reads the row
+   * by id, so toggles reflect in place); `close` dismisses it.
+   */
+  detail?: (row: any, helpers: { reload: () => void; close: () => void }) => ReactNode;
+  detailTitle?: (row: any) => string;
 }
 
 /** Long mono values (ids, paths) clip to an ellipsis; the full value stays in the hover tooltip. */
@@ -57,28 +64,54 @@ const configs: Record<string, Config> = {
       { key: "id", label: "ID", render: (r) => <Id value={r.id} /> },
       { key: "name", label: "Name", render: (r) => <span className="nw">{r.name}</span> },
       { key: "kind", label: "Kind" },
-      { key: "image", label: "Image", render: (r) => <Clip value={r.image ?? "-"} max={200} /> },
-      { key: "containerized", label: "Container", render: (r) => String(Boolean(r.containerized)) },
-      {
-        key: "credentialSource",
-        label: "Credentials",
-        render: (r) => (r.credentialSource === "harness-native" ? "Harness native" : "AgentFabric"),
-      },
-      { key: "lifecycle", label: "Lifecycle", render: (r) => r.lifecycle?.mode ?? (r.ephemeral === false ? "persistent" : "ephemeral") },
       { key: "enabled", label: "Enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
+      { key: "usableInTask", label: "Usable in tasks", render: (r) => (r.usableInTask ? "yes" : "no") },
     ],
     createFields: [
       { key: "name", label: "Name", required: true },
-      { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "docker", "mock", "custom"] },
+      { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "zcode", "docker", "mock", "custom"] },
       { key: "image", label: "Docker image", placeholder: "node:22-alpine" },
       { key: "command", label: "Container command (docker kind)", placeholder: "sh -c echo hello" },
       { key: "lifecycle", label: "Container lifecycle", type: "select", options: ["ephemeral", "keep-alive", "persistent"] },
+      { key: "usableInTask", label: "Usable in tasks", type: "select", options: ["true", "false"] },
       { key: "description", label: "Description" },
     ],
     rowActions: (row, reload) => (
       <>
         <button className="small" onClick={() => toggleRuntime(row, reload)}>{row.enabled ? "disable" : "enable"}</button>
+        <button className="small" onClick={() => toggleUsable(row, reload)}>{row.usableInTask ? "disallow in tasks" : "allow in tasks"}</button>
         <button className="small danger" onClick={() => removeItem("/api/runtimes", row.id, reload)}>delete</button>
+      </>
+    ),
+    detailTitle: (r) => `Runtime: ${r.name}`,
+    detail: (r, { reload, close }) => (
+      <>
+        <dl className="detail-list">
+          <dt>ID</dt><dd className="mono">{r.id}</dd>
+          <dt>Name</dt><dd>{r.name}</dd>
+          <dt>Kind</dt><dd>{r.kind}</dd>
+          <dt>Description</dt><dd>{r.description ?? "—"}</dd>
+          <dt>Credentials</dt><dd>{r.credentialSource === "harness-native" ? "Harness native" : "AgentFabric"}</dd>
+          <dt>Enabled</dt><dd>{r.enabled ? "yes" : "no"}</dd>
+          <dt>Usable in tasks</dt><dd>{r.usableInTask ? "yes" : "no"}</dd>
+          <dt>Lifecycle</dt><dd>{r.lifecycle?.mode ?? (r.ephemeral === false ? "persistent" : "ephemeral")}</dd>
+          <dt>Containerized</dt><dd>{String(Boolean(r.containerized))}</dd>
+          <dt>Image</dt><dd>{r.image ?? "—"}</dd>
+          <dt>Command</dt><dd>{Array.isArray(r.command) && r.command.length > 0 ? r.command.join(" ") : "—"}</dd>
+          <dt>Working directory</dt><dd>{r.cwd ?? "—"}</dd>
+          <dt>Default model</dt><dd>{r.defaultModelId ?? "—"}</dd>
+          <dt>Context window</dt><dd>{r.contextWindow ?? "—"}</dd>
+          <dt>Env keys</dt><dd>{Object.keys(r.env ?? {}).join(", ") || "—"}</dd>
+          <dt>Created</dt><dd>{fmtSaved(r.createdAt)}</dd>
+          <dt>Updated</dt><dd>{fmtSaved(r.updatedAt)}</dd>
+        </dl>
+        <div className="row">
+          <span className="right">
+            <button className="small" onClick={() => toggleRuntime(r, reload)}>{r.enabled ? "disable" : "enable"}</button>
+            <button className="small" onClick={() => toggleUsable(r, reload)}>{r.usableInTask ? "disallow in tasks" : "allow in tasks"}</button>
+            <button className="small danger" onClick={() => { removeItem("/api/runtimes", r.id, reload); close(); }}>delete</button>
+          </span>
+        </div>
       </>
     ),
   },
@@ -151,6 +184,11 @@ async function toggleRuntime(row: any, reload: () => void) {
   reload();
 }
 
+async function toggleUsable(row: any, reload: () => void) {
+  await put(`/api/runtimes/${row.id}`, { usableInTask: !row.usableInTask });
+  reload();
+}
+
 /**
  * Lightweight harness runtime status (v6 §12, v7 §16): for each enabled
  * harness-native runtime, show CLI installed / authenticated / credential
@@ -217,6 +255,10 @@ export function ResourceView({ kind }: { kind: string }) {
   const [form, setForm] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Detail modal holds the row *id*: after an action reloads the list, the
+  // modal re-reads the fresh row, so toggles reflect without reopening.
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const detailRow = data?.find((r) => r.id === detailId);
 
   if (!cfg) return <div>Unknown resource kind: {kind}</div>;
 
@@ -228,6 +270,13 @@ export function ResourceView({ kind }: { kind: string }) {
       if (cfg.path === "/api/runtimes") {
         if (body.command) body.command = String(body.command).split(" ");
         if (body.lifecycle) body.lifecycle = { mode: body.lifecycle };
+        // The form carries strings; unset ("") falls back to the server's
+        // kind default.
+        if (body.usableInTask === "true" || body.usableInTask === "false") {
+          body.usableInTask = body.usableInTask === "true";
+        } else {
+          delete body.usableInTask;
+        }
         delete body.ephemeral;
       }
       await post(cfg.path, body);
@@ -288,9 +337,14 @@ export function ResourceView({ kind }: { kind: string }) {
               </thead>
               <tbody>
                 {data.map((row) => (
-                  <tr key={row.id}>
+                  <tr
+                    key={row.id}
+                    className={cfg.detail ? "clickable" : undefined}
+                    title={cfg.detail ? "Click for details" : undefined}
+                    onClick={cfg.detail ? () => setDetailId(row.id) : undefined}
+                  >
                     {cfg.columns.map((c) => <td key={c.key}>{c.render ? c.render(row) : String(row[c.key] ?? "")}</td>)}
-                    <td className="actions">{cfg.rowActions?.(row, reload)}</td>
+                    <td className="actions" onClick={(e) => e.stopPropagation()}>{cfg.rowActions?.(row, reload)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -300,6 +354,12 @@ export function ResourceView({ kind }: { kind: string }) {
           <div className="muted">{loading ? "Loading…" : "No items yet."}</div>
         )}
       </div>
+
+      {detailRow && cfg.detail && (
+        <Modal title={cfg.detailTitle ? cfg.detailTitle(detailRow) : "Details"} onClose={() => setDetailId(null)}>
+          {cfg.detail(detailRow, { reload, close: () => setDetailId(null) })}
+        </Modal>
+      )}
 
       {kind === "runtimes" && <HarnessStatusCard />}
     </div>

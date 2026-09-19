@@ -275,6 +275,23 @@ export class HandoffRequiredError extends Error {
 }
 
 /**
+ * The target runtime is marked `usableInTask: false` — it may not execute
+ * AgentFabric tasks (e.g. a discovery-only kind with no runner adapter).
+ * Blocked at submit/continue time with a machine-readable code, never
+ * surfaced later as a harness launch failure.
+ */
+export class RuntimeNotUsableError extends Error {
+  readonly code = "runtime-not-usable";
+  constructor(runtime: Runtime) {
+    super(
+      `Runtime "${runtime.name}" (${runtime.kind}) is not usable for tasks (usableInTask is disabled) — ` +
+        "pick a usable runtime, or enable it on the Runtimes page."
+    );
+    this.name = "RuntimeNotUsableError";
+  }
+}
+
+/**
  * A context window the runtime itself declares, if any (v9 §5). Explicit
  * capability metadata beats every configured fallback and is the only way a
  * harness-native target's real window can reach the handoff budget.
@@ -442,6 +459,7 @@ export class RunService {
   async submit(input: NewTaskInput): Promise<SubmitResult> {
     const resolved = await this.resolveTask(input);
     this.assertProviderUsable(resolved.modelId);
+    this.assertRuntimeUsable(resolved.runtimeId ? this.runtimeService().get(resolved.runtimeId) : undefined);
     const task = await this.taskService().create(resolved);
     const profile = resolved.profileId ? this.profileService().get(resolved.profileId) : undefined;
     const run = await this.createRun(task, {
@@ -474,6 +492,17 @@ export class RunService {
         `Provider "${provider.name}" is disabled — enable it before starting runs with model "${model.alias ?? model.name}"`
       );
     }
+  }
+
+  /**
+   * A runtime marked `usableInTask: false` may not execute a task here
+   * (e.g. discovery-only kinds without a runner adapter). Enforced at the
+   * execution entry points — submit and continue — so the API cannot
+   * bypass what the composers filter.
+   */
+  private assertRuntimeUsable(runtime: Runtime | undefined): void {
+    if (!runtime) return;
+    if (!runtime.usableInTask) throw new RuntimeNotUsableError(runtime);
   }
 
   /**
@@ -514,6 +543,9 @@ export class RunService {
     const sameHarness = previousRuntime?.kind === target.kind;
     const workspaceId = input.workspaceId ?? task.workspaceId ?? previousRun?.workspaceId;
     this.assertProviderUsable(input.modelId ?? profile?.modelId ?? task.modelId ?? previousRun?.modelId);
+    // A runtime the product marks unusable for tasks never executes here —
+    // not as a UI filter the API could bypass.
+    this.assertRuntimeUsable(target);
     // The candidate lookup filters by harness; every other dimension
     // (capability, state, workspace) is decided by the compatibility
     // gate so the blocking reason is always available for the result.

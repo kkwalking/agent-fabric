@@ -25,7 +25,10 @@ import { navigate } from "../router";
  */
 
 export function NewTaskView() {
-  const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
+  // The composer's runtime list is served, not derived: `?usableInTask=true`
+  // returns the enabled runtimes the product allows to execute a task.
+  // Submit enforces the same rule server-side.
+  const runtimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
   const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
@@ -43,6 +46,10 @@ export function NewTaskView() {
   const [error, setError] = useState<string | null>(null);
 
   const runtimeList = runtimes.data ?? [];
+  // Only runtimes that may execute a task are offered (`usableInTask`):
+  // discovery-only kinds (zcode) never start a task, they are adopted from
+  // the Sessions page.
+  const selectableRuntimes = runtimeList.filter((r: any) => r.enabled && r.usableInTask);
   const modelList = models.data ?? [];
   const workspaceList = workspaces.data ?? [];
   const providerList = providers.data ?? [];
@@ -52,13 +59,12 @@ export function NewTaskView() {
   // Visible defaults — the submitted ids are always the concrete values on
   // screen. Choosing an Agent profile visibly re-resolves the fields the
   // user has not touched.
-  const builtinPi =
-    runtimeList.find((r: any) => r.kind === "pi" && r.enabled) ?? runtimeList.find((r: any) => r.kind === "pi");
+  const builtinPi = selectableRuntimes.find((r: any) => r.kind === "pi");
   const effectiveRuntimeId = runtimeTouched
     ? runtimeChoice
-    : inList(runtimeList, profile?.runtimeId)
+    : inList(selectableRuntimes, profile?.runtimeId)
       ? profile.runtimeId
-      : builtinPi?.id ?? runtimeList.find((r: any) => r.enabled)?.id ?? runtimeList[0]?.id ?? "";
+      : builtinPi?.id ?? selectableRuntimes[0]?.id ?? "";
   const effectiveRuntime = runtimeList.find((r: any) => r.id === effectiveRuntimeId);
   // Harness-native runtimes (v6 §2/§3, v7 §2/§3) run on their own account —
   // Codex's ChatGPT or Claude Code's Claude.ai login and default model. No
@@ -146,7 +152,7 @@ export function NewTaskView() {
             onChange={(e) => { setRuntimeChoice(e.target.value); setRuntimeTouched(true); }}
             title="Runtime"
           >
-            {runtimeList.map((r: any) => (
+            {selectableRuntimes.map((r: any) => (
               <option key={r.id} value={r.id}>Runtime: {r.name} ({r.kind})</option>
             ))}
           </select>

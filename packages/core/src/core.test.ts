@@ -8,13 +8,24 @@ import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { RuntimeRegistry } from "./runtime.js";
 import { RunService } from "./orchestrator.js";
-import { ProviderService, ModelService, RuntimeService, WorkspaceService, SecretService, seedDefaults } from "./services.js";
+import { ProviderService, ModelService, RuntimeService, TaskService, WorkspaceService, SecretService, seedDefaults } from "./services.js";
+import type { Runtime } from "./types.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import { addUsage, estimateCost } from "./cost.js";
 
 async function freshStore(): Promise<Store> {
   const dir = mkdtempSync(join(tmpdir(), "af-test-"));
   return Store.open(dir);
+}
+
+/**
+ * The seeded mock runtime defaults to unusable in tasks (product kind
+ * default); tests exercising run semantics opt in explicitly.
+ */
+async function usableMock(store: Store): Promise<Runtime> {
+  const mock = store.list<Runtime>("runtimes").find((r) => r.kind === "mock")!;
+  await new RuntimeService(store).update(mock.id, { usableInTask: true });
+  return mock;
 }
 
 test("store persists and reloads records", async () => {
@@ -85,13 +96,75 @@ test("masked secrets never expose plaintext", async () => {
   assert.ok(listed?.masked.includes("***"));
 });
 
+test("usableInTask: kind default at creation, explicit override, seed backfill", async () => {
+  const store = await freshStore();
+  const runtimes = new RuntimeService(store);
+  // Kind defaults: pi/opencode may execute tasks; discovery-only and mock kinds may not.
+  assert.equal((await runtimes.create({ name: "pi", kind: "pi" })).usableInTask, true);
+  assert.equal((await runtimes.create({ name: "oc", kind: "opencode" })).usableInTask, true);
+  assert.equal((await runtimes.create({ name: "zc", kind: "zcode" })).usableInTask, false);
+  assert.equal((await runtimes.create({ name: "mock", kind: "mock" })).usableInTask, false);
+  // An explicit input wins over the kind default.
+  assert.equal((await runtimes.create({ name: "zc-on", kind: "zcode", usableInTask: true })).usableInTask, true);
+
+  // A record created before the field existed gets the kind default written
+  // once by seedDefaults — reads never derive or repair the field.
+  const legacy = await store.insert("runtimes", {
+    id: newId("rt"),
+    name: "legacy pi",
+    kind: "pi",
+    enabled: true,
+    createdAt: "",
+    updatedAt: "",
+  });
+  await seedDefaults(store);
+  assert.equal(store.get<Runtime>("runtimes", legacy.id)?.usableInTask, true);
+  const zc = store.list<Runtime>("runtimes").find((r) => r.name === "zc")!;
+  assert.equal(zc.usableInTask, false);
+  // Toggling via update() persists.
+  await runtimes.update(zc.id, { usableInTask: true });
+  assert.equal(store.get<Runtime>("runtimes", zc.id)?.usableInTask, true);
+});
+
+test("usableInTask is enforced at the execution entry points, not just filtered in the UI", async () => {
+  const store = await freshStore();
+  const bus = new EventBus();
+  const registry = new RuntimeRegistry();
+  registry.register(mockAdapter);
+  const runtimes = new RuntimeService(store);
+  const tasks = new TaskService(store);
+  const runService = new RunService(store, bus, registry);
+  const unusable = await runtimes.create({ name: "mock-off", kind: "mock", usableInTask: false });
+
+  // Submit refuses an unusable runtime with a machine-readable code.
+  try {
+    await runService.submit({ prompt: "hello", runtimeId: unusable.id });
+    assert.fail("submit must refuse an unusable runtime");
+  } catch (e) {
+    assert.equal((e as { code?: string }).code, "runtime-not-usable");
+    assert.match((e as Error).message, /mock-off/);
+  }
+
+  // Continue refuses it as the continuation target, too.
+  const usable = await runtimes.create({ name: "mock-on", kind: "mock", usableInTask: true });
+  const { run } = await runService.submit({ prompt: "first", runtimeId: usable.id });
+  await waitForRun(runService, run.id, ["pending", "starting", "running"]);
+  const task = tasks.get(run.taskId)!;
+  try {
+    await runService.continueTask(task.id, { prompt: "next", runtimeId: unusable.id });
+    assert.fail("continue must refuse an unusable runtime");
+  } catch (e) {
+    assert.equal((e as { code?: string }).code, "runtime-not-usable");
+  }
+});
+
 test("mock run completes with events, usage and artifacts", async () => {
   const store = await freshStore();
   const bus = new EventBus();
   const registry = new RuntimeRegistry();
   registry.register(mockAdapter);
   await seedDefaults(store);
-  const mockRuntime = store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const mockRuntime = await usableMock(store);
   const runService = new RunService(store, bus, registry);
   const { run } = await runService.submit({ prompt: "hello", runtimeId: mockRuntime.id, modelId: undefined });
   // Wait for completion
@@ -147,7 +220,7 @@ test("execution policy max model calls aborts the run", async () => {
   const registry = new RuntimeRegistry();
   registry.register(mockAdapter);
   await seedDefaults(store);
-  const mockRuntime = store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const mockRuntime = await usableMock(store);
   const runService = new RunService(store, bus, registry);
   const { run } = await runService.submit({
     prompt: "policy test",
@@ -165,7 +238,7 @@ test("execution policy max tokens aborts the run", async () => {
   const registry = new RuntimeRegistry();
   registry.register(mockAdapter);
   await seedDefaults(store);
-  const mockRuntime = store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const mockRuntime = await usableMock(store);
   const runService = new RunService(store, bus, registry);
   const { run } = await runService.submit({
     prompt: "policy test",
@@ -183,7 +256,7 @@ test("execution policy max cost aborts the run", async () => {
   const registry = new RuntimeRegistry();
   registry.register(mockAdapter);
   await seedDefaults(store);
-  const mockRuntime = store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const mockRuntime = await usableMock(store);
   const runService = new RunService(store, bus, registry);
   const { run } = await runService.submit({
     prompt: "policy test",
@@ -201,7 +274,7 @@ test("task tools are stored and merged into policy tool permissions", async () =
   const registry = new RuntimeRegistry();
   registry.register(mockAdapter);
   await seedDefaults(store);
-  const mockRuntime = store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const mockRuntime = await usableMock(store);
   const runService = new RunService(store, bus, registry);
   const { task } = await runService.submit({
     prompt: "tools test",
