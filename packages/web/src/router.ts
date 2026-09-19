@@ -28,6 +28,7 @@ export interface Route {
     | "new-task"
     | "tasks"
     | "task"
+    | "trash"
     | "runs"
     | "run"
     | "llm"
@@ -47,6 +48,7 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   "/": "dashboard",
   "/new": "new-task",
   "/tasks": "tasks",
+  "/trash": "trash",
   "/runs": "runs",
   "/llm": "llm",
   "/runtimes": "runtimes",

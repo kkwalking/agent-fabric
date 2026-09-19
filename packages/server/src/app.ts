@@ -126,6 +126,22 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();
 
+  // Background purge (失败要响): soft-deleted tasks older than the
+  // retention window are physically removed with their runs, events,
+  // artifacts, handoffs and session refs. Runs once at boot, then hourly;
+  // a failing pass is logged loudly, never swallowed.
+  const purgeDeletedTasks = async () => {
+    try {
+      const purged = await tasks.purgeExpired();
+      if (purged.length > 0) console.log(`[agent-fabric] purged ${purged.length} expired deleted task(s): ${purged.join(", ")}`);
+    } catch (err) {
+      console.error("[agent-fabric] deleted-task purge failed:", err);
+    }
+  };
+  await purgeDeletedTasks();
+  const purgeTimer = setInterval(purgeDeletedTasks, 60 * 60 * 1000);
+  purgeTimer.unref();
+
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: "10mb" }));
@@ -141,7 +157,8 @@ export async function createApp(options: ServerOptions): Promise<Express> {
         models: models.list().length,
         runtimes: runtimes.list().length,
         workspaces: workspaces.list().length,
-        tasks: tasks.list().length,
+        tasks: tasks.list({ deleted: false }).length,
+        deletedTasks: tasks.list({ deleted: true }).length,
         runs: runs.list().length,
         artifacts: artifacts.list().length,
         secrets: secrets.list().length,
@@ -425,7 +442,10 @@ export async function createApp(options: ServerOptions): Promise<Express> {
 
   /* ---------------- tasks ---------------- */
 
-  app.get("/api/tasks", (_req, res) => ok(res, tasks.list()));
+  // Live tasks by default; `?deleted=true` serves the recoverable-deleted
+  // list (Trash). A deleted task is invisible to task-scoped reads and
+  // actions until restored.
+  app.get("/api/tasks", (req, res) => ok(res, tasks.list({ deleted: req.query.deleted === "true" })));
   app.post("/api/tasks", async (req, res) => {
     try {
       ok(res, await tasks.create(req.body as NewTaskInput), 201);
@@ -434,8 +454,18 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     }
   });
   app.get("/api/tasks/:id", (req, res) => {
-    const t = tasks.get(req.params.id);
+    const t = tasks.getLive(req.params.id);
     t ? ok(res, t) : fail(res, new Error("Task not found"), 404);
+  });
+  // Soft delete: the task (with its runs and history) stays recoverable
+  // until the retention window expires and the purge pass removes it.
+  app.delete("/api/tasks/:id", async (req, res) => {
+    const t = await tasks.softDelete(req.params.id);
+    t ? ok(res, t) : fail(res, new Error("Task not found"), 404);
+  });
+  app.post("/api/tasks/:id/restore", async (req, res) => {
+    const t = await tasks.restore(req.params.id);
+    t ? ok(res, t) : fail(res, new Error("Deleted task not found"), 404);
   });
   app.get("/api/tasks/:id/runs", (req, res) => ok(res, runs.forTask(req.params.id)));
 
@@ -444,7 +474,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   // and consumed handoff. Pure projection over existing records; no new
   // Message/Conversation/Session domain model.
   app.get("/api/tasks/:id/thread", async (req, res) => {
-    const task = tasks.get(req.params.id);
+    const task = tasks.getLive(req.params.id);
     if (!task) return fail(res, new Error("Task not found"), 404);
     const taskRuns = runs.forTask(task.id);
     // The thread's current workspace follows the latest run (a continuation
@@ -476,6 +506,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   // Preview of the resume-vs-handoff decision (spec v1 §18: make the
   // continuity explicit before executing).
   app.get("/api/tasks/:id/continue-options", (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
     try {
       const runtimeId = typeof req.query.runtimeId === "string" ? req.query.runtimeId : undefined;
       ok(res, runs.continueOptions(req.params.id, runtimeId));
@@ -487,6 +518,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   // Continue a task: same harness → native Resume; different harness
   // (or no native resume) → Handoff (spec v1 §20).
   app.post("/api/tasks/:id/continue", async (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
     try {
       const body = req.body as ContinueTaskInput;
       if (!body?.prompt) throw new Error("prompt is required");
@@ -501,6 +533,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   // continue reuses the stored summary instead of regenerating it. This is
   // an explicit request: a missing model summary is an error, not a digest.
   app.post("/api/tasks/:id/handoff", async (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
     try {
       const body = (req.body ?? {}) as { runtimeId?: string };
       ok(res, await runs.generateHandoff(req.params.id, body.runtimeId, { signal: requestAbort(res) }), 201);
@@ -514,7 +547,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   // happened there after adoption. The task page's Refresh button is the
   // only trigger — there is no background polling.
   app.post("/api/tasks/:id/sync-thread", async (req, res) => {
-    if (!tasks.get(req.params.id)) return fail(res, new Error("Task not found"), 404);
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
     try {
       ok(res, await runs.syncImportedThread(req.params.id));
     } catch (e) {

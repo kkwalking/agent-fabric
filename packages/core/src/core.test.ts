@@ -314,3 +314,78 @@ test("git workspace clones a local repository into the data dir", async () => {
   assert.ok(existsSync(join(ws.path!, "hello.txt")), "cloned file should exist");
   assert.ok(existsSync(join(ws.path!, ".git")), "clone should be a git repository");
 });
+
+test("task soft delete: hidden from live lists, restorable with all data intact", async () => {
+  const store = await freshStore();
+  const tasks = new TaskService(store);
+  const task = await tasks.create({ prompt: "survive deletion" });
+  const run = await store.insert("runs", {
+    id: newId("run"),
+    taskId: task.id,
+    taskTitle: task.title,
+    status: "completed",
+    artifactIds: [],
+    eventCount: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  } as any);
+
+  assert.equal(tasks.list({ deleted: false }).length, 1);
+  assert.equal(tasks.list({ deleted: true }).length, 0);
+
+  const deleted = await tasks.softDelete(task.id);
+  assert.ok(deleted?.deletedAt);
+  assert.equal(tasks.list({ deleted: false }).length, 0);
+  assert.equal(tasks.list({ deleted: true }).length, 1);
+  assert.equal(tasks.getLive(task.id), undefined);
+
+  // Deleting twice is a miss, and a live task cannot be restored.
+  assert.equal(await tasks.softDelete(task.id), undefined);
+  assert.equal(await tasks.restore(newId("task")), undefined);
+
+  const restored = await tasks.restore(task.id);
+  assert.equal(restored?.deletedAt, undefined);
+  assert.equal(tasks.getLive(task.id)?.id, task.id);
+  assert.ok(store.get("runs", run.id), "restore must not touch related records");
+});
+
+test("purgeExpired physically removes expired deleted tasks with their runs, events, artifacts, handoffs and sessions", async () => {
+  const store = await freshStore();
+  const tasks = new TaskService(store);
+  const task = await tasks.create({ prompt: "purge me" });
+  const run = await store.insert("runs", {
+    id: newId("run"),
+    taskId: task.id,
+    taskTitle: task.title,
+    status: "completed",
+    artifactIds: [],
+    eventCount: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  } as any);
+  await store.appendEvent({ id: newId("evt"), runId: run.id, seq: store.nextSeq(), type: "log", timestamp: new Date().toISOString(), data: {} });
+  const artifact = await store.insert("artifacts", { id: newId("art"), runId: run.id, name: "a.txt", kind: "text", createdAt: new Date().toISOString() } as any);
+  const handoff = await store.insert("handoffs", { id: newId("ho"), taskId: task.id, fromRunId: run.id, source: "agentfabric", content: {}, artifactIds: [], createdAt: new Date().toISOString() } as any);
+  const session = await store.insert("runtimeSessions", { id: newId("rses"), runtimeKind: "mock", nativeSessionRef: "x", resumeSupported: false, taskId: task.id, runId: run.id, status: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as any);
+  const other = await tasks.create({ prompt: "still here" });
+  const shardFile = join(store.dataDir, "events", `${run.id}.jsonl`);
+  assert.ok(existsSync(shardFile));
+
+  await tasks.softDelete(task.id);
+
+  // Inside the retention window nothing is purged.
+  assert.deepEqual(await tasks.purgeExpired(), []);
+  assert.ok(tasks.get(task.id));
+
+  // A zero retention purges every deleted task — and only that task.
+  const purged = await tasks.purgeExpired(0);
+  assert.deepEqual(purged, [task.id]);
+  assert.equal(tasks.get(task.id), undefined);
+  assert.equal(store.get("runs", run.id), undefined);
+  assert.equal(store.get("artifacts", artifact.id), undefined);
+  assert.equal(store.get("handoffs", handoff.id), undefined);
+  assert.equal(store.get("runtimeSessions", session.id), undefined);
+  assert.equal(store.listEventShards().some((s) => s.runId === run.id), false);
+  assert.equal(existsSync(shardFile), false);
+  assert.ok(tasks.getLive(other.id), "an unrelated live task survives the purge");
+});

@@ -1813,6 +1813,78 @@ tr.clickable:hover td {
   flex-wrap: wrap;
 }
 
+/* Per-task three-dot action menu (Tasks page). Vertically centered on the
+   row's right edge, outside the clickable card surface via stopPropagation. */
+.task-item-menu {
+  position: relative;
+  align-self: center;
+  flex-shrink: 0;
+  display: flex;
+}
+.task-item-menu .icon-btn {
+  width: 30px;
+  height: 30px;
+}
+.menu {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  z-index: 20;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+}
+.menu-item {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.menu-item:hover {
+  background: var(--panel-2);
+}
+.menu-item.danger {
+  color: var(--red);
+}
+.menu-item.danger:hover {
+  background: rgba(209, 36, 47, 0.05);
+}
+
+/* Task delete confirmation (Modal) */
+.delete-confirm-question {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+  word-break: break-word;
+}
+.delete-confirm .muted {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+}
+.delete-confirm .check {
+  margin: 10px 0 2px;
+  font-size: 12.5px;
+}
+
+/* Dashboard stat card that doubles as a link (Deleted tasks → Trash) */
+button.stat.clickable {
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+button.stat.clickable:hover {
+  border-color: #d7d7d5;
+  box-shadow: var(--shadow-pop);
+}
+
 /* ---------- New task ---------- */
 
 .new-task {

@@ -1,16 +1,40 @@
-import { get, fmtRelative } from "../api";
-import { StatusBadge, useAsync, ErrorBox } from "../components";
+import { useEffect, useState } from "react";
+import { del, get, fmtRelative } from "../api";
+import { Icon, Modal, StatusBadge, useAsync, ErrorBox } from "../components";
 import { navigate } from "../router";
+
+// Per-browser UI preference: when set, deleting a task skips the confirm modal.
+const SUPPRESS_DELETE_CONFIRM_KEY = "agentfabric.deleteTaskConfirmSuppressed";
 
 /**
  * Task List (v5 §16/§32): Tasks are the user's long-lived work threads;
  * Runs are executions inside them. Clicking a task opens its thread —
- * the primary surface — not a run page.
+ * the primary surface — not a run page. The three-dot menu soft-deletes:
+ * the task stays recoverable for 30 days from the Dashboard's deleted
+ * tasks card.
  */
 export function TasksView() {
   const tasks = useAsync<any[]>(() => get("/api/tasks"), []);
   const runs = useAsync<any[]>(() => get("/api/runs"), []);
   const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
+  // Which task's action menu is open (one at a time).
+  const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
+  // Task awaiting confirmation in the delete modal.
+  const [confirmTask, setConfirmTask] = useState<any | null>(null);
+  const [dontAskAgain, setDontAskAgain] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Clicks outside the menu (and its three-dot button) close it. The
+  // opening click itself also bubbles here after the effect attached, so
+  // the target is checked instead of relying on propagation ordering.
+  useEffect(() => {
+    if (!menuTaskId) return;
+    const close = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement | null)?.closest(".task-item-menu")) setMenuTaskId(null);
+    };
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [menuTaskId]);
 
   if (tasks.error) return <ErrorBox message={tasks.error} />;
 
@@ -37,6 +61,34 @@ export function TasksView() {
     })
     .sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
 
+  const deleteTask = async (task: any) => {
+    setConfirmTask(null);
+    setActionError(null);
+    try {
+      await del(`/api/tasks/${task.id}`);
+      tasks.reload();
+      runs.reload();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const requestDelete = (task: any) => {
+    setMenuTaskId(null);
+    if (localStorage.getItem(SUPPRESS_DELETE_CONFIRM_KEY) === "1") {
+      void deleteTask(task);
+    } else {
+      setDontAskAgain(false);
+      setConfirmTask(task);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!confirmTask) return;
+    if (dontAskAgain) localStorage.setItem(SUPPRESS_DELETE_CONFIRM_KEY, "1");
+    await deleteTask(confirmTask);
+  };
+
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}>
@@ -50,6 +102,8 @@ export function TasksView() {
         A Task is your long-term work thread. The system executes each step as a Run — resume or hand off
         between agents without leaving the thread.
       </p>
+
+      <ErrorBox message={actionError} />
 
       {entries.length === 0 ? (
         <div className="card muted">
@@ -79,9 +133,48 @@ export function TasksView() {
                 <StatusBadge status={status} />
                 <span className="muted task-item-time">{fmtRelative(lastActivity)}</span>
               </div>
+              <div className="task-item-menu" onClick={(e) => e.stopPropagation()}>
+                <button
+                  className="icon-btn"
+                  title="Task actions"
+                  onClick={() => setMenuTaskId((open) => (open === task.id ? null : task.id))}
+                >
+                  <Icon name="more" />
+                </button>
+                {menuTaskId === task.id && (
+                  <div className="menu">
+                    <button className="menu-item danger" onClick={() => requestDelete(task)}>Delete</button>
+                  </div>
+                )}
+              </div>
             </div>
           ))}
         </div>
+      )}
+
+      {confirmTask && (
+        <Modal title="Delete task" onClose={() => setConfirmTask(null)}>
+          <div className="delete-confirm">
+            <p className="delete-confirm-question">
+              Delete task <strong>{confirmTask.title}</strong>?
+            </p>
+            <p className="muted">
+              It is hidden from Tasks but kept for 30 days — restore it from Dashboard → Deleted tasks.
+            </p>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={dontAskAgain}
+                onChange={(e) => setDontAskAgain(e.target.checked)}
+              />
+              Don't ask again
+            </label>
+            <div className="modal-actions">
+              <button onClick={() => setConfirmTask(null)}>Cancel</button>
+              <button className="danger" onClick={confirmDelete}>Delete</button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

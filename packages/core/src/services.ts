@@ -25,6 +25,7 @@ import type {
   ResourceLimits,
   RuntimeSessionRef,
   RuntimeNativeState,
+  Handoff,
 } from "./types.js";
 
 export function now(): string {
@@ -629,15 +630,30 @@ export interface NewTaskInput {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * How long a soft-deleted task stays recoverable before the server's
+ * purge pass physically removes it with everything it owns.
+ */
+export const TASK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 export class TaskService {
   constructor(private store: Store) {}
 
-  list(): Task[] {
-    return this.store.list<Task>("tasks");
+  /** `deleted` narrows the list: `false` = live tasks, `true` = deleted ones, absent = both. */
+  list(filter?: { deleted?: boolean }): Task[] {
+    const all = this.store.list<Task>("tasks");
+    if (filter?.deleted === undefined) return all;
+    return all.filter((t) => (t.deletedAt != null) === filter.deleted);
   }
 
   get(id: ID): Task | undefined {
     return this.store.get<Task>("tasks", id);
+  }
+
+  /** The task when it has not been soft-deleted — the only form task-scoped reads and actions accept. */
+  getLive(id: ID): Task | undefined {
+    const task = this.get(id);
+    return task?.deletedAt == null ? task : undefined;
   }
 
   async create(input: NewTaskInput): Promise<Task> {
@@ -665,8 +681,48 @@ export class TaskService {
     return this.store.update<Task>("tasks", id, patch);
   }
 
-  async remove(id: ID): Promise<boolean> {
-    return this.store.remove("tasks", id);
+  /** Soft delete: stamp `deletedAt`, hide from live lists, keep everything for restore. */
+  async softDelete(id: ID): Promise<Task | undefined> {
+    const task = this.get(id);
+    if (!task || task.deletedAt != null) return undefined;
+    return this.store.update<Task>("tasks", id, { deletedAt: now() });
+  }
+
+  /** Clear the soft-delete stamp. Fails for unknown or live tasks. */
+  async restore(id: ID): Promise<Task | undefined> {
+    const task = this.get(id);
+    if (!task || task.deletedAt == null) return undefined;
+    return this.store.update<Task>("tasks", id, { deletedAt: undefined });
+  }
+
+  /**
+   * Physically delete tasks whose `deletedAt` is older than `retentionMs`:
+   * the task record plus its runs, run event shards, artifacts, handoffs
+   * and runtime session references. Returns the purged task ids.
+   */
+  async purgeExpired(retentionMs: number = TASK_RETENTION_MS): Promise<ID[]> {
+    const cutoff = Date.now() - retentionMs;
+    const expired = this.list({ deleted: true }).filter((t) => Date.parse(t.deletedAt!) <= cutoff);
+    const purged: ID[] = [];
+    for (const task of expired) {
+      const runs = this.store.list<Run>("runs").filter((r) => r.taskId === task.id);
+      for (const run of runs) {
+        for (const artifact of this.store.list<Artifact>("artifacts").filter((a) => a.runId === run.id)) {
+          await this.store.remove("artifacts", artifact.id);
+        }
+        await this.store.removeEventShard(run.id);
+        await this.store.remove("runs", run.id);
+      }
+      for (const h of this.store.list<Handoff>("handoffs").filter((h) => h.taskId === task.id)) {
+        await this.store.remove("handoffs", h.id);
+      }
+      for (const s of this.store.list<RuntimeSessionRef>("runtimeSessions").filter((s) => s.taskId === task.id)) {
+        await this.store.remove("runtimeSessions", s.id);
+      }
+      await this.store.remove("tasks", task.id);
+      purged.push(task.id);
+    }
+    return purged;
   }
 }
 

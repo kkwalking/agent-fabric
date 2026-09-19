@@ -1193,8 +1193,9 @@ export class RunService {
   async listHarnessThreads(kind: string, filter: HarnessThreadFilter = {}): Promise<HarnessThreadSummary[]> {
     const threads = await this.threadSource(kind).listThreads(filter);
     // Adoption marker: task metadata { harness, threadId } (set by import).
+    // Live tasks only — a soft-deleted task must not claim a thread.
     const adopted = new Map<string, ID>();
-    for (const task of this.taskService().list()) {
+    for (const task of this.taskService().list({ deleted: false })) {
       const meta = task.metadata ?? {};
       if (meta.importedFromHarness === kind && typeof meta.importedThreadId === "string") {
         adopted.set(meta.importedThreadId, task.id);

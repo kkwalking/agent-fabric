@@ -24,6 +24,7 @@ export type IconName =
   | "eye"
   | "eyeOff"
   | "trash"
+  | "more"
   | "plus"
   | "terminal"
   | "refresh"
@@ -162,6 +163,14 @@ const iconPaths: Record<IconName, ReactNode> = {
       <path d="M8 6V4.5A1.5 1.5 0 0 1 9.5 3h5A1.5 1.5 0 0 1 16 4.5V6" />
       <path d="m19 6-.9 13.1a2 2 0 0 1-2 1.9H7.9a2 2 0 0 1-2-1.9L5 6" />
       <path d="M10 10.5v6M14 10.5v6" />
+    </>
+  ),
+  // Vertical kebab (the three-dot task menu)
+  more: (
+    <>
+      <circle cx="12" cy="5.4" r="1.25" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="18.6" r="1.25" fill="currentColor" stroke="none" />
     </>
   ),
   plus: <path d="M12 5v14M5 12h14" />,

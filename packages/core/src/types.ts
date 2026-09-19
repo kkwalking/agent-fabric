@@ -278,6 +278,13 @@ export interface Task {
   timeoutMs?: number;
   policy?: ExecutionPolicy;
   metadata?: Record<string, unknown>;
+  /**
+   * Set when the task was soft-deleted (recoverable, hidden from the live
+   * lists); absent = live. The server purges soft-deleted tasks — record,
+   * runs, events, artifacts, handoffs — once this is older than the
+   * retention window (`TASK_RETENTION_MS`).
+   */
+  deletedAt?: string;
   createdAt: string;
 }
 

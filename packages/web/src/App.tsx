@@ -4,6 +4,7 @@ import { ResourceView } from "./views/ResourceView";
 import { LlmView } from "./views/Llm";
 import { RunsView, RunDetailView } from "./views/Runs";
 import { TasksView } from "./views/Tasks";
+import { TrashView } from "./views/Trash";
 import { NewTaskView } from "./views/NewTask";
 import { SessionsView } from "./views/Sessions";
 import { TaskThreadView } from "./views/TaskThread";
@@ -124,6 +125,7 @@ export function App() {
         {route.view === "dashboard" && <Dashboard />}
         {route.view === "new-task" && <NewTaskView />}
         {route.view === "tasks" && <TasksView />}
+        {route.view === "trash" && <TrashView />}
         {route.view === "task" && route.id && <TaskThreadView taskId={route.id} />}
         {route.view === "runs" && <RunsView />}
         {route.view === "run" && route.id && <RunDetailView runId={route.id} />}

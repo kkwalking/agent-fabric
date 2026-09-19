@@ -272,6 +272,17 @@ export class Store {
     return this.db.eventShards;
   }
 
+  /**
+   * Physically drops a run's shard file and its index row — the cleanup
+   * half of `appendEvent`, used when a task is purged with its runs.
+   */
+  async removeEventShard(runId: ID): Promise<void> {
+    const idx = this.db.eventShards.findIndex((s) => s.runId === runId);
+    if (idx !== -1) this.db.eventShards.splice(idx, 1);
+    await rm(this.shardPath(runId), { force: true });
+    await this.persist();
+  }
+
   /* ---------- generic collection helpers ---------- */
 
   list<T>(col: CollectionName): T[] {

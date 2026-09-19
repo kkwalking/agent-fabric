@@ -1,5 +1,6 @@
 import { get } from "../api";
 import { useAsync, ErrorBox } from "../components";
+import { navigate } from "../router";
 
 interface DashboardData {
   counts: Record<string, number>;
@@ -36,6 +37,11 @@ export function Dashboard() {
             <div className="lbl">{label}</div>
           </div>
         ))}
+        {/* Entry to the Trash: deleted tasks are recoverable for 30 days. */}
+        <button className="stat clickable" onClick={() => navigate("/trash")}>
+          <div className="num">{data.counts.deletedTasks}</div>
+          <div className="lbl">Deleted tasks</div>
+        </button>
         <div className="stat">
           <div className="num">${data.usage.estimatedCost.toFixed(4)}</div>
           <div className="lbl">Total cost</div>

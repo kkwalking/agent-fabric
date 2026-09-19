@@ -53,7 +53,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Runtime | OpenCode / Pi Agent / Codex Local / Claude Code Local / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
 | Workspace | 本地目录 / Git / Volume，持久化，与 Run 关联 |
-| Task | 指定 Runtime / Model / Workspace / Env / Secrets / 资源限制 / 超时 / Policy |
+| Task | 指定 Runtime / Model / Workspace / Env / Secrets / 资源限制 / 超时 / Policy；软删除后保留 30 天可恢复，过期物理清理 |
 | Run | Pending→Starting→Running→Completed/Failed/Cancelled/Timeout，查看/取消/重跑 |
 | Runtime Native Session | 只保存 Harness 原生 Session 的不透明引用（RuntimeSessionRef），同 Harness Native Resume，跨 Harness 走 Handoff；不存在统一的 AgentFabric Session |
 | Runtime Native State | Harness 私有状态的持久化目录（Opaque），容器销毁后仍可恢复 Native Session |
@@ -92,6 +92,13 @@ npm run dev:web
 * **Run Detail 退回为 Run Inspector（`/runs/:runId`）**：高级执行详情 / 调试 / 审计页面——Raw Events、Logs、Artifacts、Usage、Runtime Native Session、Native State、Handoff 与完整 `inputInstruction`。
 * **Runs 页可复制 Native Session id**：每个产生过 native session 的 Run 在操作列提供 **copy session id**——悬停可见完整 id 与该 harness 的 resume 命令（`claude --resume <id>` / `codex exec resume <id>` / `pi --session <id>` / `opencode --session <id>`），复制后可直接去原生 harness CLI resume；Run Inspector 的 native session 行提供同样的复制按钮。
 * **前端 Presentation Layer**：Raw Event → Presentation Projector → Timeline Item（事件合并：`tool.started`+`tool.completed` → 一个 Tool Activity，`shell.command`+`shell.output` → 一个 Command Activity），不修改 Core Event Schema；`GET /api/tasks/:id/thread` 提供只读聚合，未引入新的 Message / Conversation / Session 后端模型。
+
+## Task 删除与恢复（软删除 + 30 天保留）
+
+* **删除入口（Tasks 页）**：每条 Task 行右侧的三点菜单提供 **Delete**。删除是**软删除**——写 `deletedAt` 时间戳后从 Tasks 列表消失，但对该 Task 的一切 scoped 读写（thread 页、continue、handoff、sync-thread、按 id 读取）表现为「不存在」（404）；它的 runs、事件、handoffs 等从属数据原样保留，不发生任何改写。
+* **恢复入口（Dashboard）**：Dashboard 的 **Deleted tasks** 卡片显示已删除 Task 的数量，点击进入 `/trash`（Deleted tasks 页），每条可 **restore**——清除 `deletedAt` 后 Task 连同全部历史回到 Tasks 页。保留期内数据从未被动过，恢复即完整还原。
+* **30 天后物理清理**：保留期 `TASK_RETENTION_MS` = 30 天。服务器启动时执行一次、之后每小时一次后台清理 pass，把 `deletedAt` 超过保留期的 Task **连同其 runs、run 事件 shard 文件、artifacts、handoffs、runtime session 引用一起物理删除**；清理失败打错误日志（失败要响，不静默跳过）。
+* **API**：`GET /api/tasks` 默认只返回未删除 Task，`?deleted=true` 返回已删除列表；`DELETE /api/tasks/:id` 软删除；`POST /api/tasks/:id/restore` 恢复；`GET /api/dashboard` 的 `counts.tasks` 只计未删除 Task，`counts.deletedTasks` 为已删除数量。
 
 ## Codex Local 与跨 Harness Handoff（v6）
 
