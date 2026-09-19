@@ -303,6 +303,27 @@ test("continue on the same harness without a resumable session falls back to han
   assert.match(result.explanation, /Handoff/);
 });
 
+test("an untouched continue targets the latest run's runtime, not the task's original one", async () => {
+  const h = await freshHarness();
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const second = await h.runtimes.create({ name: "Mock B", kind: "mock", enabled: true, ephemeral: true });
+  // The task starts on the mock runtime (its default), then one turn runs on
+  // a different runtime via an explicit composer-style switch.
+  const { taskId } = await startTaskOn(h, mockRuntime.id);
+  const switched = await h.runService.continueTask(taskId, { prompt: "run here instead", runtimeId: second.id });
+  await waitForRun(h.runService, switched.run.id);
+  assert.equal(h.runService.get(switched.run.id)!.runtimeId, second.id);
+
+  // Coming back with a plain message (no explicit runtime) must aim at the
+  // runtime the work just happened on — e.g. resuming the session a cancel
+  // interrupted — not silently jump back to the task's birth harness, which
+  // turned a plain continue into a cross-harness handoff request.
+  const options = h.runService.continueOptions(taskId);
+  assert.equal(options.targetRuntime?.id, second.id);
+  assert.equal(options.resumeAvailable, true);
+  assert.equal(options.suggestedMode, "resume");
+});
+
 test("an explicitly requested handoff is harness-agnostic and arms the next turn", async () => {
   const h = await freshHarness();
   const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;

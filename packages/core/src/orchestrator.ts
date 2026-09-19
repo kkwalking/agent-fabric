@@ -622,9 +622,13 @@ export class RunService {
     const previousRuns = this.forTask(taskId);
     const previousRun = previousRuns[previousRuns.length - 1];
     const previousRuntime = previousRun?.runtimeId ? this.runtimeService().get(previousRun.runtimeId) : undefined;
-    // Same fallback order as pickTargetRuntime: explicit > task default >
-    // latest run's runtime > first enabled runtime.
-    const targetId = runtimeId ?? task.runtimeId ?? previousRuntime?.id ?? this.runtimeService().enabled()[0]?.id;
+    // Same fallback order as pickTargetRuntime: explicit > latest run's
+    // runtime > task default > first enabled runtime. The latest run wins
+    // over the task's original default: after a mid-task harness switch,
+    // "continue" means the harness the work just happened on — an untouched
+    // continue must not silently jump back to the task's birth harness and
+    // turn a plain resume into a cross-harness handoff request.
+    const targetId = runtimeId ?? previousRuntime?.id ?? task.runtimeId ?? this.runtimeService().enabled()[0]?.id;
     const target = targetId ? this.runtimeService().get(targetId) : undefined;
     const adapter = target ? this.registry.get(target.kind) : undefined;
     const caps = effectiveCapabilities(adapter, target);
@@ -871,9 +875,23 @@ export class RunService {
     return run;
   }
 
-  /** Target runtime for continuing a task. */
+  /**
+   * Target runtime for continuing a task: the explicit choice wins; else the
+   * latest run's runtime (a mid-task harness switch makes THAT harness the
+   * natural continuation — an untouched continue must not jump back to the
+   * task's birth harness and demand a cross-harness handoff); else the
+   * task's default; else the first enabled runtime.
+   */
   private async pickTargetRuntime(task: Task, runtimeId?: ID): Promise<Runtime> {
-    const id = runtimeId ?? task.runtimeId ?? this.forTask(task.id).find((r) => r.runtimeId)?.runtimeId;
+    const runs = this.forTask(task.id);
+    let lastRunRuntimeId: ID | undefined;
+    for (let i = runs.length - 1; i >= 0; i--) {
+      if (runs[i].runtimeId) {
+        lastRunRuntimeId = runs[i].runtimeId;
+        break;
+      }
+    }
+    const id = runtimeId ?? lastRunRuntimeId ?? task.runtimeId;
     const runtime = id ? this.runtimeService().get(id) : undefined;
     if (!runtime) {
       const fallback = this.runtimeService().enabled()[0];
