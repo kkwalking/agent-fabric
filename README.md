@@ -226,7 +226,7 @@ v2（`v2.md`）移除了旧的统一 AgentFabric Session 抽象，并打通了 C
 
 * **统一 Session 模型已删除**：顶层 `Session` 实体、`Task.sessionId`、Session 生命周期与 Session Usage 聚合、`/api/sessions*` 接口与 `af sessions` 命令均已移除；旧数据在 Store 加载时自动迁移清理。原生 Session 状态通过 Task/Run/Runtime 详情与 `/api/runtime-sessions` 了解。
 * **执行后端（Execution Backend）**：`Harness Adapter → Execution Backend → (本地进程 | Docker 容器)`。Docker 只是执行载体，不再把 OpenCode/Pi 的结构化输出降级成 Shell Log——容器的 stdout/stderr 以原始行流交给对应 Harness Adapter，本地与容器化复用同一套输出解析器（事件解析、Native Session 提取、Usage/错误解析）。
-* **Ephemeral Container 下的闭环**：Run #1 创建临时容器 → 挂载 Workspace + Native State → 捕获 Native Session Ref → 容器销毁；Run #2 新建容器 → 挂载同一 Workspace 与同一 Native State → 用 Native Session Ref Resume。Native State 是 Host 上的 Opaque 目录（默认 `data/native-state/<runtimeId>`），按 Harness 挂载到容器内对应路径（OpenCode `/root/.local/share/opencode`，Pi `/root/.pi`，可用 `runtime.config.nativeStateMountPath` 覆盖）。
+* **Ephemeral Container 下的闭环**：Run #1 创建临时容器 → 挂载 Workspace + Native State → 捕获 Native Session Ref → 容器销毁；Run #2 新建容器 → 挂载同一 Workspace 与同一 Native State → 用 Native Session Ref Resume。Native State 是 Host 上的 Opaque 目录（默认 `~/.fabric/native-state/<runtimeId>`），按 Harness 挂载到容器内对应路径（OpenCode `/root/.local/share/opencode`，Pi `/root/.pi`，可用 `runtime.config.nativeStateMountPath` 覆盖）。
 * **Handoff 行为不变**：Pi → OpenCode 等跨 Harness 场景仍然保存 Workspace、生成 Handoff、创建全新 Native Session，不做任何 Session 转换。
 
 ## 真实 Harness 协议适配与 Resume 正确性（v3）
@@ -323,7 +323,7 @@ af containers kept
 ### CLI
 
 ```bash
-# 数据目录默认 ./data，可用 AGENTFABRIC_DATA_DIR 覆盖；API 地址默认 http://localhost:7377
+# 数据目录默认 ~/.fabric，可用 AGENTFABRIC_DATA_DIR 覆盖；API 地址默认 http://localhost:7377
 
 # Provider / Model
 af providers list
@@ -432,7 +432,7 @@ packages/
 
 ## 数据与安全
 
-* 数据保存在 `AGENTFABRIC_DATA_DIR`（默认 `./data/db.json`），原子写入。
+* 数据保存在 `~/.fabric/db.json`（可用 `AGENTFABRIC_DATA_DIR` 覆盖到任意目录），原子写入。
 * `git` 类型 Workspace 在创建时克隆到 `AGENTFABRIC_DATA_DIR/workspaces/<id>`，Run 时挂载真实目录。
 * Secrets 值仅在创建时返回一次，其余接口返回掩码；Secrets 不进入日志与事件；按 `secretIds` 注入 Runtime 环境变量。
 * API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码。

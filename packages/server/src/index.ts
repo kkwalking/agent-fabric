@@ -1,12 +1,15 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApp } from "./app.js";
 
 const __dirname = resolve(fileURLToPath(import.meta.url), "..");
 
 async function main(): Promise<void> {
-  const dataDir = process.env.AGENTFABRIC_DATA_DIR ?? resolve(process.cwd(), "data");
+  // Data lives in a stable per-user directory so the store does not move
+  // with whatever cwd the server happened to be started from.
+  const dataDir = process.env.AGENTFABRIC_DATA_DIR ?? join(homedir(), ".fabric");
   const host = process.env.AGENTFABRIC_HOST ?? "0.0.0.0";
   const port = Number(process.env.AGENTFABRIC_PORT ?? 7377);
 

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { mkdir, rm, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
@@ -1063,5 +1064,5 @@ export async function seedDefaults(store: Store): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 export async function dataDirFromEnv(): Promise<string> {
-  return process.env.AGENTFABRIC_DATA_DIR ?? resolve(process.cwd(), "data");
+  return process.env.AGENTFABRIC_DATA_DIR ?? join(homedir(), ".fabric");
 }
