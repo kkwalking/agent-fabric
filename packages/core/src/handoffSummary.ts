@@ -832,17 +832,23 @@ export function createHttpCompletionFn(
   };
 }
 
-/** Safety cap for the one-off summary call (pi relies on the caller's signal). */
-const HANDOFF_SUMMARY_TIMEOUT_MS = 120_000;
+/**
+ * Safety cap for the one-off summary call (pi relies on the caller's signal).
+ * Sized for slow reasoning models: a thinking summarizer can legitimately
+ * need minutes on a full chunk, so this sits above their typical latency and
+ * only cuts off genuinely stalled calls.
+ */
+const HANDOFF_SUMMARY_TIMEOUT_MS = 240_000;
 
 /**
  * Default total budget for ONE handoff generation, covering every chunk and
  * retry. The per-attempt cap above bounds a single call; without a total
  * budget a chunked generation is unbounded (N sequential calls), and a
- * `continue` request would hang on it. Overridable per call via
- * `HandoffSummaryInput.timeoutMs`.
+ * `continue` request would hang on it. Kept above twice the per-attempt cap
+ * so a single-chunk generation is bounded by the attempt cap, not by this
+ * budget. Overridable per call via `HandoffSummaryInput.timeoutMs`.
  */
-export const HANDOFF_GENERATION_BUDGET_MS = 180_000;
+export const HANDOFF_GENERATION_BUDGET_MS = 600_000;
 
 /* ------------------------------------------------------------------ */
 /* Retry (pi: pi-ai utils/retry.ts retryAssistantCall + settings.retry */
