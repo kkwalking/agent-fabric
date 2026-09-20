@@ -604,8 +604,18 @@ test("T17 — the current instruction has the highest recency", () => {
     "Please update the tests as part of this task."
   );
   assert.match(prompt, /# Your instruction\nPlease update the tests as part of this task\./);
-  assert.match(SUPERSEDE_BODY, /"# Your instruction".*the NEWEST user instruction/);
-  assert.match(SUPERSEDE_BODY, /outranks every preserved historical user message/i);
+  // The body never announces the instruction section by name — it must stay
+  // self-contained when exported to another harness — so the consuming turn's
+  // authority is established positionally instead.
+  assert.ok(!SUPERSEDE_BODY.includes("# Your instruction"), "the body must not reference '# Your instruction'");
+  assert.match(SUPERSEDE_BODY, /arrives after everything above, however it is labelled/);
+  assert.match(SUPERSEDE_BODY, /On any conflict it wins over the preserved history/);
+});
+
+test("T17b — an exported body without a new instruction asks instead of acting", () => {
+  assert.match(SUPERSEDE_BODY, /If your turn carries no new instruction, do not start work/);
+  assert.match(SUPERSEDE_BODY, /briefly recap the most recent state of the work above/);
+  assert.match(SUPERSEDE_BODY, /then ask the user for their latest instruction/);
 });
 
 /* ------------------------------------------------------------------ */
