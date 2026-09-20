@@ -25,7 +25,7 @@ export const HARNESS_THREAD_SOURCES: readonly HarnessThreadSourceMeta[] = [
 ];
 
 /** Harness kinds that authenticate with their own account (v6 §2/v7 §2). */
-export const HARNESS_NATIVE_KINDS = new Set(["codex", "claude-code"]);
+export const HARNESS_NATIVE_KINDS = new Set(["codex", "claude-code", "dsh"]);
 
 /** How many threads one discovery request asks for. */
 export const HARNESS_THREAD_LIMIT = 50;

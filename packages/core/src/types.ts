@@ -182,9 +182,9 @@ export interface Runtime {
   /**
    * Whether this runtime may be picked as a task's execution target. The
    * task page's runtime selectors filter on it: a runtime without a
-   * working runner adapter (e.g. zcode and dsh — their sessions are
-   * discovered and adopted, but they cannot execute here yet) defaults
-   * to false, and the Runtimes page toggles the per-record value.
+   * working runner adapter (e.g. zcode — its sessions are discovered and
+   * adopted, but it cannot execute here yet) defaults to false, and the
+   * Runtimes page toggles the per-record value.
    */
   usableInTask: boolean;
   /**

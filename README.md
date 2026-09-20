@@ -134,7 +134,7 @@ v7（`v7.md`）以同样的 harness-native 模式接入本机 **Claude Code CLI*
 
 每个 Runtime 记录带 `usableInTask` 属性：**是否可作为 Task 的执行目标**。可用列表由后端给出——`GET /api/runtimes?usableInTask=true` 返回启用的、允许执行任务的 Runtime，New task 与 Task Thread 页面渲染这个列表（不自行派生）；服务端在 submit / continue 时做同一校验，目标 Runtime 不可用即拒绝（`code: "runtime-not-usable"`），所以前端过滤不可能被 API 绕过。接管（adopt）来的会话不受此限制、照常进入 Task（接管只投影历史、不执行模型），但继续执行时同样要过这道校验。
 
-* **取值来源**：创建 Runtime 时按 kind 写入默认值（`pi` / `opencode` → `true`；`codex` / `claude-code` / `zcode` / `dsh` / `docker` / `mock` / `custom` → `false`，当前只有这两个内置 harness 允许直接执行任务），显式传入的值优先；Runtimes 页的创建表单同样可以指定。Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kind 时翻开即可。表格只保留身份与状态列，点击任意一行弹出该 Runtime 的完整属性窗口（含同样的操作按钮）。
+* **取值来源**：创建 Runtime 时按 kind 写入默认值（`pi` / `opencode` / `dsh` → `true`；`codex` / `claude-code` / `zcode` / `docker` / `mock` / `custom` → `false`），显式传入的值优先；Runtimes 页的创建表单同样可以指定。Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kind 时翻开即可。表格只保留身份与状态列，点击任意一行弹出该 Runtime 的完整属性窗口（含同样的操作按钮）。
 * **接管与执行的边界**：ZCode 这类只有探测器的 kind 默认不可用——接管其会话只收历史，composer 里继续时选的是可用 Runtime（跨 harness 走 Handoff）；绕过 UI 直接把任务提交到不可用 Runtime 会以 `runtime-not-usable` 明确失败，而不是等到 harness 启动才炸（没有运行适配器的 kind 仍会以 `No adapter registered for runtime kind "…"` 失败）。
 * 种子写入的默认值在服务启动时一次性补齐到既有记录上；读取路径不派生、不修补该字段。
 
@@ -144,8 +144,18 @@ v7（`v7.md`）以同样的 harness-native 模式接入本机 **Claude Code CLI*
 
 * **ZCode 会话探测（`kind: zcode`）**：ZCode 没有列出历史会话的官方命令，发现直接读它的本地会话库 `~/.zcode/cli/db/db.sqlite`（SQLite，只读打开，仅触碰 `session` / `message` / `part` 三张会话表；credential 不会出现在其中）。只列主会话（`parent_id` 为空的分支子会话是内部簿记）；消息/部件按库内 `sequence` 列重建顺序；标题用 ZCode 自己生成的 `session.title`；`Bash` 工具调用投影为命令行活动，`Write` / `Edit` 系投影为文件活动，其余工具按通用工具调用投影；compaction 摘要作为 reasoning 条目保留在原位。
 * **Pi 会话探测（`kind: pi` 的发现口）**：发现读 Pi 自己的 transcript（`~/.pi/agent/sessions/--<cwd>--/<时间戳>_<id>.jsonl`，可用 `AGENTFABRIC_PI_SESSIONS_DIR` 覆盖）——与 `pi --session` 恢复读的是同一批文件。首行 `{"type":"session",…}` 头是格式签名，无此头的 `.jsonl`（编辑器草稿等异质文件）直接跳过；transcript 条目经 `id`/`parentId` 组成树，只读活动分支（末条目沿 parent 链走到根），被放弃的分支不是对话；`session_info.name` 是标题（缺省回退首条用户输入），`model_change` 提供模型；`bash` 工具调用与其 `toolResult` 条目按 `toolCallId` 配对成命令行活动，compaction / branch 摘要投影为 reasoning 条目。
-* **DSH 会话探测（`kind: dsh`）**：发现读 DSH 自己的会话事件日志（`$DSH_HOME/sessions`，默认 `~/.dsh/sessions`，可用 `AGENTFABRIC_DSH_SESSIONS_DIR` 覆盖）下 `<encoded-cwd>/<session-id>/session[.vN].jsonl[.zstd]`。`session` 头记录（id/cwd/createdAt）是格式签名；`.zstd` 日志是**逐次追加的拼接 zstd 帧**（DSH 每次落盘 flush 一帧，一个大会话有上万个帧）——Node 自带 zlib 解不了拼接帧、整份解压做列表又是秒级纯 JS 开销，探测器按帧头切分、逐帧解压（fzstd，纯 JS 零依赖）：列表只解到首个 turn 的标题与输入前缀（实测全库 144 份日志从 ~23s 降到 <0.5s），读取只整解目标会话那一份；`delegationDepth > 0` 的子代理会话不进列表（按 id 仍可读）。事件投影：`turn/start` 分轮，`user/message` 首条是轮输入（同轮后续注入消息投影为条目），`assistant/message` 的 reasoning / text 块投影为推理与回复，`tool/call` 与 `tool/result` 按 `callId` 配对（`bash` → 命令行活动，`edit` / `write` → 文件活动，其余 → 通用工具调用），`compaction/summary` 作为 reasoning 条目保留，流式 chunk 与 sandbox/approval/retry 状态不进对话。
-* **探测与运行的边界（重要）**：三者都只做**发现 + 读取 + 接管**。Pi 会话接管后可以用既有 Pi 适配器原生 Resume；**ZCode 与 DSH 只有探测器、没有运行适配器**——两者的 Runtime 默认 `usableInTask: false`，接管会话会把历史收进 AgentFabric Task，composer 里继续时选的是其他可用 Runtime（跨 harness 走 Handoff），不会误把它们当执行目标；绕过 UI 直接提交到 zcode / dsh 会以 `No adapter registered for runtime kind "…"` 明确失败。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用（ZCode / DSH Runtime 由种子默认创建）。
+* **DSH 会话探测（`kind: dsh`）**：发现读 DSH 自己的会话事件日志（`$DSH_HOME/sessions`，默认 `~/.dsh/sessions`，可用 `AGENTFABRIC_DSH_SESSIONS_DIR` 覆盖）下 `<encoded-cwd>/<session-id>/session[.vN].jsonl[.zstd]`。**存储是全局一棵树：DSH 的所有 surface——Desktop / Web / headless——写这同一个会话库，探测天然覆盖全部来源，无需按 profile 合并**（本机实测 145 份日志里 143 份来自 Desktop/Web surface）。会话头记录 `agentPreset`——会话创建时所属的 surface 组成，可被会话中的 `agent-preset/selected` 事件改写；探测按 DSH 自己的算法（头预设 + 逐事件推进）重建出当前 preset，作为会话的 `source` 属性带出，headless 建的会话没有 preset。其余细节：`session` 头记录（id/cwd/createdAt）是格式签名；`.zstd` 日志是**逐次追加的拼接 zstd 帧**（DSH 每次落盘 flush 一帧，一个大会话有上万个帧）——Node 自带 zlib 解不了拼接帧、整份解压做列表又是秒级纯 JS 开销，探测器按帧头切分、逐帧解压（fzstd，纯 JS 零依赖）：列表只解到首个 turn 的标题与输入前缀（实测全库 144 份日志从 ~23s 降到 <0.5s），读取只整解目标会话那一份；`delegationDepth > 0` 的子代理会话不进列表（按 id 仍可读）。事件投影：`turn/start` 分轮，`user/message` 首条是轮输入（同轮后续注入消息投影为条目），`assistant/message` 的 reasoning / text 块投影为推理与回复，`tool/call` 与 `tool/result` 按 `callId` 配对（`bash` → 命令行活动，`edit` / `write` → 文件活动，其余 → 通用工具调用），`compaction/summary` 作为 reasoning 条目保留，流式 chunk 与 sandbox/approval/retry 状态不进对话。
+
+### DSH Headless 运行适配器
+
+DSH 官方 headless bundle（`@deepseek-ai/dsh-headless`）提供完整的无头运行契约，DSH Runtime 因此是**正式可执行目标**（`usableInTask` 默认 `true`）：
+
+* **执行**：`dsh --profile headless --json [--session-id <id>] -- "<task>"`——一次调用跑一个任务，`--json` 在 stdout 投影 NDJSON 事件流（`session` → `status`（turn/step，`step_end` 携带该次模型请求的 usage）→ `text` / `thinking`（**已提交**的助手消息投影，重试中的尝试不会外泄）→ `tool_call` / `tool_result`（按 callId 配对）→ `final`），退出码 0 = 完成、1 = 中止/出错。事件映射与本地/容器化执行共用同一条路径（v3 §7）。
+* **原生恢复与采纳边界（重要）**：`--session-id` 采纳 DSH 持久化的 Session——与本地探测列出的 id 同一套，跨 Run 的 continue 原生续在同一会话（DSH 自己维护 turn 计数）。但 headless 的组成里没有 agent preset，DSH 的采纳校验因此**拒绝一切带 preset 的会话**——即 Desktop / Web surface 建的全部会话（本机实测 145 份里 143 份）；同时也拒绝子代理/分叉会话，以及记录 cwd 与本次运行工作目录不一致的会话。这些校验全部由 DSH 自己在任务开始前强制执行，AgentFabric 原样透传其报错；探测带出的 `source` 属性就是该校验比对的那个 preset，可据此预判能否原生续跑。所以 DSH 会话的完整图景是：**Desktop/Web 会话——发现、读取、接管收历史，继续时走 Handoff 或其他 Runtime；只有 headless 自己建的会话能被 `--session-id` 原生续跑**。若 DSH 未来让 headless 组成与 Desktop 相同的 preset 或放宽该校验，适配器无需改动即可自动获益。
+* **认证与凭据（harness-native，v6 §2）**：跑在 DSH 自己登录的 DeepSeek 账号上，不绑定 AgentFabric Provider/Model；可用性检测只看 `dsh --version`、headless profile 目录与 DSH 凭据文件的**存在性**，从不读取凭据内容。缺件时报错带补救命令（安装 CLI / `dsh plugin --profile headless add @deepseek-ai/dsh-headless` / 终端登录一次）。
+* **边界**：DSH 没有官方运行镜像，容器化执行在未配置 `image` 时拒绝启动（原生状态挂载点 `/root/.dsh`）；没有 headless 侧的系统提示词 flag，Agent Profile 的系统指令以前置块拼进任务文本交付（与 Codex 同法）；Profile 级 `--patch` 自定义不受影响。
+
+* **探测与运行的边界（重要）**：三者都做**发现 + 读取 + 接管**。Pi 会话接管后可以用既有 Pi 适配器原生 Resume；**只有 ZCode 还是探测器、没有运行适配器**——ZCode Runtime 默认 `usableInTask: false`，接管会话会把历史收进 AgentFabric Task，composer 里继续时选的是其他可用 Runtime（跨 harness 走 Handoff），不会误把 ZCode 当执行目标；绕过 UI 直接提交到 zcode 会以 `No adapter registered for runtime kind "zcode"` 明确失败。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用（ZCode / DSH Runtime 由种子默认创建）。
 * **解析同样严格限定在 `packages/runtimes` 的适配器层**，不进入 Core；防御性处理损坏行（DSH 列表跳过解压失败的日志，读取同一份则明确报错）；读取不会执行任何模型请求。
 
 ## 长期任务执行模型（v1）
@@ -469,7 +479,7 @@ packages/
 * 成本为内置价格表的估算值，可通过未来定价 API 覆盖。
 * 持久化使用 JSON 文件，适合单机 MVP；生产可替换为数据库。
 * OpenCode / Pi 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` 可覆盖）。
-* ZCode 只有本地会话探测（读 `~/.zcode/cli/db/db.sqlite`），没有运行适配器——接管后继续执行会明确报错，跨 Harness 用 Handoff。DSH 同（读 `$DSH_HOME/sessions` 下的会话事件日志）。
+* ZCode 只有本地会话探测（读 `~/.zcode/cli/db/db.sqlite`），没有运行适配器——接管后继续执行会明确报错，跨 Harness 用 Handoff。DSH 有官方 headless 运行适配器（读 `$DSH_HOME/sessions` 做发现），但没有官方容器镜像，容器化执行需自备镜像。
 * 容器化 OpenCode 默认使用官方镜像 `ghcr.io/anomalyco/opencode`；容器化 Pi 无官方镜像，必须配置满足 Harness Execution Contract 的镜像（`runtime.image` / `AGENTFABRIC_PI_IMAGE`，参考 `docker/pi.Dockerfile`），否则拒绝启动。镜像默认以 ENTRYPOINT 为 harness；无 entrypoint 的镜像可设 `runtime.config.containerCommand`。
 * Network `allowedHosts/blockedHosts` 与 Filesystem `allowedPaths/deniedPaths` 暂未做细粒度强制（仅支持整体开关与只读挂载）。
 

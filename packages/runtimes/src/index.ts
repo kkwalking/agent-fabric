@@ -4,6 +4,7 @@ import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
 import { codexAdapter } from "./codex.js";
 import { claudeCodeAdapter } from "./claudecode.js";
+import { dshAdapter } from "./dsh.js";
 import { dockerAdapter } from "./docker.js";
 
 export { mockAdapter, mockCapabilities } from "./mock.js";
@@ -82,6 +83,17 @@ export {
   piSessionsRoot,
 } from "./piThreads.js";
 export {
+  dshAdapter,
+  dshCapabilities,
+  dshBin,
+  dshAuthStatus,
+  mapDshEvent,
+  extractDshSessionRef,
+  parseDshUsage,
+  newDshEventMapperState,
+  dshHeadlessProfileDir,
+} from "./dsh.js";
+export {
   dshThreadSource,
   listDshSessions,
   readDshSession,
@@ -115,6 +127,7 @@ export function buildRegistry(): RuntimeRegistry {
   registry.register(piAdapter);
   registry.register(codexAdapter);
   registry.register(claudeCodeAdapter);
+  registry.register(dshAdapter);
   registry.register(dockerAdapter);
   return registry;
 }

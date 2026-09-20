@@ -23,6 +23,16 @@ function header(id: string, cwd: string, overrides: Record<string, unknown> = {}
   return { type: "session", version: 0, id, createdAt: T0, cwd, delegationDepth: 0, ...overrides };
 }
 
+/** A desktop-created session: presets appear in the creation header and
+ * can be switched mid-session via agent-preset/selected events. */
+const SESSION_PRESET: unknown[] = [
+  header("session-preset", "/tmp/proj-p", { agentPreset: "standard" }),
+  ev(0, "agent-preset/selected", { agentPreset: "router-standard" }, T0 + 1000),
+  ev(1, "turn/start", { turn: 1 }, T0 + 2000),
+  ev(2, "user/message", { content: [{ type: "text", text: "preset switch" }] }, T0 + 3000),
+  ev(3, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "switched" }] } }, T0 + 4000),
+];
+
 /** The full conversation from a real log: title, two turns, tools,
  * compaction summary, streaming noise, an injected extra user message. */
 const SESSION_A: unknown[] = [
@@ -124,6 +134,7 @@ function makeTree(root: string): void {
   writeSession(root, "--tmp-proj-a--", "session-b", "session.v3.jsonl.zstd", SESSION_B, 2000);
   writeSession(root, "--tmp-proj-b--", "session-empty", "session.jsonl.zstd", SESSION_EMPTY, 3000);
   writeSession(root, "--tmp-proj-d--", "session-d", "session.jsonl", SESSION_D, 4000);
+  writeSession(root, "--tmp-proj-p--", "session-preset", "session.jsonl.zstd", SESSION_PRESET, 4500);
   // Previously imported external thread — never re-listed.
   writeSession(root, "--tmp-proj-a--", "import-x1", "session.jsonl.zstd", SESSION_A, 5000);
 }
@@ -143,11 +154,18 @@ function withRoot(fn: (root: string) => Promise<void>): Promise<void> {
 test("lists sessions newest first, skipping delegated, empty and imported sessions", async () => {
   await withRoot(async () => {
     const sessions = await listDshSessions();
-    assert.deepEqual(sessions.map((s) => s.id), ["session-d", "session-a"]);
-    const a = sessions[1];
+    assert.deepEqual(sessions.map((s) => s.id), ["session-preset", "session-d", "session-a"]);
+    const a = sessions[2];
     assert.equal(a.title, "Fix the flaky test");
     assert.equal(a.cwd, "/tmp/proj-a");
     assert.equal(a.model, "kimi-k3");
+    assert.equal(a.createdAt, new Date(T0).toISOString());
+    assert.ok((a.preview ?? "").includes("The test fails on CI"));
+    // The preset names the surface a session came from: header-created
+    // sessions carry theirs; headless-created ones (session-d) have none.
+    assert.equal(a.source, undefined);
+    assert.equal(sessions[1].source, undefined);
+    assert.equal(sessions[0].source, "router-standard");
     // Listing decompresses only the log prefix (header/title/first turn),
     // so it carries no turn count — the full read reports it.
     assert.equal(a.turnCount, undefined);
@@ -156,7 +174,18 @@ test("lists sessions newest first, skipping delegated, empty and imported sessio
     const narrowed = await listDshSessions({ cwd: "/tmp/proj-d" });
     assert.deepEqual(narrowed.map((s) => s.id), ["session-d"]);
     const limited = await listDshSessions({ limit: 1 });
-    assert.deepEqual(limited.map((s) => s.id), ["session-d"]);
+    assert.deepEqual(limited.map((s) => s.id), ["session-preset"]);
+  });
+});
+
+test("read advances the agent preset through agent-preset/selected events", async () => {
+  await withRoot(async () => {
+    const detail = await readDshSession("session-preset");
+    // Creation header said "standard"; the selected event moved the
+    // session to "router-standard" — the value DSH's own adoptability
+    // check compares against.
+    assert.equal(detail.source, "router-standard");
+    assert.equal(detail.model, undefined);
   });
 });
 

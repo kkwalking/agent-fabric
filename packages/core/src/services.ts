@@ -265,11 +265,13 @@ export interface NewRuntimeInput {
 }
 
 /**
- * Kind-level default for `Runtime.usableInTask` — which runtime kinds can
- * execute AgentFabric tasks today. Discovery-only kinds (zcode and dsh:
- * sessions are found and adopted, but no runner adapter exists yet) and
- * the mock default to false; the Runtimes page toggles the per-record
- * value, so this table only decides what a *new* runtime record starts at.
+ * Kind-level default for `Runtime.usableInTask` — which runtime kinds
+ * start out allowed to execute AgentFabric tasks. `codex` /
+ * `claude-code` stay false until the user opts in even though adapters
+ * exist; discovery-only kinds (zcode: sessions are found and adopted,
+ * but no runner adapter exists yet) and the mock default to false; the
+ * Runtimes page toggles the per-record value, so this table only decides
+ * what a *new* runtime record starts at.
  */
 const USABLE_IN_TASK_BY_KIND: Record<Runtime["kind"], boolean> = {
   opencode: true,
@@ -277,7 +279,7 @@ const USABLE_IN_TASK_BY_KIND: Record<Runtime["kind"], boolean> = {
   codex: false,
   "claude-code": false,
   zcode: false,
-  dsh: false,
+  dsh: true,
   docker: false,
   mock: false,
   custom: false,
@@ -1083,7 +1085,7 @@ export async function seedDefaults(store: Store): Promise<void> {
       await runtimeService.create({
         name: "DSH (DeepSeek)",
         kind: "dsh",
-        description: "DeepSeek Harness (DSH) sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no DSH runner adapter yet)",
+        description: "DSH (DeepSeek Harness) headless CLI on this machine — runs one task per invocation on its own DeepSeek account and subscription (no AgentFabric provider needed)",
         credentialSource: "harness-native",
         enabled: true,
         ephemeral: true,
@@ -1170,7 +1172,7 @@ export async function seedDefaults(store: Store): Promise<void> {
   await runtimeService.create({
     name: "DSH (DeepSeek)",
     kind: "dsh",
-    description: "DeepSeek Harness (DSH) sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no DSH runner adapter yet)",
+    description: "DSH (DeepSeek Harness) headless CLI on this machine — runs one task per invocation on its own DeepSeek account and subscription (no AgentFabric provider needed)",
     credentialSource: "harness-native",
     enabled: true,
     ephemeral: true,

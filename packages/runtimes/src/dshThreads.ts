@@ -241,6 +241,10 @@ function parseSessionLog(
   let lastTime: number | undefined;
   let turnCount = 0;
   let hasConversation = false;
+  // The agent preset the session runs under: the creation header advanced
+  // by the last agent-preset/selected event — the same reconstruction
+  // DSH's presets plugin does when deciding adoptability.
+  let preset: string | undefined = typeof header.agentPreset === "string" && header.agentPreset ? header.agentPreset : undefined;
   // turn/start numbering, so a retried turn re-opening the same number
   // does not fork an extra empty turn.
   let turnNumber: number | undefined;
@@ -270,6 +274,10 @@ function parseSessionLog(
       }
       case "model/selection": {
         if (typeof data.model === "string" && data.model) model = data.model;
+        break;
+      }
+      case "agent-preset/selected": {
+        if (typeof data.agentPreset === "string" && data.agentPreset) preset = data.agentPreset;
         break;
       }
       case "turn/start": {
@@ -396,6 +404,7 @@ function parseSessionLog(
       updatedAt: msToIso(lastTime) ?? new Date(mtimeMs).toISOString(),
       turnCount: !opts.partial && turnCount > 0 ? turnCount : undefined,
       model,
+      source: preset,
     },
   };
 }
