@@ -45,7 +45,7 @@ function makeStore(dir: string): void {
 
   // A full conversation: user → assistant (thinking + bash + edit + mcp)
   // → user → assistant (text).
-  session("sess_a", "Fix the flaky test", "/tmp/proj-a");
+  session("sess_a", "Fix the flaky test", "/home/work/proj-a");
   message("m1", "sess_a", 0, { role: "user" }, 1001);
   part("m1p1", "m1", 0, { type: "text", text: "The test fails on CI" });
   message("m2", "sess_a", 1, { role: "assistant", modelId: "glm-4.7" }, 1002);
@@ -71,10 +71,10 @@ function makeStore(dir: string): void {
   part("m4p1", "m4", 0, { type: "text", text: "Config was fine." });
 
   // A branched child session — internal bookkeeping, never listed.
-  session("sess_child", "child", "/tmp/proj-a", "sess_a", 2000);
+  session("sess_child", "child", "/home/work/proj-a", "sess_a", 2000);
 
   // A session with no readable conversation (user message without text).
-  session("sess_empty", null, "/tmp/proj-b", null, 3000);
+  session("sess_empty", null, "/home/work/proj-b", null, 3000);
   message("e1", "sess_empty", 0, { role: "user" }, 3001);
 
   db.close();
@@ -91,11 +91,11 @@ test("lists main sessions newest first, skipping child and empty sessions", asyn
       assert.deepEqual(sessions.map((s) => s.id), ["sess_a"]);
       const a = sessions[0];
       assert.equal(a.title, "Fix the flaky test");
-      assert.equal(a.cwd, "/tmp/proj-a");
+      assert.equal(a.cwd, "/home/work/proj-a");
       assert.equal(a.model, "glm-4.7");
       assert.equal(a.turnCount, 2);
       assert.ok((a.preview ?? "").includes("The test fails on CI"));
-      const narrowed = await listZcodeSessions({ cwd: "/tmp/nowhere" });
+      const narrowed = await listZcodeSessions({ cwd: "/home/nowhere" });
       assert.deepEqual(narrowed, []);
       const limited = await listZcodeSessions({ limit: 0 });
       assert.equal(limited.length, 1);

@@ -22,7 +22,7 @@ function makeTree(dir: string): void {
   };
   // A v3 tree session: two branches off the root — the abandoned one is
   // not part of the conversation and must not be read.
-  const header = { type: "session", version: 3, id: "11111111-1111-1111-1111-111111111111", timestamp: "2026-09-01T10:00:00.000Z", cwd: "/tmp/proj-a" };
+  const header = { type: "session", version: 3, id: "11111111-1111-1111-1111-111111111111", timestamp: "2026-09-01T10:00:00.000Z", cwd: "/home/work/proj-a" };
   writeFileSync(
     subdir("--tmp-proj-a") + "/2026-09-01T10-00-00-000Z_11111111-1111-1111-1111-111111111111.jsonl",
     transcript([
@@ -51,7 +51,7 @@ function makeTree(dir: string): void {
   writeFileSync(
     subdir("--tmp-proj-b") + "/2026-09-02T10-00-00-000Z_22222222-2222-2222-2222-222222222222.jsonl",
     transcript([
-      { type: "session", version: 1, id: "22222222-2222-2222-2222-222222222222", timestamp: "2026-09-02T10:00:00.000Z", cwd: "/tmp/proj-b" },
+      { type: "session", version: 1, id: "22222222-2222-2222-2222-222222222222", timestamp: "2026-09-02T10:00:00.000Z", cwd: "/home/work/proj-b" },
       { type: "message", timestamp: "2026-09-02T10:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "hello there" }] } },
       { type: "compaction", timestamp: "2026-09-02T10:00:02.000Z", summary: "earlier context summary" },
       { type: "message", timestamp: "2026-09-02T10:00:03.000Z", message: { role: "assistant", model: "glm-4.6", content: [{ type: "text", text: "Hi!" }] } },
@@ -61,7 +61,7 @@ function makeTree(dir: string): void {
   // Header-only session: no conversation, not listed.
   writeFileSync(
     subdir("--tmp-proj-c") + "/2026-09-03T10-00-00-000Z_33333333-3333-3333-3333-333333333333.jsonl",
-    transcript([{ type: "session", version: 3, id: "33333333-3333-3333-3333-333333333333", timestamp: "2026-09-03T10:00:00.000Z", cwd: "/tmp/proj-c" }])
+    transcript([{ type: "session", version: 3, id: "33333333-3333-3333-3333-333333333333", timestamp: "2026-09-03T10:00:00.000Z", cwd: "/home/work/proj-c" }])
   );
 
   // Foreign .jsonl without a session header (e.g. editor scratch): never
@@ -90,13 +90,13 @@ test("lists pi sessions newest first, skipping header-less and empty files", asy
       ]);
       const a = sessions[1];
       assert.equal(a.title, "Flaky test");
-      assert.equal(a.cwd, "/tmp/proj-a");
+      assert.equal(a.cwd, "/home/work/proj-a");
       assert.equal(a.model, "glm-4.7");
       assert.equal(a.turnCount, 2);
       assert.equal(a.preview, "Fix the flaky test");
       assert.ok((a.updatedAt ?? "").startsWith("2026-09-01"));
 
-      const narrowed = await listPiSessions({ cwd: "/tmp/proj-b" });
+      const narrowed = await listPiSessions({ cwd: "/home/work/proj-b" });
       assert.deepEqual(narrowed.map((s) => s.id), ["22222222-2222-2222-2222-222222222222"]);
       assert.deepEqual(await listPiSessions({ cwd: "/tmp/nowhere" }), []);
     });

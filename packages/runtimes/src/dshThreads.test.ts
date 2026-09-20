@@ -26,7 +26,7 @@ function header(id: string, cwd: string, overrides: Record<string, unknown> = {}
 /** A desktop-created session: presets appear in the creation header and
  * can be switched mid-session via agent-preset/selected events. */
 const SESSION_PRESET: unknown[] = [
-  header("session-preset", "/tmp/proj-p", { agentPreset: "standard" }),
+  header("session-preset", "/home/work/proj-p", { agentPreset: "standard" }),
   ev(0, "agent-preset/selected", { agentPreset: "router-standard" }, T0 + 1000),
   ev(1, "turn/start", { turn: 1 }, T0 + 2000),
   ev(2, "user/message", { content: [{ type: "text", text: "preset switch" }] }, T0 + 3000),
@@ -36,7 +36,7 @@ const SESSION_PRESET: unknown[] = [
 /** The full conversation from a real log: title, two turns, tools,
  * compaction summary, streaming noise, an injected extra user message. */
 const SESSION_A: unknown[] = [
-  header("session-a", "/tmp/proj-a"),
+  header("session-a", "/home/work/proj-a"),
   ev(0, "sandbox/mode", { mode: "workspace-write" }),
   ev(1, "session/title", { title: "Fix the flaky test" }),
   ev(2, "model/selection", { provider: "deepseek", model: "kimi-k3" }),
@@ -97,19 +97,28 @@ const SESSION_A: unknown[] = [
 ];
 
 const SESSION_B: unknown[] = [
-  header("session-b", "/tmp/proj-a", { delegationDepth: 1, parentSession: "session-a" }),
+  header("session-b", "/home/work/proj-a", { delegationDepth: 1, parentSession: "session-a" }),
   ev(0, "turn/start", { turn: 1 }),
   ev(1, "user/message", { content: [{ type: "text", text: "subagent ask" }] }),
   ev(2, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "subagent reply" }] } }),
 ];
 
-const SESSION_EMPTY: unknown[] = [header("session-empty", "/tmp/proj-b")];
+const SESSION_EMPTY: unknown[] = [header("session-empty", "/home/work/proj-b")];
 
 const SESSION_D: unknown[] = [
-  header("session-d", "/tmp/proj-d", { version: 3 }),
+  header("session-d", "/home/work/proj-d", { version: 3 }),
   ev(0, "turn/start", { turn: 1 }),
   ev(1, "user/message", { content: [{ type: "text", text: "plain log" }] }),
   ev(2, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "plain reply" }] } }),
+];
+
+// A probe session recorded under a temp directory: real conversation,
+// never listed — the temp-directory constraint applies to every source.
+const SESSION_TMP: unknown[] = [
+  header("session-tmp", "/tmp/probe-ws"),
+  ev(0, "turn/start", { turn: 1 }),
+  ev(1, "user/message", { content: [{ type: "text", text: "throwaway probe" }] }),
+  ev(2, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "probe reply" }] } }),
 ];
 
 function logText(recs: unknown[]): string {
@@ -135,6 +144,7 @@ function makeTree(root: string): void {
   writeSession(root, "--tmp-proj-b--", "session-empty", "session.jsonl.zstd", SESSION_EMPTY, 3000);
   writeSession(root, "--tmp-proj-d--", "session-d", "session.jsonl", SESSION_D, 4000);
   writeSession(root, "--tmp-proj-p--", "session-preset", "session.jsonl.zstd", SESSION_PRESET, 4500);
+  writeSession(root, "--tmp-probe-ws--", "session-tmp", "session.jsonl.zstd", SESSION_TMP, 4700);
   // Previously imported external thread — never re-listed.
   writeSession(root, "--tmp-proj-a--", "import-x1", "session.jsonl.zstd", SESSION_A, 5000);
 }
@@ -154,10 +164,12 @@ function withRoot(fn: (root: string) => Promise<void>): Promise<void> {
 test("lists sessions newest first, skipping delegated, empty and imported sessions", async () => {
   await withRoot(async () => {
     const sessions = await listDshSessions();
+    // session-tmp carries a real conversation but a temp cwd — the
+    // temp-directory constraint keeps it out of every listing.
     assert.deepEqual(sessions.map((s) => s.id), ["session-preset", "session-d", "session-a"]);
     const a = sessions[2];
     assert.equal(a.title, "Fix the flaky test");
-    assert.equal(a.cwd, "/tmp/proj-a");
+    assert.equal(a.cwd, "/home/work/proj-a");
     assert.equal(a.model, "kimi-k3");
     assert.equal(a.createdAt, new Date(T0).toISOString());
     assert.ok((a.preview ?? "").includes("The test fails on CI"));
@@ -171,7 +183,7 @@ test("lists sessions newest first, skipping delegated, empty and imported sessio
     assert.equal(a.turnCount, undefined);
     assert.equal(a.createdAt, new Date(T0).toISOString());
     assert.ok((a.preview ?? "").includes("The test fails on CI"));
-    const narrowed = await listDshSessions({ cwd: "/tmp/proj-d" });
+    const narrowed = await listDshSessions({ cwd: "/home/work/proj-d" });
     assert.deepEqual(narrowed.map((s) => s.id), ["session-d"]);
     const limited = await listDshSessions({ limit: 1 });
     assert.deepEqual(limited.map((s) => s.id), ["session-preset"]);
