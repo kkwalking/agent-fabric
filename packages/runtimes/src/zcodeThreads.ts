@@ -10,6 +10,7 @@ import type {
   HarnessThreadTurn,
   LocalHarnessThreadSource,
 } from "@agentfabric/core";
+import { isTempDirPath } from "./tempDirs.js";
 
 /**
  * ZCode local session discovery.
@@ -272,6 +273,9 @@ export async function listZcodeSessions(
       if (filter.cwd && row.directory !== filter.cwd) continue;
       const parse = parseSession(row, db);
       if (!parse.hasConversation) continue;
+      // Temp-directory constraint: probe/CI/fixture sessions are not the
+      // user's work (see tempDirs.ts).
+      if (parse.summary.cwd && isTempDirPath(parse.summary.cwd)) continue;
       out.push(parse.summary);
       if (filter.limit && filter.limit > 0 && out.length >= filter.limit) break;
     }

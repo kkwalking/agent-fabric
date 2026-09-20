@@ -23,10 +23,10 @@
  * - §18: containerized Claude Code is refused.
  * - §20: acceptance scenarios A–D.
  */
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   freshHarness,
@@ -277,9 +277,14 @@ test("containerized claude code is refused — local execution only (v7 §18)", 
 /* §9/§10: discovery + read                                            */
 /* ------------------------------------------------------------------ */
 
+// Discovery filters sessions recorded under temp directories, so the
+// fixture workspaces must live outside the system's temp dirs.
+const wsRoot = mkdtempSync(join(homedir(), ".af-v7-ws-root-"));
+after(() => rmSync(wsRoot, { recursive: true, force: true }));
+
 test("local claude sessions are discovered by cwd and recency (v7 §9)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-claude-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-claude-ws-"));
   makeClaudeSessionsFixture(wsDir, fx.claudeProjects);
   const restore = useBins(fx);
   let h: Harness | undefined;
@@ -304,7 +309,7 @@ test("local claude sessions are discovered by cwd and recency (v7 §9)", async (
 
 test("a transcript without a cwd never gets a guessed path (v7 §9/§10)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-claude-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-claude-ws-"));
   const fixture = makeClaudeSessionsFixture(wsDir, fx.claudeProjects);
   const restore = useBins(fx);
   let h: Harness | undefined;
@@ -337,7 +342,7 @@ test("a transcript without a cwd never gets a guessed path (v7 §9/§10)", async
 
 test("existing claude sessions are read without executing the model (v7 §10)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-claude-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-claude-ws-"));
   const fixture = makeClaudeSessionsFixture(wsDir, fx.claudeProjects);
   const restore = useBins(fx);
   let h: Harness | undefined;
@@ -377,7 +382,7 @@ test("existing claude sessions are read without executing the model (v7 §10)", 
 
 test("scenario B: adopt an existing claude session, resume same-harness, then hand off to Pi (v7 §11/§20B)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-claude-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-claude-ws-"));
   const fixture = makeClaudeSessionsFixture(wsDir, fx.claudeProjects);
   const restore = useBins(fx, { FAKE_CLAUDE_DUMP: join(fx.dir, "claude-dump.jsonl") });
   let h: Harness | undefined;
@@ -463,7 +468,7 @@ test("scenario B: adopt an existing claude session, resume same-harness, then ha
 
 test("adoption creates a workspace record only when the caller asks for one (v7 §11)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-claude-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-claude-ws-"));
   const fixture = makeClaudeSessionsFixture(wsDir, fx.claudeProjects);
   const restore = useBins(fx);
   let h: Harness | undefined;

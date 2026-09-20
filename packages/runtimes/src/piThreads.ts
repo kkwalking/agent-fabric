@@ -9,6 +9,7 @@ import type {
   HarnessThreadTurn,
   LocalHarnessThreadSource,
 } from "@agentfabric/core";
+import { isTempDirPath } from "./tempDirs.js";
 
 /**
  * Pi Coding Agent local session discovery.
@@ -378,6 +379,7 @@ export async function listPiSessions(
   for (const { file, mtimeMs } of transcriptFiles(root)) {
     const parse = parseTranscript(file, mtimeMs);
     if (!parse || !parse.hasConversation) continue;
+    if (parse.summary.cwd && isTempDirPath(parse.summary.cwd)) continue;
     if (filter.cwd && parse.summary.cwd && !cwdCandidates(filter.cwd).includes(parse.summary.cwd)) continue;
     if (filter.cwd && !parse.summary.cwd) continue;
     candidates.push({ summary: parse.summary, mtimeMs });

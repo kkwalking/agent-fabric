@@ -118,6 +118,7 @@ export {
   selectBackend,
 } from "./backend.js";
 export { runHarnessCommand } from "./harness.js";
+export { isTempDirPath } from "./tempDirs.js";
 
 /** Builds the standard registry containing all built-in runtime adapters. */
 export function buildRegistry(): RuntimeRegistry {

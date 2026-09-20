@@ -731,9 +731,9 @@ export function makeClaudeSessionsFixture(workspaceCwd: string, projectsRoot: st
   ].join("\n");
 
   const elsewhere = [
-    line({ ...base(otherSessionId, "/tmp/definitely-not-the-workspace"), type: "user", uuid: "u1", message: { role: "user", content: "hi" } }),
+    line({ ...base(otherSessionId, "/home/work/elsewhere-project"), type: "user", uuid: "u1", message: { role: "user", content: "hi" } }),
     line({
-      ...base(otherSessionId, "/tmp/definitely-not-the-workspace"),
+      ...base(otherSessionId, "/home/work/elsewhere-project"),
       type: "assistant",
       uuid: "a1",
       message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "hello" }] },
@@ -755,13 +755,13 @@ export function makeClaudeSessionsFixture(workspaceCwd: string, projectsRoot: st
   ].join("\n");
 
   mkdirSync(join(projectsRoot, encode(workspaceCwd)), { recursive: true });
-  mkdirSync(join(projectsRoot, encode("/tmp/definitely-not-the-workspace")), { recursive: true });
+  mkdirSync(join(projectsRoot, encode("/home/work/elsewhere-project")), { recursive: true });
   mkdirSync(join(projectsRoot, "-Users-me-code-bruce-go"), { recursive: true });
   // Written first (and never rewritten) so it stays the oldest by mtime and
   // the listing order stays deterministic.
   writeFileSync(join(projectsRoot, "-Users-me-code-bruce-go", noCwdSessionId + ".jsonl"), noCwdSession + "\n");
   // The in-workspace session is written last so its mtime orders it newest.
-  writeFileSync(join(projectsRoot, encode("/tmp/definitely-not-the-workspace"), otherSessionId + ".jsonl"), elsewhere + "\n");
+  writeFileSync(join(projectsRoot, encode("/home/work/elsewhere-project"), otherSessionId + ".jsonl"), elsewhere + "\n");
   writeFileSync(join(projectsRoot, encode(workspaceCwd), inWorkspaceSessionId + ".jsonl"), inWorkspace + "\n");
   return { inWorkspaceSessionId, otherSessionId, noCwdSessionId };
 }
@@ -786,7 +786,7 @@ export function makeCodexThreadsFixture(workspaceCwd: string): {
         sessionId: otherThreadId,
         name: "Unrelated thread",
         preview: "somewhere else",
-        cwd: "/tmp/definitely-not-the-workspace",
+        cwd: "/home/work/elsewhere-project",
         createdAt: 1780000000,
         updatedAt: 1780000100,
         model: "gpt-5.6-sol",

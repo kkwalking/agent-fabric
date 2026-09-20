@@ -10,6 +10,7 @@ import type {
   HarnessThreadTurn,
   LocalHarnessThreadSource,
 } from "@agentfabric/core";
+import { isTempDirPath } from "./tempDirs.js";
 
 /**
  * DSH (DeepSeek Harness) local session discovery.
@@ -491,6 +492,7 @@ export async function listDshSessions(
       continue; // one broken log must not hide every other session
     }
     if (!parse || parse.delegated || !parse.hasConversation) continue;
+    if (parse.summary.cwd && isTempDirPath(parse.summary.cwd)) continue;
     if (filter.cwd && parse.summary.cwd && !cwdCandidates(filter.cwd).includes(parse.summary.cwd)) continue;
     if (filter.cwd && !parse.summary.cwd) continue;
     out.push(parse.summary);

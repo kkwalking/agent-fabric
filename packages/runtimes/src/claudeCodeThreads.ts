@@ -9,6 +9,7 @@ import type {
   HarnessThreadTurn,
   LocalHarnessThreadSource,
 } from "@agentfabric/core";
+import { isTempDirPath } from "./tempDirs.js";
 
 /**
  * Claude Code local session discovery (v7 §9/§10).
@@ -269,6 +270,7 @@ export async function listClaudeSessions(
     for (const { id, file, mtimeMs } of sessionFiles(dir)) {
       const scan = scanSession(id, parseTranscript(file), mtimeMs);
       if (!scan.hasConversation) continue;
+      if (scan.summary.cwd && isTempDirPath(scan.summary.cwd)) continue;
       candidates.push({ summary: scan.summary, mtimeMs });
     }
   }

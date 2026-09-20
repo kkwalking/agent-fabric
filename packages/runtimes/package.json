@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 src/codex.test.ts src/claudecode.test.ts src/dsh.test.ts src/zcodeThreads.test.ts src/piThreads.test.ts src/dshThreads.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 src/codex.test.ts src/claudecode.test.ts src/dsh.test.ts src/tempDirs.test.ts src/zcodeThreads.test.ts src/piThreads.test.ts src/dshThreads.test.ts"
   },
   "dependencies": {
     "@agentfabric/core": "0.1.0",

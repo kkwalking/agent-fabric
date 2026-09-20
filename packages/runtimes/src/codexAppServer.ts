@@ -8,6 +8,7 @@ import type {
   LocalHarnessThreadSource,
 } from "@agentfabric/core";
 import { codexBin } from "./codex.js";
+import { isTempDirPath } from "./tempDirs.js";
 
 /**
  * Codex app-server client (v6 §6/§7).
@@ -321,6 +322,7 @@ export async function listCodexThreads(
     for (const wire of result.data ?? []) {
       const summary = summaryFromWire(wire);
       if (!summary.id || seen.has(summary.id)) continue;
+      if (summary.cwd && isTempDirPath(summary.cwd)) continue;
       seen.add(summary.id);
       out.push(summary);
     }

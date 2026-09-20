@@ -18,10 +18,10 @@
  *   handoff → continue on Pi); C is covered by the quota classification
  *   plus the same handoff path.
  */
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   freshHarness,
@@ -240,9 +240,14 @@ test("containerized codex is refused — local execution only (v6 §13)", async 
   }
 });
 
+// Discovery filters sessions recorded under temp directories, so the
+// fixture workspaces must live outside the system's temp dirs.
+const wsRoot = mkdtempSync(join(homedir(), ".af-v6-ws-root-"));
+after(() => rmSync(wsRoot, { recursive: true, force: true }));
+
 test("local codex threads are discovered by cwd and recency (v6 §6/§11)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-codex-ws-"));
   const fixture = makeCodexThreadsFixture(wsDir);
   const threadsFile = join(fx.dir, "codex-threads.json");
   writeFileSync(threadsFile, fixture.file);
@@ -267,7 +272,7 @@ test("local codex threads are discovered by cwd and recency (v6 §6/§11)", asyn
 
 test("existing codex threads are read through the harness interface (v6 §7)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-codex-ws-"));
   const fixture = makeCodexThreadsFixture(wsDir);
   const threadsFile = join(fx.dir, "codex-threads.json");
   writeFileSync(threadsFile, fixture.file);
@@ -302,7 +307,7 @@ test("existing codex threads are read through the harness interface (v6 §7)", a
 
 test("scenario B: adopt an existing codex thread, then continue on Pi via handoff (v6 §8/§9/§15B)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-codex-ws-"));
   const fixture = makeCodexThreadsFixture(wsDir);
   const threadsFile = join(fx.dir, "codex-threads.json");
   writeFileSync(threadsFile, fixture.file);
@@ -400,7 +405,7 @@ function growCodexThread(threadsFile: string, threadId: string, turns: Array<Rec
 
 test("syncing an adopted thread appends turns that happened in codex after adoption (v6 §8)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-codex-ws-"));
   const fixture = makeCodexThreadsFixture(wsDir);
   const threadsFile = join(fx.dir, "codex-threads.json");
   writeFileSync(threadsFile, fixture.file);
@@ -455,7 +460,7 @@ test("syncing an adopted thread appends turns that happened in codex after adopt
 
 test("sync counts resumed turns as already present and disarms a stale armed handoff (v6 §8)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-codex-ws-"));
   const fixture = makeCodexThreadsFixture(wsDir);
   const threadsFile = join(fx.dir, "codex-threads.json");
   writeFileSync(threadsFile, fixture.file);
@@ -537,7 +542,7 @@ test("sync refuses tasks that never adopted a native session", async () => {
 
 test("adoption imports the thread's cwd as a workspace when the caller names one (v6 §8)", async () => {
   const fx = makeFixtures();
-  const wsDir = join(mkdtempSync(join(tmpdir(), "af-codex-ws-")), "codex-work");
+  const wsDir = join(mkdtempSync(join(wsRoot, "af-codex-ws-")), "codex-work");
   mkdirSync(wsDir, { recursive: true });
   const fixture = makeCodexThreadsFixture(wsDir);
   const threadsFile = join(fx.dir, "codex-threads.json");
@@ -566,7 +571,7 @@ test("adoption imports the thread's cwd as a workspace when the caller names one
 
 test("adoption without a workspace choice associates nothing (v6 §8)", async () => {
   const fx = makeFixtures();
-  const wsDir = mkdtempSync(join(tmpdir(), "af-codex-ws-"));
+  const wsDir = mkdtempSync(join(wsRoot, "af-codex-ws-"));
   const fixture = makeCodexThreadsFixture(wsDir);
   const threadsFile = join(fx.dir, "codex-threads.json");
   writeFileSync(threadsFile, fixture.file);
