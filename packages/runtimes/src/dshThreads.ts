@@ -55,6 +55,7 @@ const MAX_LOG_LINES = 200_000;
 /** Listing needs no more log than the first turn's title + prompt; if no
  * title has shown up by then, stop anyway instead of decompressing all. */
 const LIST_MAX_FRAMES = 500;
+const LIST_MAX_CHARS = 512 * 1024;
 
 const FILE_EDIT_TOOLS = new Set(["edit", "multiedit", "notebookedit"]);
 const FILE_WRITE_TOOLS = new Set(["write"]);
@@ -460,9 +461,37 @@ function cwdCandidates(cwd: string): string[] {
   return [...out];
 }
 
-/** Listing needs no more log than the first turn's title + prompt. */
+/**
+ * Listing needs no more log than the first turn's title + prompt. DSH
+ * writes a placeholder title (the truncated first prompt,
+ * `source.kind: "fallback"`) the moment the first user message lands and
+ * overwrites it with its generated title moments later — so a fallback
+ * title never satisfies the stop: the walk continues until the generated
+ * title arrives or the frame budget runs out (the full read takes the
+ * last non-empty title regardless).
+ */
 function listStop(text: string, frames: number): boolean {
-  return frames >= LIST_MAX_FRAMES || (text.includes('"type":"session/title"') && text.includes('"type":"user/message"'));
+  if (frames >= LIST_MAX_FRAMES) return true;
+  const settled = text.includes('"type":"user/message"') && text.includes('"type":"session/title"');
+  if (!settled) return false;
+  // The budget only counts once the title and prompt basics are in hand,
+  // so a huge first turn can never push a session out of the listing
+  // entirely.
+  if (text.length >= LIST_MAX_CHARS) return true;
+  let lastTitleIsFallback: boolean | undefined;
+  for (const line of text.split("\n")) {
+    if (!line.includes('"type":"session/title"')) continue;
+    try {
+      const rec = JSON.parse(line) as DshEvent;
+      const data = rec.data as { title?: unknown; source?: { kind?: unknown } } | undefined;
+      if (typeof data?.title === "string" && data.title.trim()) {
+        lastTitleIsFallback = data.source?.kind === "fallback";
+      }
+    } catch {
+      /* a title line that does not parse cannot settle the decision */
+    }
+  }
+  return lastTitleIsFallback === false;
 }
 
 /**

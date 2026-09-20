@@ -121,6 +121,20 @@ const SESSION_TMP: unknown[] = [
   ev(2, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "probe reply" }] } }),
 ];
 
+// DSH titles arrive in stages: a placeholder cut from the first prompt
+// (source.kind "fallback") lands with the first turn, the generated title
+// overwrites it moments later. An empty title event in between clears
+// nothing — the last non-empty title wins.
+const SESSION_TITLE: unknown[] = [
+  header("session-title", "/home/work/title-probe"),
+  ev(0, "turn/start", { turn: 1 }, T0),
+  ev(1, "user/message", { content: [{ type: "text", text: "当前的本地分析ana_202609160915034失败了" }] }, T0 + 1000),
+  ev(2, "session/title", { title: "当前的本地分析ana_202609160915034", source: { kind: "fallback" } }, T0 + 1000),
+  ev(3, "session/title", {}, T0 + 1000),
+  ev(4, "session/title", { title: "本地分析 vectorize 步骤失败调查", source: { kind: "provider", provider: "session-title-first-prompt-llm" } }, T0 + 2600),
+  ev(5, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "looking into it" }] } }, T0 + 3000),
+];
+
 function logText(recs: unknown[]): string {
   return recs.map((r) => JSON.stringify(r)).join("\n") + "\n";
 }
@@ -145,6 +159,7 @@ function makeTree(root: string): void {
   writeSession(root, "--tmp-proj-d--", "session-d", "session.jsonl", SESSION_D, 4000);
   writeSession(root, "--tmp-proj-p--", "session-preset", "session.jsonl.zstd", SESSION_PRESET, 4500);
   writeSession(root, "--tmp-probe-ws--", "session-tmp", "session.jsonl.zstd", SESSION_TMP, 4700);
+  writeSession(root, "--home-work-title--", "session-title", "session.jsonl.zstd", SESSION_TITLE, 4600);
   // Previously imported external thread — never re-listed.
   writeSession(root, "--tmp-proj-a--", "import-x1", "session.jsonl.zstd", SESSION_A, 5000);
 }
@@ -166,8 +181,13 @@ test("lists sessions newest first, skipping delegated, empty and imported sessio
     const sessions = await listDshSessions();
     // session-tmp carries a real conversation but a temp cwd — the
     // temp-directory constraint keeps it out of every listing.
-    assert.deepEqual(sessions.map((s) => s.id), ["session-preset", "session-d", "session-a"]);
-    const a = sessions[2];
+    assert.deepEqual(sessions.map((s) => s.id), [
+      "session-title",
+      "session-preset",
+      "session-d",
+      "session-a",
+    ]);
+    const a = sessions[3];
     assert.equal(a.title, "Fix the flaky test");
     assert.equal(a.cwd, "/home/work/proj-a");
     assert.equal(a.model, "kimi-k3");
@@ -176,8 +196,9 @@ test("lists sessions newest first, skipping delegated, empty and imported sessio
     // The preset names the surface a session came from: header-created
     // sessions carry theirs; headless-created ones (session-d) have none.
     assert.equal(a.source, undefined);
-    assert.equal(sessions[1].source, undefined);
-    assert.equal(sessions[0].source, "router-standard");
+    assert.equal(sessions[0].source, undefined);
+    assert.equal(sessions[1].source, "router-standard");
+    assert.equal(sessions[2].source, undefined);
     // Listing decompresses only the log prefix (header/title/first turn),
     // so it carries no turn count — the full read reports it.
     assert.equal(a.turnCount, undefined);
@@ -186,7 +207,7 @@ test("lists sessions newest first, skipping delegated, empty and imported sessio
     const narrowed = await listDshSessions({ cwd: "/home/work/proj-d" });
     assert.deepEqual(narrowed.map((s) => s.id), ["session-d"]);
     const limited = await listDshSessions({ limit: 1 });
-    assert.deepEqual(limited.map((s) => s.id), ["session-preset"]);
+    assert.deepEqual(limited.map((s) => s.id), ["session-title"]);
   });
 });
 
@@ -198,6 +219,16 @@ test("read advances the agent preset through agent-preset/selected events", asyn
     // check compares against.
     assert.equal(detail.source, "router-standard");
     assert.equal(detail.model, undefined);
+  });
+});
+
+test("listing waits past the placeholder title for the generated one", async () => {
+  await withRoot(async () => {
+    const sessions = await listDshSessions();
+    const title = sessions.find((s) => s.id === "session-title");
+    // Not the fallback (truncated first prompt) — the generated title
+    // that DSH writes moments later wins, matching its own UI.
+    assert.equal(title?.title, "本地分析 vectorize 步骤失败调查");
   });
 });
 
