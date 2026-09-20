@@ -82,6 +82,12 @@ export {
   piSessionsRoot,
 } from "./piThreads.js";
 export {
+  dshThreadSource,
+  listDshSessions,
+  readDshSession,
+  dshSessionsRoot,
+} from "./dshThreads.js";
+export {
   dockerAdapter,
   runDockerContainer,
   runDockerWithLifecycle,

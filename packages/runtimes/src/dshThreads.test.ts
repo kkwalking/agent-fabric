@@ -1,0 +1,226 @@
+/**
+ * Unit tests for DSH (DeepSeek Harness) local session discovery — the
+ * event-log shapes verified against live ~/.dsh/sessions logs. Fixtures
+ * reproduce DSH's frame-per-append storage: one zstd frame per event
+ * line (Node's zlib can compress single frames; discovery walks the
+ * concatenation with fzstd).
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { zstdCompressSync } from "node:zlib";
+import { listDshSessions, readDshSession } from "./dshThreads.js";
+
+const T0 = 1_700_000_000_000;
+
+function ev(seq: number, type: string, data: Record<string, unknown>, time = T0): unknown {
+  return { type, seq, time, data };
+}
+
+function header(id: string, cwd: string, overrides: Record<string, unknown> = {}): unknown {
+  return { type: "session", version: 0, id, createdAt: T0, cwd, delegationDepth: 0, ...overrides };
+}
+
+/** The full conversation from a real log: title, two turns, tools,
+ * compaction summary, streaming noise, an injected extra user message. */
+const SESSION_A: unknown[] = [
+  header("session-a", "/tmp/proj-a"),
+  ev(0, "sandbox/mode", { mode: "workspace-write" }),
+  ev(1, "session/title", { title: "Fix the flaky test" }),
+  ev(2, "model/selection", { provider: "deepseek", model: "kimi-k3" }),
+  ev(3, "turn/start", { turn: 1 }),
+  ev(3, "user/message", { content: [{ type: "text", text: "The test fails on CI" }] }),
+  ev(4, "assistant/message", {
+    turn: 1,
+    step: 1,
+    message: {
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: "look at the retry logic" },
+        { type: "text", text: "Checking the test now." },
+        { type: "tool-call", id: "c1", name: "bash", arguments: "{\"command\":\"npm test\"}" },
+      ],
+      source: { kind: "model", provider: "deepseek", model: "kimi-k3" },
+    },
+  }),
+  ev(5, "tool/call", { turn: 1, step: 1, callId: "c1", name: "bash", arguments: "{\"command\":\"npm test\"}" }),
+  ev(6, "tool/result", {
+    turn: 1,
+    step: 1,
+    message: {
+      source: { kind: "tool", callId: "c1" },
+      content: [{ type: "tool-result", toolCallId: "c1", content: [{ type: "text", text: "3 passing" }], isError: false }],
+    },
+  }),
+  ev(7, "tool/call", { turn: 1, step: 1, callId: "c2", name: "edit", arguments: "{\"file_path\":\"/tmp/proj-a/t.ts\"}" }),
+  ev(8, "tool/result", {
+    turn: 1,
+    step: 1,
+    message: {
+      source: { kind: "tool", callId: "c2" },
+      content: [{ type: "tool-result", toolCallId: "c2", content: [{ type: "text", text: "edited" }] }],
+    },
+  }),
+  ev(9, "tool/call", { turn: 1, step: 1, callId: "c3", name: "glob", arguments: "{\"pattern\":\"**/*.ts\"}" }),
+  ev(10, "tool/result", {
+    turn: 1,
+    step: 1,
+    message: {
+      source: { kind: "tool", callId: "c3" },
+      content: [{ type: "tool-result", toolCallId: "c3", content: [{ type: "text", text: "boom" }], isError: true }],
+    },
+  }),
+  ev(11, "compaction/summary", { summary: [{ type: "text", text: "earlier context summary" }] }),
+  ev(12, "assistant/chunk", { turn: 1, step: 1, chunk: { type: "block-start", index: 0, blockType: "text" } }),
+  ev(13, "turn/end", { turn: 1, reason: { kind: "completed" } }),
+  ev(14, "turn/start", { turn: 2 }),
+  ev(15, "user/message", { content: [{ type: "text", text: "and the config?" }] }),
+  ev(16, "assistant/message", {
+    turn: 2,
+    step: 1,
+    message: { role: "assistant", content: [{ type: "text", text: "Config was fine." }] },
+  }),
+  ev(17, "user/message", { content: [{ type: "text", text: "(injected note)" }] }),
+  ev(18, "turn/end", { turn: 2, reason: { kind: "completed" } }),
+];
+
+const SESSION_B: unknown[] = [
+  header("session-b", "/tmp/proj-a", { delegationDepth: 1, parentSession: "session-a" }),
+  ev(0, "turn/start", { turn: 1 }),
+  ev(1, "user/message", { content: [{ type: "text", text: "subagent ask" }] }),
+  ev(2, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "subagent reply" }] } }),
+];
+
+const SESSION_EMPTY: unknown[] = [header("session-empty", "/tmp/proj-b")];
+
+const SESSION_D: unknown[] = [
+  header("session-d", "/tmp/proj-d", { version: 3 }),
+  ev(0, "turn/start", { turn: 1 }),
+  ev(1, "user/message", { content: [{ type: "text", text: "plain log" }] }),
+  ev(2, "assistant/message", { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "plain reply" }] } }),
+];
+
+function logText(recs: unknown[]): string {
+  return recs.map((r) => JSON.stringify(r)).join("\n") + "\n";
+}
+
+/** DSH flushes one zstd frame per event batch; a fixture frame per line. */
+function zstdLog(recs: unknown[]): Buffer {
+  const lines = logText(recs).split("\n").filter((l) => l.trim());
+  return Buffer.concat(lines.map((l) => zstdCompressSync(Buffer.from(l + "\n"))));
+}
+
+function writeSession(root: string, ws: string, id: string, file: string, recs: unknown[], mtimeMs: number): void {
+  const dir = join(root, ws, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, file), file.endsWith(".zstd") ? zstdLog(recs) : logText(recs));
+  utimesSync(join(dir, file), mtimeMs / 1000, mtimeMs / 1000);
+}
+
+function makeTree(root: string): void {
+  writeSession(root, "--tmp-proj-a--", "session-a", "session.jsonl.zstd", SESSION_A, 1000);
+  writeSession(root, "--tmp-proj-a--", "session-b", "session.v3.jsonl.zstd", SESSION_B, 2000);
+  writeSession(root, "--tmp-proj-b--", "session-empty", "session.jsonl.zstd", SESSION_EMPTY, 3000);
+  writeSession(root, "--tmp-proj-d--", "session-d", "session.jsonl", SESSION_D, 4000);
+  // Previously imported external thread — never re-listed.
+  writeSession(root, "--tmp-proj-a--", "import-x1", "session.jsonl.zstd", SESSION_A, 5000);
+}
+
+function withRoot(fn: (root: string) => Promise<void>): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "af-dsh-"));
+  makeTree(root);
+  const saved = process.env.AGENTFABRIC_DSH_SESSIONS_DIR;
+  process.env.AGENTFABRIC_DSH_SESSIONS_DIR = root;
+  return fn(root).finally(() => {
+    if (saved === undefined) delete process.env.AGENTFABRIC_DSH_SESSIONS_DIR;
+    else process.env.AGENTFABRIC_DSH_SESSIONS_DIR = saved;
+    rmSync(root, { recursive: true, force: true });
+  });
+}
+
+test("lists sessions newest first, skipping delegated, empty and imported sessions", async () => {
+  await withRoot(async () => {
+    const sessions = await listDshSessions();
+    assert.deepEqual(sessions.map((s) => s.id), ["session-d", "session-a"]);
+    const a = sessions[1];
+    assert.equal(a.title, "Fix the flaky test");
+    assert.equal(a.cwd, "/tmp/proj-a");
+    assert.equal(a.model, "kimi-k3");
+    // Listing decompresses only the log prefix (header/title/first turn),
+    // so it carries no turn count — the full read reports it.
+    assert.equal(a.turnCount, undefined);
+    assert.equal(a.createdAt, new Date(T0).toISOString());
+    assert.ok((a.preview ?? "").includes("The test fails on CI"));
+    const narrowed = await listDshSessions({ cwd: "/tmp/proj-d" });
+    assert.deepEqual(narrowed.map((s) => s.id), ["session-d"]);
+    const limited = await listDshSessions({ limit: 1 });
+    assert.deepEqual(limited.map((s) => s.id), ["session-d"]);
+  });
+});
+
+test("reads a session into turns and unified items", async () => {
+  await withRoot(async () => {
+    const detail = await readDshSession("session-a");
+    assert.equal(detail.title, "Fix the flaky test");
+    assert.equal(detail.turnCount, 2);
+    assert.equal(detail.turns?.length, 2);
+    assert.equal(detail.turns?.[0].userText, "The test fails on CI");
+    assert.deepEqual(
+      (detail.turns?.[0].items ?? []).map((i) => i.kind),
+      // assistant/tool-call blocks are the announcement; the tool/call
+      // event is projected. Streaming chunks and step bookkeeping drop out;
+      // the compaction summary stays as a reasoning item.
+      ["user-message", "reasoning", "agent-message", "command", "file-change", "tool-call", "reasoning"]
+    );
+    const command = detail.items.find((i) => i.kind === "command");
+    assert.equal(command && command.kind === "command" ? command.command : undefined, "npm test");
+    assert.equal(command && command.kind === "command" ? command.output : undefined, "3 passing");
+    const edit = detail.items.find((i) => i.kind === "file-change");
+    assert.equal(edit && edit.kind === "file-change" ? edit.path : undefined, "/tmp/proj-a/t.ts");
+    assert.equal(edit && edit.kind === "file-change" ? edit.action : undefined, "update");
+    const call = detail.items.find((i) => i.kind === "tool-call");
+    assert.equal(call && call.kind === "tool-call" ? call.tool : undefined, "glob");
+    assert.equal(call && call.kind === "tool-call" ? call.isError : undefined, true);
+    assert.ok((call && call.kind === "tool-call" ? String(call.result) : "").includes("boom"));
+    const second = detail.turns?.[1];
+    assert.equal(second?.userText, "and the config?");
+    // The injected extra user message stays in its own turn as an item.
+    assert.deepEqual((second?.items ?? []).map((i) => i.kind), ["user-message", "agent-message", "user-message"]);
+
+    // Delegated and empty sessions are not listed but stay readable.
+    const delegated = await readDshSession("session-b");
+    assert.equal(delegated.turns?.length, 1);
+    const empty = await readDshSession("session-empty");
+    assert.deepEqual(empty.items, []);
+    await assert.rejects(() => readDshSession("session-missing"));
+  });
+});
+
+test("skips a log with a corrupt frame in listing but fails loudly on read", async () => {
+  await withRoot(async (root) => {
+    const dir = join(root, "--tmp-proj-c--", "session-c");
+    mkdirSync(dir, { recursive: true });
+    const corrupt = Buffer.concat([zstdLog(SESSION_A), Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x01])]);
+    writeFileSync(join(dir, "session.jsonl.zstd"), corrupt);
+    utimesSync(join(dir, "session.jsonl.zstd"), 10, 10);
+    const sessions = await listDshSessions();
+    assert.ok(!sessions.some((s) => s.id === "session-c"));
+    // A corrupted log is still a DSH session log for the other kinds; the
+    // same tree now hides session-a behind an unreadable sibling only.
+    assert.ok(sessions.some((s) => s.id === "session-a"));
+    await assert.rejects(() => readDshSession("session-c"), /zstd/);
+  });
+});
+
+test("returns no sessions when the sessions root does not exist", async () => {
+  const saved = process.env.AGENTFABRIC_DSH_SESSIONS_DIR;
+  process.env.AGENTFABRIC_DSH_SESSIONS_DIR = join(tmpdir(), "af-dsh-missing-" + Date.now());
+  try {
+    assert.deepEqual(await listDshSessions(), []);
+  } finally {
+    if (saved === undefined) delete process.env.AGENTFABRIC_DSH_SESSIONS_DIR;
+    else process.env.AGENTFABRIC_DSH_SESSIONS_DIR = saved;
+  }
+});

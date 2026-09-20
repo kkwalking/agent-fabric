@@ -34,6 +34,7 @@ import {
   claudeCodeThreadSource,
   zcodeThreadSource,
   piThreadSource,
+  dshThreadSource,
   createDockerContainerOps,
 } from "@agentfabric/runtimes";
 
@@ -122,6 +123,7 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     "claude-code": claudeCodeThreadSource,
     zcode: zcodeThreadSource,
     pi: piThreadSource,
+    dsh: dshThreadSource,
   });
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();

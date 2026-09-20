@@ -111,8 +111,8 @@ v6（`v6.md`）接入本机 **Codex CLI** 作为 Harness，核心目标是：用
 * **Harness-native 认证（`credentialSource: "harness-native"`）**：Codex 使用自己的 ChatGPT 登录与套餐额度；AgentFabric 只通过 `codex --version` / `codex login status` 检测「已安装 / 已登录 / 可用」，**不读取、不复制、不保存**任何 access token / refresh token / auth 文件，也绝不把 Codex 登录转换成 AgentFabric Provider。未登录时 Run 快速失败并给出 `codex login` 修复指引。
 * **不绑定 AgentFabric Model**：harness-native Runtime 不注入模型默认值（显式传入也会被忽略）——Codex 使用自己账号的默认模型；UI 上模型选择器替换为说明提示。
 * **本地 Thread 发现与读取（官方接口）**：通过 `codex app-server` 的 JSON-RPC（`thread/list` / `thread/read` / `thread/turns/list`）发现本机已有 Codex Threads（按 cwd / 最近更新过滤，包含 cli / vscode / exec 三类来源），只读地取出用户输入、Agent 回复与 Tool Activity——**不解析 `~/.codex` 内部文件**，也绝不触发新的模型请求。
-* **接管已有工作（Import / Adopt）**：`POST /api/harness/codex/threads/import` — Read Thread → 按 cwd 关联（或就地导入）Workspace → 每个 Codex turn 记录为一个已完成 Run（事件由 thread 内容投影）→ 注册 thread 为可 Resume 的 Native Session →（可选）预生成指向目标 Harness 的 Handoff。不把 Codex Thread 转换成统一 Session。
-* **已接管会话的显式同步（Sync，Codex 与 Claude Code 通用）**：接管是一次性快照；之后用户可能继续在原 Harness 里对话。`POST /api/tasks/:id/sync-thread` 重读原生会话，把新增的 turn 用与接管相同的投影路径**追加**为 Run，并更新 Task 上的 `threadUpdatedAt`。已入账的 turn = 接管/历次同步投影的 Run（`continuity: "new"`）+ 本任务在这条原生会话上 Resume 过的 Run（`continuity: "resume"`），因此不会把 AgentFabric 自己续跑的 turn 重复导入。同步会**解除**在此之前武装（`awaitingNextTurn`）的 Handoff——它基于过期快照生成，下一轮不该悄悄消费（`disarmedHandoffIds` 可见）。触发只有两个入口：该 REST 接口，以及 Task 页面的 Refresh 按钮（对已接管 Task 先同步再重读）；**没有后台轮询，也没有"有 N 个新 turn"之类的提示**。任务有进行中的 Run 时同步直接报错；非接管 Task 调用同步同样报错。
+* **接管已有工作（Import / Adopt）**：`POST /api/harness/codex/threads/import` — Read Thread → 按 cwd 关联（或就地导入）Workspace → 每个 Codex turn 记录为一个已完成 Run（事件由 thread 内容投影）→ 注册 thread 为可 Resume 的 Native Session，且该 Native Session 引用会写在**每条**导入 Run 上（所有 turn 本就属于同一条原生会话，Runs 列表里每条导入 Run 都能复制 session id）→（可选）预生成指向目标 Harness 的 Handoff。不把 Codex Thread 转换成统一 Session。
+* **已接管会话的显式同步（Sync，Codex 与 Claude Code 通用）**：接管是一次性快照；之后用户可能继续在原 Harness 里对话。`POST /api/tasks/:id/sync-thread` 重读原生会话，把新增的 turn 用与接管相同的投影路径**追加**为 Run（并写上同一条 Native Session 引用），同时更新 Task 上的 `threadUpdatedAt`。已入账的 turn = 接管/历次同步投影的 Run（`continuity: "new"`）+ 本任务在这条原生会话上 Resume 过的 Run（`continuity: "resume"`），因此不会把 AgentFabric 自己续跑的 turn 重复导入。同步会**解除**在此之前武装（`awaitingNextTurn`）的 Handoff——它基于过期快照生成，下一轮不该悄悄消费（`disarmedHandoffIds` 可见）。触发只有两个入口：该 REST 接口，以及 Task 页面的 Refresh 按钮（对已接管 Task 先同步再重读）；**没有后台轮询，也没有"有 N 个新 turn"之类的提示**。任务有进行中的 Run 时同步直接报错；非接管 Task 调用同步同样报错。
 * **额度耗尽 UX（`errorKind: "usage-limit"`）**：识别 Codex 的配额错误（"You've hit your usage limit…"），Task 页面显示 **Codex usage limit reached.** 与 **Continue with Pi / Continue with OpenCode**，一键预选目标 Harness 并立即生成 Handoff，新 Harness 建立自己的新 Native Session 继续任务。
 
 ## Claude Code Local Harness（v7）
@@ -125,8 +125,8 @@ v7（`v7.md`）以同样的 harness-native 模式接入本机 **Claude Code CLI*
 * **Harness-native 认证**：Claude Code 使用自己的 Claude.ai 登录与套餐；AgentFabric 只通过 `claude --version` / `claude auth status` 检测「已安装 / 已登录 / 可用」，**不读取、不复制、不保存**任何 credential / keychain / OAuth token，也绝不把 Claude.ai 套餐转换成 Anthropic Provider。未登录时 Run 快速失败并给出 `claude login` 修复指引。
 * **不绑定 AgentFabric Model**：Claude Code 使用自己账号与默认模型配置；Usage / Cost 只采用 CLI 自报数字（`total_cost_usd`），绝不按 Anthropic API 定价估算套餐 Run 成本。
 * **本地 Session 发现与读取**：Claude Code 官方只提供 `--resume <id>`（无 list 命令），因此发现走本地 transcript（`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`）——相关解析被严格限制在 Claude Code Adapter 内（`packages/runtimes`），不泄漏进 AgentFabric Core，且防御性处理未知行类型；读取不触发任何模型请求。
-* **接管已有工作（Import / Adopt）**：`POST /api/harness/claude-code/threads/import` — Read Session → 按 cwd 关联（或就地导入）Workspace → 每个 session turn 记录为一个已完成 Run → 注册为可 Resume 的 Native Session →（可选）预生成 Handoff。
-* **接管入口独立成页（Native sessions）**：Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）就是本地 Harness 会话的发现页——Codex Threads 与 Claude Code / ZCode / Pi Sessions 用页内 Tab 切换，可选 Workspace 过滤（默认全部，按最近更新排序），每个会话带 cwd / 更新时间 / turn 数 / 模型 / 来源与认证状态（检测，不读 credential），**Continue in AgentFabric** 读取该会话并进入 Task Thread。采纳前会先问工作目录归属：复用已有 Workspace / 用给定名字新建一条 / 不关联（会话 cwd 与某 Workspace 路径相同时默认复用）；AgentFabric 不会自己凭空建 Workspace 记录。New task 页面只负责描述新任务，底部给一行指向该页。
+* **接管已有工作（Import / Adopt）**：`POST /api/harness/claude-code/threads/import` — Read Session → 按 cwd 关联（或就地导入）Workspace → 每个 session turn 记录为一个已完成 Run → 注册为可 Resume 的 Native Session（引用写在每条导入 Run 上，与 Codex 接管一致）→（可选）预生成 Handoff。
+* **接管入口独立成页（Native sessions）**：Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）就是本地 Harness 会话的发现页——Codex Threads 与 Claude Code / ZCode / Pi / DSH Sessions 用页内 Tab 切换，可选 Workspace 过滤（默认全部，按最近更新排序），每个会话带 cwd / 更新时间 / turn 数 / 模型 / 来源与认证状态（检测，不读 credential），**Continue in AgentFabric** 读取该会话并进入 Task Thread。采纳前会先问工作目录归属：复用已有 Workspace / 用给定名字新建一条 / 不关联（会话 cwd 与某 Workspace 路径相同时默认复用）；AgentFabric 不会自己凭空建 Workspace 记录。New task 页面只负责描述新任务，底部给一行指向该页。
 * **双向 Handoff**：Claude Code ↔ Codex / Pi / OpenCode 全部走既有 Handoff 流程（Claude Code → 其他 Harness 生成 Context Bundle：Checkpoint 覆盖装不下的历史，最近的用户指令与工作轨迹逐字保留；其他 Harness → Claude Code 注入 Handoff 后新建自己的 Native Session）。额度耗尽时 Task 页面显示 **Claude Code usage limit reached.** 与其他 Harness 的一键 Continue。
 * **Runtime 状态**：Web UI Runtimes 页展示轻量状态（CLI Installed / Authenticated / Credential Source: Harness Native / Execution Backend: Local），不展示任何敏感 credential。
 
@@ -134,18 +134,19 @@ v7（`v7.md`）以同样的 harness-native 模式接入本机 **Claude Code CLI*
 
 每个 Runtime 记录带 `usableInTask` 属性：**是否可作为 Task 的执行目标**。可用列表由后端给出——`GET /api/runtimes?usableInTask=true` 返回启用的、允许执行任务的 Runtime，New task 与 Task Thread 页面渲染这个列表（不自行派生）；服务端在 submit / continue 时做同一校验，目标 Runtime 不可用即拒绝（`code: "runtime-not-usable"`），所以前端过滤不可能被 API 绕过。接管（adopt）来的会话不受此限制、照常进入 Task（接管只投影历史、不执行模型），但继续执行时同样要过这道校验。
 
-* **取值来源**：创建 Runtime 时按 kind 写入默认值（`pi` / `opencode` → `true`；`codex` / `claude-code` / `zcode` / `docker` / `mock` / `custom` → `false`，当前只有这两个内置 harness 允许直接执行任务），显式传入的值优先；Runtimes 页的创建表单同样可以指定。Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kind 时翻开即可。表格只保留身份与状态列，点击任意一行弹出该 Runtime 的完整属性窗口（含同样的操作按钮）。
+* **取值来源**：创建 Runtime 时按 kind 写入默认值（`pi` / `opencode` → `true`；`codex` / `claude-code` / `zcode` / `dsh` / `docker` / `mock` / `custom` → `false`，当前只有这两个内置 harness 允许直接执行任务），显式传入的值优先；Runtimes 页的创建表单同样可以指定。Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kind 时翻开即可。表格只保留身份与状态列，点击任意一行弹出该 Runtime 的完整属性窗口（含同样的操作按钮）。
 * **接管与执行的边界**：ZCode 这类只有探测器的 kind 默认不可用——接管其会话只收历史，composer 里继续时选的是可用 Runtime（跨 harness 走 Handoff）；绕过 UI 直接把任务提交到不可用 Runtime 会以 `runtime-not-usable` 明确失败，而不是等到 harness 启动才炸（没有运行适配器的 kind 仍会以 `No adapter registered for runtime kind "…"` 失败）。
 * 种子写入的默认值在服务启动时一次性补齐到既有记录上；读取路径不派生、不修补该字段。
 
-## ZCode / Pi 本地会话探测
+## ZCode / Pi / DSH 本地会话探测
 
-在 Codex / Claude Code 之后，Native sessions 页面新增 **ZCode Sessions** 与 **Pi Sessions** 两个探测源：发现并读取本机已有的 ZCode、Pi 会话历史，接管后经 Handoff 交给其他 Harness 继续。只读，不触发任何模型请求。
+在 Codex / Claude Code 之后，Native sessions 页面新增 **ZCode Sessions**、**Pi Sessions** 与 **DSH Sessions** 三个探测源：发现并读取本机已有的 ZCode、Pi、DSH（DeepSeek Harness）会话历史，接管后经 Handoff 交给其他 Harness 继续。只读，不触发任何模型请求。
 
 * **ZCode 会话探测（`kind: zcode`）**：ZCode 没有列出历史会话的官方命令，发现直接读它的本地会话库 `~/.zcode/cli/db/db.sqlite`（SQLite，只读打开，仅触碰 `session` / `message` / `part` 三张会话表；credential 不会出现在其中）。只列主会话（`parent_id` 为空的分支子会话是内部簿记）；消息/部件按库内 `sequence` 列重建顺序；标题用 ZCode 自己生成的 `session.title`；`Bash` 工具调用投影为命令行活动，`Write` / `Edit` 系投影为文件活动，其余工具按通用工具调用投影；compaction 摘要作为 reasoning 条目保留在原位。
 * **Pi 会话探测（`kind: pi` 的发现口）**：发现读 Pi 自己的 transcript（`~/.pi/agent/sessions/--<cwd>--/<时间戳>_<id>.jsonl`，可用 `AGENTFABRIC_PI_SESSIONS_DIR` 覆盖）——与 `pi --session` 恢复读的是同一批文件。首行 `{"type":"session",…}` 头是格式签名，无此头的 `.jsonl`（编辑器草稿等异质文件）直接跳过；transcript 条目经 `id`/`parentId` 组成树，只读活动分支（末条目沿 parent 链走到根），被放弃的分支不是对话；`session_info.name` 是标题（缺省回退首条用户输入），`model_change` 提供模型；`bash` 工具调用与其 `toolResult` 条目按 `toolCallId` 配对成命令行活动，compaction / branch 摘要投影为 reasoning 条目。
-* **探测与运行的边界（重要）**：两者都只做**发现 + 读取 + 接管**。Pi 会话接管后可以用既有 Pi 适配器原生 Resume；**ZCode 只有探测器、没有运行适配器**——ZCode Runtime 默认 `usableInTask: false`，接管 ZCode 会话会把历史收进 AgentFabric Task，composer 里继续时选的是其他可用 Runtime（跨 harness 走 Handoff），不会误把 ZCode 当执行目标；绕过 UI 直接提交到 zcode 会以 `No adapter registered for runtime kind "zcode"` 明确失败。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用（ZCode Runtime 由种子默认创建）。
-* **两端解析同样严格限定在 `packages/runtimes` 的适配器层**，不进入 Core；防御性处理损坏行；读取不会执行任何模型请求。
+* **DSH 会话探测（`kind: dsh`）**：发现读 DSH 自己的会话事件日志（`$DSH_HOME/sessions`，默认 `~/.dsh/sessions`，可用 `AGENTFABRIC_DSH_SESSIONS_DIR` 覆盖）下 `<encoded-cwd>/<session-id>/session[.vN].jsonl[.zstd]`。`session` 头记录（id/cwd/createdAt）是格式签名；`.zstd` 日志是**逐次追加的拼接 zstd 帧**（DSH 每次落盘 flush 一帧，一个大会话有上万个帧）——Node 自带 zlib 解不了拼接帧、整份解压做列表又是秒级纯 JS 开销，探测器按帧头切分、逐帧解压（fzstd，纯 JS 零依赖）：列表只解到首个 turn 的标题与输入前缀（实测全库 144 份日志从 ~23s 降到 <0.5s），读取只整解目标会话那一份；`delegationDepth > 0` 的子代理会话不进列表（按 id 仍可读）。事件投影：`turn/start` 分轮，`user/message` 首条是轮输入（同轮后续注入消息投影为条目），`assistant/message` 的 reasoning / text 块投影为推理与回复，`tool/call` 与 `tool/result` 按 `callId` 配对（`bash` → 命令行活动，`edit` / `write` → 文件活动，其余 → 通用工具调用），`compaction/summary` 作为 reasoning 条目保留，流式 chunk 与 sandbox/approval/retry 状态不进对话。
+* **探测与运行的边界（重要）**：三者都只做**发现 + 读取 + 接管**。Pi 会话接管后可以用既有 Pi 适配器原生 Resume；**ZCode 与 DSH 只有探测器、没有运行适配器**——两者的 Runtime 默认 `usableInTask: false`，接管会话会把历史收进 AgentFabric Task，composer 里继续时选的是其他可用 Runtime（跨 harness 走 Handoff），不会误把它们当执行目标；绕过 UI 直接提交到 zcode / dsh 会以 `No adapter registered for runtime kind "…"` 明确失败。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用（ZCode / DSH Runtime 由种子默认创建）。
+* **解析同样严格限定在 `packages/runtimes` 的适配器层**，不进入 Core；防御性处理损坏行（DSH 列表跳过解压失败的日志，读取同一份则明确报错）；读取不会执行任何模型请求。
 
 ## 长期任务执行模型（v1）
 
@@ -468,7 +469,7 @@ packages/
 * 成本为内置价格表的估算值，可通过未来定价 API 覆盖。
 * 持久化使用 JSON 文件，适合单机 MVP；生产可替换为数据库。
 * OpenCode / Pi 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` 可覆盖）。
-* ZCode 只有本地会话探测（读 `~/.zcode/cli/db/db.sqlite`），没有运行适配器——接管后继续执行会明确报错，跨 Harness 用 Handoff。
+* ZCode 只有本地会话探测（读 `~/.zcode/cli/db/db.sqlite`），没有运行适配器——接管后继续执行会明确报错，跨 Harness 用 Handoff。DSH 同（读 `$DSH_HOME/sessions` 下的会话事件日志）。
 * 容器化 OpenCode 默认使用官方镜像 `ghcr.io/anomalyco/opencode`；容器化 Pi 无官方镜像，必须配置满足 Harness Execution Contract 的镜像（`runtime.image` / `AGENTFABRIC_PI_IMAGE`，参考 `docker/pi.Dockerfile`），否则拒绝启动。镜像默认以 ENTRYPOINT 为 harness；无 entrypoint 的镜像可设 `runtime.config.containerCommand`。
 * Network `allowedHosts/blockedHosts` 与 Filesystem `allowedPaths/deniedPaths` 暂未做细粒度强制（仅支持整体开关与只读挂载）。
 

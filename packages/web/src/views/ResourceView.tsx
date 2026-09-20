@@ -69,7 +69,7 @@ const configs: Record<string, Config> = {
     ],
     createFields: [
       { key: "name", label: "Name", required: true },
-      { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "zcode", "docker", "mock", "custom"] },
+      { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "zcode", "dsh", "docker", "mock", "custom"] },
       { key: "image", label: "Docker image", placeholder: "node:22-alpine" },
       { key: "command", label: "Container command (docker kind)", placeholder: "sh -c echo hello" },
       { key: "lifecycle", label: "Container lifecycle", type: "select", options: ["ephemeral", "keep-alive", "persistent"] },

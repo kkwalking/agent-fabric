@@ -266,10 +266,10 @@ export interface NewRuntimeInput {
 
 /**
  * Kind-level default for `Runtime.usableInTask` — which runtime kinds can
- * execute AgentFabric tasks today. Discovery-only kinds (zcode: sessions
- * are found and adopted, but no runner adapter exists yet) and the mock
- * default to false; the Runtimes page toggles the per-record value, so
- * this table only decides what a *new* runtime record starts at.
+ * execute AgentFabric tasks today. Discovery-only kinds (zcode and dsh:
+ * sessions are found and adopted, but no runner adapter exists yet) and
+ * the mock default to false; the Runtimes page toggles the per-record
+ * value, so this table only decides what a *new* runtime record starts at.
  */
 const USABLE_IN_TASK_BY_KIND: Record<Runtime["kind"], boolean> = {
   opencode: true,
@@ -277,6 +277,7 @@ const USABLE_IN_TASK_BY_KIND: Record<Runtime["kind"], boolean> = {
   codex: false,
   "claude-code": false,
   zcode: false,
+  dsh: false,
   docker: false,
   mock: false,
   custom: false,
@@ -1078,6 +1079,17 @@ export async function seedDefaults(store: Store): Promise<void> {
         env: {},
       });
     }
+    if (!existing.some((r) => r.kind === "dsh")) {
+      await runtimeService.create({
+        name: "DSH (DeepSeek)",
+        kind: "dsh",
+        description: "DeepSeek Harness (DSH) sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no DSH runner adapter yet)",
+        credentialSource: "harness-native",
+        enabled: true,
+        ephemeral: true,
+        env: {},
+      });
+    }
     // `usableInTask` postdates the seeded runtimes: write the kind default
     // once, at boot, so every record carries a definite value. This is a
     // write-time seeding step — reads never derive or repair the field.
@@ -1150,6 +1162,15 @@ export async function seedDefaults(store: Store): Promise<void> {
     name: "ZCode",
     kind: "zcode",
     description: "ZCode sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no ZCode runner adapter yet)",
+    credentialSource: "harness-native",
+    enabled: true,
+    ephemeral: true,
+    env: {},
+  });
+  await runtimeService.create({
+    name: "DSH (DeepSeek)",
+    kind: "dsh",
+    description: "DeepSeek Harness (DSH) sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no DSH runner adapter yet)",
     credentialSource: "harness-native",
     enabled: true,
     ephemeral: true,

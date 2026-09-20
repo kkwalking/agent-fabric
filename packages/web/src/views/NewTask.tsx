@@ -47,8 +47,8 @@ export function NewTaskView() {
 
   const runtimeList = runtimes.data ?? [];
   // Only runtimes that may execute a task are offered (`usableInTask`):
-  // discovery-only kinds (zcode) never start a task, they are adopted from
-  // the Sessions page.
+  // discovery-only kinds (zcode, dsh) never start a task, they are adopted
+  // from the Sessions page.
   const selectableRuntimes = runtimeList.filter((r: any) => r.enabled && r.usableInTask);
   const modelList = models.data ?? [];
   const workspaceList = workspaces.data ?? [];

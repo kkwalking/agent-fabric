@@ -21,6 +21,7 @@ export const HARNESS_THREAD_SOURCES: readonly HarnessThreadSourceMeta[] = [
   { kind: "claude-code", label: "Claude Code", noun: "Sessions" },
   { kind: "zcode", label: "ZCode", noun: "Sessions" },
   { kind: "pi", label: "Pi", noun: "Sessions" },
+  { kind: "dsh", label: "DSH", noun: "Sessions" },
 ];
 
 /** Harness kinds that authenticate with their own account (v6 §2/v7 §2). */
