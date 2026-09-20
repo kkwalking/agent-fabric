@@ -347,6 +347,10 @@ test("scenario B: adopt an existing codex thread, then continue on Pi via handof
     const runs = h.runService.forTask(result.taskId);
     assert.equal(runs.length, 2);
     assert.ok(runs.every((r) => r.status === "completed"));
+    assert.ok(
+      runs.every((r) => r.runtimeSessionRefId === result.runtimeSessionRefId),
+      "every imported run carries the adopted thread's native session reference"
+    );
     assert.equal(runs[0].userPrompt, "Please fix the login bug in auth.ts");
     const events = await h.runService.events(runs[0].id);
     assert.ok(events.some((e) => e.type === "shell.command" && e.data.command === "npm test"));
@@ -440,6 +444,7 @@ test("syncing an adopted thread appends turns that happened in codex after adopt
     assert.equal(runs.length, 3);
     assert.equal(runs[2].status, "completed");
     assert.equal(runs[2].userPrompt, "one more thing");
+    assert.equal(runs[2].runtimeSessionRefId, result.runtimeSessionRefId, "synced turns belong to the same native session");
     assert.ok(runs[2].createdAt >= runs[1].createdAt);
     assert.ok(
       (await h.runService.events(runs[2].id)).some((e) => e.type === "agent.message" && /extra thing/.test(String(e.data.content)))

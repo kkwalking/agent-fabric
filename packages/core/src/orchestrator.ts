@@ -1280,10 +1280,13 @@ export class RunService {
 
     // Backdated, strictly increasing timestamps keep forTask() ordering
     // stable even when turns are recorded within the same millisecond.
-    const runId = await this.appendImportedTurns(task, runtime, detail, turns, workspaceId, { startIndex: 0 });
+    const runIds = await this.appendImportedTurns(task, runtime, detail, turns, workspaceId, { startIndex: 0 });
+    const runId = runIds[runIds.length - 1];
 
     /* ---- Register the thread as the task's native session (v6 §4):
-            same harness resumes it, other harnesses go through Handoff. ---- */
+            same harness resumes it, other harnesses go through Handoff.
+            Every imported turn IS a turn of this one native thread, so the
+            reference is stamped on each imported run, not just the last. ---- */
     let runtimeSessionRefId: ID | undefined;
     if (runId) {
       const ref = await this.runtimeSessionService().register({
@@ -1299,7 +1302,9 @@ export class RunService {
         metadata: { imported: true, threadTitle: detail.title, cwd: detail.cwd },
       });
       runtimeSessionRefId = ref.id;
-      await this.store.update<Run>("runs", runId, { runtimeSessionRefId: ref.id, updatedAt: now() });
+      for (const id of runIds) {
+        await this.store.update<Run>("runs", id, { runtimeSessionRefId: ref.id, updatedAt: now() });
+      }
       await this.emitRunEvent(runId, "runtime.session.created", {
         runtimeSessionRefId: ref.id,
         nativeSessionRef: ref.nativeSessionRef,
@@ -1375,7 +1380,14 @@ export class RunService {
 
     const disarmedHandoffIds: ID[] = [];
     if (delta.length > 0) {
-      await this.appendImportedTurns(task, runtime, detail, turns, task.workspaceId, { startIndex: accounted });
+      const appended = await this.appendImportedTurns(task, runtime, detail, turns, task.workspaceId, { startIndex: accounted });
+      // Synced turns are turns of the adopted native thread too — they carry
+      // the same session reference the adoption stamped on its runs.
+      if (threadRef) {
+        for (const id of appended) {
+          await this.store.update<Run>("runs", id, { runtimeSessionRefId: threadRef.id, updatedAt: now() });
+        }
+      }
       // An armed handoff was generated from a snapshot the appended turns
       // no longer cover; consuming it would silently ignore the new work.
       // Disarm it — regenerating is one explicit action.
@@ -1407,9 +1419,9 @@ export class RunService {
     turns: Array<{ userText?: string; items: HarnessThreadItem[] }>,
     workspaceId: ID | undefined,
     opts: { startIndex: number }
-  ): Promise<ID | undefined> {
+  ): Promise<ID[]> {
     const baseMs = Date.now() - (turns.length - opts.startIndex);
-    let runId: ID | undefined;
+    const runIds: ID[] = [];
     let budget = 4000; // hard cap on synthesized events per append
     for (let i = opts.startIndex; i < turns.length; i++) {
       const turn = turns[i];
@@ -1424,7 +1436,7 @@ export class RunService {
         },
         turn.userText ?? task.prompt
       );
-      runId = run.id;
+      runIds.push(run.id);
       const stamp = new Date(baseMs + i).toISOString();
       await this.store.update<Run>("runs", run.id, { createdAt: stamp, updatedAt: stamp });
 
@@ -1467,7 +1479,7 @@ export class RunService {
         updatedAt: stamp,
       });
     }
-    return runId;
+    return runIds;
   }
 
   /** Standard-event projections of one imported thread item (v6 §7). */

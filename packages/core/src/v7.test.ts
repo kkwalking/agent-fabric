@@ -419,6 +419,7 @@ test("scenario B: adopt an existing claude session, resume same-harness, then ha
     assert.equal(runs.length, 1);
     assert.equal(runs[0].status, "completed");
     assert.equal(runs[0].userPrompt, "Please fix the login bug in auth.ts");
+    assert.equal(runs[0].runtimeSessionRefId, result.runtimeSessionRefId, "imported run carries the adopted session reference");
     const events = await h.runService.events(runs[0].id);
     assert.ok(events.some((e) => e.type === "shell.command" && e.data.command === "npm test"));
     assert.ok(events.some((e) => e.type === "agent.message"));
