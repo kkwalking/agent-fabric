@@ -39,7 +39,10 @@ const resourceNav: NavEntry[] = [
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
   { path: "/sessions", label: "Native sessions", icon: "terminal", match: "/sessions" },
   { path: "/handoffs", label: "Handoffs", icon: "archive", match: "/handoffs" },
-  { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
+  // AGENT_UI_HIDDEN: Agents 页暂不开放（后端 / API 未动）。恢复前端入口时，
+  // 取消注释所有带 AGENT_UI_HIDDEN 标记的位置：本文件上下两处、router.ts 的
+  // PATH_VIEWS、NewTask.tsx 与 TaskThread.tsx 里的 Agent 选择器。
+  // { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
   { path: "/workspaces", label: "Workspaces", icon: "folder", match: "/workspaces" },
 ];
 
@@ -132,7 +135,8 @@ export function App() {
         {route.view === "llm" && <LlmView />}
         {route.view === "runtimes" && <ResourceView kind="runtimes" />}
         {route.view === "sessions" && <SessionsView />}
-        {route.view === "agents" && <ResourceView kind="agents" />}
+        {/* AGENT_UI_HIDDEN: 与上面侧边栏的 Agents 导航一起恢复。 */}
+        {/* {route.view === "agents" && <ResourceView kind="agents" />} */}
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
         {route.view === "handoffs" && <HandoffsView />}
         {route.view === "handoff" && route.id && <HandoffDetailView handoffId={route.id} />}

@@ -32,6 +32,10 @@ export function NewTaskView() {
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
   const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
+  // AGENT_UI_HIDDEN: 下方的 Agent 选择器已注释。这个请求与 profileId 相关的
+  // 默认值逻辑（effectiveRuntimeId / effectiveModelId 的 profile 分支、提交体
+  // 里的 profileId 字段）原样保留——选择器隐藏期间 profileId 恒为 ""，这些
+  // 分支不会命中；恢复入口只需取消注释带 AGENT_UI_HIDDEN 标记的块。
   const profiles = useAsync<any[]>(() => get("/api/agents"), []);
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
@@ -185,12 +189,14 @@ export function NewTaskView() {
               <option key={w.id} value={w.id}>Workspace: {w.name}</option>
             ))}
           </select>
+          {/* AGENT_UI_HIDDEN: Agent Profile 选择器，恢复入口时取消注释。
           <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title="Agent profile">
             <option value="">Agent: none</option>
             {(profiles.data ?? []).map((p: any) => (
               <option key={p.id} value={p.id}>Agent: {p.name}</option>
             ))}
           </select>
+          */}
           <select className="pill" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)} title="Container lifecycle">
             <option value="">
               Lifecycle:{" "}

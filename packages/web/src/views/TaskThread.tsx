@@ -1098,6 +1098,10 @@ function Composer({
   const runtimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
+  // AGENT_UI_HIDDEN: composer 里的 Agent 选择器已注释。这个请求与 profileId
+  // 相关的逻辑（effectiveModelId 的 profile 分支、postContinue 里的 profileId
+  // 字段）原样保留——选择器隐藏期间 profileId 恒为 ""，这些分支不会命中；
+  // 恢复入口只需取消注释带 AGENT_UI_HIDDEN 标记的块。
   const profiles = useAsync<any[]>(() => get("/api/agents"), []);
   const [prompt, setPrompt] = useState("");
   const [runtimeChoice, setRuntimeChoice] = useState("");
@@ -1303,12 +1307,14 @@ function Composer({
               ))}
             </select>
           )}
+          {/* AGENT_UI_HIDDEN: Agent Profile 选择器，恢复入口时取消注释。
           <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title="Agent profile">
             <option value="">Agent: none</option>
             {(profiles.data ?? []).map((p) => (
               <option key={p.id} value={p.id}>Agent: {p.name}</option>
             ))}
           </select>
+          */}
           {live && liveRunId && (
             <button className="small danger" onClick={() => onStop(liveRunId)} title="Stop the current run — the task stays open">
               <Icon name="stop" size={11} /> Stop

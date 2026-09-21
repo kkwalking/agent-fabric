@@ -53,7 +53,9 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   "/llm": "llm",
   "/runtimes": "runtimes",
   "/sessions": "sessions",
-  "/agents": "agents",
+  // AGENT_UI_HIDDEN: Agents 页隐藏期间，直接访问 /agents 回落到 Dashboard；
+  // 与 App.tsx 的两处标记一起恢复。
+  // "/agents": "agents",
   "/workspaces": "workspaces",
   "/handoffs": "handoffs",
   "/usage": "usage",
