@@ -88,7 +88,7 @@ npm run dev:web
 > **Users interact with Tasks. The system executes Runs.**
 > **Task is the product surface. Run is the execution detail.**
 
-* **Task Thread（`/tasks/:taskId`）是主交互页面**：像 Codex / Claude Code 一样，用户消息（`run.userPrompt`，绝不是拼接后的完整 Harness Prompt）、Agent 工作过程（可读、默认折叠的 Tool / Command / File Activity）与 Agent 回答（`agent.message`）在同一页面持续展开；底部 Composer 继续任务，可切换 Runtime / Model / Agent Profile，并实时提示即将发生 **Resume**（同 Harness）还是 **Handoff**（跨 Harness，带 Context Bundle：checkpoint + 逐字保留的工作上下文）。运行中可 Stop，失败提供 Retry / Continue / Switch runtime。
+* **Task Thread（`/tasks/:taskId`）是主交互页面**：像 Codex / Claude Code 一样，用户消息（`run.userPrompt`，绝不是拼接后的完整 Harness Prompt）、Agent 工作过程（可读、默认折叠的 Tool / Command / File Activity）与 Agent 回答（`agent.message`）在同一页面持续展开；底部 Composer 继续任务，可切换 Runtime / Model / Agent Profile，并实时提示即将发生 **Resume**（同 Harness）还是 **Handoff**（跨 Harness，带 Context Bundle：checkpoint + 逐字保留的工作上下文）。运行中可 Stop，失败提供 Continue / Switch runtime 与「View run」调试入口；普通 turn 不暴露 Run 概念——Run 是执行细节，调试 / 审计走 Runs 页与 Run Inspector。
 * **Run Detail 退回为 Run Inspector（`/runs/:runId`）**：高级执行详情 / 调试 / 审计页面——Raw Events、Logs、Artifacts、Usage、Runtime Native Session、Native State、Handoff 与完整 `inputInstruction`。
 * **Runs 页可复制 Native Session id**：每个产生过 native session 的 Run 在操作列提供 **copy session id**——悬停可见完整 id 与该 harness 的 resume 命令（`claude --resume <id>` / `codex exec resume <id>` / `pi --session <id>` / `opencode --session <id>`），复制后可直接去原生 harness CLI resume；Run Inspector 的 native session 行提供同样的复制按钮。
 * **前端 Presentation Layer**：Raw Event → Presentation Projector → Timeline Item（事件合并：`tool.started`+`tool.completed` → 一个 Tool Activity，`shell.command`+`shell.output` → 一个 Command Activity），不修改 Core Event Schema；`GET /api/tasks/:id/thread` 提供只读聚合，未引入新的 Message / Conversation / Session 后端模型。

@@ -25,7 +25,9 @@ import { navigate } from "../router";
  * Task + Runs + User Prompts + Agent Events, projected into a
  * conversation — this is a *presentation* of existing records, not a new
  * chat/session domain model (v5 §34/§35). Users operate Tasks; the
- * system executes Runs. Run details live behind "View run" (v5 §12).
+ * system executes Runs. Run detail stays a debug surface (Run Inspector,
+ * reached from the Runs page or a failure card) — normal turns never
+ * advertise it.
  */
 
 const LIVE_STATUSES = new Set(["pending", "starting", "running"]);
@@ -329,7 +331,6 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           <a className="switch-link" onClick={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}>
             <Icon name="refresh" size={12} /> Switch runtime
           </a>
-          <span className="meta-chip muted">{thread.runs.length} {thread.runs.length === 1 ? "run" : "runs"}</span>
         </div>
         {syncError && <ErrorBox message={`Native session sync failed: ${syncError}`} />}
       </header>
@@ -338,7 +339,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="thread-list">
           {thread.runs.length === 0 && (
-            <div className="muted" style={{ padding: "24px 0" }}>No runs yet.</div>
+            <div className="muted" style={{ padding: "24px 0" }}>No activity yet.</div>
           )}
           {thread.runs.map((turn) => (
             <TurnView
@@ -736,7 +737,7 @@ function TurnView({
             </div>
           )}
           {run.status === "cancelled" && (
-            <div className="cancelled-note">Run stopped — the task stays open; send a new instruction below.</div>
+            <div className="cancelled-note">Stopped — the task stays open; send a new instruction below.</div>
           )}
 
           {/* Artifacts (v5 §31) */}
@@ -768,7 +769,6 @@ function TurnView({
                 )}
                 {run.cost ? <span>{fmtCostShort(run.cost)}</span> : null}
                 {turn.artifacts.length > 0 && <span>{turn.artifacts.length} artifact{turn.artifacts.length > 1 ? "s" : ""}</span>}
-                <a onClick={() => navigate(`/runs/${run.id}`)}>View run ↗</a>
                 <button
                   className="turn-handoff"
                   title="Generate a handoff summary so a new native session can continue this task"
