@@ -359,6 +359,17 @@ button.danger:hover {
   border-color: var(--red);
   background: rgba(209, 36, 47, 0.05);
 }
+/* Destructive actions that sit apart from the safe ones: red at rest,
+   not only on hover. */
+button.danger-prominent {
+  color: var(--red);
+  border-color: rgba(209, 36, 47, 0.45);
+  background: rgba(209, 36, 47, 0.06);
+}
+button.danger-prominent:hover {
+  border-color: var(--red);
+  background: rgba(209, 36, 47, 0.12);
+}
 button.small {
   padding: 3px 9px;
   font-size: 11.5px;

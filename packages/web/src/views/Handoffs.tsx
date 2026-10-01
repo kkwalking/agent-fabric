@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { get, del, put, fmtTime, shortId } from "../api";
-import { useAsync, ErrorBox } from "../components";
+import { useAsync, ErrorBox, CopyButton, Modal } from "../components";
 import { HANDOFF_TRIGGERS } from "../presentation";
 import { navigate } from "../router";
 
@@ -355,6 +355,7 @@ export function HandoffsView() {
 
 export function HandoffDetailView({ handoffId }: { handoffId: string }) {
   const { data: detail, error } = useAsync<any>(() => get(`/api/handoffs/${handoffId}`), [handoffId]);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
 
   if (error) return <ErrorBox message={error} />;
   if (!detail) return <div className="muted">Loading…</div>;
@@ -404,20 +405,50 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
         >
           Export as Markdown
         </button>
+        {/* Same rendered body the export downloads and the card below shows —
+            copying it hands the next agent exactly what this record carries. */}
+        <CopyButton
+          label="Copy to clipboard"
+          text={detail.renderedPrompt}
+          title="Copy the rendered handoff text — what the next agent receives"
+        />
         {/* Wrong context is discarded, never repaired in place: a handoff is
             whatever the model produced at generation time, so a bad one is
-            deleted and regenerated from the task thread (AGENTS.md). */}
+            deleted and regenerated from the task thread (AGENTS.md). Destructive,
+            so it lives alone on the right behind an explicit confirmation. */}
         <button
-          className="small"
-          onClick={async () => {
-            if (!confirm(`Discard ${detail.id}? It cannot be recovered — generate a new handoff instead.`)) return;
-            await del(`/api/handoffs/${detail.id}`);
-            navigate("/handoffs");
-          }}
+          className="small danger-prominent right"
+          onClick={() => setConfirmingDiscard(true)}
         >
           Discard handoff
         </button>
       </div>
+      {confirmingDiscard && (
+        <Modal title="Discard handoff" onClose={() => setConfirmingDiscard(false)}>
+          <div className="delete-confirm">
+            <p className="delete-confirm-question">
+              Discard handoff <strong className="mono">{detail.id}</strong>?
+            </p>
+            <p className="muted">
+              It is deleted permanently and cannot be recovered. If the context was wrong, generate a new handoff
+              from the task thread instead.
+            </p>
+            <div className="modal-actions">
+              <button onClick={() => setConfirmingDiscard(false)}>Cancel</button>
+              <button
+                className="danger"
+                onClick={async () => {
+                  setConfirmingDiscard(false);
+                  await del(`/api/handoffs/${detail.id}`);
+                  navigate("/handoffs");
+                }}
+              >
+                Discard handoff
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
       {degraded && (
         <div className="card handoff-degraded-card">
           <b>⚠ Degraded context — not a model-written checkpoint.</b>{" "}
