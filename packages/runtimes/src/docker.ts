@@ -17,6 +17,8 @@ export interface DockerRunOptions {
   image: string;
   command: string[];
   env?: Record<string, string>;
+  /** Working directory inside the container (the workspace mount by default). */
+  workdir?: string;
   workspaceMount?: { hostPath: string; containerPath: string };
   /** Opaque harness-native state mount (v2 §13–§15). */
   nativeStateMount?: { hostPath: string; containerPath: string };
@@ -158,6 +160,7 @@ export async function runDockerContainer(
   const name = opts.name ?? `af-${ctx.run.id}`;
   const cidFile = join(tmpdir(), `${name}.cid`);
   const args = ["run", "--name", name, "--cidfile", cidFile];
+  if (opts.workdir) args.push("-w", opts.workdir);
   // Ephemeral runtimes remove the container automatically on exit;
   // keep-alive/persistent runtimes keep it so it can be reused or
   // handed to the lease manager (spec v1 §1).
@@ -411,13 +414,17 @@ export const dockerAdapter: AgentRuntimeAdapter = {
       ? ctx.runtime.command
       : ["sh", "-c", "echo hello from agent-fabric container; pwd; ls -la"];
 
+    const containerPath = String(ctx.runtime.config?.mountPath ?? "/workspace");
     try {
       const outcome = await runDockerWithLifecycle(ctx, {
         image,
         command,
         env: ctx.env,
+        // The workspace is the container's working directory, so a harness
+        // that runs relative commands operates on the mounted working copy.
+        workdir: ctx.workspacePath ? containerPath : undefined,
         workspaceMount: ctx.workspacePath
-          ? { hostPath: ctx.workspacePath, containerPath: String(ctx.runtime.config?.mountPath ?? "/workspace") }
+          ? { hostPath: ctx.workspacePath, containerPath }
           : undefined,
         // Platform-provisioned read-only mounts (skills / MCP, v11 §25/§26).
         extraMounts: ctx.extraMounts,

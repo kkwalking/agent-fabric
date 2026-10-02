@@ -23,6 +23,7 @@ import {
   WorkspaceLockService,
   seedDefaults,
   effectiveCapabilities,
+  runtimeIsolation,
   renderHandoffBody,
   toHandoffListRow,
   HandoffUnavailableError,
@@ -285,6 +286,18 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     }
     ok(res, runtimes.list());
   });
+  // The runtimes a Project Coding Task may actually use (v11 hardening §4):
+  // enabled, usable in tasks, and isolated. The Projects/Task forms read this
+  // so the user is never offered a runtime that will be refused at submit.
+  app.get("/api/runtimes/project-eligible", (_req, res) => {
+    ok(
+      res,
+      runtimes
+        .enabled()
+        .filter((r) => r.usableInTask && runtimeIsolation(r).sandboxed)
+        .map((r) => ({ ...r, isolation: runtimeIsolation(r) }))
+    );
+  });
   app.post("/api/runtimes", async (req, res) => {
     try {
       ok(res, await runtimes.create(req.body), 201);
@@ -319,6 +332,14 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     const r = runtimes.get(req.params.id);
     if (!r) return fail(res, new Error("Runtime not found"), 404);
     ok(res, effectiveCapabilities(registry.get(r.kind), r));
+  });
+
+  // Isolation verdict (v11 hardening §4.2): read from capability metadata
+  // (`executionBackend` / `containerized` / `image`), never from the name.
+  app.get("/api/runtimes/:id/isolation", (req, res) => {
+    const r = runtimes.get(req.params.id);
+    if (!r) return fail(res, new Error("Runtime not found"), 404);
+    ok(res, runtimeIsolation(r));
   });
 
   // Provider compatibility (v4 §4): which parts of an AgentFabric
