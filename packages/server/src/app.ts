@@ -5,6 +5,7 @@ import {
   Store,
   EventBus,
   RunService,
+  ExecutionSupervisor,
   ProviderService,
   ModelService,
   RuntimeService,
@@ -17,14 +18,21 @@ import {
   HandoffService,
   RuntimeSessionService,
   NativeStateService,
+  ProjectService,
+  SourceCredentialService,
+  WorkspaceLockService,
   seedDefaults,
   effectiveCapabilities,
   renderHandoffBody,
   toHandoffListRow,
   HandoffUnavailableError,
   HandoffRequiredError,
+  DomainError,
+  isDomainError,
+  httpStatusForCode,
   type NewTaskInput,
   type ContinueTaskInput,
+  type StartProjectTaskInput,
   type Run,
   type Task,
 } from "@agentfabric/core";
@@ -53,6 +61,19 @@ function fail(res: Response, err: unknown, status = 400): void {
   // fallback instead of just printing the message.
   const code = (err as { code?: string } | undefined)?.code;
   res.status(status).json({ error: message, ...(code ? { code } : {}) });
+}
+
+/**
+ * Domain failures carry their own HTTP status (v11 §22): a missing project is
+ * a 404, a locked workspace or an existing branch is a 409, an auth failure
+ * is a 403. The code is always forwarded so the UI can offer the right retry.
+ */
+function failDomain(res: Response, err: unknown): void {
+  if (isDomainError(err)) {
+    res.status(httpStatusForCode(err.code)).json({ error: err.message, code: err.code, stage: err.stage });
+    return;
+  }
+  fail(res, err);
 }
 
 /**
@@ -118,6 +139,9 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   const handoffs = new HandoffService(store);
   const runtimeSessions = new RuntimeSessionService(store);
   const nativeStates = new NativeStateService(store);
+  const projects = new ProjectService(store);
+  const sourceCredentials = new SourceCredentialService(store);
+  const workspaceLocks = new WorkspaceLockService(store);
   const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
     codex: codexThreadSource,
     "claude-code": claudeCodeThreadSource,
@@ -125,8 +149,16 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     pi: piThreadSource,
     dsh: dshThreadSource,
   });
+  // The execution supervisor owns the Project-based task lifecycle (v11 §13).
+  const supervisor = new ExecutionSupervisor(store, bus, runs);
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();
+  // A restart leaves no lifecycle running: mark in-flight project tasks as
+  // interrupted (workspace preserved) and reclaim their workspace locks.
+  const recovered = await supervisor.recoverInterrupted();
+  if (recovered.tasks.length > 0) {
+    console.log(`[agent-fabric] marked ${recovered.tasks.length} interrupted project task(s) after restart: ${recovered.tasks.join(", ")}`);
+  }
 
   // Background purge (失败要响): soft-deleted tasks older than the
   // retention window are physically removed with their runs, events,
@@ -168,6 +200,8 @@ export async function createApp(options: ServerOptions): Promise<Express> {
         handoffs: handoffs.list().length,
         runtimeSessions: runtimeSessions.list().length,
         nativeStates: nativeStates.list().length,
+        projects: projects.list().length,
+        sourceCredentials: sourceCredentials.list().length,
       },
       usage: usage.summary(),
     });
@@ -442,6 +476,82 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     removed ? ok(res, { ok: true }) : fail(res, new Error("Agent not found"), 404);
   });
 
+  /* ---------------- projects (v11 §2/§3) ---------------- */
+
+  app.get("/api/projects", (_req, res) => ok(res, projects.list()));
+  app.post("/api/projects", async (req, res) => {
+    try {
+      ok(res, await projects.create(req.body), 201);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+  app.get("/api/projects/:id", (req, res) => {
+    const p = projects.get(req.params.id);
+    p ? ok(res, p) : fail(res, new Error("Project not found"), 404);
+  });
+  app.put("/api/projects/:id", async (req, res) => {
+    try {
+      const p = await projects.update(req.params.id, req.body);
+      p ? ok(res, p) : fail(res, new Error("Project not found"), 404);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+  app.delete("/api/projects/:id", async (req, res) => {
+    const removed = await projects.remove(req.params.id);
+    removed ? ok(res, { ok: true }) : fail(res, new Error("Project not found"), 404);
+  });
+  // Tasks that belong to this project (the Project detail page's list).
+  app.get("/api/projects/:id/tasks", (req, res) => {
+    if (!projects.get(req.params.id)) return fail(res, new Error("Project not found"), 404);
+    const ids = new Set(projects.taskIds(req.params.id));
+    ok(res, tasks.list({ deleted: false }).filter((t) => ids.has(t.id)));
+  });
+
+  // Start a Project-based Task (v11 §39): the platform creates the managed
+  // workspace, prepares the source and runs the whole lifecycle. Users never
+  // create a Workspace by hand.
+  app.post("/api/projects/:id/tasks", async (req, res) => {
+    if (!projects.get(req.params.id)) return fail(res, new Error("Project not found"), 404);
+    try {
+      const body = (req.body ?? {}) as Partial<StartProjectTaskInput>;
+      const result = await supervisor.startTask({ ...body, projectId: req.params.id } as StartProjectTaskInput);
+      ok(res, result, 201);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+
+  /* ---------------- source credentials (v11 §4) ---------------- */
+  // Sensitive values live in Secrets; these endpoints only ever return
+  // metadata plus the masked preview (v11 §4.2).
+
+  app.get("/api/source-credentials", (_req, res) => ok(res, sourceCredentials.list()));
+  app.post("/api/source-credentials", async (req, res) => {
+    try {
+      ok(res, await sourceCredentials.create(req.body), 201);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+  app.get("/api/source-credentials/:id", (req, res) => {
+    const c = sourceCredentials.getView(req.params.id);
+    c ? ok(res, c) : fail(res, new Error("Source credential not found"), 404);
+  });
+  app.put("/api/source-credentials/:id", async (req, res) => {
+    try {
+      const c = await sourceCredentials.update(req.params.id, req.body);
+      c ? ok(res, c) : fail(res, new Error("Source credential not found"), 404);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+  app.delete("/api/source-credentials/:id", async (req, res) => {
+    const removed = await sourceCredentials.remove(req.params.id);
+    removed ? ok(res, { ok: true }) : fail(res, new Error("Source credential not found"), 404);
+  });
+
   /* ---------------- tasks ---------------- */
 
   // Live tasks by default; `?deleted=true` serves the recoverable-deleted
@@ -470,6 +580,70 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     t ? ok(res, t) : fail(res, new Error("Deleted task not found"), 404);
   });
   app.get("/api/tasks/:id/runs", (req, res) => ok(res, runs.forTask(req.params.id)));
+
+  /* ---------------- project task lifecycle (v11 §23/§31/§32/§40) ---------------- */
+
+  // Task Detail: everything the page needs to answer "is the agent
+  // developing, testing, committing or pushing" — project, source, base ref
+  // and commit, working branch, workspace, phase, the three statuses, the
+  // final commit and the remote branch.
+  app.get("/api/tasks/:id/detail", (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
+    try {
+      ok(res, supervisor.taskDetail(req.params.id));
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+
+  // Cancel: the runtime is stopped, cleanup runs, the workspace and its
+  // uncommitted modifications survive (v11 §32).
+  app.post("/api/tasks/:id/cancel", async (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
+    try {
+      const task = await supervisor.cancelTask(req.params.id);
+      task ? ok(res, task) : fail(res, new Error("Task not found"), 404);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+
+  // Retry Agent Run: a NEW run continues on the same workspace (v11 §31).
+  app.post("/api/tasks/:id/retry-run", async (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
+    try {
+      const body = (req.body ?? {}) as { instruction?: string; runtimeId?: string; modelId?: string };
+      ok(res, await supervisor.retryRun(req.params.id, body), 201);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+
+  // Retry Validation: re-runs validation only — no agent, no model call.
+  app.post("/api/tasks/:id/retry-validation", async (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
+    try {
+      const task = await supervisor.retryValidation(req.params.id);
+      task ? ok(res, task) : fail(res, new Error("Task not found"), 404);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+
+  // Retry Publish: re-pushes the already-committed revision — no agent, no
+  // model call (v11 §23/§31).
+  app.post("/api/tasks/:id/retry-publish", async (req, res) => {
+    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
+    try {
+      const task = await supervisor.retryPublish(req.params.id);
+      task ? ok(res, task) : fail(res, new Error("Task not found"), 404);
+    } catch (e) {
+      failDomain(res, e);
+    }
+  });
+
+  // Workspace locks currently held (one writer per managed workspace, §36).
+  app.get("/api/workspace-locks", (_req, res) => ok(res, workspaceLocks.list()));
 
   // Task Thread read model (v5 §24/§35): an aggregate of everything the
   // thread page renders — task, workspace, and per-run events, artifacts
