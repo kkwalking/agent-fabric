@@ -45,7 +45,13 @@ import {
 } from "./git.js";
 import { SecretRedactor, redactRemoteUrl, urlHasUserInfo } from "./redaction.js";
 import { buildMcpConfigDocument, provisionEnvironment } from "./provisioning.js";
-import { createValidationRunner, resolveValidationConfig } from "./validation.js";
+import {
+  buildValidationEnvironment,
+  createValidationRunner,
+  resolveValidationConfig,
+  runSandboxedValidation,
+  type SandboxedStepExecutor,
+} from "./validation.js";
 import type { Project, Run, Task } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -169,9 +175,54 @@ interface Harness {
   locks: WorkspaceLockService;
   dataDir: string;
   runtimeId: string;
+  /** Every validation step the sandboxed executor was asked to run. */
+  validationCalls: ValidationCall[];
 }
 
-async function makeHarness(options: { git?: GitOps; validationRunner?: ReturnType<typeof createValidationRunner> } = {}): Promise<Harness> {
+/** One validation step as the isolated executor received it. */
+interface ValidationCall {
+  step: { name: string; command: string };
+  cwd: string;
+  env: Record<string, string>;
+}
+
+/**
+ * The isolated validation executor used by the core suites (v11 hardening
+ * §6). Validation is never allowed to run as a host shell command, so the
+ * harness supplies a stand-in isolation carrier that runs the step through
+ * the same `runSandboxedValidation` seam the production Docker executor
+ * implements — while recording exactly what environment it was handed, which
+ * is what the isolation assertions read.
+ */
+function sandboxedValidationExecutor(calls: ValidationCall[]): (image?: string) => SandboxedStepExecutor {
+  const executor: SandboxedStepExecutor = async (opts) => {
+    calls.push({ step: { name: opts.step.name, command: opts.step.command }, cwd: opts.cwd, env: { ...opts.env } });
+    try {
+      const { stdout, stderr } = await execFileAsync("sh", ["-c", opts.step.command], {
+        cwd: opts.cwd,
+        env: opts.env,
+        timeout: opts.timeoutMs,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      const output = `${stdout}${stderr}`;
+      await opts.onOutput?.(output, "stdout");
+      return { exitCode: 0, timedOut: false, output };
+    } catch (err) {
+      const e = err as { code?: number; killed?: boolean; stdout?: string; stderr?: string };
+      const output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
+      if (output) await opts.onOutput?.(output, "stderr");
+      if (e.killed) return { exitCode: null, timedOut: true, output };
+      return { exitCode: e.code ?? 1, timedOut: false, output };
+    }
+  };
+  // The supervisor asks for an executor per toolchain image; this carrier is
+  // image-agnostic (the step runs in the test process, not in a container).
+  return () => executor;
+}
+
+async function makeHarness(
+  options: { git?: GitOps; validationRunner?: ReturnType<typeof createValidationRunner> } = {}
+): Promise<Harness> {
   const dataDir = tempDir("af-v11-data-");
   const store = await Store.open(dataDir);
   const bus = new EventBus();
@@ -179,14 +230,24 @@ async function makeHarness(options: { git?: GitOps; validationRunner?: ReturnTyp
   const registry = new RuntimeRegistry();
   registry.register(scripted.adapter);
   const runService = new RunService(store, bus, registry, { destroy: async () => {} }, undefined, {});
-  const supervisor = new ExecutionSupervisor(store, bus, runService, options);
+  const validationCalls: ValidationCall[] = [];
+  const supervisor = new ExecutionSupervisor(store, bus, runService, {
+    ...options,
+    validationExecutor: sandboxedValidationExecutor(validationCalls),
+  });
   const runtimes = new RuntimeService(store);
+  // Project Coding Tasks require an isolated runtime (v11 hardening §4): the
+  // scripted harness declares container-backed execution, which is the
+  // metadata the isolation gate reads. The adapter itself is scripted — the
+  // suite is testing the lifecycle, not Docker.
   const runtime = await runtimes.create({
     name: "Scripted runtime",
     kind: "custom",
     usableInTask: true,
     enabled: true,
-    containerized: false,
+    containerized: true,
+    executionBackend: "isolated",
+    image: "af-test-isolated:latest",
   });
   return {
     store,
@@ -203,6 +264,7 @@ async function makeHarness(options: { git?: GitOps; validationRunner?: ReturnTyp
     locks: new WorkspaceLockService(store),
     dataDir,
     runtimeId: runtime.id,
+    validationCalls,
   };
 }
 
@@ -214,7 +276,7 @@ function recordingGit(inner: GitOps): {
   fetches: number;
   commits: number;
 } {
-  const pushes: Array<{ branch: string; remote: string }> = [];
+  const pushes: Array<{ branch: string; remote: string; revision?: string }> = [];
   const state = { clones: 0, fetches: 0, commits: 0 };
   const git: GitOps = {
     ...inner,
@@ -233,6 +295,11 @@ function recordingGit(inner: GitOps): {
     async push(opts) {
       pushes.push({ branch: opts.branch, remote: opts.remote });
       return inner.push(opts);
+    },
+    async pushRevision(opts) {
+      // The production publish path: one exact revision, never a branch ref.
+      pushes.push({ branch: opts.branch, remote: opts.remote, revision: opts.revision });
+      return inner.pushRevision(opts);
     },
   };
   return {
@@ -253,14 +320,21 @@ function recordingGit(inner: GitOps): {
 /** GitOps whose push fails a fixed number of times before delegating. */
 function flakyPushGit(inner: GitOps, failures: number, error: DomainError): GitOps {
   let remaining = failures;
+  const maybeFail = async (): Promise<void> => {
+    if (remaining > 0) {
+      remaining -= 1;
+      throw error;
+    }
+  };
   return {
     ...inner,
     async push(opts) {
-      if (remaining > 0) {
-        remaining -= 1;
-        throw error;
-      }
+      await maybeFail();
       return inner.push(opts);
+    },
+    async pushRevision(opts) {
+      await maybeFail();
+      return inner.pushRevision(opts);
     },
   };
 }
@@ -879,8 +953,9 @@ describe("v11 credential security boundary", () => {
     let generatedMcpConfig: string | undefined;
     h.scripted.setHandler(async (ctx) => {
       // Read the generated configuration while the run is live — provisioning
-      // is removed at cleanup by design.
-      generatedMcpConfig = readFileSync(ctx.env.AGENTFABRIC_MCP_CONFIG, "utf8");
+      // is removed at cleanup by design. The containerized runtime sees the
+      // mount path in its env; the file itself lives at the host path.
+      generatedMcpConfig = readFileSync(ctx.provisioning!.mcpConfigHostPath!, "utf8");
       writeFileSync(join(ctx.workspacePath!, "x.txt"), "x\n");
       return { exitCode: 0 };
     });
@@ -1479,9 +1554,12 @@ describe("v11 runtime provisioning", () => {
     });
     let seenSkillsDir: string | undefined;
     h.scripted.setHandler(async (ctx) => {
-      seenSkillsDir = ctx.env.AGENTFABRIC_SKILLS_DIR;
-      assert.equal(existsSync(join(ctx.env.AGENTFABRIC_SKILLS_DIR!, "demo", "SKILL.md")), true);
-      assert.deepEqual(ctx.extraMounts, [{ hostPath: ctx.env.AGENTFABRIC_SKILLS_DIR, containerPath: "/root/.agentfabric/skills" }]);
+      // A containerized runtime is handed the mount point in its environment
+      // and the host directory as a read-only mount.
+      seenSkillsDir = ctx.provisioning!.skillsHostDir;
+      assert.equal(ctx.env.AGENTFABRIC_SKILLS_DIR, "/root/.agentfabric/skills");
+      assert.equal(existsSync(join(seenSkillsDir!, "demo", "SKILL.md")), true);
+      assert.deepEqual(ctx.extraMounts, [{ hostPath: seenSkillsDir, containerPath: "/root/.agentfabric/skills" }]);
       writeFileSync(join(ctx.workspacePath!, "x.txt"), "x\n");
       return { exitCode: 0 };
     });
