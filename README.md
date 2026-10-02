@@ -20,11 +20,13 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
                         ┌───────▼─────────────────────────┐
                         │  AgentFabric Core               │
                         │  Provider · Model · Runtime     │
+                        │  Project · Source · Credential  │
                         │  Workspace · Task · Run         │
                         │  RuntimeSessionRef · NativeState│
                         │  Event · Artifact · Secret      │
                         │  Profile · Usage/Cost · Proxy   │
                         │  Orchestrator (Run lifecycle)   │
+                        │  Supervisor (Task lifecycle)    │
                         └───────┬─────────────────────────┘
                                 │ Harness Adapter (RuntimeRegistry)
                                 │ + Execution Backend (local / docker)
@@ -44,6 +46,8 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 * **Runtime-neutral**：核心系统只依赖 `AgentRuntimeAdapter` 协议，新增 Runtime 无需改动核心。
 * **Containers are disposable；Workspace is durable**：容器可随意销毁重建，工作成果落在 Workspace。
 * **Harness sessions stay native**：AgentFabric 只保存原生 Session 的不透明引用，不统一、不转换。
+* **Project defines the codebase. Task defines the intent. Workspace holds the work. Run executes the agent. Runtime is disposable. Supervisor owns the execution lifecycle.**（Project-based Coding Task，见下）
+* **Agent 负责开发，Platform 负责 publish**：commit 策略、working branch 所有权、push 与 Git credential 都是平台能力，不依赖 prompt 提醒 Agent 执行。
 
 ## 功能清单
 
@@ -51,11 +55,15 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | --- | --- |
 | Provider | 增删改查、API 接口格式（OpenAI Responses / Completions / Anthropic / 兼容 / 自定义）、自定义 Base URL 与额外 Header、API Key 走 Secrets、启用/禁用 |
 | Model | 增删改查、所属 Provider、参数、Alias、运行时自由选择 |
+| Project | 长期存在的代码库配置：Git Source（HTTPS / SSH / GitHub / GitLab / Gitee / 通用 / 公开 / 私有）、默认分支、执行默认值（Runtime/Model/Env/Secrets/超时/资源限制/网络策略）、Skills、MCP、Validation、Git publish 策略 |
+| Source Credential | 独立于 Project 的 Git 凭据（HTTPS Token / SSH Private Key），敏感值走 Secrets，仅在单次 Git 操作期间临时materialize；公开仓库无需凭据 |
+| Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ 隔离 Runtime → Agent → Validation → Git Finalization → Publish → Cleanup；阶段与 agent/validation/publish 状态分别记录 |
+| Git Publish | 平台负责 commit 策略与 push：只推本 Task 的 working branch、绝不 force、保护分支拒推、push 结果以远端实际状态为准（可重试且幂等） |
 | Runtime | OpenCode / Pi / Codex / Claude Code / DSH / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
-| Workspace | 本地目录 / Git / Volume，持久化，与 Run 关联 |
+| Workspace | Managed Workspace（由 Project+Task 自动创建、Task 独占、durable）与 External Workspace（本地目录 / Git / Volume / 导入），持久化，与 Run 关联 |
 | Task | 指定 Runtime / Model / Workspace / Env / Secrets / 资源限制 / 超时 / Policy；软删除后保留 30 天可恢复，过期物理清理 |
-| Run | Pending→Starting→Running→Completed/Failed/Cancelled/Timeout，查看/取消/重跑 |
+| Run | Pending→Starting→Running→Completed/Failed/Cancelled/Timeout，细粒度 phase（workspace/source/runtime/agent/validation/finalization/push/cleanup），查看/取消/重跑 |
 | Runtime Native Session | 只保存 Harness 原生 Session 的不透明引用（RuntimeSessionRef），同 Harness 走 Native Resume，跨 Harness 走 Handoff；不存在统一的 AgentFabric Session |
 | Runtime Native State | Harness 私有状态的持久化目录（Opaque），容器销毁后仍可恢复 Native Session |
 | Events & Logs | 统一标准事件，REST 查询 + SSE 实时流 |
@@ -90,10 +98,22 @@ npm run dev:web
 侧边栏按用途分组：
 
 * **Tasks / Dashboard** — 主要工作入口。Dashboard 汇总各资源数量、总成本，并提供 Deleted tasks 入口。
-* **Resources** — `LLM`（Provider 与 Model 列表及编辑）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`。
+* **Resources** — `Projects`（项目与 Coding Task 生命周期）、`LLM`（Provider 与 Model 列表及编辑）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
 * **System** — `Runs`、`Usage`、`Proxy`、`Settings`。
 
 Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
+
+### Projects（`/projects`、`/projects/:id`、`/projects/:id/tasks/new`）
+
+Projects 页列出项目并支持创建（名称 / Repository URL / Credential（可选）/ 默认分支 / 默认 Runtime / 默认 Model / Validation / publish 策略）。项目详情页展示 Source、Credential（只显示掩码）、默认值、Skills、MCP、Validation 与 publish 策略，并列出该项目的 Task 及其生命周期（phase / agent / validation / publish）与按失败阶段提供的 retry 操作。
+
+`/projects/:id/tasks/new` 是 Project-based Coding Task 的创建页：Instruction、Base ref、Working branch（留空即自动生成 `af/<task>-<slug>`）、Branch mode（new / continue）、Runtime / Model 覆盖、Validation 覆盖。**不需要也不能手工创建 Workspace**。
+
+### Task Lifecycle（`/tasks/:id/lifecycle`）
+
+Task Detail 页面回答「Agent 现在到底在开发、测试、提交，还是 push」：Project / Source、Base Ref 与 Base Commit、Working Branch、Workspace、Current Phase、Agent / Validation / Publish 三个状态、Final Commit、Remote Branch、Validation 每个 step 的输出，以及可用的 Retry（agent / validation / publish）与 Cancel。运行中每 2 秒自动刷新。
+
+Tasks 列表中 Project-based Task 额外显示 working branch 与三个状态，行菜单提供 Lifecycle 入口。
 
 ### Task Thread（`/tasks/:taskId`）
 
@@ -152,14 +172,298 @@ Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kin
 
 ### Workspace
 
-Workspace 是持久、Runtime-neutral 的一等资源：Task 引用（而非拥有）Workspace，容器可随意销毁重建而 Workspace 独立存在。
+Workspace 是持久、Runtime-neutral 的一等资源，**是 Task 的 durable working copy，而不是 Runtime Container 本身**。容器可随意销毁重建而 Workspace 独立存在。
 
-* **Create / Import**：新建空目录，导入已有本地目录或 Git 仓库（`git` 类型在创建时克隆到 `AGENTFABRIC_DATA_DIR/workspaces/<id>`）。
-* **Attach**：Run 时挂载进容器。
-* **Save**：Run 结束后校验并记录 `lastSavedAt` / `lastSavedRunId`。
-* **Usage**：`GET /api/workspaces/:id/usage` 查看被哪些 Task/Run 引用，并记录目录 `status`（`ready` / `missing`）。
+Workspace 分两类（详见「Project：Coding Task 生命周期」）：
 
-## Resume 与 Handoff
+* **Managed Workspace**：Project-based Task 由平台自动创建并独占（`ownership: "managed"`，1 Task = 1 Workspace），用户不手工创建；Task 被物理清理时随之清理。
+* **External Workspace**：下面这些手工创建 / 导入的能力保持不变（`ownership: "external"`，平台不接管、不删除）。
+  * **Create / Import**：新建空目录，导入已有本地目录或 Git 仓库（`git` 类型在创建时克隆到 `AGENTFABRIC_DATA_DIR/workspaces/<id>`）。
+  * **Attach**：Run 时挂载进容器。
+  * **Save**：Run 结束后校验并记录 `lastSavedAt` / `lastSavedRunId`。
+  * **Usage**：`GET /api/workspaces/:id/usage` 查看被哪些 Task/Run 引用，并记录目录 `status`（`ready` / `missing`）。
+* **Lock**：同一个 Managed Workspace 同一时刻只有一个 active writer；`GET /api/workspace-locks` 可查看当前持有的锁。
+
+## Project：Coding Task 生命周期
+
+AgentFabric 除 Handoff 之外的另一条核心能力：**围绕一个代码项目，在隔离 Runtime 中完成从源码准备、Agent 开发、任务状态管理，到最终 Git 分支推送的完整生命周期。**
+
+```text
+Project defines the codebase.   我正在开发哪个项目
+Task    defines the intent.     我要完成什么需求
+Workspace holds the work.       该 Task 的实际代码状态放在哪里
+Run     executes the agent.     一次具体的 Agent execution attempt
+Runtime is disposable.          Agent 此刻在哪里执行（可销毁）
+Supervisor owns the lifecycle.  谁负责整条执行链
+```
+
+### Project
+
+Project 是长期存在的顶层业务资源：一个你希望 AgentFabric 持续开发工作的代码库。它持有 **Source（Git 仓库）**、**执行默认值**（Runtime / Model / Profile / Env / Secrets / Timeout / Resource Limit / Network Policy）、可选的 **Skills** 与 **MCP Servers**、**Validation** 与 **Git publish 策略**。
+
+配置继承关系：`Global Settings → Project → Task → Run`（显式给出的层级覆盖上一层，`undefined` 表示「此处未配置」而不是「覆盖为空」）。
+
+Project 是 Task 的上游资源：
+
+```text
+Project
+  └── Task            （一个 Project 可以有多个 Task）
+       └── Workspace  （1 Task = 1 Managed Workspace）
+            └── Run   （1 Task = N Runs，共享同一个 Workspace）
+```
+
+创建 Project 只需要：**名称、Repository URL、（可选）Credential、默认分支**。Web UI 的 Projects 页、`af projects add`、`POST /api/projects` 三条路径等价。
+
+### Source
+
+当前版本一个 Project 有且只有一个 primary source，类型为 `git`。Source 保存：
+
+* `remoteUrl`：**绝不含凭据**的远端地址（`https://…` / `ssh://…` / `git@host:path` / 本地绝对路径）；
+* `defaultBranch`：Task 未指定 base ref 时的默认起点；
+* `provider`：由 host 推断（github / gitlab / gitee / generic）；
+* `credentialId`：可选，指向 Source Credential；**公开仓库不需要**。
+
+URL 在写入前校验：内嵌凭据（`https://user:token@host/repo.git`）、未知 scheme、控制字符、`-` 开头一律拒绝（`source-url-invalid`），不会变成命令。当前不支持一个 Project 多 Repository / monorepo 多 Source / mirror / submodule 独立管理，但模型不会阻碍将来扩展（`Project.source` 旁边加列表即可）。
+
+### Source Credential
+
+Source Credential 属于 **Settings / Global Configuration** 层，而不是 Project 私有数据；Project 只保存引用。
+
+* 类型：`https-token`（HTTPS Token）与 `ssh-key`（SSH Private Key）；`username` / `host` / `knownHosts` 是非敏感元数据。
+* 敏感值（token / private key / passphrase）**永远是 Secret**：创建时写入 Secrets，之后 API 只返回掩码；`af source-credentials list` 同样只见掩码。
+* 设计上允许将来扩展 GitHub App / GitLab Access Token / Deploy Key / Short-lived Credential / OAuth（新增 `type` 与 materialize 分支即可）。
+* 公开仓库：`credential = none`，创建 Project 时不会被强制要求提供凭据。
+
+配置方式：
+
+```bash
+# HTTPS（Personal Access Token）
+af source-credentials add-https "Personal GitHub" --host github.com --username octocat --token ghp_xxx
+
+# SSH（私钥 + 可选 passphrase + 可选 known_hosts）
+af source-credentials add-ssh "Internal Git" --host git.internal --key-file ~/.ssh/id_ed25519 \
+  --passphrase '***' --known-hosts-file ~/.ssh/known_hosts
+
+# 公开仓库：什么都不配
+af projects add "agent-fabric" --repo https://github.com/org/agent-fabric.git --branch main
+```
+
+### Credential Security Boundary
+
+Git Credential 不会作为长期环境变量、命令参数或 Repository URL 暴露给 Agent：
+
+* **HTTPS**：token 只存在于 `GIT_ASKPASS` helper 脚本读取的**子进程环境变量**里，配合 `-c credential.helper=` 禁用任何凭据缓存；token 不进入 argv、不进入 `.git/config`。
+* **SSH**：私钥 materialize 成 `0600` 的临时文件，通过 `core.sshCommand` 显式指定 `-i <key>`；始终 `StrictHostKeyChecking=yes`（host key 必须验证，缺省用宿主的 `~/.ssh/known_hosts`，绝不静默信任）；passphrase 通过 `SSH_ASKPASS_REQUIRE=force` 交付。
+* 一次 Git 操作结束后立即删除临时目录；push 需要凭据时再 materialize 一次。
+* **Agent 拿不到仓库写凭据**：Agent Runtime 的环境变量、工作目录与挂载里都没有它。
+* **脱敏**：所有生命周期事件与错误消息经过统一的 `SecretRedactor`，凭据值不会出现在 Log / Event / API Response / Runtime stdout-stderr / error / `.git/config` / task metadata 中（`packages/core/src/v11.test.ts` 与 `scripts/e2e-v11.sh` 都有断言）。
+
+### Task：从 Project 创建 Coding Task
+
+创建 Task 时可以选择：
+
+```text
+Select Project
+Base Branch / Ref          （默认取 Project 的 default branch）
+Working Branch
+  - Generate               （系统生成 af/<task-id>-<slug>）
+  - Custom                 （用户自定义，非法分支名直接拒绝）
+Task Instruction
+Runtime / Harness / Model  （可选覆盖 Project 默认值）
+Validation                 （可选覆盖 Project 默认值）
+Start
+```
+
+**baseRef 与 workingBranch 是分离的两个概念**：
+
+```text
+baseRef       = main               （会移动的引用）
+baseCommitSha = 7c9f…              （Task 启动时解析出的真实 revision，之后冻结）
+workingBranch = af/task_x-add-model（本 Task 拥有并负责发布的分支）
+```
+
+系统记录 `baseCommitSha` 的原因正是 `main` 会移动而 commit SHA 不会：任何时候都能回答「这个 Task 最初是基于哪个具体 commit 开始开发的」。
+
+Branch 语义：默认 `branchMode: "new"`——**新 Task 创建新 working branch，绝不默默覆盖已存在的本地或远程分支**（`branch-conflict`）。想接着已有分支开发必须显式 `branchMode: "continue"`（此时 `baseCommitSha` 记为该分支当时的 tip；分支不存在则 `branch-not-found`）。分支名按 git 自身规则校验（`branch-invalid`），保护分支（默认 `main` / `master`）不能作为 working branch。
+
+### Workspace：Task 的 durable working copy
+
+**Workspace 是 Task 的持久工作副本，而不是 Runtime Container 本身。** 它不再承担 Project Definition 的职责。
+
+* **Managed Workspace**：Project-based Task 创建时由平台自动生成（`1 Task = 1 Managed Workspace`），位于 `AGENTFABRIC_DATA_DIR/workspaces/<workspaceId>`，Task 独占，不同 Task 即使来自同一个 Project 也不共享 working tree。用户永远不需要手工创建。
+* **External Workspace**：本地目录 / Git / Volume / 导入的已有目录，用于高级场景与兼容既有能力（`ownership: "external"`，平台不接管、不复制、不删除）。
+* **Durable**：`Runtime Container 生命周期 != Workspace 生命周期`。容器可随时销毁重建，Workspace 与其未提交的修改始终保留；Task 被物理清理（软删除满 30 天）时，它自己的 Managed Workspace 才随之清理，External Workspace 永不受影响。
+* **Workspace Lock**：一个 Managed Workspace 同一时刻只有一个 active writer。第二个写入者拿到 `workspace-locked`，而不是让两个 Run 同时改同一棵 working tree；锁在 Run 结束/取消时释放，持有者 Run 已不活跃的锁视为陈旧并自动回收（这也是崩溃恢复的一部分）。
+
+### Run：一个 Task 可以拥有多个 Run
+
+一个 Task 可以执行多个 Run，这些 Run 共享同一个 Task Workspace：Runtime 重启、Handoff、Harness 切换、Agent 失败、用户重新执行都会产生新的 Run，而 Workspace 中的代码修改持续存在。
+
+Run 保留粗粒度 `status`（Pending → Starting → Running → Completed / Failed / Cancelled / Timeout），并新增细粒度 `phase`：
+
+```text
+task.created → workspace.preparing → source.fetching → source.checkout
+→ runtime.preparing → agent.running → validation.running
+→ git.finalizing → git.pushing → cleanup → completed / failed / cancelled
+```
+
+### Runtime：disposable execution environment
+
+Runtime 是**可销毁的执行环境**。每次 Run 按 lifecycle 策略创建容器（默认 `ephemeral`：Run 结束即销毁），Workspace 与 Runtime Native State 以挂载方式注入。容器销毁不会影响 Workspace，也不会影响 Harness 的 Native Session（Native State 是 Harness 私有状态，与 Workspace 严格区分，两者不混在一起）。Task 之间彼此隔离：独立 Workspace、独立 working branch、独立 Runtime、独立 execution state，Secret 不会被无关 Task 获取。
+
+### Supervisor：完整 execution lifecycle 的负责人
+
+`ExecutionSupervisor`（`packages/core/src/supervisor.ts`）位于 **Control Plane**，负责整个 Task / Run 生命周期，而不是 Agent 的一部分：
+
+```text
+AgentFabric Control Plane
+        ↓
+Execution Supervisor
+        ↓
+Agent Runtime Container
+```
+
+职责：
+
+* **Workspace lifecycle**：prepare / lock / attach / preserve / cleanup 临时资源；
+* **Source lifecycle**：clone / fetch / checkout / branch / revision resolve；
+* **Credential lifecycle**：resolve / 临时注入 / 撤销清理 / 防泄漏；
+* **Runtime lifecycle**：create / monitor / timeout / stop / cancel / destroy；
+* **Runtime provisioning**：Harness / Skill / MCP / Agent / Model / environment / Native State mount / Workspace mount；
+* **Execution monitoring**：process exit、heartbeat、stdout-stderr、结构化事件、cancellation、timeout；
+* **Finalization**：inspect repository state、validate、commit、push、record final revision。
+
+Runtime Container 内只运行 Agent Harness（Runner 侧只做启动、信号转发、输出与结构化事件转发、退出码上报）；它不持有 Source Credential，也不承担 Project-level Git publish 权限。
+
+### Skill 与 MCP provisioning
+
+Project 可以配置默认 Skills（`skills: [{ name, path }]`）与 MCP Servers（`mcpServers: [...]`），Task 在允许范围内覆盖。Runtime 启动前 Supervisor 生成最终执行环境：
+
+* 每个 Run 拥有独立的 provisioning 目录（`AGENTFABRIC_DATA_DIR/provisioning/<runId>`），可重复执行（重建而不是叠加）、不污染其他 Task、不依赖长期容器、跨 Runtime 可恢复，Run 结束即清理；
+* Skills 以只读挂载注入（容器内 `/root/.agentfabric/skills`，本地执行时环境变量 `AGENTFABRIC_SKILLS_DIR` 指向宿主目录）；skill 目录不存在即响亮失败；
+* MCP 配置由**控制面配置生成**（`AGENTFABRIC_MCP_CONFIG`，文件 `0600`，cleanup 时删除），Secret 引用在 provisioning 时解析注入；**仓库内容不能自行申请** Production Credential、任意 Secret、更高 Runtime 权限、任意网络访问或任意 publish 目标——`.agentfabric.yml` 之类的 Repository-local config 属于不可信输入，本期不读取、不执行。
+
+### Validation
+
+Project 定义默认 Validation，Task 可以覆盖（`typecheck` / `test` / `lint` / `build` 等，就是一行行命令）。Validation 在 Agent 结束后、Git Finalization 之前执行，工作目录是同一个 durable Workspace（容器是否已销毁无关紧要）：
+
+* 每个 step 记录 `status / exitCode / durationMs / output`，并产出一份 `validation-report.txt` artifact 挂在该 Run 上；
+* 失败区分 `validation-failed` 与 `validation-timeout`；
+* **Validation 失败不会被混进普通的 `Task Failed`**：`execution.failure.stage = "validation"`，agent 状态保持 `completed`，也不会进入 publish；
+* 可以**单独重试 validation**（`POST /api/tasks/:id/retry-validation`），不重新开发、不调用模型。
+
+### Git Finalization
+
+Agent 结束后平台检查仓库状态：当前 branch、working tree status、tracked changes、untracked files、Agent 产生的 commit、HEAD revision。
+
+* **Agent 没有 commit 也没关系**：默认 `autoCommit: true` 时平台会把剩余改动（含 untracked，遵守 `.gitignore`）补成一个最终 commit，所以「即使 Agent 没有主动 commit，Task 仍然能正确发布」。
+* **不破坏 Agent 已有 commit**：不 squash、不 rebase、不丢弃；只有当仍有 dirty changes 时才**追加**一个最终 commit。
+* 记录 `baseCommitSha` / `finalCommitSha` / `workingBranch` / `remoteBranch` / `pushedAt` / publish 结果。
+* 纯 no-op Task（没有任何改动）仍会把 working branch 发布到 base revision，Task 正常完成。
+
+### Git Push：平台能力
+
+Git Push 是 Supervisor / Platform 的能力，不是 Agent 可任意调用的工具：
+
+* 只推**本 Task 的 working branch**（显式 refspec `refs/heads/<branch>:refs/heads/<branch>`）；
+* **绝不 force push**（本版本没有 force 选项，也没有 force policy）；
+* 保护分支拒推（`policy-denied`）；
+* 远端分支不是本 Task 创建的 → `remote-branch-conflict`，而不是覆盖；
+* 网络/认证失败 → `git-push-failed` / `git-push-auth-failed`；远端拒绝（分叉）→ `git-push-rejected`。
+
+### Development Completed 与 Publish Failed 分开
+
+重点场景：Agent 已经完成开发、代码已在 Workspace、commit 已生成，但 push 因网络或 credential 失败。此时**不会重新执行 Agent**：
+
+```text
+Development = Completed   （agent: completed, validation: passed）
+Publishing  = Failed      （failure.stage = "publish", publish.status = "failed"）
+```
+
+三种 Retry 语义明确分开，没有笼统的 `Retry Task`：
+
+| Retry | 入口 | 语义 |
+| --- | --- | --- |
+| **Retry Agent Run** | `POST /api/tasks/:id/retry-run` | 新建一个 Run，继续使用同一个 Workspace（已有改动保留） |
+| **Retry Validation** | `POST /api/tasks/:id/retry-validation` | 只重跑 validation，不重新开发、不调用模型 |
+| **Retry Publish** | `POST /api/tasks/:id/retry-publish` | 只把已 commit 的 revision 重新 push，不重新执行 Agent |
+
+**幂等与崩溃恢复**：重复执行的生命周期步骤都可安全重试——workspace 目录已存在即复用；branch 只在 Task 首次启动时创建，之后是 checkout 复用；push 之前先读远端实际 revision，若远端已有我们的 commit 就直接记为成功（`push 超时但其实已成功` 的情况由此收敛）；push 报错后再问一次远端，若已落地也算成功。Supervisor / API Server 重启后，处于中间阶段的 Task 会被标记为 `supervisor-restarted`（Workspace 保留、锁回收），重试即可继续。
+
+### Cancellation
+
+用户随时可以取消正在执行的 Task / Run（`POST /api/tasks/:id/cancel`）：终止 Runtime 进程与正在进行的 Git 操作、进入 cleanup、**Workspace 保留**（当前代码修改不删除）、释放 Workspace lock、凭据及时清理、Task 状态准确记为 `cancelled`。之后可以基于同一个 Workspace 继续新的 Run。
+
+### Task Detail / 可观测性
+
+`GET /api/tasks/:id/detail`（Web UI 的 `/tasks/:id/lifecycle`、`af tasks detail <id>`）展示：
+
+```text
+Project / Source（含凭据名称与掩码，绝不含凭据值）
+Base Ref / Base Commit
+Working Branch
+Workspace（managed/external + 路径）
+Current Phase
+Agent Status / Validation Status / Publish Status
+Final Commit / Remote Branch
+可用的 Retry（agent / validation / publish）
+```
+
+每次 Task / Run 都能追踪：Project、Workspace、Runtime、Harness、Model、base ref、base commit、working branch、Run phase、起止时间、exit result、validation result、final commit、publish result；所有生命周期关键操作都写入现有 Event / Logging 系统（`run.phase`、`workspace.prepared`、`source.prepared`、`runtime.prepared`、`credential.resolved` / `credential.released`、`provisioning.prepared` / `provisioning.cleaned`、`validation.started` / `validation.step` / `validation.passed` / `validation.failed`、`git.finalized`、`git.pushed`、`publish.failed`）。
+
+### 领域错误模型
+
+失败带稳定 `code` 与 `stage`，API 按 stage 映射 HTTP 状态（404 / 409 / 403 / 502）：
+
+```text
+Source        source-url-invalid · source-not-found · source-auth-failed · source-network-failed
+              source-credential-missing · source-credential-invalid
+              base-ref-not-found · branch-invalid · branch-not-found · branch-conflict
+Workspace     workspace-create-failed · workspace-locked · workspace-invalid
+Runtime       runtime-create-failed · runtime-start-failed · runtime-lost · runtime-timeout
+Agent         agent-start-failed · agent-failed · agent-timeout · agent-cancelled
+Validation    validation-failed · validation-timeout
+Finalization  git-state-invalid · git-commit-failed
+Publishing    git-push-failed · git-push-auth-failed · git-push-rejected · remote-branch-conflict
+Platform      project-not-found · project-invalid · credential-not-found
+              task-not-found · task-state-invalid · task-busy · policy-denied · supervisor-restarted
+```
+
+### API
+
+```text
+Project
+  GET    /api/projects                     列表
+  POST   /api/projects                     创建（name, source{remoteUrl, credentialId?, defaultBranch?}, execution?, skills?, mcpServers?, validation?, git?）
+  GET    /api/projects/:id                 详情
+  PUT    /api/projects/:id                 更新
+  DELETE /api/projects/:id                 删除
+  GET    /api/projects/:id/tasks           该项目的 Task
+  POST   /api/projects/:id/tasks           创建并启动 Coding Task（instruction, baseRef?, workingBranch?, branchMode?, runtimeId?, modelId?, validation?, git?）
+
+Source Credential
+  GET    /api/source-credentials           列表（只含掩码）
+  POST   /api/source-credentials           创建（name, type, host?, username?, value?, passphrase?, knownHosts?, secretId?）
+  GET    /api/source-credentials/:id       详情（只含掩码）
+  PUT    /api/source-credentials/:id       更新（value / passphrase 可轮换）
+  DELETE /api/source-credentials/:id       删除（连同其 Secret）
+
+Task lifecycle
+  GET    /api/tasks/:id/detail             Task Detail 读模型（§40 全部字段 + 可用 retry）
+  POST   /api/tasks/:id/cancel             取消（终止 Runtime 与 Git 操作，Workspace 保留）
+  POST   /api/tasks/:id/retry-run          新 Run 继续同一 Workspace
+  POST   /api/tasks/:id/retry-validation   只重跑 validation
+  POST   /api/tasks/:id/retry-publish      只重新 push（不重新执行 Agent）
+  GET    /api/workspace-locks              当前持有的 Workspace 写锁
+```
+
+`GET /api/dashboard` 的 `counts` 增加 `projects` 与 `sourceCredentials`。既有 Task / Run / Workspace / Handoff / Secret / Event API 未做破坏性变更（新字段全部可选）。
+
+### Handoff 兼容
+
+Project-based Task 同样支持既有 Handoff / Native State / Resume：Workspace 表示**用户代码与 working tree state**，Native State 表示**Harness 私有 session state**，二者不混。本期实现没有改动 Handoff 的生成、投影与渲染路径。
+
+
 
 AgentFabric 只保存 Harness 原生 Session 的不透明引用（`RuntimeSessionRef`：Runtime 类型/版本、native ref、是否可 Resume、执行后端、metadata），不理解更不转换其内部结构。同 Harness 继续走 **Resume**，跨 Harness 继续走 **Handoff**。
 
@@ -351,10 +655,12 @@ Execution Policy 在 Run 中强制执行：
 
 ## 数据与安全
 
-* 数据保存在 `~/.fabric/db.json`（可用 `AGENTFABRIC_DATA_DIR` 覆盖到任意目录），原子写入。
+* 数据保存在 `~/.fabric/db.json`（可用 `AGENTFABRIC_DATA_DIR` 覆盖到任意目录），原子写入。Project / SourceCredential / WorkspaceLock 与既有集合一样存在同一个 store 里。
 * Run 事件不进 db.json：事件负载按 run 分片，append-only 追加到 `~/.fabric/events/<runId>.jsonl`；db.json 只保留每 run 一行的索引（`eventShards`：文件、条数、字节数、`lastSeq` 高水位，`lastSeq` 同时用于重启后恢复全局 seq 计数器）。读取按需从分片文件载入。
-* `git` 类型 Workspace 在创建时克隆到 `AGENTFABRIC_DATA_DIR/workspaces/<id>`，Run 时挂载真实目录。
+* `git` 类型 Workspace 在创建时克隆到 `AGENTFABRIC_DATA_DIR/workspaces/<id>`，Run 时挂载真实目录；Project-based Task 的 Managed Workspace 同样落在这里，由平台自动创建与（软删除满 30 天后）自动清理。
 * Secrets 值仅在创建时返回一次，其余接口返回掩码；Secrets 不进入日志与事件；按 `secretIds` 注入 Runtime 环境变量。
+* Git 凭据只在单次 Git 操作期间 materialize 到 `AGENTFABRIC_DATA_DIR/git-credentials/<op>-<random>`（操作结束立即删除）：HTTPS 走 `GIT_ASKPASS` + 子进程环境变量，SSH 走 `0600` 私钥文件 + `core.sshCommand`（`StrictHostKeyChecking=yes`）。远端 URL 始终不含凭据，`.git/config` 里也没有。
+* Skill / MCP provisioning 落在 `AGENTFABRIC_DATA_DIR/provisioning/<runId>`，Run 结束即删除；生成的 MCP 配置是 `0600` 文件（可能含注入的 Secret 值），同样不进入日志与 API 响应。
 * API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码。
 * 存储层只保存生成时算出来的结果，读路径不重新解析、不重新投影、不做格式修补。
 
@@ -383,6 +689,21 @@ af workspaces save <ws-id> --run <run-id>
 af workspaces usage <ws-id>
 af agents add "Senior Engineer" --runtime <rt> --model <model> --system-prompt "You are a senior engineer"
 af secrets add my-key --value sk-xxx --scope env
+
+# Project / Source Credential / Coding Task 生命周期
+af source-credentials list | add-https | add-ssh | update | remove
+af source-credentials add-https "Personal GitHub" --host github.com --username octocat --token ghp_xxx
+af source-credentials add-ssh "Internal Git" --key-file ~/.ssh/id_ed25519 --known-hosts-file ~/.ssh/known_hosts
+af projects list | show <id> | add | update | remove | tasks <id>
+af projects add "agent-fabric" --repo https://github.com/org/agent-fabric.git --branch main
+af projects add "private" --repo git@github.com:org/private.git --credential <cred-id>
+af projects start <project-id> "给 README 补充用法" --base main --follow
+af projects start <project-id> "接着改" --working-branch af/existing --branch-mode continue
+af tasks detail <task-id>        # Project / Source / base commit / branch / phase / 三个状态 / final commit / retry
+af tasks cancel <task-id>        # 终止 Runtime，Workspace 保留
+af tasks retry-run <task-id> "继续修剩下的"   # 新 Run，复用同一 Workspace
+af tasks retry-validation <task-id>          # 只重跑 validation，不重新开发
+af tasks retry-publish <task-id>             # 只重新 push，不重新执行 Agent
 
 # 提交任务
 af run "分析当前代码库并修复所有 failing tests" --from-repo --follow
@@ -438,6 +759,8 @@ registry.register(myAdapter);
 ```
 packages/
   core/      领域模型、JSON 持久化、EventBus、CRUD 服务、Run Orchestrator、
+             Execution Supervisor（Project Task 生命周期）、Git 操作与凭据隔离、
+             Validation、Skill/MCP provisioning、领域错误模型、脱敏、
              Runtime 协议、Handoff 组装与渲染、Policy、Proxy、生命周期
   runtimes/  Runtime Adapters：mock / opencode / pi / codex / claude-code /
              dsh / docker，以及各 Harness 的本地会话探测与 Execution Backend
@@ -445,6 +768,7 @@ packages/
   cli/       af 命令行（对接 REST API）
   web/       React + Vite Web UI
 docker/      pi.Dockerfile（容器化 Pi 的参考镜像）
+scripts/     e2e-v11.sh（Project Coding Task 生命周期的端到端验证脚本）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
 ```
 
@@ -457,7 +781,15 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * DSH 没有官方容器镜像，容器化执行需自备镜像。
 * Network `allowedHosts` / `blockedHosts` 与 Filesystem `allowedPaths` / `deniedPaths` 未做细粒度强制（仅支持整体开关与只读挂载）。
 * Agent Profiles 的 Web UI 入口未开放（API 与 CLI 可用）。
-* Workspace 的 Snapshot / Fork / Diff / Lock 等高级能力未提供。
+* Workspace 的 Snapshot / Fork / Diff 等高级能力未提供（Managed Workspace 的 Lock 已提供）。
+* **Project Coding Task 本期边界**：
+  * 一个 Project 只支持一个 primary source（单 Repository）；monorepo 多 Source、mirror、submodule 独立管理未实现。
+  * Source Credential 只实现 HTTPS Token 与 SSH Private Key；GitHub App / Deploy Key / OAuth / Short-lived Credential 预留未实现。
+  * `branchMode: "new"` 与 `"continue"` 已实现；force push 与 push tag 明确不支持（无选项、无 policy）。
+  * Validation 在 AgentFabric 宿主机的 Workspace 目录里执行（`sh -c`），不在容器内执行。
+  * Skills provisioning 提供 canonical 目录 + 只读挂载 + `AGENTFABRIC_SKILLS_DIR`，是否被某个 harness 自动发现取决于该 harness；MCP 配置按统一 `mcpServers` 文档生成并通过 `AGENTFABRIC_MCP_CONFIG` 交付，未逐 harness 写入各自的私有配置格式。
+  * Repository-local config（`.agentfabric.yml`）本期不读取（不可信输入），只在领域上划清 Control Plane Configuration 与 Repository Configuration 的边界。
+  * Project 的 `execution` 继承模型已覆盖 Runtime / Model / Profile / Env / Secrets / Timeout / Resource Limit / Network Policy / Lifecycle / Tools；Secret references 与 Validation / Git publish 走 Project→Task 覆盖，Run 级仅继承 Task 快照。
 
 ## 测试
 
@@ -469,6 +801,14 @@ npm run build                                    # 构建全部 workspace（含 
 ```
 
 core 测试覆盖 store / secret / mock run / cost / event bus / policy / git workspace，容器生命周期策略与 keep-alive 租约，同 Harness Native Resume 与跨 Harness Handoff，Handoff 上下文选择、预算账目与渲染语义，能力声明与随执行后端收窄。
+
+`src/v11.test.ts` 覆盖 Project / Source Credential / Coding Task 生命周期：Project 与 Credential 的创建与校验、公开与私有仓库、URL 与分支名校验、凭据 materialize 与脱敏、clone/fetch/base ref/working branch、分支冲突与 continue 模式、baseCommitSha 冻结、Validation（失败/超时/重试）、Git finalization（自动 commit / Agent 已有 commit / dirty + commit / no-op / autoCommit=false）、Publish（成功 / 认证失败 / 远端拒绝 / 冲突 / 重试 / 幂等）、并发隔离、Workspace lock、取消、崩溃恢复、Skill/MCP provisioning，以及 §41.11 的 Case A–F。Git 部分使用**真实 `git` CLI 与本地 bare 仓库**作为远端，只有 Agent Harness 是脚本化的。
+
+端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
+
+```bash
+bash scripts/e2e-v11.sh          # 需要本机 git；使用临时数据目录与本地端口，不触碰 ~/.fabric
+```
 
 真实 Harness 集成测试（Pi/OpenCode × Local/Docker + 跨 Harness Handoff）默认 skip，使用真实 CLI、真实模型调用与真实容器：
 
