@@ -19,8 +19,11 @@ function buildProgram(): Command {
     .option("--json", "output raw JSON")
     .showHelpAfterError();
 
-  const client = (cmd: Command): ApiClient => new ApiClient(cmd.opts().api ?? apiUrl());
-  const json = (cmd: Command): boolean => Boolean(cmd.opts().json);
+  // Global options live on the program; a subcommand's own `opts()` does not
+  // include them, so `optsWithGlobals()` is what actually resolves `--api` /
+  // `--json` wherever they are written on the command line.
+  const client = (cmd: Command): ApiClient => new ApiClient(cmd.optsWithGlobals().api ?? apiUrl());
+  const json = (cmd: Command): boolean => Boolean(cmd.optsWithGlobals().json);
 
   /* ---------------- config ---------------- */
 
@@ -377,6 +380,179 @@ function buildProgram(): Command {
       throw new Error(`unknown action: ${action}`);
     });
 
+  /* ---------------- source credentials (v11 §4) ---------------- */
+
+  program
+    .command("source-credentials")
+    .description("manage Git source credentials (values are stored as Secrets, never printed)")
+    .argument("<action>", "list | add-https | add-ssh | update | remove")
+    .argument("[name]", "credential name or id")
+    .option("--host <host>", "host the credential applies to (e.g. github.com)")
+    .option("--username <user>", "non-sensitive username")
+    .option("--token <token>", "HTTPS token (add-https)")
+    .option("--key-file <path>", "SSH private key file (add-ssh)")
+    .option("--passphrase <text>", "SSH key passphrase (add-ssh)")
+    .option("--known-hosts-file <path>", "known_hosts content for host verification")
+    .action(async (action: string, name: string | undefined, _opts: unknown, cmd: Command) => {
+      const c = client(cmd);
+      const opts = cmd.opts();
+      if (action === "list") {
+        const rows = await c.get<Record<string, unknown>[]>("/api/source-credentials");
+        if (json(cmd)) return console.log(pretty(rows));
+        console.log(table(rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          type: r.type,
+          host: r.host ?? "-",
+          username: r.username ?? "-",
+          secret: r.secretMasked ?? "-",
+        }))));
+        return;
+      }
+      if (action === "add-https") {
+        if (!name) throw new Error("usage: af source-credentials add-https <name> --token <token> [--username] [--host]");
+        const created = await c.post<{ id: string }>("/api/source-credentials", {
+          name,
+          type: "https-token",
+          host: opts.host,
+          username: opts.username,
+          value: opts.token,
+        });
+        console.log(json(cmd) ? pretty(created) : `source credential created: ${created.id}`);
+        return;
+      }
+      if (action === "add-ssh") {
+        if (!name) throw new Error("usage: af source-credentials add-ssh <name> --key-file <path> [--passphrase] [--known-hosts-file]");
+        if (!opts.keyFile) throw new Error("--key-file is required for an SSH credential");
+        const value = readFileSync(resolve(opts.keyFile), "utf8");
+        const knownHosts = opts.knownHostsFile ? readFileSync(resolve(opts.knownHostsFile), "utf8") : undefined;
+        const created = await c.post<{ id: string }>("/api/source-credentials", {
+          name,
+          type: "ssh-key",
+          host: opts.host,
+          username: opts.username ?? "git",
+          value,
+          passphrase: opts.passphrase,
+          knownHosts,
+        });
+        console.log(json(cmd) ? pretty(created) : `source credential created: ${created.id}`);
+        return;
+      }
+      if (action === "update") {
+        if (!name) throw new Error("usage: af source-credentials update <id> [--token] [--key-file] [--host] [--username]");
+        const body: Record<string, unknown> = {};
+        if (opts.token) body.value = opts.token;
+        if (opts.keyFile) body.value = readFileSync(resolve(opts.keyFile), "utf8");
+        if (opts.passphrase) body.passphrase = opts.passphrase;
+        if (opts.host !== undefined) body.host = opts.host;
+        if (opts.username !== undefined) body.username = opts.username;
+        const updated = await c.put<unknown>(`/api/source-credentials/${name}`, body);
+        console.log(json(cmd) ? pretty(updated) : `source credential updated: ${name}`);
+        return;
+      }
+      if (action === "remove") {
+        if (!name) throw new Error("usage: af source-credentials remove <id>");
+        const r = await c.delete<unknown>(`/api/source-credentials/${name}`);
+        console.log(json(cmd) ? pretty(r) : "source credential removed");
+        return;
+      }
+      throw new Error(`unknown action: ${action}`);
+    });
+
+  /* ---------------- projects (v11 §2/§3) ---------------- */
+
+  program
+    .command("projects")
+    .description("manage projects (a long-lived codebase AgentFabric develops against)")
+    .argument("<action>", "list | show | add | update | remove | tasks | start")
+    .argument("[name]", "project name or id")
+    .argument("[instruction]", "task instruction (for start)")
+    .option("--repo <url>", "Git remote URL")
+    .option("--credential <id>", "source credential id (omit for a public repository)")
+    .option("--branch <name>", "default branch")
+    .option("--runtime <id>", "default runtime for the project's tasks")
+    .option("--model <id>", "default model for the project's tasks")
+    .option("--base <ref>", "base ref for a new task (for start)")
+    .option("--working-branch <name>", "working branch for a new task (for start)")
+    .option("--branch-mode <mode>", "new | continue (for start)")
+    .option("--follow", "stream the run's events live (for start)")
+    .action(async (action: string, name: string | undefined, instruction: string | undefined, _opts: unknown, cmd: Command) => {
+      const c = client(cmd);
+      const opts = cmd.opts();
+      if (action === "list") {
+        const rows = await c.get<Record<string, unknown>[]>("/api/projects");
+        if (json(cmd)) return console.log(pretty(rows));
+        console.log(table(rows.map((p) => ({
+          id: p.id,
+          name: p.name,
+          repo: (p.source as { remoteUrl: string }).remoteUrl,
+          provider: (p.source as { provider?: string }).provider ?? "-",
+          branch: (p.source as { defaultBranch?: string }).defaultBranch ?? "-",
+          credential: (p.source as { credentialId?: string }).credentialId ?? "(public)",
+        }))));
+        return;
+      }
+      if (action === "add") {
+        if (!name) throw new Error("usage: af projects add <name> --repo <url> [--credential <id>] [--branch main]");
+        if (!opts.repo) throw new Error("--repo is required");
+        const p = await c.post<{ id: string }>("/api/projects", {
+          name,
+          source: { remoteUrl: opts.repo, credentialId: opts.credential, defaultBranch: opts.branch },
+          execution: { runtimeId: opts.runtime, modelId: opts.model },
+        });
+        console.log(json(cmd) ? pretty(p) : `project created: ${p.id}`);
+        return;
+      }
+      if (!name) throw new Error(`usage: af projects ${action} <id>`);
+      if (action === "show") {
+        const [p, projectTasks] = await Promise.all([
+          c.get<Record<string, unknown>>(`/api/projects/${name}`),
+          c.get<Record<string, unknown>[]>(`/api/projects/${name}/tasks`),
+        ]);
+        if (json(cmd)) return console.log(pretty({ project: p, tasks: projectTasks }));
+        console.log(pretty(p));
+        console.log("\ntasks:");
+        console.log(table(projectTasks.map(taskRow)));
+        return;
+      }
+      if (action === "update") {
+        const body: Record<string, unknown> = {};
+        if (opts.repo) body.source = { remoteUrl: opts.repo, credentialId: opts.credential, defaultBranch: opts.branch };
+        if (opts.runtime || opts.model) body.execution = { runtimeId: opts.runtime, modelId: opts.model };
+        const p = await c.put<unknown>(`/api/projects/${name}`, body);
+        console.log(json(cmd) ? pretty(p) : `project updated: ${name}`);
+        return;
+      }
+      if (action === "remove") {
+        const r = await c.delete<unknown>(`/api/projects/${name}`);
+        console.log(json(cmd) ? pretty(r) : "project removed");
+        return;
+      }
+      if (action === "tasks") {
+        const rows = await c.get<Record<string, unknown>[]>(`/api/projects/${name}/tasks`);
+        if (json(cmd)) return console.log(pretty(rows));
+        console.log(table(rows.map(taskRow)));
+        return;
+      }
+      if (action === "start") {
+        if (!instruction) throw new Error('usage: af projects start <id> "<instruction>" [--base main] [--working-branch af/...]');
+        const result = await c.post<{ task: { id: string }; run: { id: string } }>(`/api/projects/${name}/tasks`, {
+          instruction,
+          baseRef: opts.base,
+          workingBranch: opts.workingBranch,
+          branchMode: opts.branchMode,
+          runtimeId: opts.runtime,
+          modelId: opts.model,
+        });
+        console.log(
+          json(cmd) ? pretty(result) : `task ${result.task.id} -> run ${result.run.id} (project lifecycle started)`
+        );
+        if (opts.follow) await followRun(c, result.run.id, json(cmd));
+        return;
+      }
+      throw new Error(`unknown action: ${action}`);
+    });
+
   /* ---------------- run ---------------- */
 
   program
@@ -446,9 +622,9 @@ function buildProgram(): Command {
   program
     .command("tasks")
     .description("manage tasks (a task is the long-term goal; runs execute it)")
-    .argument("<action>", "list | show | continue | options")
+    .argument("<action>", "list | show | continue | options | detail | cancel | retry-run | retry-validation | retry-publish")
     .argument("[id]", "task id")
-    .argument("[prompt]", "prompt (for continue)")
+    .argument("[prompt]", "prompt (for continue / retry-run)")
     .option("--runtime <id>", "target runtime id (for continue)")
     .option("--model <id>", "model id (for continue)")
     .option("--mode <mode>", "resume | handoff | auto (default auto)")
@@ -461,10 +637,59 @@ function buildProgram(): Command {
       if (action === "list") {
         const rows = await c.get<Record<string, unknown>[]>("/api/tasks");
         if (json(cmd)) return console.log(pretty(rows));
-        console.log(table(rows.map((t) => ({ id: t.id, title: t.title, runtime: t.runtimeId ?? "-", workspace: t.workspaceId ?? "-", createdAt: t.createdAt }))));
+        console.log(table(rows.map(taskRow)));
         return;
       }
       if (!id) throw new Error(`usage: af tasks ${action} <id>`);
+      // Project-based task lifecycle (v11 §31/§32/§40).
+      if (action === "detail") {
+        const detail = await c.get<Record<string, unknown>>(`/api/tasks/${id}/detail`);
+        if (json(cmd)) return console.log(pretty(detail));
+        const task = detail.task as Record<string, unknown>;
+        const execution = (task.execution ?? {}) as Record<string, unknown>;
+        const source = detail.source as Record<string, unknown> | null;
+        console.log(`task       : ${task.id}  ${task.title}`);
+        console.log(`project    : ${(detail.project as { name?: string } | null)?.name ?? "-"}`);
+        console.log(`source     : ${(source?.remoteUrl as string) ?? "-"}`);
+        console.log(`base ref   : ${detail.baseRef ?? "-"}`);
+        console.log(`base commit: ${detail.baseCommitSha ?? "-"}`);
+        console.log(`branch     : ${detail.workingBranch ?? "-"}`);
+        console.log(`workspace  : ${(detail.workspace as { path?: string } | null)?.path ?? "-"}`);
+        console.log(`phase      : ${detail.phase} (${detail.status})`);
+        console.log(`agent      : ${(execution.agent as { status?: string } | undefined)?.status ?? "-"}`);
+        console.log(`validation : ${(execution.validation as { status?: string } | undefined)?.status ?? "-"}`);
+        console.log(`publish    : ${(execution.publish as { status?: string } | undefined)?.status ?? "-"}`);
+        console.log(`final      : ${(execution.publish as { finalCommitSha?: string } | undefined)?.finalCommitSha ?? "-"}`);
+        console.log(`remote     : ${(execution.publish as { remoteBranch?: string } | undefined)?.remoteBranch ?? "-"}`);
+        const failure = execution.failure as { stage?: string; code?: string; message?: string } | undefined;
+        if (failure) console.log(`failure    : [${failure.stage}/${failure.code}] ${failure.message}`);
+        const retry = detail.retry as { agent: boolean; validation: boolean; publish: boolean };
+        console.log(`retry      : agent=${retry.agent} validation=${retry.validation} publish=${retry.publish}`);
+        return;
+      }
+      if (action === "cancel") {
+        const t = await c.post<Record<string, unknown>>(`/api/tasks/${id}/cancel`);
+        const execution = (t.execution ?? {}) as Record<string, unknown>;
+        console.log(json(cmd) ? pretty(t) : `task ${id} -> ${execution.status ?? t.status ?? "cancelled"}`);
+        return;
+      }
+      if (action === "retry-run") {
+        const result = await c.post<{ run: { id: string } }>(`/api/tasks/${id}/retry-run`, { instruction: prompt });
+        console.log(json(cmd) ? pretty(result) : `new run ${result.run.id} on the same workspace`);
+        return;
+      }
+      if (action === "retry-validation") {
+        const t = await c.post<Record<string, unknown>>(`/api/tasks/${id}/retry-validation`);
+        console.log(json(cmd) ? pretty(t) : "validation retried (the agent was not re-run)");
+        return;
+      }
+      if (action === "retry-publish") {
+        const t = await c.post<Record<string, unknown>>(`/api/tasks/${id}/retry-publish`);
+        const execution = (t.execution ?? {}) as Record<string, unknown>;
+        const publish = (execution.publish ?? {}) as Record<string, unknown>;
+        console.log(json(cmd) ? pretty(t) : `publish -> ${publish.status ?? "-"} (${publish.remoteBranch ?? "-"}) — the agent was not re-run`);
+        return;
+      }
       if (action === "show") {
         const [task, taskRuns, taskHandoffs] = await Promise.all([
           c.get<Record<string, unknown>>(`/api/tasks/${id}`),
@@ -751,6 +976,31 @@ function buildProgram(): Command {
 }
 
 /* ---------------- helpers ---------------- */
+
+/**
+ * One table row per task. Project-based tasks show their lifecycle
+ * (phase / agent / validation / publish) instead of only the raw ids, so
+ * `af tasks list` answers "is it developing, testing or publishing".
+ */
+function taskRow(t: Record<string, unknown>): Record<string, unknown> {
+  const execution = (t.execution ?? {}) as Record<string, unknown>;
+  const project = t.projectId ? String(t.projectId) : "-";
+  if (!t.projectId) {
+    return { id: t.id, title: t.title, runtime: t.runtimeId ?? "-", workspace: t.workspaceId ?? "-", createdAt: t.createdAt };
+  }
+  const failure = execution.failure as { code?: string } | undefined;
+  return {
+    id: t.id,
+    title: String(t.title).slice(0, 32),
+    project,
+    branch: t.workingBranch ?? "-",
+    phase: execution.phase ?? "-",
+    agent: (execution.agent as { status?: string } | undefined)?.status ?? "-",
+    validation: (execution.validation as { status?: string } | undefined)?.status ?? "-",
+    publish: (execution.publish as { status?: string } | undefined)?.status ?? "-",
+    error: failure?.code ?? "",
+  };
+}
 
 async function followRun(c: ApiClient, runId: string, rawJson: boolean): Promise<void> {
   const seen = new Set<string>();
