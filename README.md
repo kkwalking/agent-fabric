@@ -48,6 +48,10 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 * **Harness sessions stay native**：AgentFabric 只保存原生 Session 的不透明引用，不统一、不转换。
 * **Project defines the codebase. Task defines the intent. Workspace holds the work. Run executes the agent. Runtime is disposable. Supervisor owns the execution lifecycle.**（Project-based Coding Task，见下）
 * **Agent 负责开发，Platform 负责 publish**：commit 策略、working branch 所有权、push 与 Git credential 都是平台能力，不依赖 prompt 提醒 Agent 执行。
+* **Agent Runtime ≠ AgentFabric Host**：Project Coding Task 的 Agent 与 Validation 都运行在隔离 Runtime 中，仓库内容（即不可信代码）从不在宿主上执行。
+* **Git Credential ≠ Agent Secret**：`scope = git` 的 Secret 只能被 Credential Broker 使用，永不进入 Agent / Validation / MCP 的信任域。
+* **Retry Publish ≠ Re-finalize Task**：Finalization 成功即冻结 `finalCommitSha`，Retry Publish 只重推这个 revision。
+* **Agent Completed ≠ Task Fully Completed**：每个阶段独立记录结果，已完成的阶段不会被后续失败倒退覆盖。
 
 ## 功能清单
 
@@ -57,7 +61,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Model | 增删改查、所属 Provider、参数、Alias、运行时自由选择 |
 | Project | 长期存在的代码库配置：Git Source（HTTPS / SSH / GitHub / GitLab / Gitee / 通用 / 公开 / 私有）、默认分支、执行默认值（Runtime/Model/Env/Secrets/超时/资源限制/网络策略）、Skills、MCP、Validation、Git publish 策略 |
 | Source Credential | 独立于 Project 的 Git 凭据（HTTPS Token / SSH Private Key），敏感值走 Secrets，仅在单次 Git 操作期间临时materialize；公开仓库无需凭据 |
-| Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ 隔离 Runtime → Agent → Validation → Git Finalization → Publish → Cleanup；阶段与 agent/validation/publish 状态分别记录 |
+| Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ **强制隔离 Runtime** → Agent → **隔离 Validation** → Git Finalization（**冻结 final revision**）→ Publish（**只发布冻结 revision**）→ Cleanup；阶段与 agent/validation/finalization/publish 状态分别、单调地记录 |
 | Git Publish | 平台负责 commit 策略与 push：只推本 Task 的 working branch、绝不 force、保护分支拒推、push 结果以远端实际状态为准（可重试且幂等） |
 | Runtime | OpenCode / Pi / Codex / Claude Code / DSH / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
@@ -248,6 +252,115 @@ af source-credentials add-ssh "Internal Git" --host git.internal --key-file ~/.s
 af projects add "agent-fabric" --repo https://github.com/org/agent-fabric.git --branch main
 ```
 
+### Project Task Runtime Policy：Coding Task 必须运行在隔离 Runtime
+
+> **Project Coding Task 默认只能运行在 isolated Runtime。** 普通的 Project Coding Task 不允许使用 Local Host Runtime。
+
+判断依据是 **Runtime 的 isolation metadata**，而不是 Runtime 名字或 kind：
+
+```text
+runtime.executionBackend = "isolated"   （旧记录由 containerized 推导，无需迁移）
+runtime.containerized    = true
+runtime.image            存在
+        ↓
+runtimeIsolation(runtime).sandboxed = true   → 允许
+```
+
+三者缺一即不构成隔离承诺（例如「声明 isolated 但没有 image」的 Runtime 根本无法启动，也不算隔离）。
+
+* 用户显式选择不满足要求的 Runtime 时，在 **Task / Run 创建之前**拒绝：`runtime-not-isolated`（HTTP 403）。不会先启动再失败。
+* 没有显式指定时，自动选择的候选只包含隔离 Runtime；一个都没有就报错，**不会静默降级**到 Host Runtime。
+* `GET /api/runtimes/:id/isolation` 返回判定结果；`GET /api/runtimes/project-eligible` 返回可用于 Project Task 的 Runtime 列表（Projects / New Task 页读它，因此界面上不会出现会被拒绝的选项）。
+* **Local Runtime 依然保留**：development、debugging、non-project task、advanced usage、internal test 都继续可用。只有 Project Coding Task 受约束。
+* 高级逃生阀：`allowHostExecution`（`SupervisorOptions` 或 `Project.execution.allowHostExecution`，默认关闭）。这是 operator 级别的显式安全策略，**Task 请求体无法自行开启**。开启后仅放宽 Agent Runtime；Validation 的隔离要求不受它影响。
+
+### Validation：不可信代码，必须在隔离环境执行
+
+> Repository validation command 视为不可信代码，因此在 sandbox 中执行，而不是 AgentFabric Host。
+
+`npm test` / `npm run build` / `pytest` / `cargo test` / `make test` 都会执行仓库里的代码，因此 Validation **不再**通过 `sh -c` 在宿主上运行。默认实现是 **Option B：每次尝试创建一个 disposable validation container**：
+
+```text
+Agent finished
+    ↓
+（Agent Runtime 已销毁）
+    ↓
+disposable validation container（同一个 Workspace 只读/读写挂载）
+    ↓
+validation steps
+    ↓
+container 销毁
+```
+
+Validation 环境按 **allowlist** 构建，绝无 `...process.env` 兜底：
+
+```text
+Workspace（唯一挂载的宿主路径）
+必要 runtime environment（PATH / HOME / TMPDIR / LANG / CI / AGENTFABRIC_VALIDATION）
+明确允许的 Task env
+明确允许的 build/test secret（Project/Task 的 validationSecretIds，scope 不得为 git）
+```
+
+Validation **不会**获得：Git Source Credential、所有 Task Secret、Docker socket、Workspace 以外的宿主文件系统、宿主 `process.env`。
+
+* 每个 step 仍然记录 `status / exitCode / durationMs / output`，并产出 `validation-report.txt`；
+* `validation.execution` 记录隔离证据（`backend: "isolated"`、`runtimeKind`、`image`、`disposable`）；
+* 事件新增 `validation.runtime.prepared`，`shell.command` / `validation.started` 带 `isolated: true`；
+* Validation 阶段保持独立：`validation.pending / running / completed / failed`，**Validation 失败不会覆盖 `agent.completed`**；
+* Validation Runtime 本身起不来（没有 Docker daemon、image 不存在）报 `validation-runtime-failed` / `validation-runtime-unavailable`，**绝不回退到宿主执行**。
+
+### Source Credential：Host Binding 与 Transport 兼容
+
+> Source Credential 只用于 Source Manager / Publisher，不属于 Agent Runtime Secret。
+
+使用凭据前先从 Repository Remote URL 解析真实 Host 与 transport，再验证：
+
+```text
+https://github.com/org/repo.git    → { https, github.com }
+git@github.com:org/repo.git        → { ssh,   github.com }
+ssh://git@gitlab.com/o/r.git       → { ssh,   gitlab.com }
+/srv/git/repo.git                  → { local }
+```
+
+* **Host binding**：`credential.host` 必须覆盖 remote host。支持精确匹配与 `*.internal.example.com` 形式的 wildcard（wildcard 只覆盖子域，不覆盖裸域）。不匹配 → `credential-host-mismatch`。未设置 `host` 视为用户有意不限定范围。
+* **Transport 兼容**：`https-token` 只能用于 HTTPS remote，`ssh-key` 只能用于 SSH remote。不兼容 → `credential-transport-mismatch`，**不静默降级**（HTTPS token 不会被拿去走 SSH 认证路径，SSH key 也不会被当作 HTTPS token）。
+* **尽早失败**：Project create / update 时就检查（配置错误不该等到 clone 才暴露）；`startTask` 与每次 Git 操作前再检查一次。
+* **凭据永不被发送到未授权 Host**。
+
+### Secret Scope：授权边界，而不是描述信息
+
+> `scope = git` 的 Secret 只能被 Git Credential Broker 使用。
+
+`scope` 是**底层强制执行的授权机制**（`packages/core/src/secrets.ts`），不是给调用方自觉遵守的约定：
+
+| Scope | 谁可以使用 |
+| --- | --- |
+| `git` | **只有** Credential Broker（clone / fetch / remote inspection / push） |
+| `provider` | Provider API key（控制面） |
+| `validation` | Validation 环境（build/test secret） |
+| `mcp` | 生成的 MCP 配置 |
+| `runtime` / `env` / `service` | 通用 Agent Runtime 环境 |
+
+强制执行点在 **Secret resolution boundary**（`SecretService.resolve(ids, purpose)`），而不是 UI 或 Task API 的过滤：
+
+* `git` scope 的 Secret 通过 **Task `secretIds`** 注入 Runtime → `secret-scope-not-allowed`，拒绝；
+* 通过 **Runtime `secretIds`** → 拒绝；
+* 通过 **Project `execution.secretIds`** → 拒绝；
+* 被 **MCP server** 引用 → 拒绝（`resolveSecret` 走同一个 scope 检查）；
+* 被 **Validation** 引用 → `validation-secret-not-allowed`，拒绝；
+* **即使调用底层 Secret resolve API**（`SecretService.resolve`，默认 purpose 是 `agent-runtime`）也执行同一套 policy。
+
+只有 `SourceCredentialService.resolve()`（Credential Broker）可以读 `git` scope 的 Secret，它自己也会断言 scope。这样即使未来新增调用路径，也不能意外把 Git Credential 注入 Agent。
+
+### Git Credential 的防泄漏保证
+
+敏感值不得进入 log / event / API response / error / stdout / stderr / `.git/config` / remote URL / Task metadata / Run metadata：
+
+* **HTTPS**：token 只存在于 `GIT_ASKPASS` helper 读取的**子进程环境变量**，`https://TOKEN@host/repo.git` 形式永不持久化；remote URL 始终不含凭据；
+* **SSH**：private key 临时 materialize 成 `0600` 文件、操作后立即 cleanup、不放入 Workspace、不进入 Agent Runtime；
+* 所有生命周期事件与错误消息经过统一 `SecretRedactor`；
+* `packages/core/src/v11.credential.test.ts`、`v11.docker.real.test.ts` 与 `scripts/e2e-v11-docker.sh` 用可识别的 fake secret（`AGENTFABRIC_TEST_SECRET_DO_NOT_LEAK`）扫描 logs / events / errors / DB metadata / Workspace / `.git/config` / Runtime stdout-stderr 确认无泄漏。
+
 ### Credential Security Boundary
 
 Git Credential 不会作为长期环境变量、命令参数或 Repository URL 暴露给 Agent：
@@ -309,7 +422,9 @@ task.created → workspace.preparing → source.fetching → source.checkout
 
 ### Runtime：disposable execution environment
 
-Runtime 是**可销毁的执行环境**。每次 Run 按 lifecycle 策略创建容器（默认 `ephemeral`：Run 结束即销毁），Workspace 与 Runtime Native State 以挂载方式注入。容器销毁不会影响 Workspace，也不会影响 Harness 的 Native Session（Native State 是 Harness 私有状态，与 Workspace 严格区分，两者不混在一起）。Task 之间彼此隔离：独立 Workspace、独立 working branch、独立 Runtime、独立 execution state，Secret 不会被无关 Task 获取。
+Runtime 是**可销毁的执行环境**。每次 Run 按 lifecycle 策略创建容器（默认 `ephemeral`：Run 结束即销毁），Workspace 与 Runtime Native State 以挂载方式注入。
+
+Runtime 声明自己的 **execution backend**（`executionBackend: "isolated" | "host"`，旧记录由 `containerized` 推导）。这不是描述性字段：Project Coding Task 的 isolation gate 就读它（配合 `containerized` 与 `image`），因此新增 Runtime 时不要依赖名字或 kind 判断隔离能力。容器销毁不会影响 Workspace，也不会影响 Harness 的 Native Session（Native State 是 Harness 私有状态，与 Workspace 严格区分，两者不混在一起）。Task 之间彼此隔离：独立 Workspace、独立 working branch、独立 Runtime、独立 execution state，Secret 不会被无关 Task 获取。
 
 ### Supervisor：完整 execution lifecycle 的负责人
 
@@ -331,7 +446,11 @@ Agent Runtime Container
 * **Runtime lifecycle**：create / monitor / timeout / stop / cancel / destroy；
 * **Runtime provisioning**：Harness / Skill / MCP / Agent / Model / environment / Native State mount / Workspace mount；
 * **Execution monitoring**：process exit、heartbeat、stdout-stderr、结构化事件、cancellation、timeout；
-* **Finalization**：inspect repository state、validate、commit、push、record final revision。
+* **Finalization**：inspect repository state、commit、**冻结 final revision**、push 该 revision、记录 publish 结果；
+* **Runtime isolation gate**：在 Task 创建前拒绝不满足隔离要求的 Runtime；
+* **Validation lifecycle**：在隔离 Runtime 中执行 validation step，按 allowlist 构建环境；
+* **Credential broker**：只在单次 Git 操作期间 materialize 凭据，并校验 host binding 与 transport 兼容性；
+* **Stage recovery**：崩溃重启后按 crash 时的阶段恢复，不倒退已完成的阶段。
 
 Runtime Container 内只运行 Agent Harness（Runner 侧只做启动、信号转发、输出与结构化事件转发、退出码上报）；它不持有 Source Credential，也不承担 Project-level Git publish 权限。
 
@@ -345,12 +464,12 @@ Project 可以配置默认 Skills（`skills: [{ name, path }]`）与 MCP Servers
 
 ### Validation
 
-Project 定义默认 Validation，Task 可以覆盖（`typecheck` / `test` / `lint` / `build` 等，就是一行行命令）。Validation 在 Agent 结束后、Git Finalization 之前执行，工作目录是同一个 durable Workspace（容器是否已销毁无关紧要）：
+Project 定义默认 Validation，Task 可以覆盖（`typecheck` / `test` / `lint` / `build` 等，就是一行行命令）。Validation 在 Agent 结束后、Git Finalization 之前执行，工作目录是同一个 durable Workspace——但**执行位置是隔离 Runtime，不是宿主**（见上文「Validation：不可信代码，必须在隔离环境执行」）：
 
 * 每个 step 记录 `status / exitCode / durationMs / output`，并产出一份 `validation-report.txt` artifact 挂在该 Run 上；
-* 失败区分 `validation-failed` 与 `validation-timeout`；
+* 失败区分 `validation-failed` 与 `validation-timeout`；隔离环境本身起不来则是 `validation-runtime-failed` / `validation-runtime-unavailable`；
 * **Validation 失败不会被混进普通的 `Task Failed`**：`execution.failure.stage = "validation"`，agent 状态保持 `completed`，也不会进入 publish；
-* 可以**单独重试 validation**（`POST /api/tasks/:id/retry-validation`），不重新开发、不调用模型。
+* 可以**单独重试 validation**（`POST /api/tasks/:id/retry-validation`），不重新开发、不调用模型，同样在隔离 Runtime 内执行。
 
 ### Git Finalization
 
@@ -360,6 +479,49 @@ Agent 结束后平台检查仓库状态：当前 branch、working tree status、
 * **不破坏 Agent 已有 commit**：不 squash、不 rebase、不丢弃；只有当仍有 dirty changes 时才**追加**一个最终 commit。
 * 记录 `baseCommitSha` / `finalCommitSha` / `workingBranch` / `remoteBranch` / `pushedAt` / publish 结果。
 * 纯 no-op Task（没有任何改动）仍会把 working branch 发布到 base revision，Task 正常完成。
+
+### Frozen Final Revision：Finalization 成功后冻结 revision
+
+首次 Git Finalization 成功后，平台**冻结**这次开发的最终结果：
+
+```text
+execution.frozenRevision = {
+  finalCommitSha, baseCommitSha,
+  workingBranch, remote, remoteBranch,
+  workspaceFingerprint,     // HEAD + branch + porcelain status
+  at, finalizations,
+}
+```
+
+之后所有 Publish 都针对这个明确 revision 执行：push 的源是 **commit SHA**（`git push <remote> <sha>:refs/heads/<branch>`），而不是本地 branch ref。这样无论 Workspace 之后发生了什么，都不可能被顺带发布出去。事件 `git.revision.frozen` 记录冻结时刻。
+
+### Retry Publish：重新发布已经 Finalize 的 commit
+
+> Retry Publish 重新发布已经 Finalize 的 commit，不重新运行 Agent、不重新 Validation、不重新 Finalization。
+
+`POST /api/tasks/:id/retry-publish` 是一个**纯发布操作**：
+
+* 不运行 Agent；不运行 Validation；不重新 Finalization；
+* **不创建新的 commit**；不修改 Workspace；不重新计算 `finalCommitSha`；
+* 只把 `frozenRevision.finalCommitSha` 重新 push 到当前 Task 已登记的 remote / working branch。
+
+如果 Finalization 之后 Workspace 又被修改（新 commit、checkout、甚至只是一个 untracked 文件），Retry Publish **不会**把这些修改一起发布：
+
+```text
+workspace-diverged-after-finalization
+```
+
+它对比的是冻结时记录的 `workspaceFingerprint`。要发布新改动，必须显式开一个新的 Agent Run 重新 Finalize（此时 `finalizations` 递增，冻结 revision 前进到新的 commit）。
+
+并发上，Retry Publish 会获取同一个 Workspace 写锁，因此不会与正在修改同一 Workspace 的 active Run 产生竞态（`workspace-locked` / `task-busy`）。
+
+### Publish 目标限制
+
+Publish 只能针对当前 Task 已登记的 `remote` / `working branch` / `final commit`：
+
+* 不允许 arbitrary branch；不允许 arbitrary remote；**不允许 force push**；不允许 push tag。
+
+`GitOps` 的 push 契约本身没有 force 参数，refspec 显式且固定为 `refs/heads/<branch>`；protected branch（默认 `main` / `master`）直接 `policy-denied`。
 
 ### Git Push：平台能力
 
@@ -388,7 +550,19 @@ Publishing  = Failed      （failure.stage = "publish", publish.status = "failed
 | **Retry Validation** | `POST /api/tasks/:id/retry-validation` | 只重跑 validation，不重新开发、不调用模型 |
 | **Retry Publish** | `POST /api/tasks/:id/retry-publish` | 只把已 commit 的 revision 重新 push，不重新执行 Agent |
 
-**幂等与崩溃恢复**：重复执行的生命周期步骤都可安全重试——workspace 目录已存在即复用；branch 只在 Task 首次启动时创建，之后是 checkout 复用；push 之前先读远端实际 revision，若远端已有我们的 commit 就直接记为成功（`push 超时但其实已成功` 的情况由此收敛）；push 报错后再问一次远端，若已落地也算成功。Supervisor / API Server 重启后，处于中间阶段的 Task 会被标记为 `supervisor-restarted`（Workspace 保留、锁回收），重试即可继续。
+**幂等与崩溃恢复**：重复执行的生命周期步骤都可安全重试——workspace 目录已存在即复用；branch 只在 Task 首次启动时创建，之后是 checkout 复用；push 之前先读远端实际 revision，若远端已有我们的 commit 就直接记为成功（`push 超时但其实已成功` 的情况由此收敛）；push 报错后再问一次远端，若已落地也算成功。
+
+Supervisor / API Server 重启后按 **crash 时的阶段**做 stage-specific recovery（`packages/core/src/supervisor.ts` 的 `recoverInterrupted()`）：
+
+| crash 发生在 | agent | validation | finalization | publish | 给出的下一步 |
+| --- | --- | --- | --- | --- | --- |
+| `agent.running` | failed | — | — | — | Retry Agent |
+| `validation.running` | **completed** | interrupted | — | — | Retry Validation |
+| `git.finalizing` | **completed** | **completed** | interrupted | — | Retry Agent |
+| `git.pushing` | **completed** | **completed** | **completed** | interrupted/failed | Retry Publish |
+| `cleanup`（只丢了终态写入） | completed | completed | completed | completed | 无（Task 直接收敛为 completed） |
+
+**Recovery 不会反向破坏已经成功的状态**，也不会自动重新执行 Agent；Workspace 与其中未提交的修改保留，锁被回收，事件 `task.recovered` 记录判定结果。
 
 ### Cancellation
 
@@ -409,7 +583,19 @@ Final Commit / Remote Branch
 可用的 Retry（agent / validation / publish）
 ```
 
-每次 Task / Run 都能追踪：Project、Workspace、Runtime、Harness、Model、base ref、base commit、working branch、Run phase、起止时间、exit result、validation result、final commit、publish result；所有生命周期关键操作都写入现有 Event / Logging 系统（`run.phase`、`workspace.prepared`、`source.prepared`、`runtime.prepared`、`credential.resolved` / `credential.released`、`provisioning.prepared` / `provisioning.cleaned`、`validation.started` / `validation.step` / `validation.passed` / `validation.failed`、`git.finalized`、`git.pushed`、`publish.failed`）。
+每次 Task / Run 都能追踪：Project、Workspace、Runtime、Harness、Model、base ref、base commit、working branch、Run phase、起止时间、exit result、validation result、final commit、publish result；所有生命周期关键操作都写入现有 Event / Logging 系统（`run.phase`、`workspace.prepared`、`source.prepared`、`runtime.prepared`、`credential.resolved` / `credential.released`、`provisioning.prepared` / `provisioning.cleaned`、`validation.runtime.prepared`、`validation.started` / `validation.step` / `validation.passed` / `validation.failed`、`git.finalized`、`git.revision.frozen`、`git.pushed`、`publish.retry.started`、`publish.failed`、`task.recovered`）。
+
+**阶段可分辨（Stage observability）**：Task Detail 不只暴露一个 `Task failed`，而是分别表达每个阶段的结果——Agent / Validation / Finalization / Publish 各自的状态、错误码与时间，加上冻结的 revision：
+
+```text
+Agent         completed
+Validation    completed            ran in an isolated container (node:22-alpine)
+Finalization  completed            commit = abc123
+Publish       failed               [git-push-auth-failed] reason = auth failure
+Frozen        abc123 → origin/af/xxx-add-model
+```
+
+`execution.stages` 是**单调**的：某个阶段一旦 `completed`，后续阶段的失败不会把它改写。`agent.status` 不会因为 `publish.failed` 变成 `failed`，`validation.status` 也不会因为 Retry Publish 失败而改变。
 
 ### 领域错误模型
 
@@ -418,16 +604,23 @@ Final Commit / Remote Branch
 ```text
 Source        source-url-invalid · source-not-found · source-auth-failed · source-network-failed
               source-credential-missing · source-credential-invalid
+              credential-host-mismatch · credential-transport-mismatch
               base-ref-not-found · branch-invalid · branch-not-found · branch-conflict
 Workspace     workspace-create-failed · workspace-locked · workspace-invalid
 Runtime       runtime-create-failed · runtime-start-failed · runtime-lost · runtime-timeout
+              runtime-not-isolated · runtime-not-allowed-for-project-task
+              secret-scope-not-allowed
 Agent         agent-start-failed · agent-failed · agent-timeout · agent-cancelled
 Validation    validation-failed · validation-timeout
+              validation-runtime-failed · validation-runtime-unavailable · validation-secret-not-allowed
 Finalization  git-state-invalid · git-commit-failed
 Publishing    git-push-failed · git-push-auth-failed · git-push-rejected · remote-branch-conflict
+              publish-revision-missing · workspace-diverged-after-finalization
 Platform      project-not-found · project-invalid · credential-not-found
               task-not-found · task-state-invalid · task-busy · policy-denied · supervisor-restarted
 ```
+
+HTTP 映射：隔离/授权类失败（`runtime-not-isolated`、`credential-host-mismatch`、`credential-transport-mismatch`、`secret-scope-not-allowed`、`validation-secret-not-allowed`、`policy-denied`）为 **403**；并发/状态冲突类（`workspace-diverged-after-finalization`、`publish-revision-missing`、`workspace-locked`、`remote-branch-conflict`、`task-busy`、`task-state-invalid`、`branch-conflict`）为 **409**；`validation-runtime-*` 与 `runtime-*` 为 **502**。
 
 ### API
 
@@ -449,12 +642,17 @@ Source Credential
   DELETE /api/source-credentials/:id       删除（连同其 Secret）
 
 Task lifecycle
-  GET    /api/tasks/:id/detail             Task Detail 读模型（§40 全部字段 + 可用 retry）
+  GET    /api/tasks/:id/detail             Task Detail 读模型（§40 全部字段 + isolation + stages + frozenRevision + 可用 retry）
   POST   /api/tasks/:id/cancel             取消（终止 Runtime 与 Git 操作，Workspace 保留）
   POST   /api/tasks/:id/retry-run          新 Run 继续同一 Workspace
-  POST   /api/tasks/:id/retry-validation   只重跑 validation
-  POST   /api/tasks/:id/retry-publish      只重新 push（不重新执行 Agent）
+  POST   /api/tasks/:id/retry-validation   只重跑 validation（同样在隔离 Runtime 内）
+  POST   /api/tasks/:id/retry-publish      只重新 push 冻结的 revision（不重新执行 Agent / Validation / Finalization）
   GET    /api/workspace-locks              当前持有的 Workspace 写锁
+```
+
+Runtime isolation
+  GET    /api/runtimes/project-eligible    可用于 Project Coding Task 的 Runtime（isolated 且可用）
+  GET    /api/runtimes/:id/isolation       isolation 判定（sandboxed / executionBackend / image / reason）
 ```
 
 `GET /api/dashboard` 的 `counts` 增加 `projects` 与 `sourceCredentials`。既有 Task / Run / Workspace / Handoff / Secret / Event API 未做破坏性变更（新字段全部可选）。
@@ -677,10 +875,12 @@ af models list | add | remove
 af models add gpt-4o --provider <provider-id> --alias gpt-4o
 
 # Runtime
-af runtimes list | add | update | remove
+af runtimes list | add | enable | disable | remove
 af runtimes add "OpenCode" --kind opencode
 af runtimes add "Pi Agent" --kind pi
-af runtimes add "My Docker" --kind docker --image node:22-alpine --command "sh -c echo hi"
+# Project Coding Task 需要隔离 Runtime：--isolated（或 --containerized）声明 isolated 执行，
+# 必须同时给出 --image；--host 声明 host 执行（仅 development / 非 Project 任务）。
+af runtimes add "My Docker" --kind docker --isolated --image node:22-alpine --command "sh -c echo hi"
 
 # Workspace / Agent Profile / Secrets
 af workspaces add repo --path /path/to/code
@@ -786,7 +986,10 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
   * 一个 Project 只支持一个 primary source（单 Repository）；monorepo 多 Source、mirror、submodule 独立管理未实现。
   * Source Credential 只实现 HTTPS Token 与 SSH Private Key；GitHub App / Deploy Key / OAuth / Short-lived Credential 预留未实现。
   * `branchMode: "new"` 与 `"continue"` 已实现；force push 与 push tag 明确不支持（无选项、无 policy）。
-  * Validation 在 AgentFabric 宿主机的 Workspace 目录里执行（`sh -c`），不在容器内执行。
+  * Validation 在 disposable 隔离 Runtime 内执行（默认 Docker，workspace 挂载）；**不再**在宿主 `sh -c` 执行。非 Project 任务仍可使用宿主 runner。
+  * Validation Runtime 复用 Task Runtime 的 image 作为工具链；`AGENTFABRIC_VALIDATION_IMAGE` 可覆盖默认值（`node:22-alpine`）。
+  * 容器化的 Coding Task 需要 Docker daemon 可达；不可达时 validation 报 `validation-runtime-unavailable`，不会回退到宿主执行。
+  * `allowHostExecution` 是 operator 级逃生阀（SupervisorOptions / Project.execution），默认关闭，Task 请求无法开启。
   * Skills provisioning 提供 canonical 目录 + 只读挂载 + `AGENTFABRIC_SKILLS_DIR`，是否被某个 harness 自动发现取决于该 harness；MCP 配置按统一 `mcpServers` 文档生成并通过 `AGENTFABRIC_MCP_CONFIG` 交付，未逐 harness 写入各自的私有配置格式。
   * Repository-local config（`.agentfabric.yml`）本期不读取（不可信输入），只在领域上划清 Control Plane Configuration 与 Repository Configuration 的边界。
   * Project 的 `execution` 继承模型已覆盖 Runtime / Model / Profile / Env / Secrets / Timeout / Resource Limit / Network Policy / Lifecycle / Tools；Secret references 与 Validation / Git publish 走 Project→Task 覆盖，Run 级仅继承 Task 快照。
@@ -804,11 +1007,24 @@ core 测试覆盖 store / secret / mock run / cost / event bus / policy / git wo
 
 `src/v11.test.ts` 覆盖 Project / Source Credential / Coding Task 生命周期：Project 与 Credential 的创建与校验、公开与私有仓库、URL 与分支名校验、凭据 materialize 与脱敏、clone/fetch/base ref/working branch、分支冲突与 continue 模式、baseCommitSha 冻结、Validation（失败/超时/重试）、Git finalization（自动 commit / Agent 已有 commit / dirty + commit / no-op / autoCommit=false）、Publish（成功 / 认证失败 / 远端拒绝 / 冲突 / 重试 / 幂等）、并发隔离、Workspace lock、取消、崩溃恢复、Skill/MCP provisioning，以及 §41.11 的 Case A–F。Git 部分使用**真实 `git` CLI 与本地 bare 仓库**作为远端，只有 Agent Harness 是脚本化的。
 
+v11 hardening 的专项测试：
+
+| 文件 | 覆盖 |
+| --- | --- |
+| `src/v11.isolation.test.ts` | Runtime isolation metadata 判定、Host Escape（Project Task + local runtime 在执行前被拒）、隔离 Runtime 的 Validation（Case A–E）、allowlist 环境、宿主 secret 不可见、Git Credential 不可达、Validation failure 不倒退 agent |
+| `src/v11.secretscope.test.ts` | Secret scope 授权边界 Case A–F：git scope 可用于 clone/push，经 Task/Runtime/Project secretIds、MCP、Validation 一律拒绝；底层 resolve API 同样执行 policy |
+| `src/v11.credential.test.ts` | Remote host 解析、host binding（HTTPS/SSH match & mismatch、wildcard）、transport 兼容（HTTPS token × SSH remote 等）、Project create/update 尽早失败、`.git/config` 与全生命周期防泄漏 |
+| `src/v11.publish.test.ts` | Frozen final revision、Retry Publish 是纯发布（同 commit、不新增 commit、不跑 agent/validation/finalization、SHA 不变）、workspace 漂移检测、stage-specific crash recovery（Agent/Validation/Finalization/Publish/Cleanup）、状态单调性、取消与并发 |
+| `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
+
 端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
 
 ```bash
 bash scripts/e2e-v11.sh          # 需要本机 git；使用临时数据目录与本地端口，不触碰 ~/.fabric
+bash scripts/e2e-v11-docker.sh   # 额外需要 Docker daemon 与 node:22-alpine 镜像（可用 AGENTFABRIC_DOCKER_E2E_IMAGE 覆盖）
 ```
+
+`scripts/e2e-v11-docker.sh` 走完整条验收链路：创建 git-scoped credential → Project → Task → Managed Workspace → clone → base commit → working branch → 真实 Docker Runtime → 容器内 fake agent 改 Workspace → 验证 agent 读不到 credential → Validation 在 disposable sandbox 内执行 → Finalize → 冻结 final SHA → push 该精确 commit → 销毁 container → 验证 Workspace 仍在 → 验证远端 branch → Retry Publish（含 workspace 漂移拒绝）→ 验证 secret 从未泄漏。
 
 真实 Harness 集成测试（Pi/OpenCode × Local/Docker + 跨 Harness Handoff）默认 skip，使用真实 CLI、真实模型调用与真实容器：
 
