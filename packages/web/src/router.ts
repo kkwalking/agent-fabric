@@ -28,6 +28,7 @@ export interface Route {
     | "new-task"
     | "tasks"
     | "task"
+    | "task-lifecycle"
     | "trash"
     | "runs"
     | "run"
@@ -36,6 +37,10 @@ export interface Route {
     | "sessions"
     | "agents"
     | "workspaces"
+    | "projects"
+    | "project"
+    | "project-new-task"
+    | "source-credentials"
     | "handoffs"
     | "handoff"
     | "usage"
@@ -57,6 +62,8 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   // 与 App.tsx 的两处标记一起恢复。
   // "/agents": "agents",
   "/workspaces": "workspaces",
+  "/projects": "projects",
+  "/source-credentials": "source-credentials",
   "/handoffs": "handoffs",
   "/usage": "usage",
   "/proxy": "proxy",
@@ -67,8 +74,17 @@ export function parsePath(path: string): Route {
   const base = PATH_VIEWS[path];
   if (base) return { view: base };
   const parts = path.split("/").filter(Boolean);
-  if (parts[0] === "tasks" && parts[1]) return { view: "task", id: decodeURIComponent(parts[1]) };
+  if (parts[0] === "tasks" && parts[1]) {
+    const id = decodeURIComponent(parts[1]);
+    if (parts[2] === "lifecycle") return { view: "task-lifecycle", id };
+    return { view: "task", id };
+  }
   if (parts[0] === "runs" && parts[1]) return { view: "run", id: decodeURIComponent(parts[1]) };
   if (parts[0] === "handoffs" && parts[1]) return { view: "handoff", id: decodeURIComponent(parts[1]) };
+  if (parts[0] === "projects" && parts[1]) {
+    const id = decodeURIComponent(parts[1]);
+    if (parts[2] === "tasks" && parts[3] === "new") return { view: "project-new-task", id };
+    return { view: "project", id };
+  }
   return { view: "dashboard" };
 }

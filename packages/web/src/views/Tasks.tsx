@@ -124,6 +124,18 @@ export function TasksView() {
                   </span>
                   <span className="meta-chip"><span className="muted">workspace</span> {wsName(last?.workspaceId ?? task.workspaceId) ?? "—"}</span>
                   <span className="meta-chip">{taskRuns.length} {taskRuns.length === 1 ? "run" : "runs"}</span>
+                  {/* Project-based tasks expose their lifecycle (v11 §40):
+                      which branch they own and where they stand. */}
+                  {task.projectId && (
+                    <>
+                      <span className="meta-chip"><span className="muted">branch</span> {task.workingBranch ?? "—"}</span>
+                      <span className="meta-chip">
+                        <span className="muted">agent</span> {task.execution?.agent?.status ?? "—"} ·{" "}
+                        <span className="muted">validation</span> {task.execution?.validation?.status ?? "—"} ·{" "}
+                        <span className="muted">publish</span> {task.execution?.publish?.status ?? "—"}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
               {/* Status and recency answer the same question from the same
@@ -143,6 +155,9 @@ export function TasksView() {
                 </button>
                 {menuTaskId === task.id && (
                   <div className="menu">
+                    {task.projectId && (
+                      <button className="menu-item" onClick={() => navigate(`/tasks/${task.id}/lifecycle`)}>Lifecycle</button>
+                    )}
                     <button className="menu-item danger" onClick={() => requestDelete(task)}>Delete</button>
                   </div>
                 )}

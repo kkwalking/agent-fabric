@@ -12,6 +12,9 @@ import { HandoffsView, HandoffDetailView } from "./views/Handoffs";
 import { UsageView } from "./views/Usage";
 import { ProxyView } from "./views/Proxy";
 import { SettingsView } from "./views/Settings";
+import { NewProjectTaskView, ProjectDetailView, ProjectsView } from "./views/Projects";
+import { SourceCredentialsView } from "./views/SourceCredentials";
+import { TaskLifecycleView } from "./views/TaskLifecycle";
 import { Icon, IconName } from "./components";
 import { navigate, parsePath, usePath, type Route } from "./router";
 
@@ -36,6 +39,7 @@ const primaryNav: NavEntry[] = [
 
 const resourceNav: NavEntry[] = [
   { path: "/llm", label: "LLM", icon: "cloud", match: "/llm" },
+  { path: "/projects", label: "Projects", icon: "folder", match: "/projects" },
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
   { path: "/sessions", label: "Native sessions", icon: "terminal", match: "/sessions" },
   { path: "/handoffs", label: "Handoffs", icon: "archive", match: "/handoffs" },
@@ -44,6 +48,7 @@ const resourceNav: NavEntry[] = [
   // PATH_VIEWS、NewTask.tsx 与 TaskThread.tsx 里的 Agent 选择器。
   // { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
   { path: "/workspaces", label: "Workspaces", icon: "folder", match: "/workspaces" },
+  { path: "/source-credentials", label: "Source credentials", icon: "key", match: "/source-credentials" },
 ];
 
 const systemNav: NavEntry[] = [
@@ -130,6 +135,7 @@ export function App() {
         {route.view === "tasks" && <TasksView />}
         {route.view === "trash" && <TrashView />}
         {route.view === "task" && route.id && <TaskThreadView taskId={route.id} />}
+        {route.view === "task-lifecycle" && route.id && <TaskLifecycleView taskId={route.id} />}
         {route.view === "runs" && <RunsView />}
         {route.view === "run" && route.id && <RunDetailView runId={route.id} />}
         {route.view === "llm" && <LlmView />}
@@ -138,6 +144,10 @@ export function App() {
         {/* AGENT_UI_HIDDEN: 与上面侧边栏的 Agents 导航一起恢复。 */}
         {/* {route.view === "agents" && <ResourceView kind="agents" />} */}
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
+        {route.view === "projects" && <ProjectsView />}
+        {route.view === "project" && route.id && <ProjectDetailView projectId={route.id} />}
+        {route.view === "project-new-task" && route.id && <NewProjectTaskView projectId={route.id} />}
+        {route.view === "source-credentials" && <SourceCredentialsView />}
         {route.view === "handoffs" && <HandoffsView />}
         {route.view === "handoff" && route.id && <HandoffDetailView handoffId={route.id} />}
         {route.view === "usage" && <UsageView />}
