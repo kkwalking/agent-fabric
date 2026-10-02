@@ -91,7 +91,9 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
       cwd,
       env: ctx.env,
       workspaceContainerPath: opts.workspaceContainerPath,
-      extraMounts: opts.extraMounts,
+      // Harness-generated config first, then the platform-provisioned mounts
+      // (skills / MCP configuration, v11 §25/§26).
+      extraMounts: [...(opts.extraMounts ?? []), ...(ctx.extraMounts ?? [])],
       // Explicit in-container command prefix (e.g. ["node", "/pi.js"] for
       // images without a harness entrypoint). Default: the harness image's
       // entrypoint is the harness, so only the args run inside.

@@ -419,6 +419,8 @@ export const dockerAdapter: AgentRuntimeAdapter = {
         workspaceMount: ctx.workspacePath
           ? { hostPath: ctx.workspacePath, containerPath: String(ctx.runtime.config?.mountPath ?? "/workspace") }
           : undefined,
+        // Platform-provisioned read-only mounts (skills / MCP, v11 §25/§26).
+        extraMounts: ctx.extraMounts,
         resourceLimits: mergedResourceLimits(ctx),
         networkPolicy: ctx.policy?.network ?? ctx.runtime.networkPolicy,
       });
