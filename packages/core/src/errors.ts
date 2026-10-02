@@ -20,6 +20,9 @@ export type ErrorCode =
   | "source-network-failed"
   | "source-credential-missing"
   | "source-credential-invalid"
+  | "credential-host-mismatch"
+  | "credential-transport-mismatch"
+  | "secret-scope-not-allowed"
   | "base-ref-not-found"
   | "branch-invalid"
   | "branch-not-found"
@@ -33,6 +36,8 @@ export type ErrorCode =
   | "runtime-start-failed"
   | "runtime-lost"
   | "runtime-timeout"
+  | "runtime-not-isolated"
+  | "runtime-not-allowed-for-project-task"
   /* Agent */
   | "agent-start-failed"
   | "agent-failed"
@@ -41,6 +46,9 @@ export type ErrorCode =
   /* Validation */
   | "validation-failed"
   | "validation-timeout"
+  | "validation-runtime-failed"
+  | "validation-runtime-unavailable"
+  | "validation-secret-not-allowed"
   /* Git finalization */
   | "git-state-invalid"
   | "git-commit-failed"
@@ -49,6 +57,8 @@ export type ErrorCode =
   | "git-push-auth-failed"
   | "git-push-rejected"
   | "remote-branch-conflict"
+  | "publish-revision-missing"
+  | "workspace-diverged-after-finalization"
   /* Project / Task */
   | "project-not-found"
   | "project-invalid"
@@ -78,6 +88,9 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "source-network-failed": "source",
   "source-credential-missing": "source",
   "source-credential-invalid": "source",
+  "credential-host-mismatch": "source",
+  "credential-transport-mismatch": "source",
+  "secret-scope-not-allowed": "runtime",
   "base-ref-not-found": "source",
   "branch-invalid": "source",
   "branch-not-found": "source",
@@ -89,18 +102,25 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "runtime-start-failed": "runtime",
   "runtime-lost": "runtime",
   "runtime-timeout": "runtime",
+  "runtime-not-isolated": "runtime",
+  "runtime-not-allowed-for-project-task": "runtime",
   "agent-start-failed": "agent",
   "agent-failed": "agent",
   "agent-timeout": "agent",
   "agent-cancelled": "agent",
   "validation-failed": "validation",
   "validation-timeout": "validation",
+  "validation-runtime-failed": "validation",
+  "validation-runtime-unavailable": "validation",
+  "validation-secret-not-allowed": "validation",
   "git-state-invalid": "finalization",
   "git-commit-failed": "finalization",
   "git-push-failed": "publish",
   "git-push-auth-failed": "publish",
   "git-push-rejected": "publish",
   "remote-branch-conflict": "publish",
+  "publish-revision-missing": "publish",
+  "workspace-diverged-after-finalization": "publish",
 };
 
 export function stageForCode(code: ErrorCode): FailureStage {
@@ -139,11 +159,25 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "branch-conflict" ||
     code === "remote-branch-conflict" ||
     code === "task-busy" ||
-    code === "task-state-invalid"
+    code === "task-state-invalid" ||
+    code === "workspace-diverged-after-finalization" ||
+    code === "publish-revision-missing"
   ) {
     return 409;
   }
-  if (code === "source-auth-failed" || code === "git-push-auth-failed" || code === "policy-denied") return 403;
+  if (
+    code === "source-auth-failed" ||
+    code === "git-push-auth-failed" ||
+    code === "policy-denied" ||
+    code === "runtime-not-isolated" ||
+    code === "runtime-not-allowed-for-project-task" ||
+    code === "credential-host-mismatch" ||
+    code === "credential-transport-mismatch" ||
+    code === "secret-scope-not-allowed" ||
+    code === "validation-secret-not-allowed"
+  ) {
+    return 403;
+  }
   if (
     code === "source-network-failed" ||
     code === "git-push-failed" ||
@@ -152,6 +186,8 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "runtime-start-failed" ||
     code === "runtime-lost" ||
     code === "runtime-timeout" ||
+    code === "validation-runtime-failed" ||
+    code === "validation-runtime-unavailable" ||
     code === "source-not-found"
   ) {
     return 502;

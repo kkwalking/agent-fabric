@@ -28,6 +28,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DomainError } from "./errors.js";
 import { SecretRedactor, redactRemoteUrl, urlHasUserInfo } from "./redaction.js";
+import type { SourceCredential, SourceCredentialType } from "./types.js";
 
 /* ------------------------------------------------------------------ */
 /* Credential materialization                                          */
@@ -218,10 +219,122 @@ export function branchSlug(text: string, maxLength = 40): string {
   return slug || "task";
 }
 
+/* ------------------------------------------------------------------ */
+/* Remote host & credential binding (v11 hardening §9/§10)             */
+/* ------------------------------------------------------------------ */
+
+/** How a remote URL authenticates. */
+export type RemoteTransport = "https" | "ssh" | "local";
+
+export interface RemoteEndpoint {
+  transport: RemoteTransport;
+  /** Host the credential would be sent to; absent for a local path remote. */
+  host?: string;
+}
+
+/** Case-insensitive host comparison (DNS names are case-insensitive). */
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase().replace(/\.$/, "");
+}
+
 /**
- * System-generated working branch name (v11 §8): stable, recognizable and
- * derived from the task id so it is never ambiguous.
+ * Extracts the real host and transport from a repository remote URL
+ * (v11 hardening §10). Handles the three shapes AgentFabric accepts:
+ *
+ *   https://github.com/org/repo.git      → { https, github.com }
+ *   ssh://git@gitlab.com/org/repo.git    → { ssh,   gitlab.com }
+ *   git@github.com:org/repo.git          → { ssh,   github.com }
+ *   /srv/git/repo.git                    → { local }
+ *
+ * Returns `undefined` for a URL that carries no host at all (a local path).
  */
+export function parseRemoteEndpoint(remoteUrl: string): RemoteEndpoint | undefined {
+  const url = remoteUrl.trim();
+  if (!url) return undefined;
+  if (url.startsWith("/") || url.startsWith("file://")) return { transport: "local" };
+
+  // scp-like: user@host:path (no scheme, no port syntax)
+  const scp = /^[A-Za-z0-9._-]+@([A-Za-z0-9._-]+):/.exec(url);
+  if (scp) return { transport: "ssh", host: normalizeHost(scp[1]) };
+
+  const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(?:([^/@\s]*)@)?([^/\s:]+)(?::(\d+))?/.exec(url);
+  if (!match) return undefined;
+  const scheme = match[1].toLowerCase();
+  const host = normalizeHost(match[3]);
+  if (!host) return undefined;
+  if (scheme === "ssh" || scheme === "git") return { transport: "ssh", host };
+  if (scheme === "http" || scheme === "https") return { transport: "https", host };
+  return { transport: "local", host };
+}
+
+/** True when `pattern` (exact host or `*.suffix` wildcard) covers `host`. */
+export function hostPatternMatches(pattern: string, host: string): boolean {
+  const p = normalizeHost(pattern);
+  const h = normalizeHost(host);
+  if (!p || !h) return false;
+  if (p === h) return true;
+  if (!p.startsWith("*.")) return false;
+  const suffix = p.slice(1); // ".internal.example.com"
+  // A wildcard covers sub-domains only — never the bare domain itself.
+  return h.endsWith(suffix) && h.length > suffix.length;
+}
+
+/** Which transports each credential type can actually authenticate. */
+const CREDENTIAL_TRANSPORTS: Record<SourceCredentialType, RemoteTransport[]> = {
+  "https-token": ["https"],
+  "ssh-key": ["ssh"],
+};
+
+export interface CredentialBindingCheck {
+  ok: boolean;
+  code: "credential-host-mismatch" | "credential-transport-mismatch";
+  message: string;
+  detail?: string;
+}
+
+/**
+ * Verifies a Source Credential may be used against a repository remote
+ * (v11 hardening §9/§10/§10.2). Two independent constraints:
+ *
+ * 1. **Host binding** — the credential's `host` (exact or `*.suffix`) must
+ *    cover the remote's real host. A credential is never sent to a host it
+ *    was not scoped to.
+ * 2. **Transport compatibility** — an HTTPS token cannot authenticate an SSH
+ *    remote and an SSH key cannot be an HTTPS token. There is no silent
+ *    downgrade: the mismatch is an explicit refusal.
+ *
+ * A credential with no `host` is a wildcard by intent (the user did not scope
+ * it); the transport rule still applies. Local-path remotes need neither.
+ */
+export function checkCredentialBinding(
+  credential: Pick<SourceCredential, "name" | "type" | "host">,
+  remoteUrl: string
+): CredentialBindingCheck {
+  const endpoint = parseRemoteEndpoint(remoteUrl);
+  if (!endpoint || endpoint.transport === "local") return { ok: true, code: "credential-transport-mismatch", message: "" };
+
+  const allowed = CREDENTIAL_TRANSPORTS[credential.type] ?? [];
+  if (!allowed.includes(endpoint.transport)) {
+    const wanted = endpoint.transport === "ssh" ? "an SSH key" : "an HTTPS token";
+    const have = credential.type === "ssh-key" ? "an SSH key" : "an HTTPS token";
+    return {
+      ok: false,
+      code: "credential-transport-mismatch",
+      message: `Credential "${credential.name}" is ${have} but the repository remote uses ${endpoint.transport} — configure ${wanted}`,
+      detail: "credential type and remote transport must agree; AgentFabric never downgrades a credential",
+    };
+  }
+
+  if (credential.host && endpoint.host && !hostPatternMatches(credential.host, endpoint.host)) {
+    return {
+      ok: false,
+      code: "credential-host-mismatch",
+      message: `Credential "${credential.name}" is scoped to "${credential.host}" but the repository remote is on "${endpoint.host}"`,
+      detail: "a source credential is never sent to an unauthorized host",
+    };
+  }
+  return { ok: true, code: "credential-host-mismatch", message: "" };
+}
 export function generateWorkingBranch(taskId: string, title: string): string {
   const shortId = taskId.replace(/^task_/, "").slice(0, 8);
   return `af/${shortId}-${branchSlug(title)}`;
@@ -339,6 +452,14 @@ export interface GitOps {
   commit(opts: GitCommandOptions & { message: string; author?: { name: string; email: string } }): Promise<string>;
   commitsBetween(opts: GitCommandOptions & { from: string; to: string }): Promise<string[]>;
   push(opts: GitCommandOptions & { remote: string; branch: string }): Promise<void>;
+  /**
+   * Pushes one **exact revision** to a remote branch (v11 hardening §13):
+   * `git push <remote> <sha>:refs/heads/<branch>`. This is the only publish
+   * primitive a Project task uses, because it publishes the frozen
+   * `finalCommitSha` regardless of what the local working tree or branch has
+   * done since. Never forced, never a tag.
+   */
+  pushRevision(opts: GitCommandOptions & { remote: string; branch: string; revision: string }): Promise<void>;
 }
 
 /** The exact argv a git invocation used, redacted for logging. */
@@ -585,6 +706,17 @@ export function createGitOps(bin = process.env.AGENTFABRIC_GIT_BIN ?? "git"): Gi
       // publish something else (v11 §18).
       await exec(
         gitArgs(credential, ["push", "--quiet", remote, `refs/heads/${branch}:refs/heads/${branch}`]),
+        { cwd: dir, credential, timeoutMs, redactor, signal, operation: "push" }
+      );
+    },
+
+    async pushRevision({ dir, remote, branch, revision, credential, timeoutMs, redactor, signal }) {
+      // Publishing one frozen revision (v11 hardening §13/§15): the source is
+      // a commit SHA, not a local branch, so nothing the working tree did
+      // after finalization can ride along. The refspec is explicit, the
+      // destination is this task's branch only, and there is no force flag.
+      await exec(
+        gitArgs(credential, ["push", "--quiet", remote, `${revision}:refs/heads/${branch}`]),
         { cwd: dir, credential, timeoutMs, redactor, signal, operation: "push" }
       );
     },

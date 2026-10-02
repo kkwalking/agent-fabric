@@ -6,7 +6,8 @@ import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { emptyUsage, addUsage, estimateCost } from "./cost.js";
 import { DomainError } from "./errors.js";
-import { validateRemoteUrl, type GitCredentialInput } from "./git.js";
+import { validateRemoteUrl, checkCredentialBinding, type CredentialBindingCheck, type GitCredentialInput } from "./git.js";
+import { assertSecretAllowed, resolveSecretsForPurpose, type SecretPurpose } from "./secrets.js";
 import type {
   ID,
   Provider,
@@ -278,6 +279,12 @@ export interface NewRuntimeInput {
   networkPolicy?: Runtime["networkPolicy"];
   filesystemPolicy?: Runtime["filesystemPolicy"];
   config?: Record<string, unknown>;
+  /**
+   * Declared execution backend (v11 hardening §4). `isolated` marks the
+   * runtime eligible for Project Coding Tasks; `host` marks it
+   * development-only. Absent derives from `containerized`.
+   */
+  executionBackend?: Runtime["executionBackend"];
 }
 
 /**
@@ -332,6 +339,7 @@ export class RuntimeService {
       command: input.command,
       cwd: input.cwd,
       containerized: input.containerized ?? false,
+      executionBackend: input.executionBackend,
       credentialSource: input.credentialSource,
       defaultModelId: input.defaultModelId,
       enabled: input.enabled ?? true,
@@ -608,11 +616,24 @@ export class SecretService {
     return this.store.remove("secrets", id);
   }
 
-  resolve(ids: ID[] | undefined): Secret[] {
-    if (!ids) return [];
-    return ids
-      .map((id) => this.getWithValue(id))
-      .filter((s): s is Secret => Boolean(s));
+  /**
+   * Resolves secret ids for a **purpose**, enforcing the scope policy at the
+   * resolution boundary (v11 hardening §8.3). `purpose` defaults to
+   * `agent-runtime` — the safest default: a caller that forgets to say why it
+   * wants a secret still cannot obtain a git-scoped one.
+   */
+  resolve(ids: ID[] | undefined, purpose: SecretPurpose = "agent-runtime"): Secret[] {
+    return resolveSecretsForPurpose(ids, purpose, (id) => this.getWithValue(id));
+  }
+
+  /**
+   * Resolves the Git credential material a Source Credential points at. This
+   * is the *only* path allowed to read a `git`-scoped secret, and it is
+   * reachable only from `SourceCredentialService.resolve` — the credential
+   * broker.
+   */
+  resolveForGit(ids: ID[] | undefined): Secret[] {
+    return resolveSecretsForPurpose(ids, "git", (id) => this.getWithValue(id));
   }
 }
 
@@ -693,6 +714,8 @@ export interface NewTaskInput {
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: ID[];
+  /** Secrets the Task's validation commands may receive (v11 hardening §6.2). */
+  validationSecretIds?: ID[];
   tools?: string[];
   resourceLimits?: ResourceLimits;
   timeoutMs?: number;
@@ -748,6 +771,7 @@ export class TaskService {
       profileId: input.profileId,
       env: input.env,
       secretIds: input.secretIds,
+      validationSecretIds: input.validationSecretIds,
       tools: input.tools,
       resourceLimits: input.resourceLimits,
       timeoutMs: input.timeoutMs,
@@ -1191,8 +1215,15 @@ export class ProjectService {
     if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
     const type = input.source.type ?? "git";
     if (type !== "git") throw new DomainError("project-invalid", `Unsupported source type: ${String(type)}`);
-    if (input.source.credentialId && !this.store.get<SourceCredential>("sourceCredentials", input.source.credentialId)) {
-      throw new DomainError("credential-not-found", `Source credential not found: ${input.source.credentialId}`);
+    if (input.source.credentialId) {
+      const credential = this.store.get<SourceCredential>("sourceCredentials", input.source.credentialId);
+      if (!credential) {
+        throw new DomainError("credential-not-found", `Source credential not found: ${input.source.credentialId}`);
+      }
+      // Host binding + transport compatibility are checked at configuration
+      // time (v11 hardening §10.2), so an unusable pairing fails here rather
+      // than after a clone was attempted.
+      assertCredentialBinding(credential, remoteUrl);
     }
     const project: Project = {
       id: newId("proj"),
@@ -1231,15 +1262,20 @@ export class ProjectService {
       if (!remoteUrl) throw new DomainError("project-invalid", "A project needs a repository URL");
       const urlCheck = validateRemoteUrl(remoteUrl);
       if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
-      if (patch.source.credentialId && !this.store.get<SourceCredential>("sourceCredentials", patch.source.credentialId)) {
-        throw new DomainError("credential-not-found", `Source credential not found: ${patch.source.credentialId}`);
+      // The credential may be carried over from the current source; either
+      // way the *resulting* pairing must satisfy the host binding (§9/§10).
+      const credentialId = patch.source.credentialId !== undefined ? patch.source.credentialId : project.source.credentialId;
+      if (credentialId) {
+        const credential = this.store.get<SourceCredential>("sourceCredentials", credentialId);
+        if (!credential) throw new DomainError("credential-not-found", `Source credential not found: ${credentialId}`);
+        assertCredentialBinding(credential, remoteUrl);
       }
       next.source = {
         type: "git",
         remoteUrl,
         provider: patch.source.provider ?? inferSourceProvider(remoteUrl),
         defaultBranch: patch.source.defaultBranch?.trim() || project.source.defaultBranch || "main",
-        credentialId: patch.source.credentialId,
+        credentialId,
       };
     }
     if (patch.execution !== undefined) next.execution = patch.execution;
@@ -1263,6 +1299,18 @@ export class ProjectService {
 /* ------------------------------------------------------------------ */
 /* Source Credential (v11 §4)                                         */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Project-level credential binding check (v11 hardening §9/§10): a Project
+ * may only reference a credential that is scoped to its repository host and
+ * compatible with its transport. Kept as a free function so both the Project
+ * service and the supervisor's preflight run the exact same rule.
+ */
+export function assertCredentialBinding(credential: SourceCredential, remoteUrl: string): void {
+  const check = checkCredentialBinding(credential, remoteUrl);
+  if (check.ok) return;
+  throw new DomainError(check.code, check.message, check.detail);
+}
 
 export interface NewSourceCredentialInput {
   name: string;
@@ -1423,6 +1471,10 @@ export class SourceCredentialService {
    * Resolves the credential's plaintext material for one Git operation
    * (v11 §12.1). The result is handed straight to the credential
    * materializer and never stored, logged or returned by an API.
+   *
+   * This is the **credential broker** boundary (v11 hardening §8): it is the
+   * only caller allowed to read a `git`-scoped secret, and it refuses to hand
+   * that secret to any other purpose.
    */
   resolve(id: ID | undefined): GitCredentialInput | undefined {
     if (!id) return undefined;
@@ -1435,6 +1487,10 @@ export class SourceCredentialService {
         `Source credential "${credential.name}" has no stored value — re-save it`
       );
     }
+    // A credential's secret is git material by definition: assert the scope
+    // rather than assume it, so a mis-scoped secret fails here and not at the
+    // remote.
+    assertSecretAllowed(secret, "git");
     const passphrase = credential.passphraseSecretId
       ? this.store.get<Secret>("secrets", credential.passphraseSecretId)?.value
       : undefined;
@@ -1448,6 +1504,25 @@ export class SourceCredentialService {
       passphrase,
       knownHosts: credential.knownHosts,
     };
+  }
+
+  /**
+   * Credential binding check (v11 hardening §9/§10): the credential may only
+   * be sent to the host it is scoped to, over a transport its type supports.
+   *
+   * Called before the credential is materialized, and again at project
+   * create/update so an incompatible configuration fails at configuration
+   * time rather than after a clone was attempted.
+   */
+  assertBoundTo(credential: SourceCredential, remoteUrl: string): void {
+    const binding = checkCredentialBinding(credential, remoteUrl);
+    if (binding.ok) return;
+    throw new DomainError(binding.code, binding.message, binding.detail);
+  }
+
+  /** The same check without throwing, for preflight callers. */
+  checkBinding(credential: SourceCredential, remoteUrl: string): CredentialBindingCheck {
+    return checkCredentialBinding(credential, remoteUrl);
   }
 }
 
@@ -1661,13 +1736,18 @@ export async function seedDefaults(store: Store): Promise<void> {
     ephemeral: true,
     env: {},
   });
+  // The generic Docker runtime is the seeded *isolated* runtime: it declares
+  // container-backed execution and names an image, which is what the Project
+  // Coding Task isolation gate reads (v11 hardening §4). `usableInTask` stays
+  // false until the operator opts in — the Runtimes page toggles it.
   await runtimeService.create({
     name: "Docker (generic)",
     kind: "docker",
-    description: "Generic Docker container runtime",
+    description: "Generic Docker container runtime — isolated execution, the runtime kind Project Coding Tasks require",
     image: "node:22-alpine",
     command: ["sh", "-c", "echo hello from agent-fabric container"],
     containerized: true,
+    executionBackend: "isolated",
     enabled: true,
     ephemeral: true,
     networkPolicy: { enabled: true },

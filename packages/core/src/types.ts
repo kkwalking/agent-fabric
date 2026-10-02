@@ -133,6 +133,99 @@ export interface RuntimeLifecycle {
 }
 
 /**
+ * Where a Runtime actually executes (v11 hardening §4/§6).
+ *
+ * This is the *declared* isolation metadata — the field a policy decision
+ * reads. `containerized` remains the backend switch (which carrier the
+ * adapter spawns on); `executionBackend` is the answer to "is the work
+ * isolated from the AgentFabric host?". They normally agree, and a runtime
+ * whose record predates this field is read through `executionBackendOf()`,
+ * which derives the backend from `containerized`.
+ *
+ * - `isolated`: the harness runs inside a container/VM boundary and never on
+ *   the AgentFabric host.
+ * - `host`: the harness runs as a local process on the AgentFabric host.
+ *   Still fully supported for development, debugging, non-project tasks and
+ *   internal tests — but never for a Project Coding Task.
+ */
+export type RuntimeExecutionBackend = "isolated" | "host";
+
+/**
+ * Runtime isolation requirement of one execution (v11 hardening §4).
+ * Derived from the runtime's declared isolation metadata, never from its
+ * name or kind.
+ */
+export interface RuntimeIsolation {
+  /** True when the runtime executes inside an isolation boundary. */
+  sandboxed: boolean;
+  /** The declared execution backend this verdict was read from. */
+  executionBackend: RuntimeExecutionBackend;
+  /** True when the backend is container-backed (the adapter spawns Docker). */
+  containerized: boolean;
+  /** Image the isolated runtime runs, when configured. */
+  image?: string;
+  /** Human-readable reason, used verbatim in a refusal. */
+  reason: string;
+}
+
+/**
+ * Reads a Runtime's isolation metadata. Explicit `executionBackend` wins;
+ * otherwise the legacy `containerized` boolean decides, so every runtime
+ * record that existed before this concept is read correctly without a
+ * migration.
+ */
+export function executionBackendOf(runtime: Pick<Runtime, "containerized" | "executionBackend">): RuntimeExecutionBackend {
+  if (runtime.executionBackend) return runtime.executionBackend;
+  return runtime.containerized ? "isolated" : "host";
+}
+
+/**
+ * The isolation verdict for a runtime (v11 hardening §4.2). A sandboxed
+ * runtime must additionally be container-backed and name an image: a
+ * "containerized" record without an image cannot actually start, so it is
+ * not an isolation guarantee.
+ */
+export function runtimeIsolation(runtime: Pick<Runtime, "name" | "containerized" | "executionBackend" | "image">): RuntimeIsolation {
+  const executionBackend = executionBackendOf(runtime);
+  const containerized = Boolean(runtime.containerized);
+  const image = runtime.image?.trim() || undefined;
+  if (executionBackend !== "isolated") {
+    return {
+      sandboxed: false,
+      executionBackend,
+      containerized,
+      image,
+      reason: `Runtime "${runtime.name}" executes on the AgentFabric host`,
+    };
+  }
+  if (!containerized) {
+    return {
+      sandboxed: false,
+      executionBackend,
+      containerized,
+      image,
+      reason: `Runtime "${runtime.name}" declares isolated execution but is not backed by a container`,
+    };
+  }
+  if (!image) {
+    return {
+      sandboxed: false,
+      executionBackend,
+      containerized,
+      image,
+      reason: `Runtime "${runtime.name}" declares isolated execution but has no container image configured`,
+    };
+  }
+  return {
+    sandboxed: true,
+    executionBackend,
+    containerized,
+    image,
+    reason: `Runtime "${runtime.name}" executes in an isolated container (${image})`,
+  };
+}
+
+/**
  * Capabilities a Runtime can declare (spec v1 §17). AgentFabric uses them
  * to decide which behaviors are available (e.g. native resume vs handoff).
  */
@@ -171,6 +264,13 @@ export interface Runtime {
   cwd?: string;
   /** If true, the adapter runs inside a Docker container. */
   containerized?: boolean;
+  /**
+   * Declared execution backend (v11 hardening §4). Absent on records created
+   * before the field existed; read it through `executionBackendOf()`, which
+   * derives the backend from `containerized`. Project Coding Tasks require
+   * `"isolated"`.
+   */
+  executionBackend?: RuntimeExecutionBackend;
   /**
    * Credential source (v6 §2): `harness-native` runtimes authenticate with
    * their own logged-in account (e.g. Codex + ChatGPT) and therefore do
@@ -349,6 +449,18 @@ export interface ProjectExecutionConfig {
   policy?: ExecutionPolicy;
   lifecycle?: RuntimeLifecycle;
   networkPolicy?: NetworkPolicy;
+  /**
+   * Explicit advanced policy allowing a Project Coding Task to run on a
+   * host (non-isolated) runtime (v11 hardening §4.1). Default off; it is an
+   * operator escape hatch, never something a task request can grant itself.
+   */
+  allowHostExecution?: boolean;
+  /**
+   * Secrets a validation command may receive (v11 hardening §6.2). A
+   * separate allowlist from `secretIds`: build/test credentials are not
+   * agent credentials. `scope: "git"` secrets are refused here as well.
+   */
+  validationSecretIds?: ID[];
 }
 
 /** A skill provisioned into the agent execution environment (v11 §25). */
@@ -468,6 +580,7 @@ export type RunPhase =
   | "source.checkout"
   | "runtime.preparing"
   | "agent.running"
+  | "validation.preparing"
   | "validation.running"
   | "git.finalizing"
   | "git.pushing"
@@ -524,13 +637,32 @@ export interface ValidationStepResult {
 }
 
 export interface TaskValidationState {
-  status: "pending" | "skipped" | "running" | "passed" | "failed" | "timeout";
+  status: "pending" | "skipped" | "running" | "passed" | "failed" | "timeout" | "interrupted";
   steps?: ValidationStepResult[];
   error?: string;
   errorCode?: string;
   attempts: number;
   startedAt?: string;
   endedAt?: string;
+  /**
+   * Where the validation commands actually ran (v11 hardening §6). Always an
+   * isolated runtime: repository commands are untrusted code and never
+   * execute on the AgentFabric host.
+   */
+  execution?: ValidationExecutionInfo;
+}
+
+/** How validation was executed — the isolation evidence on the record. */
+export interface ValidationExecutionInfo {
+  /** Isolation boundary the commands ran behind. */
+  backend: "isolated";
+  runtimeId?: ID;
+  runtimeKind?: string;
+  containerized: boolean;
+  image?: string;
+  /** True when a disposable validation runtime was created for this attempt. */
+  disposable?: boolean;
+  containerId?: string;
 }
 
 /**
@@ -551,6 +683,30 @@ export interface TaskPublishState {
   errorCode?: string;
 }
 
+/**
+ * The frozen result of the first successful Git finalization (v11 hardening
+ * §13). Written once; every later publish pushes exactly this revision.
+ * `publishOnly` distinguishes a publish that must never touch the working
+ * tree from a full lifecycle that owns it.
+ */
+export interface FrozenFinalRevision {
+  finalCommitSha: string;
+  baseCommitSha: string;
+  workingBranch: string;
+  remote: string;
+  remoteBranch: string;
+  /**
+   * Fingerprint of the working tree at the moment finalization succeeded
+   * (HEAD + branch + porcelain status). Retry Publish compares it to detect a
+   * workspace that drifted after finalization.
+   */
+  workspaceFingerprint: string;
+  /** When the revision was frozen. */
+  at: string;
+  /** Number of finalizations that produced it (always 1 for a frozen revision). */
+  finalizations: number;
+}
+
 export interface TaskExecution {
   phase: RunPhase;
   status: TaskLifecycleStatus;
@@ -560,7 +716,34 @@ export interface TaskExecution {
   publish?: TaskPublishState;
   /** Revision the task was started from, resolved once (v11 §7). */
   baseCommitSha?: string;
+  /**
+   * The task's frozen publish revision (v11 hardening §13). Present once
+   * finalization succeeded; Retry Publish pushes this and nothing else.
+   */
+  frozenRevision?: FrozenFinalRevision;
+  /**
+   * Stage completion record (v11 hardening §17/§36). Written monotonically:
+   * a stage that completed stays completed, whatever a later stage does.
+   */
+  stages?: TaskStageStates;
   updatedAt: string;
+}
+
+/** Monotonic per-stage outcomes of one Project task (v11 hardening §36). */
+export interface TaskStageStates {
+  agent?: StageOutcome;
+  validation?: StageOutcome;
+  finalization?: StageOutcome;
+  publish?: StageOutcome;
+}
+
+export interface StageOutcome {
+  status: "completed" | "failed" | "interrupted" | "cancelled" | "skipped";
+  at: string;
+  /** Failure code when the stage did not complete. */
+  errorCode?: string;
+  /** Commit the stage produced / published, when it has one. */
+  commitSha?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -577,6 +760,12 @@ export interface Task {
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: string[];
+  /**
+   * Secrets the Task's validation commands may receive (v11 hardening §6.2).
+   * A separate allowlist from `secretIds`: a build/test credential is not an
+   * agent credential, and a git-scoped secret is refused here.
+   */
+  validationSecretIds?: string[];
   tools?: string[];
   resourceLimits?: ResourceLimits;
   timeoutMs?: number;
@@ -1103,12 +1292,16 @@ export type EventType =
   | "provisioning.prepared"
   | "provisioning.cleaned"
   | "validation.started"
+  | "validation.runtime.prepared"
   | "validation.step"
   | "validation.passed"
   | "validation.failed"
   | "git.finalized"
+  | "git.revision.frozen"
   | "git.pushed"
   | "publish.failed"
+  | "publish.retry.started"
+  | "task.recovered"
   | "container.reused"
   | "container.retained"
   | "container.destroyed"
