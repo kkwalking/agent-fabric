@@ -5,6 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { emptyUsage, addUsage, estimateCost } from "./cost.js";
+import { DomainError } from "./errors.js";
+import { validateRemoteUrl, type GitCredentialInput } from "./git.js";
 import type {
   ID,
   Provider,
@@ -26,6 +28,20 @@ import type {
   RuntimeSessionRef,
   RuntimeNativeState,
   Handoff,
+  Project,
+  SourceProvider,
+  SourceType,
+  SourceCredential,
+  SourceCredentialView,
+  SourceCredentialType,
+  ProjectExecutionConfig,
+  ProjectSkill,
+  McpServerConfig,
+  ValidationConfig,
+  GitPublishPolicy,
+  WorkspaceLock,
+  BranchMode,
+  TaskExecution,
 } from "./types.js";
 
 export function now(): string {
@@ -408,6 +424,52 @@ export class WorkspaceService {
       persistent: input.persistent ?? true,
       source: "create",
       status: "ready",
+      ownership: "external",
+      createdAt: now(),
+    };
+    return this.store.insert("workspaces", workspace);
+  }
+
+  /**
+   * Create the platform-managed working copy for one Project-based Task
+   * (v11 §5.1/§10). The directory is created eagerly and owned by the
+   * platform; the Git content is prepared by the execution supervisor.
+   *
+   * One Task = one managed Workspace, never shared with another Task.
+   */
+  async createManaged(input: {
+    name: string;
+    projectId: ID;
+    taskId: ID;
+    repoUrl: string;
+    workingBranch?: string;
+    mountPath?: string;
+  }): Promise<Workspace> {
+    const id = newId("ws");
+    const path = join(this.store.dataDir, "workspaces", id);
+    try {
+      await mkdir(path, { recursive: true });
+    } catch (err) {
+      throw new DomainError(
+        "workspace-create-failed",
+        `Could not create the managed workspace directory: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    const workspace: Workspace = {
+      id,
+      name: input.name,
+      type: "git",
+      path,
+      repoUrl: input.repoUrl,
+      branch: input.workingBranch,
+      workingBranch: input.workingBranch,
+      mountPath: input.mountPath ?? "/workspace",
+      persistent: true,
+      source: "create",
+      status: "ready",
+      ownership: "managed",
+      projectId: input.projectId,
+      taskId: input.taskId,
       createdAt: now(),
     };
     return this.store.insert("workspaces", workspace);
@@ -446,6 +508,7 @@ export class WorkspaceService {
       persistent: input.persistent ?? true,
       source: "import",
       status: "ready",
+      ownership: "external",
       createdAt: now(),
     };
     return this.store.insert("workspaces", workspace);
@@ -616,6 +679,12 @@ export class ProfileService {
 /* ------------------------------------------------------------------ */
 
 export interface NewTaskInput {
+  /**
+   * Explicit task id. The execution supervisor generates it up front because
+   * the managed workspace and the system-generated working branch are both
+   * derived from it (v11 §8).
+   */
+  id?: ID;
   title?: string;
   prompt: string;
   runtimeId?: ID;
@@ -631,6 +700,15 @@ export interface NewTaskInput {
   /** Container lifecycle override for the run (spec v1 §1). */
   lifecycle?: Runtime["lifecycle"];
   metadata?: Record<string, unknown>;
+  /** Project-based Task fields (v11 §6). */
+  projectId?: ID;
+  baseRef?: string;
+  baseCommitSha?: string;
+  workingBranch?: string;
+  branchMode?: BranchMode;
+  validation?: ValidationConfig;
+  git?: GitPublishPolicy;
+  execution?: TaskExecution;
 }
 
 /**
@@ -661,7 +739,7 @@ export class TaskService {
 
   async create(input: NewTaskInput): Promise<Task> {
     const task: Task = {
-      id: newId("task"),
+      id: input.id ?? newId("task"),
       title: input.title ?? input.prompt.slice(0, 80),
       prompt: input.prompt,
       runtimeId: input.runtimeId,
@@ -675,6 +753,14 @@ export class TaskService {
       timeoutMs: input.timeoutMs,
       policy: input.policy,
       metadata: input.metadata,
+      projectId: input.projectId,
+      baseRef: input.baseRef,
+      baseCommitSha: input.baseCommitSha,
+      workingBranch: input.workingBranch,
+      branchMode: input.branchMode,
+      validation: input.validation,
+      git: input.git,
+      execution: input.execution,
       createdAt: now(),
     };
     return this.store.insert("tasks", task);
@@ -701,7 +787,9 @@ export class TaskService {
   /**
    * Physically delete tasks whose `deletedAt` is older than `retentionMs`:
    * the task record plus its runs, run event shards, artifacts, handoffs
-   * and runtime session references. Returns the purged task ids.
+   * and runtime session references. A **managed** workspace belonging to the
+   * task is removed with it (record + directory); external workspaces are
+   * user-owned and never touched. Returns the purged task ids.
    */
   async purgeExpired(retentionMs: number = TASK_RETENTION_MS): Promise<ID[]> {
     const cutoff = Date.now() - retentionMs;
@@ -721,6 +809,14 @@ export class TaskService {
       }
       for (const s of this.store.list<RuntimeSessionRef>("runtimeSessions").filter((s) => s.taskId === task.id)) {
         await this.store.remove("runtimeSessions", s.id);
+      }
+      for (const lock of this.store.list<WorkspaceLock>("workspaceLocks").filter((l) => l.taskId === task.id)) {
+        await this.store.remove("workspaceLocks", lock.id);
+      }
+      // Managed workspaces exist only to serve their task: they go with it.
+      for (const ws of this.store.list<Workspace>("workspaces").filter((w) => w.taskId === task.id && w.ownership === "managed")) {
+        if (ws.path) await rm(ws.path, { recursive: true, force: true });
+        await this.store.remove("workspaces", ws.id);
       }
       await this.store.remove("tasks", task.id);
       purged.push(task.id);
@@ -1035,6 +1131,393 @@ export class UsageService {
         .map(([date, v]) => ({ date, ...v }))
         .sort((a, b) => a.date.localeCompare(b.date)),
     };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Project (v11 §2/§3)                                                */
+/* ------------------------------------------------------------------ */
+
+export interface NewProjectInput {
+  name: string;
+  description?: string;
+  source: {
+    type?: SourceType;
+    remoteUrl: string;
+    provider?: SourceProvider;
+    defaultBranch?: string;
+    credentialId?: ID;
+  };
+  execution?: ProjectExecutionConfig;
+  skills?: ProjectSkill[];
+  mcpServers?: McpServerConfig[];
+  validation?: ValidationConfig;
+  git?: GitPublishPolicy;
+}
+
+/** Infers the provider from the host so users never have to pick one. */
+export function inferSourceProvider(remoteUrl: string): SourceProvider {
+  const url = remoteUrl.toLowerCase();
+  if (url.includes("github.com")) return "github";
+  if (url.includes("gitlab")) return "gitlab";
+  if (url.includes("gitee.com")) return "gitee";
+  return "generic";
+}
+
+/**
+ * Projects are the long-lived top-level business resource (v11 §2): one
+ * codebase AgentFabric keeps working on. A Project owns its source definition
+ * and the execution defaults every Task inherits; it never holds a working
+ * copy (that is the Workspace's job) and never holds credential material
+ * (that is the SourceCredential's job).
+ */
+export class ProjectService {
+  constructor(private store: Store) {}
+
+  list(): Project[] {
+    return this.store.list<Project>("projects");
+  }
+
+  get(id: ID): Project | undefined {
+    return this.store.get<Project>("projects", id);
+  }
+
+  async create(input: NewProjectInput): Promise<Project> {
+    const name = input.name?.trim();
+    if (!name) throw new DomainError("project-invalid", "A project needs a name");
+    const remoteUrl = input.source?.remoteUrl?.trim();
+    if (!remoteUrl) throw new DomainError("project-invalid", "A project needs a repository URL");
+    const urlCheck = validateRemoteUrl(remoteUrl);
+    if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
+    const type = input.source.type ?? "git";
+    if (type !== "git") throw new DomainError("project-invalid", `Unsupported source type: ${String(type)}`);
+    if (input.source.credentialId && !this.store.get<SourceCredential>("sourceCredentials", input.source.credentialId)) {
+      throw new DomainError("credential-not-found", `Source credential not found: ${input.source.credentialId}`);
+    }
+    const project: Project = {
+      id: newId("proj"),
+      name,
+      description: input.description,
+      source: {
+        type: "git",
+        remoteUrl,
+        provider: input.source.provider ?? inferSourceProvider(remoteUrl),
+        defaultBranch: input.source.defaultBranch?.trim() || "main",
+        credentialId: input.source.credentialId,
+      },
+      execution: input.execution,
+      skills: input.skills,
+      mcpServers: input.mcpServers,
+      validation: input.validation,
+      git: input.git,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    return this.store.insert("projects", project);
+  }
+
+  async update(id: ID, patch: Partial<NewProjectInput>): Promise<Project | undefined> {
+    const project = this.get(id);
+    if (!project) return undefined;
+    const next: Partial<Project> = { updatedAt: now() };
+    if (patch.name !== undefined) {
+      const name = patch.name.trim();
+      if (!name) throw new DomainError("project-invalid", "A project needs a name");
+      next.name = name;
+    }
+    if (patch.description !== undefined) next.description = patch.description || undefined;
+    if (patch.source !== undefined) {
+      const remoteUrl = patch.source.remoteUrl?.trim();
+      if (!remoteUrl) throw new DomainError("project-invalid", "A project needs a repository URL");
+      const urlCheck = validateRemoteUrl(remoteUrl);
+      if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
+      if (patch.source.credentialId && !this.store.get<SourceCredential>("sourceCredentials", patch.source.credentialId)) {
+        throw new DomainError("credential-not-found", `Source credential not found: ${patch.source.credentialId}`);
+      }
+      next.source = {
+        type: "git",
+        remoteUrl,
+        provider: patch.source.provider ?? inferSourceProvider(remoteUrl),
+        defaultBranch: patch.source.defaultBranch?.trim() || project.source.defaultBranch || "main",
+        credentialId: patch.source.credentialId,
+      };
+    }
+    if (patch.execution !== undefined) next.execution = patch.execution;
+    if (patch.skills !== undefined) next.skills = patch.skills;
+    if (patch.mcpServers !== undefined) next.mcpServers = patch.mcpServers;
+    if (patch.validation !== undefined) next.validation = patch.validation;
+    if (patch.git !== undefined) next.git = patch.git;
+    return this.store.update<Project>("projects", id, next);
+  }
+
+  async remove(id: ID): Promise<boolean> {
+    return this.store.remove("projects", id);
+  }
+
+  /** Tasks belonging to this project (live and deleted alike). */
+  taskIds(id: ID): ID[] {
+    return this.store.list<Task>("tasks").filter((t) => t.projectId === id).map((t) => t.id);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Source Credential (v11 §4)                                         */
+/* ------------------------------------------------------------------ */
+
+export interface NewSourceCredentialInput {
+  name: string;
+  type: SourceCredentialType;
+  host?: string;
+  username?: string;
+  /** HTTPS token (type `https-token`) or PEM private key (`ssh-key`). */
+  value?: string;
+  /** SSH key passphrase, when the key is encrypted. */
+  passphrase?: string;
+  knownHosts?: string;
+  /** Reference an existing Secret instead of creating one from `value`. */
+  secretId?: ID;
+}
+
+/**
+ * Reusable Git credentials (v11 §4). The sensitive value always lives in the
+ * existing Secret store: this record is metadata plus a Secret reference, and
+ * the API only ever serves the masked preview.
+ */
+export class SourceCredentialService {
+  constructor(private store: Store) {}
+
+  list(): SourceCredentialView[] {
+    return this.store
+      .list<SourceCredential>("sourceCredentials")
+      .map((c) => this.toView(c));
+  }
+
+  get(id: ID): SourceCredential | undefined {
+    return this.store.get<SourceCredential>("sourceCredentials", id);
+  }
+
+  getView(id: ID): SourceCredentialView | undefined {
+    const credential = this.get(id);
+    return credential ? this.toView(credential) : undefined;
+  }
+
+  private toView(credential: SourceCredential): SourceCredentialView {
+    const secret = this.store.get<Secret>("secrets", credential.secretId);
+    const passphrase = credential.passphraseSecretId
+      ? this.store.get<Secret>("secrets", credential.passphraseSecretId)
+      : undefined;
+    return {
+      ...credential,
+      secretMasked: secret?.masked,
+      passphraseMasked: passphrase?.masked,
+    };
+  }
+
+  async create(input: NewSourceCredentialInput): Promise<SourceCredentialView> {
+    const name = input.name?.trim();
+    if (!name) throw new DomainError("source-credential-invalid", "A source credential needs a name");
+    if (input.type !== "https-token" && input.type !== "ssh-key") {
+      throw new DomainError("source-credential-invalid", `Unsupported credential type: ${String(input.type)}`);
+    }
+    let secretId = input.secretId;
+    if (secretId) {
+      if (!this.store.get<Secret>("secrets", secretId)) {
+        throw new DomainError("source-credential-invalid", `Secret not found: ${secretId}`);
+      }
+    } else {
+      if (!input.value) {
+        throw new DomainError(
+          "source-credential-invalid",
+          input.type === "https-token" ? "An HTTPS credential needs a token value" : "An SSH credential needs a private key value"
+        );
+      }
+      const secret = await this.store.insert<Secret>("secrets", {
+        id: newId("sec"),
+        name: `${name} ${input.type === "https-token" ? "token" : "private key"}`,
+        value: input.value,
+        masked: maskSecret(input.value),
+        scope: "git",
+        createdAt: now(),
+        updatedAt: now(),
+      });
+      secretId = secret.id;
+    }
+    let passphraseSecretId: ID | undefined;
+    if (input.passphrase) {
+      const secret = await this.store.insert<Secret>("secrets", {
+        id: newId("sec"),
+        name: `${name} passphrase`,
+        value: input.passphrase,
+        masked: maskSecret(input.passphrase),
+        scope: "git",
+        createdAt: now(),
+        updatedAt: now(),
+      });
+      passphraseSecretId = secret.id;
+    }
+    const credential: SourceCredential = {
+      id: newId("cred"),
+      name,
+      type: input.type,
+      host: input.host?.trim() || undefined,
+      username: input.username?.trim() || undefined,
+      secretId: secretId!,
+      passphraseSecretId,
+      knownHosts: input.knownHosts,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    const stored = await this.store.insert("sourceCredentials", credential);
+    return this.toView(stored);
+  }
+
+  async update(id: ID, patch: Partial<NewSourceCredentialInput>): Promise<SourceCredentialView | undefined> {
+    const credential = this.get(id);
+    if (!credential) return undefined;
+    const next: Partial<SourceCredential> = { updatedAt: now() };
+    if (patch.name !== undefined) next.name = patch.name.trim() || credential.name;
+    if (patch.host !== undefined) next.host = patch.host.trim() || undefined;
+    if (patch.username !== undefined) next.username = patch.username.trim() || undefined;
+    if (patch.knownHosts !== undefined) next.knownHosts = patch.knownHosts;
+    if (patch.value) {
+      const secret = this.store.get<Secret>("secrets", credential.secretId);
+      await this.store.update<Secret>("secrets", credential.secretId, {
+        value: patch.value,
+        masked: maskSecret(patch.value),
+        updatedAt: now(),
+        ...(secret ? {} : { id: credential.secretId, name: `${credential.name} secret`, scope: "git", createdAt: now() }),
+      });
+    }
+    if (patch.passphrase) {
+      const existing = credential.passphraseSecretId
+        ? this.store.get<Secret>("secrets", credential.passphraseSecretId)
+        : undefined;
+      if (existing) {
+        await this.store.update<Secret>("secrets", existing.id, { value: patch.passphrase, masked: maskSecret(patch.passphrase), updatedAt: now() });
+      } else {
+        const secret = await this.store.insert<Secret>("secrets", {
+          id: newId("sec"),
+          name: `${credential.name} passphrase`,
+          value: patch.passphrase,
+          masked: maskSecret(patch.passphrase),
+          scope: "git",
+          createdAt: now(),
+          updatedAt: now(),
+        });
+        next.passphraseSecretId = secret.id;
+      }
+    }
+    const updated = await this.store.update<SourceCredential>("sourceCredentials", id, next);
+    return updated ? this.toView(updated) : undefined;
+  }
+
+  async remove(id: ID): Promise<boolean> {
+    const credential = this.get(id);
+    if (!credential) return false;
+    await this.store.remove("secrets", credential.secretId);
+    if (credential.passphraseSecretId) await this.store.remove("secrets", credential.passphraseSecretId);
+    return this.store.remove("sourceCredentials", id);
+  }
+
+  /**
+   * Resolves the credential's plaintext material for one Git operation
+   * (v11 §12.1). The result is handed straight to the credential
+   * materializer and never stored, logged or returned by an API.
+   */
+  resolve(id: ID | undefined): GitCredentialInput | undefined {
+    if (!id) return undefined;
+    const credential = this.get(id);
+    if (!credential) throw new DomainError("credential-not-found", `Source credential not found: ${id}`);
+    const secret = this.store.get<Secret>("secrets", credential.secretId);
+    if (!secret?.value) {
+      throw new DomainError(
+        "source-credential-invalid",
+        `Source credential "${credential.name}" has no stored value — re-save it`
+      );
+    }
+    const passphrase = credential.passphraseSecretId
+      ? this.store.get<Secret>("secrets", credential.passphraseSecretId)?.value
+      : undefined;
+    if (credential.type === "https-token") {
+      return { type: "https-token", username: credential.username, token: secret.value };
+    }
+    return {
+      type: "ssh-key",
+      username: credential.username,
+      privateKey: secret.value,
+      passphrase,
+      knownHosts: credential.knownHosts,
+    };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Workspace locks (v11 §36)                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One writer per managed workspace (v11 §36). A lock is held for the whole
+ * lifecycle of the Run that owns the working tree and released at cleanup;
+ * a lock whose run is no longer active is stale and may be reclaimed, which
+ * is what makes crash recovery possible without a separate reconciliation.
+ */
+export class WorkspaceLockService {
+  constructor(private store: Store) {}
+
+  get(workspaceId: ID): WorkspaceLock | undefined {
+    return this.store.list<WorkspaceLock>("workspaceLocks").find((l) => l.workspaceId === workspaceId);
+  }
+
+  list(): WorkspaceLock[] {
+    return this.store.list<WorkspaceLock>("workspaceLocks");
+  }
+
+  /**
+   * Acquires the workspace for one run. `isRunActive` decides whether an
+   * existing lock is live: an active holder blocks the acquisition
+   * (`workspace-locked`), a stale one is reclaimed.
+   */
+  async acquire(
+    workspaceId: ID,
+    holder: { taskId: ID; runId: ID },
+    isRunActive: (runId: ID) => boolean
+  ): Promise<WorkspaceLock> {
+    const existing = this.get(workspaceId);
+    if (existing && existing.runId !== holder.runId && isRunActive(existing.runId)) {
+      throw new DomainError(
+        "workspace-locked",
+        `Workspace ${workspaceId} is already being written by run ${existing.runId}`,
+        `held by task ${existing.taskId} since ${existing.acquiredAt}`
+      );
+    }
+    if (existing) await this.store.remove("workspaceLocks", existing.id);
+    return this.store.insert<WorkspaceLock>("workspaceLocks", {
+      id: newId("wslock"),
+      workspaceId,
+      taskId: holder.taskId,
+      runId: holder.runId,
+      acquiredAt: now(),
+    });
+  }
+
+  /** Releases the lock when it is held by `runId` (idempotent). */
+  async release(workspaceId: ID, runId?: ID): Promise<boolean> {
+    const existing = this.get(workspaceId);
+    if (!existing) return false;
+    if (runId && existing.runId !== runId) return false;
+    return this.store.remove("workspaceLocks", existing.id);
+  }
+
+  /** Drops locks whose run is no longer active (boot-time recovery). */
+  async releaseStale(isRunActive: (runId: ID) => boolean): Promise<ID[]> {
+    const released: ID[] = [];
+    for (const lock of this.list()) {
+      if (!isRunActive(lock.runId)) {
+        await this.store.remove("workspaceLocks", lock.id);
+        released.push(lock.workspaceId);
+      }
+    }
+    return released;
   }
 }
 

@@ -128,6 +128,24 @@ export interface RuntimeContext {
   saveWorkspace(): Promise<Workspace | undefined>;
   /** Resolved absolute workspace path on the host (if any). */
   workspacePath?: string;
+  /**
+   * Additional read-only bind mounts the platform provisioned for this run
+   * (v11 §25/§26): skills and generated MCP configuration. Containerized
+   * backends must mount them; local backends simply see the host paths
+   * through the environment. Never carries credentials in the mount path.
+   */
+  extraMounts?: Array<{ hostPath: string; containerPath: string }>;
+  /**
+   * Provisioned execution environment for this run (v11 §25/§26): where the
+   * skills live on the host and inside the runtime, and the generated MCP
+   * configuration file. Host paths only — no secret values.
+   */
+  provisioning?: {
+    skillsHostDir?: string;
+    skillsMountPath?: string;
+    mcpConfigHostPath?: string;
+    mcpConfigMountPath?: string;
+  };
 }
 
 /* ------------------------------------------------------------------ */

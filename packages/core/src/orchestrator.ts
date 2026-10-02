@@ -72,6 +72,7 @@ import type {
   Run,
   RunContinuity,
   RunEvent,
+  RunPhase,
   Runtime,
   RuntimeCapability,
   RuntimeLifecycle,
@@ -179,7 +180,7 @@ function evaluateResumeCompatibility(
  * Everything needed to materialize one Run under an existing Task
  * (submit creates its own Task; continuation passes overrides here).
  */
-interface RunSpec {
+export interface RunSpec {
   title?: string;
   runtimeId?: ID;
   modelId?: ID;
@@ -199,6 +200,24 @@ interface RunSpec {
   previousHandoffId?: ID;
   runtimeSessionRefId?: ID;
   lifecycle?: RuntimeLifecycle;
+  /** Project-based runs: the Project and its working branch (v11 §6/§40). */
+  projectId?: ID;
+  workingBranch?: string;
+  baseCommitSha?: string;
+  /** Initial lifecycle phase (v11 §21); set by the execution supervisor. */
+  phase?: RunPhase;
+}
+
+/**
+ * Per-run execution environment the platform provisioned outside the run
+ * record (v11 §25/§26): skills / MCP mounts and env, plus the descriptors the
+ * runtime context exposes. Registered in memory right before execution —
+ * provisioning is recreated on every attempt, so it never needs to persist.
+ */
+export interface RunExecutionExtras {
+  extraMounts?: Array<{ hostPath: string; containerPath: string }>;
+  env?: Record<string, string>;
+  provisioning?: RuntimeContext["provisioning"];
 }
 
 /**
@@ -376,6 +395,12 @@ export class RunService {
   private controllers = new Map<string, { controller: AbortController; reason: "cancel" | "timeout" | "policy" }>();
   private active = new Map<string, Promise<void>>();
   private leaseManager: ContainerLeaseManager;
+  /**
+   * Execution environments provisioned for a run that is about to start
+   * (v11 §25/§26). Held in memory: provisioning is rebuilt for every attempt,
+   * so nothing here needs to survive a restart.
+   */
+  private executionExtras = new Map<string, RunExecutionExtras>();
   /** In-flight handoff generations keyed by the previous run and its degradation policy, so the UI pre-generate and a racing continue share one result. */
   private handoffGenerations = new Map<string, Promise<Handoff>>();
   /**
@@ -454,6 +479,46 @@ export class RunService {
   async recoverKeepAliveContainers(): Promise<void> {
     if (!this.containerOps.listKeepAlive) return;
     await recoverKeepAliveContainers(this.leaseManager, await this.containerOps.listKeepAlive());
+  }
+
+  /* ---------------- supervisor-facing execution hooks (v11 §13–§15) ---------------- */
+
+  /**
+   * Creates a Run for an existing Task without executing it. The execution
+   * supervisor prepares the workspace and source first, then calls
+   * `executeRun` — the agent must never start before the working copy is on
+   * the right branch (v11 §11).
+   */
+  async createRunForTask(task: Task, spec: RunSpec): Promise<Run> {
+    return this.createRunFromTask(task, spec);
+  }
+
+  /** The adapter registered for a runtime kind (supervisor preflight). */
+  adapterFor(kind: string): AgentRuntimeAdapter | undefined {
+    return this.registry.get(kind);
+  }
+
+  /** Registers the provisioned execution environment for an upcoming run. */
+  setExecutionExtras(runId: string, extras: RunExecutionExtras): void {
+    this.executionExtras.set(runId, extras);
+  }
+
+  clearExecutionExtras(runId: string): void {
+    this.executionExtras.delete(runId);
+  }
+
+  /**
+   * Runs a Run that was created by `createRunForTask` (or by submit/continue,
+   * which call it internally). Awaiting it resolves once the run reached a
+   * terminal status.
+   */
+  async executeRun(runId: string): Promise<void> {
+    await this.execute(runId);
+  }
+
+  /** True while this run has an execution in flight in this process. */
+  isExecuting(runId: string): boolean {
+    return this.active.has(runId);
   }
 
   async submit(input: NewTaskInput): Promise<SubmitResult> {
@@ -876,6 +941,10 @@ export class RunService {
       taskId: task.id,
       taskTitle: extra.title ?? task.title,
       status: "pending",
+      phase: extra.phase,
+      projectId: extra.projectId ?? task.projectId,
+      workingBranch: extra.workingBranch ?? task.workingBranch,
+      baseCommitSha: extra.baseCommitSha ?? task.baseCommitSha,
       runtimeId,
       runtimeName: runtime?.name,
       modelId,
@@ -1822,6 +1891,7 @@ export class RunService {
       await task;
     } finally {
       this.active.delete(runId);
+      this.executionExtras.delete(runId);
     }
   }
 
@@ -1876,8 +1946,12 @@ export class RunService {
     // over the task's defaults. The Proxy page env (when enabled) is the
     // lowest layer — explicit task/run env wins — and is resolved at
     // spawn time: toggling affects subsequent runs, never live ones.
+    // Platform provisioning env (skills / MCP paths, v11 §25/§26) sits just
+    // above the proxy layer so an explicit user value still wins.
+    const extras = this.executionExtras.get(runId);
     const mergedEnv: Record<string, string> = {
       ...buildProxyEnv(this.store.config().proxy, Boolean(runtime.containerized)),
+      ...(extras?.env ?? {}),
       ...(task.env ?? {}),
       ...(run.env ?? {}),
     };
@@ -1986,6 +2060,7 @@ export class RunService {
         signal: controller.signal,
         usageAcc,
         abortForPolicy,
+        extras,
       });
 
       await ctx.emit("run.started", {
@@ -2044,6 +2119,11 @@ export class RunService {
       }
 
       run = (await this.store.update<Run>("runs", runId, { status: "running", updatedAt: now() })) ?? run;
+      // Project-based runs carry the fine-grained phase (v11 §21) so the task
+      // view can say whether the agent is developing, testing or publishing.
+      if (run.phase || run.projectId) {
+        await this.store.update<Run>("runs", runId, { phase: "agent.running", updatedAt: now() });
+      }
 
       let result: RuntimeResult;
       try {
@@ -2262,6 +2342,7 @@ export class RunService {
     signal: AbortSignal;
     usageAcc: Usage;
     abortForPolicy: (message: string) => void;
+    extras?: RunExecutionExtras;
   }): RuntimeContext {
     const { run, task, runtime, model, provider, providerModels, workspace, secrets, signal, usageAcc } = opts;
     const resolved = opts.resolved;
@@ -2332,6 +2413,8 @@ export class RunService {
       reusableContainer: opts.reusableContainer,
       nativeState: opts.nativeState,
       workspacePath: workspace?.path,
+      extraMounts: opts.extras?.extraMounts,
+      provisioning: opts.extras?.provisioning,
       emit,
       log: async (line, level = "info") => {
         await emit("log", { line }, { level, source: runtime.kind });

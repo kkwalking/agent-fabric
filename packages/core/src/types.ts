@@ -219,6 +219,15 @@ export interface Runtime {
 
 export type WorkspaceType = "local" | "git" | "volume";
 
+/**
+ * How a Workspace came into being (v11 §5.4):
+ * - `managed`: the platform created it for one Project-based Task and owns
+ *   its lifecycle. Never shared between tasks.
+ * - `external`: a user directory or repository the user attached — used in
+ *   place, never copied or taken over.
+ */
+export type WorkspaceOwnership = "managed" | "external";
+
 export interface Workspace {
   id: ID;
   name: string;
@@ -238,7 +247,190 @@ export interface Workspace {
   lastSavedAt?: string;
   /** Run that last saved the workspace. */
   lastSavedRunId?: ID;
+  /**
+   * Managed vs external (v11 §5.4). Absent means external: every workspace
+   * created before this concept existed is a user-owned working copy.
+   */
+  ownership?: WorkspaceOwnership;
+  /** Project a managed workspace belongs to. */
+  projectId?: ID;
+  /** Task a managed workspace belongs to (1 Task = 1 Workspace, v11 §5.1). */
+  taskId?: ID;
+  /** Working branch checked out in a managed workspace. */
+  workingBranch?: string;
+  /** Base revision the managed workspace was created from. */
+  baseCommitSha?: string;
   createdAt: string;
+}
+
+/**
+ * A single writer lease over a Workspace (v11 §36). One managed workspace
+ * has at most one active writer at a time; a second writer is refused with
+ * `workspace-locked` instead of corrupting the working tree.
+ */
+export interface WorkspaceLock {
+  id: ID;
+  workspaceId: ID;
+  taskId: ID;
+  runId: ID;
+  acquiredAt: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* Project & Source (v11 §2/§3)                                        */
+/* ------------------------------------------------------------------ */
+
+/** Source providers with first-class recognition (v11 §3). */
+export type SourceProvider = "github" | "gitlab" | "gitee" | "generic";
+
+export type SourceType = "git";
+
+/**
+ * A Project's primary source (v11 §3). One Project currently has exactly one
+ * primary source; the shape keeps `repositories`-style multi-source growth
+ * possible without a rewrite (a future version adds a list beside it).
+ */
+export interface ProjectSource {
+  type: SourceType;
+  /** Credential-free remote URL. Never carries a token or userinfo (v11 §12). */
+  remoteUrl: string;
+  provider?: SourceProvider;
+  /** Default branch used when a Task does not name a base ref. */
+  defaultBranch?: string;
+  /** Reference to a SourceCredential; absent = public repository (v11 §4.3). */
+  credentialId?: ID;
+}
+
+/**
+ * A reusable Git credential (v11 §4). Lives in global settings, never inside
+ * a Project: Projects only reference it by id. Sensitive material is always a
+ * Secret reference — this record only carries non-sensitive metadata.
+ */
+export type SourceCredentialType = "https-token" | "ssh-key";
+
+export interface SourceCredential {
+  id: ID;
+  name: string;
+  type: SourceCredentialType;
+  /** Host this credential applies to (e.g. `github.com`), when scoped. */
+  host?: string;
+  /** Non-sensitive username (HTTPS token user, or SSH user). */
+  username?: string;
+  /** Secret holding the token (https-token) or the private key (ssh-key). */
+  secretId: ID;
+  /** Secret holding the SSH key passphrase, when the key is encrypted. */
+  passphraseSecretId?: ID;
+  /**
+   * known_hosts content for SSH host verification (v11 §12.1/§42). Absent
+   * falls back to the host's `~/.ssh/known_hosts`; host keys are always
+   * verified (StrictHostKeyChecking=yes) — never silently trusted.
+   */
+  knownHosts?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A SourceCredential as served by the API: metadata plus the masked secret. */
+export interface SourceCredentialView extends SourceCredential {
+  secretMasked?: string;
+  passphraseMasked?: string;
+}
+
+/** Where a Project's agent execution defaults come from (v11 §24). */
+export interface ProjectExecutionConfig {
+  runtimeId?: ID;
+  modelId?: ID;
+  profileId?: ID;
+  timeoutMs?: number;
+  resourceLimits?: ResourceLimits;
+  env?: Record<string, string>;
+  secretIds?: ID[];
+  tools?: string[];
+  policy?: ExecutionPolicy;
+  lifecycle?: RuntimeLifecycle;
+  networkPolicy?: NetworkPolicy;
+}
+
+/** A skill provisioned into the agent execution environment (v11 §25). */
+export interface ProjectSkill {
+  name: string;
+  /** Host directory whose contents are provisioned. */
+  path: string;
+  description?: string;
+}
+
+/**
+ * An MCP server definition (v11 §26). Secrets are referenced, never inlined:
+ * the generated runtime configuration resolves them at provisioning time.
+ */
+export interface McpServerConfig {
+  name: string;
+  transport?: "stdio" | "http" | "sse";
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, string>;
+  secretIds?: ID[];
+  enabled?: boolean;
+}
+
+/** One validation command (v11 §20). */
+export interface ValidationStep {
+  name: string;
+  /** Shell command run in the workspace directory. */
+  command: string;
+  timeoutMs?: number;
+  /** A failing required step fails validation (default true). */
+  required?: boolean;
+}
+
+export interface ValidationConfig {
+  enabled?: boolean;
+  steps: ValidationStep[];
+}
+
+/**
+ * How the platform publishes a Task's work (v11 §17/§18).
+ *
+ * The platform — never the agent — owns commit policy and publishing: an
+ * agent that never runs `git commit` still gets its work published when
+ * `autoCommit` is on (the default).
+ */
+export interface GitPublishPolicy {
+  /** Commit remaining dirty changes at finalization (default true). */
+  autoCommit?: boolean;
+  /** Commit message template; `{task}` / `{title}` / `{branch}` are substituted. */
+  commitMessage?: string;
+  commitAuthorName?: string;
+  commitAuthorEmail?: string;
+  /** Push the working branch after finalization (default true). */
+  push?: boolean;
+  /** Remote name to push to (default `origin`). */
+  remote?: string;
+  /** Branches the platform refuses to publish (default main / master). */
+  protectedBranches?: string[];
+}
+
+/** How a Task's working branch comes into being (v11 §8.1). */
+export type BranchMode = "new" | "continue";
+
+export interface Project {
+  id: ID;
+  name: string;
+  description?: string;
+  source: ProjectSource;
+  /** Default execution configuration inherited by every Task (v11 §24). */
+  execution?: ProjectExecutionConfig;
+  /** Default skills provisioned before the runtime starts (v11 §25). */
+  skills?: ProjectSkill[];
+  /** Default MCP servers generated into the runtime configuration (v11 §26). */
+  mcpServers?: McpServerConfig[];
+  /** Default validation steps; a Task may override them (v11 §20). */
+  validation?: ValidationConfig;
+  /** Default publish policy; a Task may override it. */
+  git?: GitPublishPolicy;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -261,6 +453,117 @@ export interface ExecutionPolicy {
 }
 
 /* ------------------------------------------------------------------ */
+/* Task lifecycle (v11 §9/§21/§22/§23)                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fine-grained lifecycle phase of a Project-based Task / its Run (v11 §21).
+ * The coarse `RunStatus` stays as-is; the phase answers "what is happening
+ * right now" — developing, testing, committing or pushing.
+ */
+export type RunPhase =
+  | "task.created"
+  | "workspace.preparing"
+  | "source.fetching"
+  | "source.checkout"
+  | "runtime.preparing"
+  | "agent.running"
+  | "validation.running"
+  | "git.finalizing"
+  | "git.pushing"
+  | "cleanup"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** Coarse Task lifecycle status. */
+export type TaskLifecycleStatus =
+  | "created"
+  | "preparing"
+  | "running"
+  | "validating"
+  | "finalizing"
+  | "publishing"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/**
+ * Which stage a failure belongs to (v11 §20/§23). Agent execution, validation
+ * and publishing failures are never collapsed into one plain "Task failed".
+ */
+export type TaskFailureStage = "workspace" | "source" | "runtime" | "agent" | "validation" | "finalization" | "publish";
+
+export interface TaskFailure {
+  stage: TaskFailureStage;
+  /** Domain error code (see `core/errors.ts`). */
+  code: string;
+  message: string;
+  at: string;
+}
+
+export interface TaskAgentState {
+  status: "pending" | "running" | "completed" | "failed" | "timeout" | "cancelled";
+  /** Run that performed the latest agent attempt. */
+  runId?: ID;
+  attempts: number;
+  error?: string;
+  errorCode?: string;
+  startedAt?: string;
+  endedAt?: string;
+}
+
+export interface ValidationStepResult {
+  name: string;
+  command: string;
+  status: "passed" | "failed" | "timeout" | "skipped";
+  exitCode?: number | null;
+  durationMs?: number;
+  /** Tail of the step's output, kept for the Task detail view. */
+  output?: string;
+}
+
+export interface TaskValidationState {
+  status: "pending" | "skipped" | "running" | "passed" | "failed" | "timeout";
+  steps?: ValidationStepResult[];
+  error?: string;
+  errorCode?: string;
+  attempts: number;
+  startedAt?: string;
+  endedAt?: string;
+}
+
+/**
+ * Publish outcome (v11 §17.2). Kept separate from the development result so
+ * "development completed, publishing failed" is expressible and publish can
+ * be retried without re-running the agent (v11 §23/§31).
+ */
+export interface TaskPublishState {
+  status: "pending" | "pushed" | "failed" | "skipped";
+  /** Remote branch the work was published to. */
+  remoteBranch?: string;
+  remote?: string;
+  baseCommitSha?: string;
+  finalCommitSha?: string;
+  pushedAt?: string;
+  attempts: number;
+  error?: string;
+  errorCode?: string;
+}
+
+export interface TaskExecution {
+  phase: RunPhase;
+  status: TaskLifecycleStatus;
+  failure?: TaskFailure;
+  agent?: TaskAgentState;
+  validation?: TaskValidationState;
+  publish?: TaskPublishState;
+  /** Revision the task was started from, resolved once (v11 §7). */
+  baseCommitSha?: string;
+  updatedAt: string;
+}
+
+/* ------------------------------------------------------------------ */
 /* Task                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -279,6 +582,22 @@ export interface Task {
   timeoutMs?: number;
   policy?: ExecutionPolicy;
   metadata?: Record<string, unknown>;
+  /** Project this Task develops against (v11 §6); absent = classic Task. */
+  projectId?: ID;
+  /** Base ref the working branch was created from (v11 §7). */
+  baseRef?: string;
+  /** Concrete revision `baseRef` resolved to when the Task started (v11 §7). */
+  baseCommitSha?: string;
+  /** Branch the platform owns and publishes for this Task (v11 §7/§8). */
+  workingBranch?: string;
+  /** Whether the working branch is new or continues an existing one. */
+  branchMode?: BranchMode;
+  /** Task-level validation override (replaces the Project's). */
+  validation?: ValidationConfig;
+  /** Task-level publish policy override. */
+  git?: GitPublishPolicy;
+  /** Project-based lifecycle state (v11 §6/§40). */
+  execution?: TaskExecution;
   /**
    * Set when the task was soft-deleted (recoverable, hidden from the live
    * lists); absent = live. The server purges soft-deleted tasks — record,
@@ -316,6 +635,17 @@ export interface Run {
   taskId: ID;
   taskTitle: string;
   status: RunStatus;
+  /**
+   * Fine-grained lifecycle phase (v11 §21) for Project-based runs. Absent on
+   * classic Task runs, which never go through the execution supervisor.
+   */
+  phase?: RunPhase;
+  /** Project this run develops against (Project-based runs only). */
+  projectId?: ID;
+  /** Working branch the run's workspace was on when it started. */
+  workingBranch?: string;
+  /** Base revision the task started from, snapshotted per run. */
+  baseCommitSha?: string;
   runtimeId?: ID;
   runtimeName?: string;
   modelId?: ID;
@@ -742,6 +1072,7 @@ export type EventType =
   | "run.cancelled"
   | "run.timeout"
   | "run.progress"
+  | "run.phase"
   | "agent.message"
   | "agent.thinking"
   | "model.request"
@@ -763,6 +1094,21 @@ export type EventType =
   | "native.state.persisted"
   | "workspace.attached"
   | "workspace.saved"
+  | "workspace.prepared"
+  | "source.prepared"
+  | "runtime.prepared"
+  | "runtime.destroyed"
+  | "credential.resolved"
+  | "credential.released"
+  | "provisioning.prepared"
+  | "provisioning.cleaned"
+  | "validation.started"
+  | "validation.step"
+  | "validation.passed"
+  | "validation.failed"
+  | "git.finalized"
+  | "git.pushed"
+  | "publish.failed"
   | "container.reused"
   | "container.retained"
   | "container.destroyed"

@@ -17,6 +17,9 @@ import type {
   Handoff,
   RuntimeSessionRef,
   RuntimeNativeState,
+  Project,
+  SourceCredential,
+  WorkspaceLock,
 } from "./types.js";
 
 export type CollectionName =
@@ -33,6 +36,9 @@ export type CollectionName =
   | "handoffs"
   | "runtimeSessions"
   | "nativeStates"
+  | "projects"
+  | "sourceCredentials"
+  | "workspaceLocks"
   | "config";
 
 /**
@@ -66,6 +72,9 @@ export interface Database {
   handoffs: Handoff[];
   runtimeSessions: RuntimeSessionRef[];
   nativeStates: RuntimeNativeState[];
+  projects: Project[];
+  sourceCredentials: SourceCredential[];
+  workspaceLocks: WorkspaceLock[];
   config: AppConfig;
 }
 
@@ -89,6 +98,9 @@ export function emptyDatabase(): Database {
     handoffs: [],
     runtimeSessions: [],
     nativeStates: [],
+    projects: [],
+    sourceCredentials: [],
+    workspaceLocks: [],
     config: {},
   };
 }
@@ -149,6 +161,9 @@ export class Store {
       if (!Array.isArray(this.db.handoffs)) this.db.handoffs = [];
       if (!Array.isArray(this.db.runtimeSessions)) this.db.runtimeSessions = [];
       if (!Array.isArray(this.db.nativeStates)) this.db.nativeStates = [];
+      if (!Array.isArray(this.db.projects)) this.db.projects = [];
+      if (!Array.isArray(this.db.sourceCredentials)) this.db.sourceCredentials = [];
+      if (!Array.isArray(this.db.workspaceLocks)) this.db.workspaceLocks = [];
       if (!this.db.config) this.db.config = {};
       // v2 §3: strip legacy unified-session fields so old databases stop
       // referencing the removed AgentFabric Session abstraction.
