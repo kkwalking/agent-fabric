@@ -2,11 +2,17 @@
 # End-to-end verification of the v11 Project task lifecycle against a real
 # server, a real git remote (a local bare repository) and the real API/CLI
 # surface. Prints every step's evidence; exits non-zero on the first failure.
+#
+# Requires: git, a reachable Docker daemon, and the validation image below
+# (validation commands are untrusted code and always run in an isolated
+# runtime — see scripts/e2e-v11-docker.sh for the full real-Docker E2E).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PORT=${PORT:-7391}
 BASE="http://127.0.0.1:$PORT"
+# Image the disposable validation sandbox runs (v11 hardening §6).
+IMAGE=${AGENTFABRIC_VALIDATION_IMAGE:-node:22-alpine}
 WORK=$(mktemp -d /tmp/af-e2e-XXXXXX)
 export AGENTFABRIC_DATA_DIR="$WORK/data"
 export AGENTFABRIC_HOST=127.0.0.1
@@ -34,6 +40,11 @@ assert_token_confined() {
     console.log('token confined to the secret store');
   " "$file" "$token"
 }
+
+step "preconditions: docker daemon + validation image $IMAGE"
+docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || fail "no reachable Docker daemon (validation runs in an isolated runtime)"
+docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "docker image $IMAGE is not present locally"
+echo "docker $(docker info --format '{{.ServerVersion}}') · image $IMAGE"
 
 step "prepare a local bare git remote"
 mkdir -p "$WORK/seed"
@@ -79,6 +90,25 @@ step "make a runtime usable for tasks (the mock harness)"
 RT=$(curl -s "$BASE/api/runtimes" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s).find(x=>x.kind==='mock');console.log(r.id)})")
 curl -sf -X PUT "$BASE/api/runtimes/$RT" -H 'Content-Type: application/json' -d '{"usableInTask":true}' >/dev/null
 echo "runtime=$RT"
+
+step "AC-1/AC-2: the mock runtime is a HOST runtime — a Project task on it is refused"
+REFUSED=$(curl -s -o "$WORK/refused.json" -w '%{http_code}' -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
+  -d "{\"instruction\":\"refused\",\"runtimeId\":\"$RT\"}")
+REFUSED_CODE=$(node -e "console.log(require('$WORK/refused.json').code)")
+echo "http=$REFUSED code=$REFUSED_CODE"
+[ "$REFUSED" = "403" ] || fail "expected 403 for a host runtime, got $REFUSED"
+[ "$REFUSED_CODE" = "runtime-not-isolated" ] || fail "expected runtime-not-isolated, got $REFUSED_CODE"
+[ "$(curl -s "$BASE/api/projects/$PROJ_ID/tasks" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")" = "0" ] \
+  || fail "a task was created despite the isolation refusal"
+
+step "AC-2: declare the mock runtime isolated, with a real image for the validation sandbox"
+# The agent harness stays scripted (the mock adapter does not spawn a
+# container), but Validation is untrusted code and must genuinely run in an
+# isolated runtime — so the image named here has to exist locally. This is
+# the honest consequence of the hardening: this suite now needs Docker.
+curl -sf -X PUT "$BASE/api/runtimes/$RT" -H 'Content-Type: application/json' \
+  -d "{\"usableInTask\":true,\"executionBackend\":\"isolated\",\"containerized\":true,\"image\":\"$IMAGE\"}" >/dev/null
+echo "isolation=$(curl -s "$BASE/api/runtimes/$RT/isolation")"
 
 step "AC-4..AC-13: start a Project task (managed workspace → clone → branch → runtime → agent → validation → finalize → push)"
 START=$(curl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
