@@ -73,7 +73,14 @@ async function provisionSkill(skill: ProjectSkill, dest: string): Promise<void> 
   await cp(skill.path, dest, { recursive: true, dereference: true, force: true });
 }
 
-/** Builds the MCP configuration document for the resolved servers. */
+/**
+ * Builds the MCP configuration document for the resolved servers.
+ *
+ * Every secret reference goes through the caller's `resolveSecret`, which is
+ * the scope-authorized resolver (v11 hardening §8): a `git`-scoped secret
+ * referenced from an MCP server is refused at this boundary rather than
+ * silently injected into the agent's environment.
+ */
 export function buildMcpConfigDocument(
   servers: McpServerConfig[],
   resolveSecret?: (id: string) => string | undefined
