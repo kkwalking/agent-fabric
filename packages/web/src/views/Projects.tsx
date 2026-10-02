@@ -115,7 +115,9 @@ function ProjectTaskTable({ tasks, onAction }: { tasks: any[]; onAction?: () => 
 export function ProjectsView() {
   const projects = useAsync<any[]>(() => get("/api/projects"), []);
   const credentials = useAsync<any[]>(() => get("/api/source-credentials"), []);
-  const runtimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
+  // Project Coding Tasks require an isolated runtime (v11 hardening §4), so
+  // the project default may only be one of those. The server refuses the rest.
+  const runtimes = useAsync<any[]>(() => get("/api/runtimes/project-eligible"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
@@ -238,7 +240,7 @@ export function ProjectsView() {
             <Field label="Default branch">
               <input value={form.defaultBranch} onChange={(e) => setForm({ ...form, defaultBranch: e.target.value })} />
             </Field>
-            <Field label="Default runtime (optional)">
+            <Field label="Default runtime (optional — isolated runtimes only)">
               <select value={form.runtimeId} onChange={(e) => setForm({ ...form, runtimeId: e.target.value })}>
                 <option value="">(choose per task)</option>
                 {(runtimes.data ?? []).map((r) => (
@@ -419,7 +421,9 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
 
 export function NewProjectTaskView({ projectId }: { projectId: string }) {
   const project = useAsync<any>(() => get(`/api/projects/${projectId}`), [projectId]);
-  const runtimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
+  // Isolated runtimes only: a Project Coding Task never falls back to a host
+  // runtime, so the selector must not offer one (v11 hardening §4).
+  const runtimes = useAsync<any[]>(() => get("/api/runtimes/project-eligible"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
   const [form, setForm] = useState({
     instruction: "",
@@ -467,8 +471,9 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
       <h1>New task</h1>
       <p className="sub">
         AgentFabric creates a managed Workspace for this task, clones the repository, checks out the base ref,
-        creates the working branch and then runs the agent in an isolated runtime. You never create a workspace
-        by hand.
+        creates the working branch and then runs the agent in an isolated runtime — validation runs in an
+        isolated runtime too, and the source credential never enters the agent's environment. You never create
+        a workspace by hand.
       </p>
       <ErrorBox message={error} />
 
@@ -497,7 +502,7 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
               <option value="continue">continue — build on an existing branch explicitly</option>
             </select>
           </Field>
-          <Field label="Runtime override (optional)">
+          <Field label="Runtime override (optional — isolated runtimes only)">
             <select value={form.runtimeId} onChange={(e) => setForm({ ...form, runtimeId: e.target.value })}>
               <option value="">(project default)</option>
               {(runtimes.data ?? []).map((r) => (

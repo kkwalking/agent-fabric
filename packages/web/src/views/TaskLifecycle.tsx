@@ -93,7 +93,7 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
             )}
             <span className="muted" style={{ marginLeft: 8 }}>
               {d.retry.kind === "publish"
-                ? "retry publish re-pushes the existing commit — the agent is not re-run"
+                ? "retry publish re-pushes the frozen commit — the agent is not re-run, nothing is re-committed"
                 : d.retry.kind === "validation"
                   ? "retry validation re-runs the checks only — the agent is not re-run"
                   : "retry starts a new run on the same workspace"}
@@ -121,7 +121,20 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
           <div><span className="muted">Working branch</span><span>{d.workingBranch ?? "-"}</span></div>
           <div><span className="muted">Workspace</span><span>{d.workspace ? `${d.workspace.name} · ${d.workspace.ownership ?? "external"}` : "-"}</span></div>
           <div><span className="muted">Workspace path</span><span className="muted">{d.workspace?.path ?? "-"}</span></div>
-          <div><span className="muted">Runtime</span><span>{d.runtime ? `${d.runtime.name} (${d.runtime.kind})` : "-"}</span></div>
+          <div>
+            <span className="muted">Runtime</span>
+            <span>
+              {d.runtime ? `${d.runtime.name} (${d.runtime.kind})` : "-"}
+              {d.isolation ? (
+                <>
+                  {" · "}
+                  <span className={d.isolation.sandboxed ? "muted" : "fail-reason"}>
+                    {d.isolation.sandboxed ? "isolated" : "host execution"}
+                  </span>
+                </>
+              ) : null}
+            </span>
+          </div>
           <div><span className="muted">Current phase</span><span>{d.phase}</span></div>
           <div><span className="muted">Agent</span><span>{d.agent?.status ?? "-"}{d.agent?.attempts ? ` · ${d.agent.attempts} attempt(s)` : ""}</span></div>
           <div>
@@ -146,6 +159,58 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
           <div><span className="muted">Remote branch</span><span>{d.remoteBranch ?? "-"}</span></div>
         </div>
       </div>
+
+      {/* Stage outcomes (v11 hardening §35/§36): agent / validation /
+          finalization / publish each carry their own result, so a failed
+          publish never reads as "the task failed". */}
+      <h2 style={{ marginTop: 20 }}>Lifecycle stages</h2>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Stage</th><th>Status</th><th>Detail</th><th>At</th></tr>
+          </thead>
+          <tbody>
+            {(["agent", "validation", "finalization", "publish"] as const).map((stage) => {
+              const outcome = d.stages?.[stage];
+              const live =
+                stage === "agent"
+                  ? d.agent?.status
+                  : stage === "validation"
+                    ? d.validation.status
+                    : stage === "finalization"
+                      ? d.finalCommitSha
+                        ? "completed"
+                        : undefined
+                      : d.publish.status;
+              return (
+                <tr key={stage}>
+                  <td>{stage}</td>
+                  <td>{outcome?.status ?? live ?? "-"}</td>
+                  <td className="muted">
+                    {stage === "finalization" && d.finalCommitSha ? `commit ${shortId(d.finalCommitSha)}` : ""}
+                    {stage === "publish" && d.publish.remoteBranch
+                      ? `${d.publish.remote} / ${d.publish.remoteBranch}${d.publish.errorCode ? ` — [${d.publish.errorCode}] ${d.publish.error ?? ""}` : ""}`
+                      : ""}
+                    {outcome?.errorCode ? `[${outcome.errorCode}]` : ""}
+                    {stage === "validation" && d.validation.execution
+                      ? `ran in ${d.validation.execution.containerized ? "an isolated container" : "an isolated runtime"}${d.validation.execution.image ? ` (${d.validation.execution.image})` : ""}`
+                      : ""}
+                  </td>
+                  <td className="muted">{outcome?.at ? fmtRelative(outcome.at) : "-"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {d.frozenRevision ? (
+        <div className="card muted" style={{ marginTop: 12 }}>
+          Frozen revision <code>{shortId(d.frozenRevision.finalCommitSha)}</code> on{" "}
+          <code>{d.frozenRevision.remote}/{d.frozenRevision.remoteBranch}</code> — retry publish re-pushes exactly
+          this commit; it never re-runs the agent, validation or finalization.
+        </div>
+      ) : null}
 
       {d.validation.steps?.length ? (
         <>

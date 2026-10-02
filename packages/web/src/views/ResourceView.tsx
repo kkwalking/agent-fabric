@@ -66,10 +66,23 @@ const configs: Record<string, Config> = {
       { key: "kind", label: "Kind" },
       { key: "enabled", label: "Enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
       { key: "usableInTask", label: "Usable in tasks", render: (r) => (r.usableInTask ? "yes" : "no") },
+      {
+        // v11 hardening §4: Project Coding Tasks require an isolated runtime;
+        // the column states the verdict so an operator can see which runtimes
+        // are eligible without reading the record.
+        key: "executionBackend",
+        label: "Isolation",
+        render: (r) =>
+          (r.executionBackend ?? (r.containerized ? "isolated" : "host")) === "isolated" && r.image
+            ? "isolated"
+            : "host — not usable for project tasks",
+      },
     ],
     createFields: [
       { key: "name", label: "Name", required: true },
       { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "zcode", "dsh", "docker", "mock", "custom"] },
+      { key: "executionBackend", label: "Execution backend", type: "select", options: ["isolated", "host"] },
+      { key: "containerized", label: "Containerized", type: "select", options: ["true", "false"] },
       { key: "image", label: "Docker image", placeholder: "node:22-alpine" },
       { key: "command", label: "Container command (docker kind)", placeholder: "sh -c echo hello" },
       { key: "lifecycle", label: "Container lifecycle", type: "select", options: ["ephemeral", "keep-alive", "persistent"] },
@@ -95,8 +108,15 @@ const configs: Record<string, Config> = {
           <dt>Enabled</dt><dd>{r.enabled ? "yes" : "no"}</dd>
           <dt>Usable in tasks</dt><dd>{r.usableInTask ? "yes" : "no"}</dd>
           <dt>Lifecycle</dt><dd>{r.lifecycle?.mode ?? (r.ephemeral === false ? "persistent" : "ephemeral")}</dd>
+          <dt>Execution backend</dt><dd>{r.executionBackend ?? (r.containerized ? "isolated" : "host")}</dd>
           <dt>Containerized</dt><dd>{String(Boolean(r.containerized))}</dd>
           <dt>Image</dt><dd>{r.image ?? "—"}</dd>
+          <dt>Project Coding Tasks</dt>
+          <dd>
+            {(r.executionBackend ?? (r.containerized ? "isolated" : "host")) === "isolated" && r.image
+              ? "allowed — runs in an isolated runtime"
+              : "refused — requires an isolated runtime (container + image)"}
+          </dd>
           <dt>Command</dt><dd>{Array.isArray(r.command) && r.command.length > 0 ? r.command.join(" ") : "—"}</dd>
           <dt>Working directory</dt><dd>{r.cwd ?? "—"}</dd>
           <dt>Default model</dt><dd>{r.defaultModelId ?? "—"}</dd>

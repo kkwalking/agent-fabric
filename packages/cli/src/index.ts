@@ -177,6 +177,8 @@ function buildProgram(): Command {
     .option("--image <image>", "docker image (for containerized runtimes)")
     .option("--command <cmd>", "command inside container (docker kind)")
     .option("--containerized", "run inside a Docker container")
+    .option("--isolated", "declare isolated (container-backed) execution — required for Project Coding Tasks")
+    .option("--host", "declare host execution (development / non-project tasks only)")
     .option("--persistent", "keep the runtime/container after the run")
     .option("--description <text>", "description")
     .action(async (action: string, name: string | undefined, _opts: unknown, cmd: Command) => {
@@ -191,6 +193,7 @@ function buildProgram(): Command {
               name: r.name,
               kind: r.kind,
               image: r.image ?? "-",
+              backend: r.executionBackend ?? (r.containerized ? "isolated" : "host"),
               containerized: r.containerized,
               enabled: r.enabled,
               ephemeral: r.ephemeral,
@@ -201,12 +204,18 @@ function buildProgram(): Command {
       }
       if (action === "add") {
         if (!name) throw new Error("usage: af runtimes add <name> --kind <kind> [--image] [--containerized]");
+        // The declared execution backend decides whether a Project Coding
+        // Task may use this runtime (v11 hardening §4): `--isolated` (or
+        // `--containerized`) marks it eligible, `--host` marks it
+        // development-only. Never inferred from the runtime's name.
+        const isolated = Boolean(cmd.opts().isolated) || Boolean(cmd.opts().containerized);
         const r = await c.post<unknown>("/api/runtimes", {
           name,
           kind: cmd.opts().kind ?? "docker",
           image: cmd.opts().image,
           command: cmd.opts().command ? String(cmd.opts().command).split(" ") : undefined,
-          containerized: Boolean(cmd.opts().containerized),
+          containerized: isolated,
+          executionBackend: cmd.opts().host ? "host" : isolated ? "isolated" : undefined,
           ephemeral: !cmd.opts().persistent,
           description: cmd.opts().description,
         });
