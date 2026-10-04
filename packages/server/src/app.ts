@@ -575,17 +575,17 @@ export async function createApp(options: ServerOptions): Promise<Express> {
 
   /* ---------------- tasks ---------------- */
 
+  // Reads and lifecycle actions only. A Task is never created here: it is
+  // either started in a Project (`POST /api/projects/:id/tasks`, which owns
+  // the managed Workspace and the whole lifecycle) or submitted as a classic
+  // non-project run (`POST /api/runs`). A bare `insert` of a task row would
+  // produce a record with no Runtime resolution, Workspace or Run — a shape
+  // no other endpoint accepts.
+  //
   // Live tasks by default; `?deleted=true` serves the recoverable-deleted
   // list (Trash). A deleted task is invisible to task-scoped reads and
   // actions until restored.
   app.get("/api/tasks", (req, res) => ok(res, tasks.list({ deleted: req.query.deleted === "true" })));
-  app.post("/api/tasks", async (req, res) => {
-    try {
-      ok(res, await tasks.create(req.body as NewTaskInput), 201);
-    } catch (e) {
-      fail(res, e);
-    }
-  });
   app.get("/api/tasks/:id", (req, res) => {
     const t = tasks.getLive(req.params.id);
     t ? ok(res, t) : fail(res, new Error("Task not found"), 404);
