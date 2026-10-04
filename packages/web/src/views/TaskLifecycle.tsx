@@ -49,7 +49,7 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
 
   return (
     <div>
-      <button className="back-btn" onClick={() => navigate(`/tasks/${taskId}`)}>
+      <button className="back-btn with-label" onClick={() => navigate(`/tasks/${taskId}`)}>
         <Icon name="arrowLeft" size={14} /> Task thread
       </button>
       <div className="row" style={{ marginBottom: 4 }}>
@@ -103,61 +103,63 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
       )}
 
       <div className="card">
-        <div className="detail-list">
-          <div><span className="muted">Project</span><span>{d.project ? <a onClick={() => navigate(`/projects/${d.project.id}`)}>{d.project.name}</a> : "-"}</span></div>
-          <div><span className="muted">Source</span><span>{d.source?.remoteUrl ?? "-"}</span></div>
-          <div>
-            <span className="muted">Credential</span>
-            <span>{d.source?.credential ? `${d.source.credential.name} (${d.source.credential.type})` : "public — no credential"}</span>
-          </div>
-          <div><span className="muted">Base ref</span><span>{d.baseRef ?? "-"}</span></div>
-          <div>
-            <span className="muted">Base commit</span>
-            <span>
-              {d.baseCommitSha ? shortId(d.baseCommitSha) : "-"}
-              {d.baseCommitSha ? <> <CopyButton text={d.baseCommitSha} label="copy" /></> : null}
-            </span>
-          </div>
-          <div><span className="muted">Working branch</span><span>{d.workingBranch ?? "-"}</span></div>
-          <div><span className="muted">Workspace</span><span>{d.workspace ? `${d.workspace.name} · ${d.workspace.ownership ?? "external"}` : "-"}</span></div>
-          <div><span className="muted">Workspace path</span><span className="muted">{d.workspace?.path ?? "-"}</span></div>
-          <div>
-            <span className="muted">Runtime</span>
-            <span>
-              {d.runtime ? `${d.runtime.name} (${d.runtime.kind})` : "-"}
-              {d.isolation ? (
-                <>
-                  {" · "}
-                  <span className={d.isolation.sandboxed ? "muted" : "fail-reason"}>
-                    {d.isolation.sandboxed ? "isolated" : "host execution"}
-                  </span>
-                </>
-              ) : null}
-            </span>
-          </div>
-          <div><span className="muted">Current phase</span><span>{d.phase}</span></div>
-          <div><span className="muted">Agent</span><span>{d.agent?.status ?? "-"}{d.agent?.attempts ? ` · ${d.agent.attempts} attempt(s)` : ""}</span></div>
-          <div>
-            <span className="muted">Validation</span>
-            <span>{d.validation.status}{d.validation.steps?.length ? ` · ${d.validation.steps.length} step(s)` : ""}</span>
-          </div>
-          <div>
-            <span className="muted">Publish</span>
-            <span>
-              {d.publish.status}
-              {d.publish.remote ? ` → ${d.publish.remote}/${d.publish.remoteBranch ?? "?"}` : ""}
-              {d.publish.pushedAt ? ` · ${fmtRelative(d.publish.pushedAt)}` : ""}
-            </span>
-          </div>
-          <div>
-            <span className="muted">Final commit</span>
-            <span>
-              {d.finalCommitSha ? shortId(d.finalCommitSha) : "-"}
-              {d.finalCommitSha ? <> <CopyButton text={d.finalCommitSha} label="copy" /></> : null}
-            </span>
-          </div>
-          <div><span className="muted">Remote branch</span><span>{d.remoteBranch ?? "-"}</span></div>
-        </div>
+        {/* dl/dt/dd, not div>span: `.detail-list` is a two-column grid whose
+            label/value split comes from the dt/dd elements themselves. A
+            wrapper div per row collapses label and value into a single
+            150px cell, which is what made long values overlap the next
+            column. */}
+        <dl className="detail-list">
+          <dt>Project</dt>
+          <dd>{d.project ? <a onClick={() => navigate(`/projects/${d.project.id}`)}>{d.project.name}</a> : "-"}</dd>
+          <dt>Source</dt>
+          <dd>{d.source?.remoteUrl ?? "-"}</dd>
+          <dt>Credential</dt>
+          <dd>{d.source?.credential ? `${d.source.credential.name} (${d.source.credential.type})` : "public — no credential"}</dd>
+          <dt>Base ref</dt>
+          <dd>{d.baseRef ?? "-"}</dd>
+          <dt>Base commit</dt>
+          <dd>
+            {d.baseCommitSha ? shortId(d.baseCommitSha) : "-"}
+            {d.baseCommitSha ? <> <CopyButton text={d.baseCommitSha} label="copy" /></> : null}
+          </dd>
+          <dt>Working branch</dt>
+          <dd>{d.workingBranch ?? "-"}</dd>
+          <dt>Workspace</dt>
+          <dd>{d.workspace ? `${d.workspace.name} · ${d.workspace.ownership ?? "external"}` : "-"}</dd>
+          <dt>Workspace path</dt>
+          <dd className="muted">{d.workspace?.path ?? "-"}</dd>
+          <dt>Runtime</dt>
+          <dd>
+            {d.runtime ? `${d.runtime.name} (${d.runtime.kind})` : "-"}
+            {d.isolation ? (
+              <>
+                {" · "}
+                <span className={d.isolation.sandboxed ? "muted" : "fail-reason"}>
+                  {d.isolation.sandboxed ? "isolated" : "host execution"}
+                </span>
+              </>
+            ) : null}
+          </dd>
+          <dt>Current phase</dt>
+          <dd>{d.phase}</dd>
+          <dt>Agent</dt>
+          <dd>{d.agent?.status ?? "-"}{d.agent?.attempts ? ` · ${d.agent.attempts} attempt(s)` : ""}</dd>
+          <dt>Validation</dt>
+          <dd>{d.validation.status}{d.validation.steps?.length ? ` · ${d.validation.steps.length} step(s)` : ""}</dd>
+          <dt>Publish</dt>
+          <dd>
+            {d.publish.status}
+            {d.publish.remote ? ` → ${d.publish.remote}/${d.publish.remoteBranch ?? "?"}` : ""}
+            {d.publish.pushedAt ? ` · ${fmtRelative(d.publish.pushedAt)}` : ""}
+          </dd>
+          <dt>Final commit</dt>
+          <dd>
+            {d.finalCommitSha ? shortId(d.finalCommitSha) : "-"}
+            {d.finalCommitSha ? <> <CopyButton text={d.finalCommitSha} label="copy" /></> : null}
+          </dd>
+          <dt>Remote branch</dt>
+          <dd>{d.remoteBranch ?? "-"}</dd>
+        </dl>
       </div>
 
       {/* Stage outcomes (v11 hardening §35/§36): agent / validation /

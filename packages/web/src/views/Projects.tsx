@@ -330,7 +330,7 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
 
   return (
     <div>
-      <button className="back-btn" onClick={() => navigate("/projects")}>
+      <button className="back-btn with-label" onClick={() => navigate("/projects")}>
         <Icon name="arrowLeft" size={14} /> Projects
       </button>
       <div className="row" style={{ marginBottom: 4 }}>
@@ -358,31 +358,35 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
       <ErrorBox message={error} />
 
       <div className="card">
-        <div className="detail-list">
-          <div><span className="muted">Repository</span><span>{p.source?.remoteUrl}</span></div>
-          <div><span className="muted">Provider</span><span>{p.source?.provider ?? "-"}</span></div>
-          <div><span className="muted">Default branch</span><span>{p.source?.defaultBranch ?? "-"}</span></div>
-          <div>
-            <span className="muted">Credential</span>
-            <span>
-              {credential ? `${credential.name} (${credential.type}${credential.secretMasked ? ` · ${credential.secretMasked}` : ""})` : "public — no credential"}
-            </span>
-          </div>
-          <div><span className="muted">Default runtime</span><span>{p.execution?.runtimeId ?? "-"}</span></div>
-          <div><span className="muted">Default model</span><span>{p.execution?.modelId ?? "-"}</span></div>
-          <div>
-            <span className="muted">Validation</span>
-            <span>{(p.validation?.steps ?? []).map((s: any) => s.command).join(" · ") || "none"}</span>
-          </div>
-          <div>
-            <span className="muted">Publish</span>
-            <span>
-              autoCommit={String(p.git?.autoCommit ?? true)} push={String(p.git?.push ?? true)} remote={p.git?.remote ?? "origin"}
-            </span>
-          </div>
-          <div><span className="muted">Skills</span><span>{(p.skills ?? []).map((s: any) => s.name).join(", ") || "none"}</span></div>
-          <div><span className="muted">MCP servers</span><span>{(p.mcpServers ?? []).map((s: any) => s.name).join(", ") || "none"}</span></div>
-        </div>
+        {/* dl/dt/dd: `.detail-list` is a two-column grid whose label/value
+            split comes from the dt/dd elements (see ResourceView). Wrapper
+            divs would collapse each pair into one cell and overlap. */}
+        <dl className="detail-list">
+          <dt>Repository</dt>
+          <dd>{p.source?.remoteUrl}</dd>
+          <dt>Provider</dt>
+          <dd>{p.source?.provider ?? "-"}</dd>
+          <dt>Default branch</dt>
+          <dd>{p.source?.defaultBranch ?? "-"}</dd>
+          <dt>Credential</dt>
+          <dd>
+            {credential ? `${credential.name} (${credential.type}${credential.secretMasked ? ` · ${credential.secretMasked}` : ""})` : "public — no credential"}
+          </dd>
+          <dt>Default runtime</dt>
+          <dd>{p.execution?.runtimeId ?? "-"}</dd>
+          <dt>Default model</dt>
+          <dd>{p.execution?.modelId ?? "-"}</dd>
+          <dt>Validation</dt>
+          <dd>{(p.validation?.steps ?? []).map((s: any) => s.command).join(" · ") || "none"}</dd>
+          <dt>Publish</dt>
+          <dd>
+            autoCommit={String(p.git?.autoCommit ?? true)} push={String(p.git?.push ?? true)} remote={p.git?.remote ?? "origin"}
+          </dd>
+          <dt>Skills</dt>
+          <dd>{(p.skills ?? []).map((s: any) => s.name).join(", ") || "none"}</dd>
+          <dt>MCP servers</dt>
+          <dd>{(p.mcpServers ?? []).map((s: any) => s.name).join(", ") || "none"}</dd>
+        </dl>
       </div>
 
       <h2 style={{ marginTop: 20 }}>Tasks</h2>
@@ -468,7 +472,7 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
 
   return (
     <div>
-      <button className="back-btn" onClick={() => navigate(`/projects/${projectId}`)}>
+      <button className="back-btn with-label" onClick={() => navigate(`/projects/${projectId}`)}>
         <Icon name="arrowLeft" size={14} /> {project.data?.name ?? "Project"}
       </button>
       <h1>New task</h1>

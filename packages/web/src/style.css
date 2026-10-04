@@ -777,6 +777,12 @@ a:hover {
   margin-top: 10px;
   margin-bottom: 0;
 }
+/* Back navigation. The circle is the icon-only form (Llm.tsx); views that
+   put a label next to the arrow (TaskLifecycle, Projects) would otherwise
+   render the text as a second anonymous grid item *below* the icon, outside
+   the 30px circle and on top of the <h1> underneath. `:has(> span)` is not
+   usable here because the label is a bare text node, so the labelled form is
+   opted into by class and the circle stays the default. */
 .back-btn {
   width: 30px;
   height: 30px;
@@ -785,6 +791,25 @@ a:hover {
   display: grid;
   place-items: center;
   flex-shrink: 0;
+}
+.back-btn.with-label {
+  width: auto;
+  height: auto;
+  border-radius: 8px;
+  padding: 5px 12px 5px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.back-btn.with-label:hover {
+  color: var(--text);
 }
 
 .form-grid-2 {
