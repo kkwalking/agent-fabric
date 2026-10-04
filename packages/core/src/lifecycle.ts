@@ -1,36 +1,22 @@
-import type { ID, Runtime, RuntimeLifecycle, RuntimeLifecycleMode } from "./types.js";
+import type { ID, RuntimeLifecycle, RuntimeLifecycleMode } from "./types.js";
 
 /** Default idle window for keep-alive containers: 10 minutes. */
 export const DEFAULT_KEEP_ALIVE_IDLE_MS = 10 * 60 * 1000;
 
 /**
- * Resolves the effective container lifecycle policy for a Run
- * (spec v1 §1). Precedence: per-run override > runtime.lifecycle >
- * legacy `ephemeral` flag > ephemeral default.
+ * Materializes the lifecycle a Task will run under, **at creation time**.
+ *
+ * This is the only place a lifecycle is ever derived. The result is written
+ * onto the Task, and every Run copies it verbatim from there — so no read
+ * path ever resolves, defaults or repairs the value. A caller that passes
+ * nothing gets `ephemeral`, and that decision is then frozen in the record
+ * like any explicit choice.
  */
-export function resolveLifecycle(
-  runtime: Runtime | undefined,
-  override?: RuntimeLifecycle
-): RuntimeLifecycle {
-  if (override?.mode) {
-    return { mode: override.mode, idleTimeoutMs: override.idleTimeoutMs };
-  }
-  if (runtime?.lifecycle?.mode) {
-    return {
-      mode: runtime.lifecycle.mode,
-      idleTimeoutMs: runtime.lifecycle.idleTimeoutMs,
-    };
-  }
-  // Legacy MVP flag: ephemeral === false meant "keep the container".
-  const mode: RuntimeLifecycleMode = runtime?.ephemeral === false ? "persistent" : "ephemeral";
-  return { mode, idleTimeoutMs: DEFAULT_KEEP_ALIVE_IDLE_MS };
-}
-
-/** Normalize an unresolved lifecycle (e.g. missing idle timeout). */
-export function normalizeLifecycle(lifecycle: RuntimeLifecycle | undefined): RuntimeLifecycle {
+export function taskLifecycle(declared?: RuntimeLifecycle): RuntimeLifecycle {
+  const mode: RuntimeLifecycleMode = declared?.mode ?? "ephemeral";
   return {
-    mode: lifecycle?.mode ?? "ephemeral",
-    idleTimeoutMs: lifecycle?.idleTimeoutMs ?? DEFAULT_KEEP_ALIVE_IDLE_MS,
+    mode,
+    idleTimeoutMs: declared?.idleTimeoutMs ?? DEFAULT_KEEP_ALIVE_IDLE_MS,
   };
 }
 

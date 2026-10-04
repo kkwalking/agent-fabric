@@ -179,7 +179,6 @@ function buildProgram(): Command {
     .option("--containerized", "run inside a Docker container")
     .option("--isolated", "declare isolated (container-backed) execution — required for Project Coding Tasks")
     .option("--host", "declare host execution (development / non-project tasks only)")
-    .option("--persistent", "keep the runtime/container after the run")
     .option("--description <text>", "description")
     .action(async (action: string, name: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
@@ -196,7 +195,6 @@ function buildProgram(): Command {
               backend: r.executionBackend ?? (r.containerized ? "isolated" : "host"),
               containerized: r.containerized,
               enabled: r.enabled,
-              ephemeral: r.ephemeral,
             }))
           )
         );
@@ -216,7 +214,6 @@ function buildProgram(): Command {
           command: cmd.opts().command ? String(cmd.opts().command).split(" ") : undefined,
           containerized: isolated,
           executionBackend: cmd.opts().host ? "host" : isolated ? "isolated" : undefined,
-          ephemeral: !cmd.opts().persistent,
           description: cmd.opts().description,
         });
         console.log(json(cmd) ? pretty(r) : `runtime created: ${(r as { id: string }).id}`);
@@ -484,6 +481,8 @@ function buildProgram(): Command {
     .option("--base <ref>", "base ref for a new task (for start)")
     .option("--working-branch <name>", "working branch for a new task (for start)")
     .option("--branch-mode <mode>", "new | continue (for start)")
+    .option("--lifecycle <mode>", "container lifecycle for the whole task: ephemeral | keep-alive | persistent (for start)")
+    .option("--idle-timeout <ms>", "keep-alive idle timeout in ms (for start)")
     .option("--follow", "stream the run's events live (for start)")
     .action(async (action: string, name: string | undefined, instruction: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
@@ -552,6 +551,11 @@ function buildProgram(): Command {
           branchMode: opts.branchMode,
           runtimeId: opts.runtime,
           modelId: opts.model,
+          lifecycle: opts.lifecycle
+            ? { mode: opts.lifecycle, idleTimeoutMs: opts.idleTimeout ? Number(opts.idleTimeout) : undefined }
+            : opts.idleTimeout
+              ? { mode: "keep-alive", idleTimeoutMs: Number(opts.idleTimeout) }
+              : undefined,
         });
         console.log(
           json(cmd) ? pretty(result) : `task ${result.task.id} -> run ${result.run.id} (project lifecycle started)`
@@ -639,8 +643,6 @@ function buildProgram(): Command {
     .option("--mode <mode>", "resume | handoff | auto (default auto)")
     .option("--notes <text>", "user notes folded into the handoff")
     .option("--allow-degraded", "if the model summary is unavailable, continue with a degraded structured context")
-    .option("--lifecycle <mode>", "container lifecycle: ephemeral | keep-alive | persistent")
-    .option("--idle-timeout <ms>", "keep-alive idle timeout in ms")
     .action(async (action: string, id: string | undefined, prompt: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
       if (action === "list") {
@@ -740,11 +742,6 @@ function buildProgram(): Command {
           mode: opts.mode,
           userNotes: opts.notes,
           allowDegradedHandoff: Boolean(opts.allowDegraded),
-          lifecycle: opts.lifecycle
-            ? { mode: opts.lifecycle, idleTimeoutMs: opts.idleTimeout ? Number(opts.idleTimeout) : undefined }
-            : opts.idleTimeout
-              ? { mode: "keep-alive", idleTimeoutMs: Number(opts.idleTimeout) }
-              : undefined,
         });
         if (json(cmd)) return console.log(pretty(result));
         const run = result.run as Record<string, unknown>;

@@ -113,7 +113,7 @@ export interface FilesystemPolicy {
 }
 
 /**
- * Runtime Container lifecycle policies (spec v1 §1).
+ * Container lifecycle policies (spec v1 §1).
  *
  * - `ephemeral` (default): a fresh container per Run, destroyed when the
  *   Run completes, fails, is cancelled or times out.
@@ -123,6 +123,12 @@ export interface FilesystemPolicy {
  * - `persistent`: long-lived container (daemon agents etc.). Reserved in
  *   the model — not a core implementation goal of this phase — but the
  *   lifecycle model and cleanup paths already honor it.
+ *
+ * The policy belongs to the **Task**, chosen once when the Task is created,
+ * and applies to every Run of that Task for its whole life. It is not a
+ * Runtime property (the same runtime serves Tasks with different needs) and
+ * it is not a per-Run override (a later turn silently reverting to a
+ * different policy is exactly the surprise this model removes).
  */
 export type RuntimeLifecycleMode = "ephemeral" | "keep-alive" | "persistent";
 
@@ -287,13 +293,6 @@ export interface Runtime {
    * Runtimes page toggles the per-record value.
    */
   usableInTask: boolean;
-  /**
-   * Ephemeral runtime: container destroyed after the run.
-   * Superseded by `lifecycle.mode`; kept for backward compatibility —
-   * `ephemeral: false` maps to `lifecycle.mode: "persistent"`.
-   */
-  ephemeral?: boolean;
-  lifecycle?: RuntimeLifecycle;
   /** Declared capabilities; falls back to the adapter's declared set. */
   capabilities?: Partial<RuntimeCapability>;
   /**
@@ -447,7 +446,6 @@ export interface ProjectExecutionConfig {
   secretIds?: ID[];
   tools?: string[];
   policy?: ExecutionPolicy;
-  lifecycle?: RuntimeLifecycle;
   networkPolicy?: NetworkPolicy;
   /**
    * Explicit advanced policy allowing a Project Coding Task to run on a
@@ -770,6 +768,14 @@ export interface Task {
   resourceLimits?: ResourceLimits;
   timeoutMs?: number;
   policy?: ExecutionPolicy;
+  /**
+   * Container lifecycle for **every Run of this Task**. Written once when
+   * the Task is created (see `taskLifecycle()`) and never changed: later
+   * turns — continue / retry / handoff — inherit it verbatim, so the policy
+   * a user picked cannot silently change mid-conversation. Required: the
+   * record always carries the decision, so no reader has to derive it.
+   */
+  lifecycle: RuntimeLifecycle;
   metadata?: Record<string, unknown>;
   /** Project this Task develops against (v11 §6); absent = classic Task. */
   projectId?: ID;
@@ -866,8 +872,12 @@ export interface Run {
   generatedHandoffId?: ID;
   /** Runtime-native session reference used/created by this run. */
   runtimeSessionRefId?: ID;
-  /** Container lifecycle policy applied to this run. */
-  lifecycle?: RuntimeLifecycle;
+  /**
+   * The container lifecycle this Run executed under — copied verbatim from
+   * the Task at creation. A snapshot, not a decision: the Run never resolves
+   * it, and no reader re-derives it.
+   */
+  lifecycle: RuntimeLifecycle;
   /** Per-run execution parameters (override the task's defaults). */
   profileId?: ID;
   env?: Record<string, string>;

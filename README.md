@@ -172,7 +172,11 @@ Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kin
 | `keep-alive` | Run 结束后容器保留 `idleTimeoutMs`（默认 10 分钟），期间同 Runtime+Workspace 的下一个 Run 通过 `docker exec` 复用；空闲超时自动销毁（重启后由容器 label 恢复定时器，不泄漏） |
 | `persistent` | 长期存活容器（Daemon 场景），容器不被销毁 |
 
-生命周期可在 Runtime 上配置，也可按 Run 覆盖（`POST /api/runs` / `POST /api/tasks/:id/continue` 传 `lifecycle`）。`GET /api/containers/kept` 与 `af containers kept` 可查看 keep-alive 保留中的容器。
+生命周期属于 **Task**，在创建 Task 时选定，此后**不可修改**：该 Task 的每一个 Run（首轮、continue、retry、handoff）都继承同一个策略，不存在中途漂移。它既不是 Runtime 的属性（同一个 Runtime 服务需求不同的 Task），也不是按 Run 的覆盖项（下一轮悄悄换回另一种策略，正是这个模型要消除的意外）。
+
+创建时未指定即 `ephemeral`，该决定在创建那一刻固化到 Task 记录上（`taskLifecycle()`），Run 创建时原样拷贝一份快照——因此没有任何读取路径需要推导、兜底或修补这个值。
+
+`GET /api/containers/kept` 与 `af containers kept` 可查看 keep-alive 保留中的容器。
 
 ### Workspace
 
@@ -422,7 +426,7 @@ task.created → workspace.preparing → source.fetching → source.checkout
 
 ### Runtime：disposable execution environment
 
-Runtime 是**可销毁的执行环境**。每次 Run 按 lifecycle 策略创建容器（默认 `ephemeral`：Run 结束即销毁），Workspace 与 Runtime Native State 以挂载方式注入。
+Runtime 是**可销毁的执行环境**。每次 Run 按 **Task 的 lifecycle 策略**创建容器（默认 `ephemeral`：Run 结束即销毁；策略在创建 Task 时选定，见「容器生命周期」）。Workspace 与 Runtime Native State 以挂载方式注入。
 
 Runtime 声明自己的 **execution backend**（`executionBackend: "isolated" | "host"`，旧记录由 `containerized` 推导）。这不是描述性字段：Project Coding Task 的 isolation gate 就读它（配合 `containerized` 与 `image`），因此新增 Runtime 时不要依赖名字或 kind 判断隔离能力。容器销毁不会影响 Workspace，也不会影响 Harness 的 Native Session（Native State 是 Harness 私有状态，与 Workspace 严格区分，两者不混在一起）。Task 之间彼此隔离：独立 Workspace、独立 working branch、独立 Runtime、独立 execution state，Secret 不会被无关 Task 获取。
 
@@ -905,7 +909,7 @@ af tasks retry-run <task-id> "继续修剩下的"   # 新 Run，复用同一 Wor
 af tasks retry-validation <task-id>          # 只重跑 validation，不重新开发
 af tasks retry-publish <task-id>             # 只重新 push，不重新执行 Agent
 
-# 提交任务
+# 提交任务（lifecycle 在此选定，此后该 Task 全程沿用）
 af run "分析当前代码库并修复所有 failing tests" --from-repo --follow
 af run "给 README 补充用法" --runtime <rt> --model <model> --workspace <ws> --timeout 600000
 af run "..." --lifecycle keep-alive --idle-timeout 600000

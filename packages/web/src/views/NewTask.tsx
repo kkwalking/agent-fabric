@@ -45,7 +45,9 @@ export function NewTaskView() {
   const [modelTouched, setModelTouched] = useState(false);
   const [workspaceChoice, setWorkspaceChoice] = useState("");
   const [profileId, setProfileId] = useState("");
-  const [lifecycle, setLifecycle] = useState("");
+  // Container lifecycle for the task, decided at creation and immutable
+  // afterwards; `ephemeral` is what the server materializes when unset.
+  const [lifecycle, setLifecycle] = useState("ephemeral");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -108,7 +110,7 @@ export function NewTaskView() {
         modelId: harnessNative ? undefined : effectiveModelId || undefined,
         workspaceId: effectiveWorkspaceId || undefined,
         profileId: profileId || undefined,
-        lifecycle: lifecycle ? { mode: lifecycle } : undefined,
+        lifecycle: { mode: lifecycle },
       });
       // Create Task → Create Run #1 → Task Thread (v5 §14).
       navigate(`/tasks/${r.task.id}`);
@@ -197,14 +199,15 @@ export function NewTaskView() {
             ))}
           </select>
           */}
-          <select className="pill" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)} title="Container lifecycle">
-            <option value="">
-              Lifecycle:{" "}
-              {effectiveRuntime
-                ? `${effectiveRuntime.name} default (${effectiveRuntime.lifecycle?.mode ?? (effectiveRuntime.ephemeral === false ? "persistent" : "ephemeral")})`
-                : "runtime default"}
-            </option>
-            <option value="ephemeral">Lifecycle: ephemeral</option>
+          {/* The lifecycle belongs to the Task, not the runtime: chosen here,
+              once, and inherited by every later turn of this task. */}
+          <select
+            className="pill"
+            value={lifecycle}
+            onChange={(e) => setLifecycle(e.target.value)}
+            title="Container lifecycle for this task — fixed for every run of the task"
+          >
+            <option value="ephemeral">Lifecycle: ephemeral (default)</option>
             <option value="keep-alive">Lifecycle: keep-alive</option>
             <option value="persistent">Lifecycle: persistent</option>
           </select>

@@ -37,9 +37,7 @@ import { HandoffService, buildAssistedHandoffContent, renderHandoffPrompt } from
 import {
   ContainerLeaseManager,
   DEFAULT_KEEP_ALIVE_IDLE_MS,
-  normalizeLifecycle,
   recoverKeepAliveContainers,
-  resolveLifecycle,
   type ContainerOps,
 } from "./lifecycle.js";
 import { addUsage, emptyUsage, estimateCost } from "./cost.js";
@@ -199,7 +197,6 @@ export interface RunSpec {
   continuity?: RunContinuity;
   previousHandoffId?: ID;
   runtimeSessionRefId?: ID;
-  lifecycle?: RuntimeLifecycle;
   /** Project-based runs: the Project and its working branch (v11 §6/§40). */
   projectId?: ID;
   workingBranch?: string;
@@ -340,7 +337,6 @@ export interface ContinueTaskInput {
    * instead of silently degrading, and the caller must ask the user.
    */
   allowDegradedHandoff?: boolean;
-  lifecycle?: RuntimeLifecycle;
   workspaceId?: ID;
   profileId?: ID;
   env?: Record<string, string>;
@@ -531,7 +527,6 @@ export class RunService {
       continuity: "new",
       inputInstruction: task.prompt,
       userPrompt: task.prompt,
-      lifecycle: resolved.lifecycle,
       profileId: resolved.profileId,
       systemInstructions: profile?.systemInstructions,
     });
@@ -638,7 +633,6 @@ export class RunService {
         modelId,
         workspaceId,
         runtimeSessionRefId: ref.id,
-        lifecycle: resolveLifecycle(target, input.lifecycle),
         profileId: input.profileId,
         env: Object.keys(mergedEnv).length ? mergedEnv : undefined,
         secretIds: mergedSecretIds.length ? mergedSecretIds : undefined,
@@ -678,7 +672,6 @@ export class RunService {
       modelId,
       workspaceId,
       previousHandoffId: handoff.id,
-      lifecycle: resolveLifecycle(target, input.lifecycle),
       profileId: input.profileId,
       env: Object.keys(mergedEnv).length ? mergedEnv : undefined,
       secretIds: mergedSecretIds.length ? mergedSecretIds : undefined,
@@ -957,7 +950,9 @@ export class RunService {
       continuity: extra.continuity ?? "new",
       previousHandoffId: extra.previousHandoffId,
       runtimeSessionRefId: extra.runtimeSessionRefId,
-      lifecycle: normalizeLifecycle(extra.lifecycle ?? resolveLifecycle(runtime)),
+      // Copied verbatim from the Task, which owns the policy. The Run never
+      // derives it, and nothing downstream re-resolves it.
+      lifecycle: task.lifecycle,
       profileId: extra.profileId,
       env: extra.env,
       secretIds: extra.secretIds,
@@ -1957,7 +1952,8 @@ export class RunService {
     };
     const mergedSecretIds = [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
     const secrets = this.secretService().resolve(mergedSecretIds);
-    const lifecycle = normalizeLifecycle(run.lifecycle ?? resolveLifecycle(runtime));
+    // The Run's own snapshot, copied from the Task when it was created.
+    const lifecycle = run.lifecycle;
     const continuity: RunContinuity = run.continuity ?? "new";
     const runtimeSession = run.runtimeSessionRefId ? this.runtimeSessionService().get(run.runtimeSessionRefId) : undefined;
     const previousHandoff = run.previousHandoffId ? this.handoffService().get(run.previousHandoffId) : undefined;

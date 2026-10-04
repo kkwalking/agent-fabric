@@ -401,15 +401,16 @@ test(
       containerized: true,
       image: "node:22-alpine",
       command: ["sh", "-c", "echo ran-in-container"],
-      lifecycle: { mode: "keep-alive", idleTimeoutMs: 5 * 60_000 },
     });
 
-    /* Run #1 completes and retains a real container. */
+    /* Run #1 completes and retains a real container. The lifecycle is a
+       Task property, declared when the Task is created. */
     const { task, run } = await h.runService.submit({
       prompt: "ka probe 1",
       runtimeId: runtime.id,
       workspaceId: ws.id,
       timeoutMs: RUN_TIMEOUT_MS,
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 5 * 60_000 },
     });
     const first = await waitForRunReal(h.runService, run.id);
     assert.equal(first.status, "completed", first.error);

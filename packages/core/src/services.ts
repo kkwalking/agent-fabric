@@ -8,6 +8,7 @@ import { emptyUsage, addUsage, estimateCost } from "./cost.js";
 import { DomainError } from "./errors.js";
 import { validateRemoteUrl, checkCredentialBinding, type CredentialBindingCheck, type GitCredentialInput } from "./git.js";
 import { assertSecretAllowed, resolveSecretsForPurpose, type SecretPurpose } from "./secrets.js";
+import { taskLifecycle } from "./lifecycle.js";
 import type {
   ID,
   Provider,
@@ -268,8 +269,6 @@ export interface NewRuntimeInput {
   enabled?: boolean;
   /** See `Runtime.usableInTask`; defaults to the kind-level table below. */
   usableInTask?: boolean;
-  ephemeral?: boolean;
-  lifecycle?: Runtime["lifecycle"];
   capabilities?: Runtime["capabilities"];
   /** Explicit context window of the model this runtime runs (v9 §5). */
   contextWindow?: number;
@@ -328,8 +327,6 @@ export class RuntimeService {
   }
 
   async create(input: NewRuntimeInput): Promise<Runtime> {
-    // Legacy `ephemeral: false` maps to the persistent lifecycle mode.
-    const lifecycle = input.lifecycle ?? (input.ephemeral === false ? { mode: "persistent" as const } : { mode: "ephemeral" as const });
     const runtime: Runtime = {
       id: newId("rt"),
       name: input.name,
@@ -344,8 +341,6 @@ export class RuntimeService {
       defaultModelId: input.defaultModelId,
       enabled: input.enabled ?? true,
       usableInTask: input.usableInTask ?? defaultUsableInTask(input.kind),
-      ephemeral: input.ephemeral ?? lifecycle.mode === "ephemeral",
-      lifecycle,
       capabilities: input.capabilities,
       contextWindow: input.contextWindow,
       resourceLimits: input.resourceLimits,
@@ -720,8 +715,13 @@ export interface NewTaskInput {
   resourceLimits?: ResourceLimits;
   timeoutMs?: number;
   policy?: ExecutionPolicy;
-  /** Container lifecycle override for the run (spec v1 §1). */
-  lifecycle?: Runtime["lifecycle"];
+  /**
+   * Container lifecycle declared for the Task (spec v1 §1). Optional at the
+   * call site; `create` materializes it once (default `ephemeral`) and the
+   * stored Task always carries the result. Immutable afterwards: every Run
+   * of this Task copies it verbatim.
+   */
+  lifecycle?: Task["lifecycle"];
   metadata?: Record<string, unknown>;
   /** Project-based Task fields (v11 §6). */
   projectId?: ID;
@@ -776,6 +776,8 @@ export class TaskService {
       resourceLimits: input.resourceLimits,
       timeoutMs: input.timeoutMs,
       policy: input.policy,
+      // Materialized once, here: the stored Task always carries the decision.
+      lifecycle: taskLifecycle(input.lifecycle),
       metadata: input.metadata,
       projectId: input.projectId,
       baseRef: input.baseRef,
@@ -790,7 +792,13 @@ export class TaskService {
     return this.store.insert("tasks", task);
   }
 
-  async update(id: ID, patch: Partial<NewTaskInput>): Promise<Task | undefined> {
+  /**
+   * Mutable Task fields. `lifecycle` is deliberately excluded: the container
+   * policy is decided once at creation and immutable for the Task's whole
+   * life, so no update path can change what a later turn runs under. The
+   * exclusion is enforced by the type, not by convention.
+   */
+  async update(id: ID, patch: Partial<Omit<NewTaskInput, "id" | "lifecycle">>): Promise<Task | undefined> {
     return this.store.update<Task>("tasks", id, patch);
   }
 
@@ -1613,7 +1621,6 @@ export async function seedDefaults(store: Store): Promise<void> {
         description: "Codex CLI on this machine — runs on its own ChatGPT login and subscription (no AgentFabric provider needed)",
         credentialSource: "harness-native",
         enabled: true,
-        ephemeral: true,
         env: {},
       });
     }
@@ -1624,7 +1631,6 @@ export async function seedDefaults(store: Store): Promise<void> {
         description: "Claude Code CLI on this machine — runs on its own Claude.ai login and subscription (no AgentFabric provider needed)",
         credentialSource: "harness-native",
         enabled: true,
-        ephemeral: true,
         env: {},
       });
     }
@@ -1635,7 +1641,6 @@ export async function seedDefaults(store: Store): Promise<void> {
         description: "ZCode sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no ZCode runner adapter yet)",
         credentialSource: "harness-native",
         enabled: true,
-        ephemeral: true,
         env: {},
       });
     }
@@ -1646,7 +1651,6 @@ export async function seedDefaults(store: Store): Promise<void> {
         description: "DSH (DeepSeek Harness) headless CLI on this machine — runs one task per invocation on its own DeepSeek account and subscription (no AgentFabric provider needed)",
         credentialSource: "harness-native",
         enabled: true,
-        ephemeral: true,
         env: {},
       });
     }
@@ -1678,14 +1682,12 @@ export async function seedDefaults(store: Store): Promise<void> {
     kind: "mock",
     description: "Simulated agent runtime for demos and tests",
     enabled: true,
-    ephemeral: true,
   });
   await runtimeService.create({
     name: "OpenCode",
     kind: "opencode",
     description: "OpenCode CLI agent (local)",
     enabled: true,
-    ephemeral: true,
     env: {},
   });
   await runtimeService.create({
@@ -1693,7 +1695,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     kind: "pi",
     description: "Pi coding agent (local)",
     enabled: true,
-    ephemeral: true,
     env: {},
   });
   // Codex Local (v6 §1): the user's own codex CLI + ChatGPT login. No
@@ -1704,7 +1705,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     description: "Codex CLI on this machine — runs on its own ChatGPT login and subscription (no AgentFabric provider needed)",
     credentialSource: "harness-native",
     enabled: true,
-    ephemeral: true,
     env: {},
   });
   // Claude Code Local (v7 §1): the user's own claude CLI + Claude.ai
@@ -1715,7 +1715,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     description: "Claude Code CLI on this machine — runs on its own Claude.ai login and subscription (no AgentFabric provider needed)",
     credentialSource: "harness-native",
     enabled: true,
-    ephemeral: true,
     env: {},
   });
   await runtimeService.create({
@@ -1724,7 +1723,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     description: "ZCode sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no ZCode runner adapter yet)",
     credentialSource: "harness-native",
     enabled: true,
-    ephemeral: true,
     env: {},
   });
   await runtimeService.create({
@@ -1733,7 +1731,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     description: "DSH (DeepSeek Harness) headless CLI on this machine — runs one task per invocation on its own DeepSeek account and subscription (no AgentFabric provider needed)",
     credentialSource: "harness-native",
     enabled: true,
-    ephemeral: true,
     env: {},
   });
   // The generic Docker runtime is the seeded *isolated* runtime: it declares
@@ -1749,7 +1746,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     containerized: true,
     executionBackend: "isolated",
     enabled: true,
-    ephemeral: true,
     networkPolicy: { enabled: true },
   });
 }

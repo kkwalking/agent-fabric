@@ -85,7 +85,6 @@ const configs: Record<string, Config> = {
       { key: "containerized", label: "Containerized", type: "select", options: ["true", "false"] },
       { key: "image", label: "Docker image", placeholder: "node:22-alpine" },
       { key: "command", label: "Container command (docker kind)", placeholder: "sh -c echo hello" },
-      { key: "lifecycle", label: "Container lifecycle", type: "select", options: ["ephemeral", "keep-alive", "persistent"] },
       { key: "usableInTask", label: "Usable in tasks", type: "select", options: ["true", "false"] },
       { key: "description", label: "Description" },
     ],
@@ -107,7 +106,6 @@ const configs: Record<string, Config> = {
           <dt>Credentials</dt><dd>{r.credentialSource === "harness-native" ? "Harness native" : "AgentFabric"}</dd>
           <dt>Enabled</dt><dd>{r.enabled ? "yes" : "no"}</dd>
           <dt>Usable in tasks</dt><dd>{r.usableInTask ? "yes" : "no"}</dd>
-          <dt>Lifecycle</dt><dd>{r.lifecycle?.mode ?? (r.ephemeral === false ? "persistent" : "ephemeral")}</dd>
           <dt>Execution backend</dt><dd>{r.executionBackend ?? (r.containerized ? "isolated" : "host")}</dd>
           <dt>Containerized</dt><dd>{String(Boolean(r.containerized))}</dd>
           <dt>Image</dt><dd>{r.image ?? "—"}</dd>
@@ -289,7 +287,6 @@ export function ResourceView({ kind }: { kind: string }) {
       const body: Record<string, unknown> = { ...form };
       if (cfg.path === "/api/runtimes") {
         if (body.command) body.command = String(body.command).split(" ");
-        if (body.lifecycle) body.lifecycle = { mode: body.lifecycle };
         // The form carries strings; unset ("") falls back to the server's
         // kind default.
         if (body.usableInTask === "true" || body.usableInTask === "false") {
@@ -297,7 +294,6 @@ export function ResourceView({ kind }: { kind: string }) {
         } else {
           delete body.usableInTask;
         }
-        delete body.ephemeral;
       }
       await post(cfg.path, body);
       setForm({});

@@ -54,7 +54,6 @@ async function setupStack(
     modelParams?: Record<string, unknown>;
     runtimeEnv?: Record<string, string>;
     containerized?: boolean;
-    lifecycle?: { mode: "ephemeral" | "keep-alive"; idleTimeoutMs?: number };
     networkPolicy?: { enabled: boolean };
   } = {}
 ) {
@@ -88,7 +87,6 @@ async function setupStack(
     // explicit in-container command (real harness images don't need this;
     // their entrypoint is the harness itself).
     config: overrides.containerized ? { containerCommand: ["node", fx.fakePi] } : undefined,
-    lifecycle: overrides.lifecycle ?? { mode: "ephemeral" },
     networkPolicy: overrides.networkPolicy,
     env: {
       // Local runs get an isolated pi agent dir; containerized runs read
@@ -542,15 +540,16 @@ test("v4 §30: keep-alive — same task reuses the container, another task does 
     const { model, ws, runtime } = await setupStack(h, fx, dumpPath, {
       containerized: true,
       provider: { name: "KA Prov", apiKey: "sk-ka-1" },
-      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
     });
 
-    /* Run #1: fresh keep-alive container, retained after success. */
+    /* Run #1: fresh keep-alive container, retained after success. The
+       lifecycle is a Task property, chosen at creation. */
     const { task, run } = await h.runService.submit({
       prompt: "Remember ORBIT-31. Reply OK.",
       runtimeId: runtime.id,
       modelId: model.id,
       workspaceId: ws.id,
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
     });
     await waitCompleted(h, run.id);
     assert.ok(
@@ -583,13 +582,16 @@ test("v4 §30: keep-alive — same task reuses the container, another task does 
       "the harness ran inside the kept container"
     );
 
-    /* A different task on the same runtime+workspace never inherits it. */
+    /* A different task on the same runtime+workspace never inherits it.
+       It is keep-alive too, so reuse would be possible if the lease key
+       ignored the task — which is exactly what this asserts it does not. */
     const other = await h.runService.submit({
       title: "Unrelated task",
       prompt: "Fresh start. Reply OK.",
       runtimeId: runtime.id,
       modelId: model.id,
       workspaceId: ws.id,
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
     });
     await waitCompleted(h, other.run.id);
     assert.ok(
@@ -615,18 +617,19 @@ test("v4 §23/§24: cancelling a keep-alive run stops the in-container harness a
     const { model, ws, runtime } = await setupStack(h, fx, dumpPath, {
       containerized: true,
       provider: { name: "Cancel Prov", apiKey: "sk-cxl-1" },
-      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
       runtimeEnv: { FAKE_PI_SLEEP_MS: "12000" },
     });
 
     // Run the slow harness inside the keep-alive container (the fake pi
-    // holds the run open via FAKE_PI_SLEEP_MS).
+    // holds the run open via FAKE_PI_SLEEP_MS). The lifecycle is a Task
+    // property, so it is declared when the Task is created.
     const { task, run } = await h.runService.submit({
       prompt: "Remember VEGA-9. Reply OK.",
       runtimeId: runtime.id,
       modelId: model.id,
       workspaceId: ws.id,
       timeoutMs: 60_000,
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
     });
     // Wait until the harness process is genuinely running, then cancel.
     const deadline = Date.now() + 15_000;
@@ -668,7 +671,6 @@ test("v4 §23: timeout aborts a keep-alive run the same way as cancel", async ()
     const { model, ws, runtime } = await setupStack(h, fx, dumpPath, {
       containerized: true,
       provider: { name: "Timeout Prov", apiKey: "sk-tmo-1" },
-      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
       runtimeEnv: { FAKE_PI_SLEEP_MS: "12000" },
     });
 
@@ -678,6 +680,7 @@ test("v4 §23: timeout aborts a keep-alive run the same way as cancel", async ()
       modelId: model.id,
       workspaceId: ws.id,
       timeoutMs: 1_500,
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
     });
     const finished = await waitForRun(h.runService, run.id);
     assert.equal(finished.status, "timeout", finished.error);

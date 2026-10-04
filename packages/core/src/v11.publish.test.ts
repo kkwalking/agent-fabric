@@ -1038,6 +1038,7 @@ describe("v11 hardening: cancellation and concurrency", () => {
       taskId: "task_other",
       taskTitle: "other",
       status: "running",
+      lifecycle: { mode: "ephemeral" },
       artifactIds: [],
       eventCount: 0,
       createdAt: new Date().toISOString(),

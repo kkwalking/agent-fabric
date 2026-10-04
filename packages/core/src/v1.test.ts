@@ -18,12 +18,12 @@ import {
   seedDefaults,
 } from "./services.js";
 import { HandoffService } from "./handoff.js";
-import { ContainerLeaseManager, resolveLifecycle, type ContainerOps } from "./lifecycle.js";
+import { ContainerLeaseManager, DEFAULT_KEEP_ALIVE_IDLE_MS, taskLifecycle, type ContainerOps } from "./lifecycle.js";
 import { buildAssistedHandoffContent, renderHandoffPrompt } from "./handoff.js";
 import { testCompletionFactory } from "./testkit.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import type { AgentRuntimeAdapter, RuntimeContext, RuntimeResult } from "./runtime.js";
-import type { Handoff, Run } from "./types.js";
+import type { Handoff, Run, Task } from "./types.js";
 
 async function freshStore(): Promise<Store> {
   const dir = mkdtempSync(join(tmpdir(), "af-v1-"));
@@ -107,26 +107,20 @@ async function waitForRun(runService: RunService, runId: string): Promise<Run> {
 /* Lifecycle policy resolution (spec v1 §1)                            */
 /* ------------------------------------------------------------------ */
 
-test("lifecycle resolution: default ephemeral, legacy persistent, keep-alive, override", async () => {
-  const h = await freshHarness();
-  const ephemeral = await h.runtimes.create({ name: "e", kind: "mock" });
-  assert.equal(resolveLifecycle(ephemeral).mode, "ephemeral");
+test("taskLifecycle: materializes the policy once, ephemeral by default", () => {
+  // A Task that declares nothing gets ephemeral, materialized at creation.
+  assert.equal(taskLifecycle().mode, "ephemeral");
+  assert.equal(taskLifecycle(undefined).mode, "ephemeral");
+  assert.equal(taskLifecycle().idleTimeoutMs, DEFAULT_KEEP_ALIVE_IDLE_MS);
 
-  const legacy = await h.runtimes.create({ name: "l", kind: "mock", ephemeral: false });
-  assert.equal(resolveLifecycle(legacy).mode, "persistent");
+  const keepAlive = taskLifecycle({ mode: "keep-alive", idleTimeoutMs: 1234 });
+  assert.equal(keepAlive.mode, "keep-alive");
+  assert.equal(keepAlive.idleTimeoutMs, 1234);
 
-  const keepAlive = await h.runtimes.create({
-    name: "k",
-    kind: "mock",
-    lifecycle: { mode: "keep-alive", idleTimeoutMs: 1234 },
-  });
-  const resolved = resolveLifecycle(keepAlive);
-  assert.equal(resolved.mode, "keep-alive");
-  assert.equal(resolved.idleTimeoutMs, 1234);
-
-  // Per-run override wins over the runtime default.
-  const override = resolveLifecycle(keepAlive, { mode: "ephemeral" });
-  assert.equal(override.mode, "ephemeral");
+  const persistent = taskLifecycle({ mode: "persistent" });
+  assert.equal(persistent.mode, "persistent");
+  // An explicit mode without an idle window still carries the default.
+  assert.equal(persistent.idleTimeoutMs, DEFAULT_KEEP_ALIVE_IDLE_MS);
 });
 
 test("keep-alive lease is destroyed after idle timeout and reusable before", async () => {
@@ -606,18 +600,39 @@ test("effective capabilities merge adapter declaration with runtime overrides", 
 /* Per-run lifecycle overrides & keep-alive recovery wiring            */
 /* ------------------------------------------------------------------ */
 
-test("submit honors per-run lifecycle overrides (spec v1 §1)", async () => {
+test("a task's lifecycle is fixed at creation and inherited by every run", async () => {
   const h = await freshHarness();
   const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
-  const { run } = await h.runService.submit({
-    prompt: "lifecycle override",
+  const { task, run } = await h.runService.submit({
+    prompt: "lifecycle at creation",
     runtimeId: mockRuntime.id,
     lifecycle: { mode: "keep-alive", idleTimeoutMs: 4321 },
   });
   await waitForRun(h.runService, run.id);
+
+  // The Task owns the policy...
+  const storedTask = h.store.get<Task>("tasks", task.id)!;
+  assert.equal(storedTask.lifecycle?.mode, "keep-alive");
+  assert.equal(storedTask.lifecycle?.idleTimeoutMs, 4321);
+
+  // ...and the Run snapshots it.
   const stored = h.runService.get(run.id)!;
   assert.equal(stored.lifecycle?.mode, "keep-alive");
   assert.equal(stored.lifecycle?.idleTimeoutMs, 4321);
+
+  // A later turn inherits the same policy — it cannot drift back to the
+  // runtime default, which is exactly the behaviour this model removes.
+  const next = await h.runService.continueTask(task.id, { prompt: "second turn" });
+  await waitForRun(h.runService, next.run.id);
+  assert.equal(h.runService.get(next.run.id)!.lifecycle?.mode, "keep-alive");
+});
+
+test("a task with no lifecycle declared runs ephemeral", async () => {
+  const h = await freshHarness();
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+  const { run } = await h.runService.submit({ prompt: "default lifecycle", runtimeId: mockRuntime.id });
+  await waitForRun(h.runService, run.id);
+  assert.equal(h.runService.get(run.id)!.lifecycle?.mode, "ephemeral");
 });
 
 test("keep-alive containers are re-armed from docker labels after a restart", async () => {

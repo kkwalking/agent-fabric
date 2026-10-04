@@ -179,6 +179,11 @@ export interface StartProjectTaskInput {
   timeoutMs?: number;
   policy?: Task["policy"];
   resourceLimits?: Task["resourceLimits"];
+  /**
+   * Container lifecycle for the Task, chosen here and frozen for its whole
+   * life: every Run of the Task — including later continues and retries —
+   * inherits this value. Absent = `ephemeral`.
+   */
   lifecycle?: RuntimeLifecycle;
   /** Task-level validation override (replaces the Project's). */
   validation?: ValidationConfig;
@@ -479,6 +484,9 @@ export class ExecutionSupervisor {
       resourceLimits: input.resourceLimits ?? project.execution?.resourceLimits,
       timeoutMs: input.timeoutMs ?? project.execution?.timeoutMs,
       policy: input.policy ?? project.execution?.policy,
+      // Passed through as declared; `TaskService.create` materializes and
+      // freezes it on the record.
+      lifecycle: input.lifecycle,
       metadata: input.metadata,
       execution,
     });
@@ -494,7 +502,6 @@ export class ExecutionSupervisor {
       userPrompt: instruction,
       systemInstructions: profile?.systemInstructions,
       profileId: input.profileId,
-      lifecycle: input.lifecycle ?? project.execution?.lifecycle,
       phase: "workspace.preparing",
     });
     await this.setPhase(task.id, run.id, "workspace.preparing", "preparing");
@@ -575,7 +582,6 @@ export class ExecutionSupervisor {
     const runtime = this.resolveRuntime(project, input.runtimeId ?? task.runtimeId);
     const modelId = this.resolveModelId(project, runtime, input.modelId ?? task.modelId);
     const instruction = input.instruction?.trim() || task.prompt;
-    const previous = this.activeRun(taskId) ?? this.latestRun(taskId);
     const profile = task.profileId ? this.profiles().get(task.profileId) : undefined;
 
     const run = await this.runService.createRunForTask(task, {
@@ -590,7 +596,6 @@ export class ExecutionSupervisor {
       userPrompt: instruction,
       systemInstructions: profile?.systemInstructions,
       profileId: task.profileId,
-      lifecycle: previous?.lifecycle,
       phase: "workspace.preparing",
     });
     await this.patchExecution(taskId, {

@@ -433,6 +433,8 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
     branchMode: "new",
     runtimeId: "",
     modelId: "",
+    // Chosen here, once: the Task owns it and every later run inherits it.
+    lifecycle: "ephemeral",
     validation: "",
   });
   const [error, setError] = useState<string | null>(null);
@@ -451,6 +453,7 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
         branchMode: form.branchMode,
         runtimeId: form.runtimeId || undefined,
         modelId: form.modelId || undefined,
+        lifecycle: { mode: form.lifecycle },
         ...(steps.length ? { validation: { steps } } : {}),
       });
       navigate(`/tasks/${result.task.id}/lifecycle`);
@@ -516,6 +519,13 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
               {(models.data ?? []).map((m) => (
                 <option key={m.id} value={m.id}>{m.alias ?? m.name}</option>
               ))}
+            </select>
+          </Field>
+          <Field label="Container lifecycle (fixed for the whole task)">
+            <select value={form.lifecycle} onChange={(e) => setForm({ ...form, lifecycle: e.target.value })}>
+              <option value="ephemeral">ephemeral — a fresh container per run, destroyed afterwards</option>
+              <option value="keep-alive">keep-alive — retain the container for a follow-up run</option>
+              <option value="persistent">persistent — long-lived container</option>
             </select>
           </Field>
         </div>
