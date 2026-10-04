@@ -55,6 +55,33 @@ test("status phases map to run progress; step_end usage parses once per request"
   assert.deepEqual(turnEnd?.data.reason, { kind: "completed" });
 });
 
+test("an in-turn failure surfaces DSH's own reason as a runtime.error", () => {
+  // A turn that fails in-turn still ends with `final` and exit 1, so
+  // turn_end's reason is the only place the diagnosis appears — without
+  // this the run fails with a bare exit code.
+  const state = newDshEventMapperState();
+  const out = map(
+    '{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"no API key for provider route \\"deepseek-official\\"","code":"MISSING_CREDENTIAL"}}}',
+    state
+  );
+  assert.ok(Array.isArray(out), "progress plus the error");
+  assert.equal(out[0].type, "run.progress");
+  assert.equal(out[1].type, "runtime.error");
+  assert.equal(out[1].level, "error");
+  assert.equal(out[1].data.error, 'no API key for provider route "deepseek-official"');
+  assert.equal(out[1].data.code, "MISSING_CREDENTIAL");
+
+  // A reason without a message keeps the raw line so nothing is lost.
+  const bare = map('{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error"}}');
+  assert.ok(Array.isArray(bare));
+  assert.equal(bare[1].type, "runtime.error");
+
+  // Non-error reasons stay plain progress (no spurious runtime errors).
+  const aborted = map('{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"aborted"}}');
+  assert.ok(!Array.isArray(aborted));
+  assert.equal(aborted?.type, "run.progress");
+});
+
 test("committed text and thinking map to message/thinking; final is bookkeeping only", () => {
   const text = first('{"type":"text","text":"I\'ll create the file."}');
   assert.equal(text?.type, "agent.message");

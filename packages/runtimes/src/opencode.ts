@@ -86,18 +86,24 @@ export function opencodeBin(): string {
   return process.env.AGENTFABRIC_OPENCODE_BIN ?? "opencode";
 }
 
-/**
- * Default container image (v3 §11): the currently maintained official
- * runtime image. The project moved off the stale `ghcr.io/sst/opencode`
- * name — `ghcr.io/anomalyco/opencode` is what the OpenCode publish
- * pipeline actually pushes (entrypoint `opencode`, runs as root, state
- * at /root/.local/share/opencode).
- */
-export const OPENCODE_DEFAULT_IMAGE = "ghcr.io/anomalyco/opencode";
-
-export function opencodeImage(): string {
-  return process.env.AGENTFABRIC_OPENCODE_IMAGE ?? OPENCODE_DEFAULT_IMAGE;
+/** Container image override for containerized opencode (v3 §10, plan A). */
+export function opencodeImage(): string | undefined {
+  return process.env.AGENTFABRIC_OPENCODE_IMAGE;
 }
+
+/**
+ * Where the OpenCode Dockerfile reference lives. The official image
+ * (`ghcr.io/anomalyco/opencode`) is a minimal Alpine build carrying only
+ * ripgrep, so it fails the Harness Execution Contract's python3 + curl
+ * requirement; `docker/opencode.Dockerfile` derives from it and adds
+ * exactly those two tools.
+ */
+export const OPENCODE_IMAGE_CONTRACT_HINT =
+  "Containerized OpenCode requires an OpenCode Runtime Image (a container whose entrypoint is the opencode CLI " +
+  "with its state under /root/.local/share/opencode, plus python3 and curl for the agent's own commands). " +
+  "Configure `image` on the runtime or set AGENTFABRIC_OPENCODE_IMAGE. " +
+  "A reference Dockerfile is provided at docker/opencode.Dockerfile in the AgentFabric repository " +
+  "( Harness Execution Contract: docs/harness-image-contract.md ).";
 
 /**
  * OpenCode harness capabilities (spec v1 §17): it owns native sessions
@@ -115,12 +121,13 @@ export const opencodeCapabilities: Partial<RuntimeCapability> = {
 };
 
 /**
- * Containerized capabilities (v2 §11, v3 §16/§17): the official image's
- * entrypoint is the `opencode` CLI and the opaque native-state directory
- * ($XDG_DATA_HOME/opencode → /root/.local/share/opencode) is mounted by
- * the execution backend, so containerized runs are capability-equivalent
- * to local ones — streaming stays structured and native sessions
- * survive container destruction.
+ * Containerized capabilities (v2 §11, v3 §16/§17): a runtime image whose
+ * entrypoint is the `opencode` CLI plus the opaque native-state directory
+ * ($XDG_DATA_HOME/opencode → /root/.local/share/opencode) mounted by the
+ * execution backend make containerized runs capability-equivalent to local
+ * ones — streaming stays structured and native sessions survive container
+ * destruction. Without a configured image the effective-capability
+ * computation narrows these to "cannot run" (v3 §10).
  */
 export const opencodeContainerizedCapabilities: Partial<RuntimeCapability> = {
   ...opencodeCapabilities,
@@ -498,9 +505,10 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
  *
  * Containerized runs mount the runtime's opaque native-state directory
  * at OpenCode's data path ($XDG_DATA_HOME/opencode) so native sessions
- * survive container destruction (v2 §15). The default image is the
- * maintained official runtime image whose entrypoint *is* the CLI
- * (v3 §11/§12 — the image is part of the Harness Execution Contract).
+ * survive container destruction (v2 §15). There is no default image: the
+ * official one ships neither python3 nor curl, so a runtime names an
+ * image built from docker/opencode.Dockerfile (v3 §10/§11/§12 — the
+ * image is part of the Harness Execution Contract).
  */
 export const opencodeAdapter: AgentRuntimeAdapter = {
   kind: "opencode",
@@ -508,10 +516,23 @@ export const opencodeAdapter: AgentRuntimeAdapter = {
   capabilities: opencodeCapabilities,
   containerizedCapabilities: opencodeContainerizedCapabilities,
   nativeStateMountPath: "/root/.local/share/opencode",
-  defaultImage: OPENCODE_DEFAULT_IMAGE,
   providerCompatibility: opencodeProviderCompatibility,
+  // No defaultImage on purpose (v3 §10 plan A): the official image is a
+  // minimal Alpine build without python3/curl, so it fails the contract.
+  // A containerized runtime must name an image explicitly.
 
   async run(ctx: RuntimeContext): Promise<RuntimeResult> {
+    if (ctx.runtime.containerized) {
+      const image = ctx.runtime.image ?? opencodeImage();
+      if (!image) {
+        await ctx.emit(
+          "runtime.error",
+          { error: OPENCODE_IMAGE_CONTRACT_HINT, backend: "docker", source: "opencode" },
+          { level: "error" }
+        );
+        return { error: `Containerized OpenCode refused to start: ${OPENCODE_IMAGE_CONTRACT_HINT}` };
+      }
+    }
     // Provider configuration first: OPENCODE_CONFIG must exist before
     // opencode resolves -m <provider>/<model> (v4 §1).
     const useAgentfabricAgent = await prepareProviderConfig(ctx);
@@ -541,6 +562,6 @@ export const opencodeAdapter: AgentRuntimeAdapter = {
   },
 
   describe() {
-    return { needsDocker: false, needsModel: false, cli: opencodeBin(), defaultImage: OPENCODE_DEFAULT_IMAGE };
+    return { needsDocker: false, needsModel: false, cli: opencodeBin(), requiresImageWhenContainerized: true };
   },
 };

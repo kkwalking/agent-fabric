@@ -15,11 +15,18 @@
 #   ✓ Native state lives under /root/.pi (mounted by AgentFabric, rw)
 #   ✓ stdout speaks the pi JSON protocol (`--mode json`)
 #   ✓ `--session <id>` resumes sessions persisted in the mounted state
+#   ✓ python3 + curl available for the agent's own commands
+#
+# python3 and curl are part of the contract (docs/harness-image-contract.md
+# §7): agents routinely script with python and fetch things with curl, and a
+# harness image without them fails those tasks for no good reason. Every
+# AgentFabric harness image ships both.
 
 FROM node:24-bookworm-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
+  && apt-get install -y --no-install-recommends \
+       bash ca-certificates curl git python3 ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent

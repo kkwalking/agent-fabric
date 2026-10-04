@@ -3,7 +3,7 @@
  * (fakes.ts), a fake `docker` CLI, and an in-memory harness wiring the
  * orchestrator to the real runtime adapters.
  */
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./store.js";
@@ -25,12 +25,14 @@ import { codexAdapter } from "../../runtimes/src/codex.js";
 import { codexThreadSource } from "../../runtimes/src/codexAppServer.js";
 import { claudeCodeAdapter } from "../../runtimes/src/claudecode.js";
 import { claudeCodeThreadSource } from "../../runtimes/src/claudeCodeThreads.js";
+import { dshAdapter } from "../../runtimes/src/dsh.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import { createDockerContainerOps } from "../../runtimes/src/docker.js";
 import {
   FAKE_CLAUDE_SCRIPT,
   FAKE_CODEX_SCRIPT,
   FAKE_DOCKER_SCRIPT,
+  FAKE_DSH_SCRIPT,
   FAKE_OPENCODE_SCRIPT,
   FAKE_PI_SCRIPT,
 } from "./fakes.js";
@@ -40,6 +42,7 @@ export interface Fixtures {
   dir: string;
   fakeOpenCode: string;
   fakePi: string;
+  fakeDsh: string;
   fakeDocker: string;
   fakeCodex: string;
   fakeClaude: string;
@@ -48,6 +51,8 @@ export interface Fixtures {
   claudeHome: string;
   /** Transcript root: $claudeHome/projects (real ~/.claude/projects layout). */
   claudeProjects: string;
+  /** DSH home: the fake CLI's session store, mounted as native state. */
+  dshHome: string;
 }
 
 function writeExecutable(dir: string, name: string, content: string): string {
@@ -60,16 +65,20 @@ function writeExecutable(dir: string, name: string, content: string): string {
 export function makeFixtures(): Fixtures {
   const dir = mkdtempSync(join(tmpdir(), "af-fixtures-"));
   const claudeHome = join(dir, "claude-home");
+  const dshHome = join(dir, "dsh-home");
+  mkdirSync(dshHome, { recursive: true });
   return {
     dir,
     fakeOpenCode: writeExecutable(dir, "fake-opencode.mjs", FAKE_OPENCODE_SCRIPT),
     fakePi: writeExecutable(dir, "fake-pi.mjs", FAKE_PI_SCRIPT),
+    fakeDsh: writeExecutable(dir, "fake-dsh.mjs", FAKE_DSH_SCRIPT),
     fakeDocker: writeExecutable(dir, "fake-docker.mjs", FAKE_DOCKER_SCRIPT),
     fakeCodex: writeExecutable(dir, "fake-codex.mjs", FAKE_CODEX_SCRIPT),
     fakeClaude: writeExecutable(dir, "fake-claude.mjs", FAKE_CLAUDE_SCRIPT),
     dockerLog: join(dir, "docker-calls.log"),
     claudeHome,
     claudeProjects: join(claudeHome, "projects"),
+    dshHome,
   };
 }
 
@@ -86,6 +95,9 @@ export function useBins(fx: Fixtures, extra: Record<string, string> = {}, unset:
     AGENTFABRIC_CODEX_BIN: process.env.AGENTFABRIC_CODEX_BIN,
     AGENTFABRIC_CLAUDE_BIN: process.env.AGENTFABRIC_CLAUDE_BIN,
     AGENTFABRIC_CLAUDE_PROJECTS_DIR: process.env.AGENTFABRIC_CLAUDE_PROJECTS_DIR,
+    AGENTFABRIC_DSH_BIN: process.env.AGENTFABRIC_DSH_BIN,
+    AGENTFABRIC_DSH_IMAGE: process.env.AGENTFABRIC_DSH_IMAGE,
+    DSH_HOME: process.env.DSH_HOME,
     AGENTFABRIC_DOCKER_BIN: process.env.AGENTFABRIC_DOCKER_BIN,
     AGENTFABRIC_PI_IMAGE: process.env.AGENTFABRIC_PI_IMAGE,
     AGENTFABRIC_OPENCODE_IMAGE: process.env.AGENTFABRIC_OPENCODE_IMAGE,
@@ -105,6 +117,11 @@ export function useBins(fx: Fixtures, extra: Record<string, string> = {}, unset:
   process.env.AGENTFABRIC_PI_BIN = fx.fakePi;
   process.env.AGENTFABRIC_CODEX_BIN = fx.fakeCodex;
   process.env.AGENTFABRIC_DOCKER_BIN = fx.fakeDocker;
+  // DSH: the fake CLI keeps its sessions under this home, and the adapter
+  // mounts it as the runtime's opaque native state, so a containerized
+  // fake run native-resumes exactly like the real one.
+  process.env.AGENTFABRIC_DSH_BIN = fx.fakeDsh;
+  process.env.DSH_HOME = fx.dshHome;
   process.env.FAKE_DOCKER_LOG = fx.dockerLog;
   // Isolated per-test codex state: session store + threads fixture live in
   // the fixtures dir unless a test overrides them.
@@ -190,6 +207,7 @@ export async function freshHarness(opts?: { completionFactory?: CompletionFactor
   registry.register(piAdapter);
   registry.register(codexAdapter);
   registry.register(claudeCodeAdapter);
+  registry.register(dshAdapter);
   await seedDefaults(store);
   // Suites exercise run semantics: mark the seeded runtimes usable for
   // tasks so tests target run behavior, not the product's usability

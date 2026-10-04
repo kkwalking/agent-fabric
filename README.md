@@ -765,11 +765,45 @@ Checkpoint 模型不可用（未配置 provider/model、调用失败、回答不
 | `pi` | 本地 + 容器 | AgentFabric Provider / Model | `pi --session <id>` |
 | `codex` | 仅本地 | harness-native（ChatGPT 登录） | `codex exec resume <id>` |
 | `claude-code` | 仅本地 | harness-native（Claude.ai 登录） | `claude --resume <id>` |
-| `dsh` | 仅本地 | harness-native（DeepSeek 账号） | `--session-id <id>`（受限，见下） |
+| `dsh` | 本地 + 容器 | harness-native（DeepSeek 账号） | `--session-id <id>`（受限，见下） |
 | `docker` | 容器 | — | — |
 | `mock` | 本地 | — | — |
 
-OpenCode / Pi 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` 可覆盖）。容器化 OpenCode 默认使用官方镜像 `ghcr.io/anomalyco/opencode`；容器化 Pi 没有官方镜像，未配置镜像（`runtime.image` 或 `AGENTFABRIC_PI_IMAGE`）时**拒绝启动**并提示契约——参考镜像见 `docker/pi.Dockerfile`。镜像默认以 ENTRYPOINT 为 harness；无 entrypoint 的镜像可设 `runtime.config.containerCommand`。
+OpenCode / Pi / DSH 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` / `AGENTFABRIC_DSH_BIN` 可覆盖）。**三个容器化 Runtime 都必须显式配置镜像**（`runtime.image`，或用 `AGENTFABRIC_OPENCODE_IMAGE` / `AGENTFABRIC_PI_IMAGE` / `AGENTFABRIC_DSH_IMAGE` 覆盖），未配置时**拒绝启动**并提示契约——参考镜像见 `docker/` 下的三个 Dockerfile，一次构建全部：
+
+```bash
+bash scripts/build-harness-images.sh            # 或只构建一部分：… opencode / … pi / … dsh
+af runtimes add "OpenCode (containerized)"  --kind opencode --isolated --image agentfabric-opencode:latest
+af runtimes add "Pi Agent (containerized)"  --kind pi       --isolated --image agentfabric-pi:latest
+af runtimes add "DSH (containerized)"       --kind dsh      --isolated --image agentfabric-dsh:latest
+```
+
+镜像默认以 ENTRYPOINT 为 harness；无 entrypoint 的镜像可设 `runtime.config.containerCommand`。
+
+**容器化 Harness 的认证在容器内解析，与宿主无关**：宿主是否装了 CLI、是否登录过，不决定容器里的 Run 能不能跑（宿主侧的可用性探测只作用于本地执行）；容器缺凭据时由 Harness 自己在 Run 内报错（DSH 报 `MISSING_CREDENTIAL`）。因此容器化 Runtime 的凭据要么预置进它挂载的 Native State，要么通过 Runtime env / Secrets 注入。
+
+## 容器化 Runtime 镜像
+
+`docker/` 下的 Dockerfile 是各 Harness 的参考镜像，都满足同一条 **Harness Execution Contract**（`docs/harness-image-contract.md`）：Harness CLI 已安装、ENTRYPOINT 就是 Harness、Workspace 挂到 `/workspace`、Native State 挂在各自约定路径、stdout 输出该 Harness 的协议、Native Resume 参数可用，以及 **python3 与 curl 可用**。
+
+| 镜像 | Kind | Native State 挂载点 | 说明 |
+| --- | --- | --- | --- |
+| `agentfabric-opencode:latest` | `opencode` | `/root/.local/share/opencode` | `docker/opencode.Dockerfile`；派生自官方镜像 |
+| `agentfabric-pi:latest` | `pi` | `/root/.pi` | `docker/pi.Dockerfile`；无官方镜像 |
+| `agentfabric-dsh:latest` | `dsh` | `/root/.dsh` | `docker/dsh.Dockerfile`；无官方镜像 |
+
+**为什么 OpenCode 也要自建**：官方镜像 `ghcr.io/anomalyco/opencode` 是只带 ripgrep 的极简 Alpine 构建，**没有 python3 也没有 curl**，不满足契约第 7 条。`docker/opencode.Dockerfile` 从它派生，只 `apk add python3 curl`，ENTRYPOINT 与其它一切都不动。基础镜像用 `--build-arg OPENCODE_BASE=<镜像>` 可换（内网 mirror 或固定 tag）。
+
+```bash
+bash scripts/build-harness-images.sh            # 构建 pi + dsh（AGENTFABRIC_IMAGE_TAG_PREFIX 可改前缀）
+```
+
+`docker/dsh.Dockerfile` 有两个 DSH 特有的取舍，改动前值得先读：
+
+* **镜像里不预置 profile**。DSH 把 `$DSH_HOME/profiles/<name>` 与 sessions、credentials 放在同一个 home 下，而 AgentFabric 把整个 `/root/.dsh` 当作该 Runtime 的 Opaque Native State 挂进去——镜像里烤进去的 profile 目录每次 Run 都会被挂载遮蔽。DSH 会在首次使用时自行重建缺失的 headless profile，且 headless bundle 从全局安装解析，所以构建期不需要（也不该）执行 `dsh plugin add`。
+* **`dsh` 版本被钉住**。`@deepseek-ai/dsh-headless` 的 `latest` dist-tag 落后于 CLI（对 0.2.x 的 CLI 是 `0.0.1-rc.1`），装上这一对会让 DSH 以 peerDependencies 不兼容为由拒绝该插件。钉住 CLI 版本保证镜像可复现；升级用 `--build-arg DSH_VERSION=<version>`。
+
+容器化 DSH 的原生 resume 与本地一致：Native Session 落在挂载的 Native State 里，容器销毁后用 `--session-id` 恢复。
 
 ### 事件映射与 Usage
 
@@ -799,11 +833,13 @@ Claude Code 官方只提供 `--resume <id>`（无 list 命令），因此发现�
 
 ### DSH Headless
 
-DSH 官方 headless bundle（`@deepseek-ai/dsh-headless`）提供完整的无头运行契约。认证与凭据是 harness-native，可用性检测只看 `dsh --version`、headless profile 目录与 DSH 凭据文件的**存在性**，从不读取凭据内容；缺件时报错带补救命令（安装 CLI / `dsh plugin --profile headless add @deepseek-ai/dsh-headless` / 终端登录一次）。
+DSH 官方 headless bundle（`@deepseek-ai/dsh-headless`）提供完整的无头运行契约。认证与凭据是 harness-native，本地执行的可用性检测只看 `dsh --version`、headless profile 目录与 DSH 凭据文件的**存在性**，从不读取凭据内容；缺件时报错带补救命令（安装 CLI / `dsh plugin --profile headless add @deepseek-ai/dsh-headless` / 终端登录一次）。
 
 `--session-id` 采纳 DSH 持久化的 Session，但 headless 的组成里没有 agent preset，DSH 的采纳校验因此**拒绝一切带 preset 的会话**——即 Desktop / Web surface 建的全部会话；同时也拒绝子代理/分叉会话，以及记录 cwd 与本次运行工作目录不一致的会话。这些校验全部由 DSH 自己在任务开始前强制执行，AgentFabric 原样透传其报错。所以 DSH 会话的完整图景是：Desktop/Web 会话——发现、读取、接管收历史，继续时走 Handoff 或其他 Runtime；只有 headless 自己建的会话能被 `--session-id` 原生续跑。
 
-DSH 没有官方运行镜像，容器化执行在未配置 `image` 时拒绝启动（原生状态挂载点 `/root/.dsh`）；没有 headless 侧的系统提示词 flag，Agent Profile 的系统指令以前置块拼进任务文本交付（与 Codex 同法）。
+DSH 没有官方运行镜像，容器化执行需自备镜像（参考 `docker/dsh.Dockerfile`，原生状态挂载点 `/root/.dsh`）：容器内自带 CLI 与 headless profile，宿主侧的 CLI / profile / 凭据检测不参与容器化 Run 的判定。容器里的凭据要么是预置进 Native State 的 DSH 自己的 `.credentials.yaml`，要么通过 Runtime env / Secrets 注入（如 `DEEPSEEK_API_KEY`）；两者都没有时 DSH 在 Run 内报 `MISSING_CREDENTIAL` 并以退出码 1 结束。**turn 内的失败**（凭据缺失、provider 报错等）DSH 仍然会发 `final`，因此失败原因只出现在 `turn_end` 的 reason 里——适配器把它转成 `runtime.error`（保留 DSH 自己的 message 与 code），Run 不会只剩一个裸退出码。
+
+DSH 没有 headless 侧的系统提示词 flag，Agent Profile 的系统指令以前置块拼进任务文本交付（与 Codex 同法）。
 
 ### 系统指令交付
 
@@ -982,8 +1018,9 @@ packages/
   server/    Express REST API + SSE + 静态 Web UI 托管
   cli/       af 命令行（对接 REST API）
   web/       React + Vite Web UI
-docker/      pi.Dockerfile（容器化 Pi 的参考镜像）
-scripts/     e2e-v11.sh（Project Coding Task 生命周期的端到端验证脚本）
+docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
+docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）
+scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
 ```
 
@@ -991,9 +1028,9 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 
 * 成本为内置价格表的估算值；harness-native Runtime 只采用 CLI 自报成本，绝不按 API 定价估算套餐 Run 成本。
 * 持久化使用 JSON 文件，面向单机部署。
-* Codex / Claude Code / DSH 仅支持本地执行，容器化被明确拒绝。
+* Codex / Claude Code 仅支持本地执行，容器化被明确拒绝。
 * ZCode 只有本地会话探测（读 `~/.zcode/cli/db/db.sqlite`），没有运行适配器——接管后继续执行会明确报错，跨 Harness 用 Handoff。
-* DSH 没有官方容器镜像，容器化执行需自备镜像。
+* DSH 没有官方容器镜像，容器化执行需自备镜像（参考 `docker/dsh.Dockerfile`）；Pi 同理（`docker/pi.Dockerfile`）。两者都不会自动构建镜像，也不会回退到普通 node 镜像——未配置 `runtime.image` 时拒绝启动。
 * Network `allowedHosts` / `blockedHosts` 与 Filesystem `allowedPaths` / `deniedPaths` 未做细粒度强制（仅支持整体开关与只读挂载）。
 * Agent Profiles 的 Web UI 入口未开放（API 与 CLI 可用）。
 * Workspace 的 Snapshot / Fork / Diff 等高级能力未提供（Managed Workspace 的 Lock 已提供）。
@@ -1049,3 +1086,5 @@ AGENTFABRIC_REAL_INTEGRATION=1 npm test -w @agentfabric/core
 #       AGENTFABRIC_REAL_DEEPSEEK_KEY / DEEPSEEK_API_KEY（Pi 模型调用）
 #       AGENTFABRIC_OPENCODE_AUTH_JSON（OpenCode 容器认证，缺省复用本机 auth.json）
 ```
+
+容器化 Pi / DSH 的镜像用 `bash scripts/build-harness-images.sh` 构建（`docker/pi.Dockerfile` / `docker/dsh.Dockerfile`，契约见 `docs/harness-image-contract.md`）。离线测试用 fake harness 覆盖同一条路径（`packages/core/src/v3.test.ts` 的 dsh 用例：无镜像拒绝 → 真进容器 → 跨容器销毁 Native Resume），不需要 Docker 与真实凭据。

@@ -114,6 +114,29 @@ async function ensurePiImage(): Promise<string | undefined> {
 const piImage = enabled && dockerOk && key ? await ensurePiImage() : undefined;
 
 /**
+ * opencode runtime image: prebuilt via env, or built from the reference
+ * Dockerfile. The official image alone is not enough — it ships neither
+ * python3 nor curl, so the contract image derives from it.
+ */
+async function ensureOpenCodeImage(): Promise<string | undefined> {
+  if (process.env.AGENTFABRIC_OPENCODE_IMAGE) return process.env.AGENTFABRIC_OPENCODE_IMAGE;
+  if (!dockerOk) return undefined;
+  const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+  const tag = "agentfabric-opencode-itest:latest";
+  try {
+    await exec(
+      "docker",
+      ["build", "-t", tag, "-f", join(repoRoot, "docker", "opencode.Dockerfile"), join(repoRoot, "docker")],
+      { timeout: 10 * 60_000 }
+    );
+    return tag;
+  } catch {
+    return undefined;
+  }
+}
+const opencodeImage = enabled && dockerOk ? await ensureOpenCodeImage() : undefined;
+
+/**
  * Gate for node:test's skip option: `false` means run (an empty string
  * would be treated as a skip reason by the runner).
  */
@@ -316,13 +339,14 @@ test("REAL: opencode local native resume continues Run #1's context (v3 §20/§2
 /* OpenCode Docker Native Resume (v3 §20 / §23)                        */
 /* ------------------------------------------------------------------ */
 
-test("REAL: opencode docker native resume across destroyed containers (v3 §20/§23)", { skip: gate(dockerOk && Boolean(opencodeAuthJson()), "docker daemon + opencode auth") }, async () => {
+test("REAL: opencode docker native resume across destroyed containers (v3 §20/§23)", { skip: gate(dockerOk && Boolean(opencodeAuthJson()) && Boolean(opencodeImage), "docker daemon + opencode auth + runtime image") }, async () => {
   const h = await realHarness();
   const ws = await h.workspaces.create({ name: "oc-docker-real", type: "local", path: mkdtempSync(join(tmpdir(), "af-ws-")) });
   const runtime = await h.runtimes.create({
     name: "oc-docker-real",
     kind: "opencode",
-    containerized: true, // default image: ghcr.io/anomalyco/opencode (v3 §11)
+    containerized: true,
+    image: opencodeImage!, // built from docker/opencode.Dockerfile (v3 §11)
   });
 
   // Pre-provision auth inside the opaque native state the container

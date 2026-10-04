@@ -17,7 +17,7 @@ export {
   opencodeContainerizedCapabilities,
   opencodeBin,
   opencodeImage,
-  OPENCODE_DEFAULT_IMAGE,
+  OPENCODE_IMAGE_CONTRACT_HINT,
 } from "./opencode.js";
 export {
   providerSlug,
@@ -86,12 +86,14 @@ export {
   dshAdapter,
   dshCapabilities,
   dshBin,
+  dshImage,
   dshAuthStatus,
   mapDshEvent,
   extractDshSessionRef,
   parseDshUsage,
   newDshEventMapperState,
   dshHeadlessProfileDir,
+  DSH_IMAGE_CONTRACT_HINT,
 } from "./dsh.js";
 export {
   dshThreadSource,

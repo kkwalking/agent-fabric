@@ -138,12 +138,12 @@ test("effective capabilities reflect the containerized execution backend (v2 §1
 
   // The real harness adapters now declare containerized parity — truthfully,
   // because the backend streams raw output to the adapter and mounts state.
-  // (Pi needs an explicit image per v3 §10; OpenCode falls back to its
-  // maintained official default image per v3 §11.)
+  // Both pi and opencode need an explicit image (v3 §10/§11): neither has a
+  // default that satisfies the Harness Execution Contract.
   for (const adapter of [opencodeAdapter, piAdapter]) {
     const caps = effectiveCapabilities(
       adapter,
-      { kind: adapter.kind, containerized: true, ...(adapter.kind === "pi" ? { image: "fake/pi:1" } : {}) } as any
+      { kind: adapter.kind, containerized: true, image: `fake/${adapter.kind}:1` } as any
     );
     assert.equal(caps.supportsNativeSession, true, `${adapter.kind} keeps native sessions behind docker`);
     assert.equal(caps.supportsNativeResume, true, `${adapter.kind} keeps native resume behind docker`);
@@ -152,9 +152,10 @@ test("effective capabilities reflect the containerized execution backend (v2 §1
   // Containerized pi without an image cannot run (v3 §10 plan A).
   const piNoImage = effectiveCapabilities(piAdapter, { kind: "pi", containerized: true } as any);
   assert.equal(piNoImage.supportsNativeResume, false);
-  // Containerized opencode defaults to the maintained official image.
-  const ocDefault = effectiveCapabilities(opencodeAdapter, { kind: "opencode", containerized: true } as any);
-  assert.equal(ocDefault.supportsNativeResume, true);
+  // Containerized opencode without an image cannot run either (v3 §10):
+  // the official image lacks python3/curl, so it is not a valid default.
+  const ocNoImage = effectiveCapabilities(opencodeAdapter, { kind: "opencode", containerized: true } as any);
+  assert.equal(ocNoImage.supportsNativeResume, false);
 });
 
 /* ------------------------------------------------------------------ */

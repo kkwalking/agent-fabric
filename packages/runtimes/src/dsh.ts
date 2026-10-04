@@ -65,6 +65,18 @@ export function dshBin(): string {
   return process.env.AGENTFABRIC_DSH_BIN ?? "dsh";
 }
 
+/** Container image override for containerized DSH (v3 §10, plan A). */
+export function dshImage(): string | undefined {
+  return process.env.AGENTFABRIC_DSH_IMAGE;
+}
+
+/** Where the DSH Dockerfile reference lives (see docs/harness-image-contract.md). */
+export const DSH_IMAGE_CONTRACT_HINT =
+  "Containerized DSH requires a DSH Runtime Image (a container whose entrypoint is the dsh CLI with its state " +
+  "under /root/.dsh). Configure `image` on the runtime or set AGENTFABRIC_DSH_IMAGE. " +
+  "A reference Dockerfile is provided at docker/dsh.Dockerfile in the AgentFabric repository " +
+  "( Harness Execution Contract: docs/harness-image-contract.md ).";
+
 /** $DSH_HOME resolution mirrors the harness's own launcher. */
 function dshHome(): string {
   return process.env.DSH_HOME ?? join(homedir(), ".dsh");
@@ -95,11 +107,13 @@ export const dshCapabilities: Partial<RuntimeCapability> = {
 };
 
 /**
- * Containerized DSH has no official runtime image; without a configured
- * `image` the effective-capability computation narrows these to "cannot
- * run" and the adapter refuses to start (same contract as pi, v3 §10).
- * The opaque native state (~/.dsh: sessions, profiles, credentials) is
- * what must be mounted for Containerized Native Resume.
+ * Containerized DSH runs the same headless runner inside a runtime image,
+ * with the opaque native state (~/.dsh: sessions, profiles, credentials)
+ * bind-mounted at the same path — so native resume keeps working across
+ * container destruction. There is no official DSH image, so a run without
+ * a configured `image` is refused: the effective-capability computation
+ * also narrows these declarations to "cannot run" in that case (same
+ * contract as pi, v3 §10).
  */
 export const dshNativeStateMountPath = "/root/.dsh";
 
@@ -164,7 +178,7 @@ export function mapDshEvent(
             parseDshUsage so it is not duplicated here ---- */
     case "status": {
       const phase = typeof evt.phase === "string" ? evt.phase : "unknown";
-      return {
+      const progress: RunEvent = {
         ...base,
         type: "run.progress",
         level: "debug",
@@ -176,6 +190,29 @@ export function mapDshEvent(
           ...(evt.reason && typeof evt.reason === "object" ? { reason: evt.reason } : {}),
         },
       };
+      // A failure *inside* a turn still ends with a `final` event, so the
+      // turn_end reason is the only place the real diagnosis appears —
+      // without surfacing it here the run would fail with a bare exit
+      // code. The reason keeps DSH's own message and code.
+      const reason = evt.reason as { kind?: unknown; error?: { message?: unknown; code?: unknown } } | undefined;
+      if (phase === "turn_end" && reason?.kind === "error") {
+        const detail = reason.error?.message;
+        const code = reason.error?.code;
+        return [
+          progress,
+          {
+            ...base,
+            type: "runtime.error",
+            level: "error",
+            source: "dsh",
+            data: {
+              error: typeof detail === "string" && detail.trim() ? detail : raw,
+              ...(typeof code === "string" && code ? { code } : {}),
+            },
+          },
+        ];
+      }
+      return progress;
     }
 
     case "thinking": {
@@ -417,28 +454,37 @@ export const dshAdapter: AgentRuntimeAdapter = {
   // No providerCompatibility on purpose: DSH runs on its own account;
   // declaring an empty one would silence the orchestrator's warning while
   // claiming structure it does not have.
-  // No defaultImage on purpose: no official DSH runtime image exists; a
-  // plain node image would silently break native resume.
+  // No defaultImage on purpose: no official DSH runtime image exists, so
+  // containerized runs name one explicitly (see dshImage and
+  // DSH_IMAGE_CONTRACT_HINT); a plain node image would silently break
+  // native resume.
 
   async run(ctx: RuntimeContext): Promise<RuntimeResult> {
-    if (ctx.runtime.containerized && !ctx.runtime.image) {
-      const message =
-        "Containerized DSH requires a DSH Runtime Image (a container whose entrypoint is the dsh CLI with " +
-        "its state under /root/.dsh). Configure `image` on the runtime.";
-      await ctx.emit("runtime.error", { error: message, backend: "docker", source: "dsh" }, { level: "error" });
-      return { error: `Containerized DSH refused to start: ${message}` };
-    }
-    // Fail fast with an actionable message when the harness's own login
-    // or the headless profile is missing (v6 §2).
-    const auth = await dshAuthStatus();
-    if (!auth.installed || !auth.loggedIn) {
-      const message = auth.hint ?? "DSH CLI is not available";
-      await ctx.emit(
-        "runtime.error",
-        { error: message, source: "dsh", installed: auth.installed, loggedIn: auth.loggedIn },
-        { level: "error" }
-      );
-      return { error: message };
+    // Containerized runs execute the harness inside the image, so the
+    // host's dsh install, profile and credentials say nothing about what
+    // the container has. The host precheck below is therefore local-only:
+    // a container reports its own missing credential loudly (DSH's
+    // MISSING_CREDENTIAL on turn_end), which the mapper surfaces as a
+    // runtime.error.
+    if (ctx.runtime.containerized) {
+      const image = ctx.runtime.image ?? dshImage();
+      if (!image) {
+        await ctx.emit("runtime.error", { error: DSH_IMAGE_CONTRACT_HINT, backend: "docker", source: "dsh" }, { level: "error" });
+        return { error: `Containerized DSH refused to start: ${DSH_IMAGE_CONTRACT_HINT}` };
+      }
+    } else {
+      // Fail fast with an actionable message when the harness's own login
+      // or the headless profile is missing (v6 §2).
+      const auth = await dshAuthStatus();
+      if (!auth.installed || !auth.loggedIn) {
+        const message = auth.hint ?? "DSH CLI is not available";
+        await ctx.emit(
+          "runtime.error",
+          { error: message, source: "dsh", installed: auth.installed, loggedIn: auth.loggedIn },
+          { level: "error" }
+        );
+        return { error: message };
+      }
     }
 
     const state = newDshEventMapperState();
@@ -454,7 +500,7 @@ export const dshAdapter: AgentRuntimeAdapter = {
       args: buildArgs(ctx),
       prompt,
       source: "dsh",
-      image: ctx.runtime.image,
+      image: ctx.runtime.image ?? dshImage(),
       workspaceContainerPath: "/workspace",
       mapLine: (raw, runId, seq) => mapDshEvent(raw, runId, seq, state),
       extractSessionRef: extractDshSessionRef,
@@ -478,7 +524,7 @@ export const dshAdapter: AgentRuntimeAdapter = {
       cli: dshBin(),
       profile: "headless",
       credentialSource: "harness-native",
-      executionBackend: "local",
+      requiresImageWhenContainerized: true,
     };
   },
 };

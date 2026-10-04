@@ -17,7 +17,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dockerCalls, freshHarness, makeFixtures, useBins, waitForRun, type Harness } from "./testkit.js";
@@ -538,25 +538,219 @@ test("AGENTFABRIC_PI_IMAGE provides the containerized pi image (v3 §10)", async
   }
 });
 
-test("containerized opencode defaults to the maintained official image (v3 §11)", async () => {
+test("containerized opencode without an image refuses to run and names the contract (v3 §10/§11)", async () => {
   const fx = makeFixtures();
-  const restore = useBins(fx);
+  // Unset image overrides so the no-image policy is actually exercised
+  // even when the outer environment provides a default opencode image.
+  const restore = useBins(fx, {}, ["AGENTFABRIC_OPENCODE_IMAGE"]);
   try {
     const h = await freshHarness();
     const ws = await h.workspaces.create({ name: "ws", type: "local", path: mkdtempSync(join(tmpdir(), "af-ws-")) });
     const runtime = await h.runtimes.create({
-      name: "oc-default-image",
+      name: "oc-no-image",
+      kind: "opencode",
+      containerized: true,
+      config: { containerCommand: ["node", fx.fakeOpenCode] },
+    });
+
+    const { task, run } = await h.runService.submit({ prompt: "should refuse", runtimeId: runtime.id, workspaceId: ws.id });
+    const finished = await waitForRun(h.runService, run.id);
+    assert.equal(finished.status, "failed");
+    assert.match(finished.error ?? "", /OpenCode Runtime Image/);
+    assert.match(finished.error ?? "", /docker\/opencode\.Dockerfile/);
+    assert.ok(
+      (await h.runService.events(run.id)).some(
+        (e) => e.type === "runtime.error" && String(e.data?.error ?? "").includes("OpenCode Runtime Image")
+      )
+    );
+
+    // Without a usable image the runtime must not claim native resume.
+    const options = h.runService.continueOptions(task.id);
+    assert.equal(options.resumeAvailable, false);
+    assert.ok(dockerCalls(fx).every((c) => !c.includes("run")), "no container was started");
+  } finally {
+    restore();
+  }
+});
+
+test("AGENTFABRIC_OPENCODE_IMAGE provides the containerized opencode image (v3 §11)", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx, { AGENTFABRIC_OPENCODE_IMAGE: "env/opencode:9" });
+  try {
+    const h = await freshHarness();
+    const ws = await h.workspaces.create({ name: "ws", type: "local", path: mkdtempSync(join(tmpdir(), "af-ws-")) });
+    const runtime = await h.runtimes.create({
+      name: "oc-env-image",
       kind: "opencode",
       containerized: true,
       config: { containerCommand: ["node", fx.fakeOpenCode] },
     });
     const { run } = await h.runService.submit({ prompt: "p", runtimeId: runtime.id, workspaceId: ws.id });
     const finished = await waitForRun(h.runService, run.id);
-    assert.equal(finished.status, "completed");
-    const call = dockerCalls(fx).find((c) => c.includes("ghcr.io/anomalyco/opencode"));
-    assert.ok(call, "the default image is the current official opencode image");
-    // The stale image name must not be used anywhere.
+    assert.equal(finished.status, "completed", finished.error);
+    assert.ok(dockerCalls(fx).some((c) => c.includes("env/opencode:9")));
+    // The stale official image name must not be used anywhere.
     assert.ok(dockerCalls(fx).every((c) => !c.some((a) => String(a).includes("ghcr.io/sst/opencode"))));
+  } finally {
+    restore();
+  }
+});
+
+test("containerized dsh without an image refuses to run and names the contract (v3 §10)", async () => {
+  const fx = makeFixtures();
+  // Unset image overrides so the no-image policy is actually exercised
+  // even when the outer environment provides a default DSH image.
+  const restore = useBins(fx, {}, ["AGENTFABRIC_DSH_IMAGE"]);
+  try {
+    const h = await freshHarness();
+    const ws = await h.workspaces.create({ name: "ws", type: "local", path: mkdtempSync(join(tmpdir(), "af-ws-")) });
+    const runtime = await h.runtimes.create({
+      name: "dsh-no-image",
+      kind: "dsh",
+      containerized: true,
+      config: { containerCommand: ["node", fx.fakeDsh] },
+    });
+
+    const { task, run } = await h.runService.submit({ prompt: "should refuse", runtimeId: runtime.id, workspaceId: ws.id });
+    const finished = await waitForRun(h.runService, run.id);
+    assert.equal(finished.status, "failed");
+    assert.match(finished.error ?? "", /DSH Runtime Image/);
+    assert.match(finished.error ?? "", /docker\/dsh\.Dockerfile/);
+    assert.ok(
+      (await h.runService.events(run.id)).some(
+        (e) => e.type === "runtime.error" && String(e.data?.error ?? "").includes("DSH Runtime Image")
+      )
+    );
+
+    // Without a usable image the runtime must not claim native resume.
+    const options = h.runService.continueOptions(task.id);
+    assert.equal(options.resumeAvailable, false);
+    assert.ok(dockerCalls(fx).every((c) => !c.includes("run")), "no container was started");
+  } finally {
+    restore();
+  }
+});
+
+test("AGENTFABRIC_DSH_IMAGE provides the containerized dsh image (v3 §10)", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx, { AGENTFABRIC_DSH_IMAGE: "env/dsh:9" });
+  try {
+    const h = await freshHarness();
+    const ws = await h.workspaces.create({ name: "ws", type: "local", path: mkdtempSync(join(tmpdir(), "af-ws-")) });
+    const runtime = await h.runtimes.create({
+      name: "dsh-env-image",
+      kind: "dsh",
+      containerized: true,
+      // The key travels as runtime env, which the container receives.
+      env: { DEEPSEEK_API_KEY: "test-key" },
+      config: { containerCommand: ["node", fx.fakeDsh] },
+    });
+    const { run } = await h.runService.submit({ prompt: "p", runtimeId: runtime.id, workspaceId: ws.id });
+    const finished = await waitForRun(h.runService, run.id);
+    assert.equal(finished.status, "completed", finished.error);
+    assert.ok(dockerCalls(fx).some((c) => c.includes("env/dsh:9")));
+  } finally {
+    restore();
+  }
+});
+
+/**
+ * The host-side auth precheck (`dsh --version` + profile + credentials on
+ * the AgentFabric host) says nothing about what a runtime image contains,
+ * so a containerized run must not be gated on it: the container reports
+ * its own missing credential. The fake dsh here has no credentials file
+ * and no key, so the run fails for the container's reason — not because
+ * the host lacks a DSH login.
+ */
+test("containerized dsh is not gated on the host's own dsh login (v3 §10)", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx, {}, ["AGENTFABRIC_DSH_IMAGE", "DEEPSEEK_API_KEY"]);
+  try {
+    const h = await freshHarness();
+    const ws = await h.workspaces.create({ name: "ws", type: "local", path: mkdtempSync(join(tmpdir(), "af-ws-")) });
+    const runtime = await h.runtimes.create({
+      name: "dsh-containerized",
+      kind: "dsh",
+      containerized: true,
+      image: "fake/dsh:1",
+      config: { containerCommand: ["node", fx.fakeDsh] },
+    });
+
+    const { run } = await h.runService.submit({ prompt: "p", runtimeId: runtime.id, workspaceId: ws.id });
+    const finished = await waitForRun(h.runService, run.id);
+    // The container really started (the host gate did not short-circuit),
+    // and the failure is DSH's own in-turn credential error from inside
+    // it — surfaced from turn_end, not a bare exit code.
+    assert.ok(dockerCalls(fx).some((c) => c.includes("fake/dsh:1")), "the container ran");
+    assert.equal(finished.status, "failed");
+    assert.match(finished.error ?? "", /no API key for provider route/, `container's own failure, got: ${finished.error}`);
+    assert.doesNotMatch(finished.error ?? "", /DSH CLI is not available/, "the host precheck did not gate the run");
+    assert.ok(
+      (await h.runService.events(run.id)).some(
+        (e) => e.type === "runtime.error" && e.data?.code === "MISSING_CREDENTIAL"
+      ),
+      "DSH's own error code is preserved on the event"
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("containerized dsh native-resumes across destroyed containers (v3 §10/§19)", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  try {
+    const h = await freshHarness();
+    const ws = await h.workspaces.create({ name: "ws", type: "local", path: mkdtempSync(join(tmpdir(), "af-ws-")) });
+    const runtime = await h.runtimes.create({
+      name: "dsh-containerized",
+      kind: "dsh",
+      containerized: true,
+      image: "fake/dsh:1",
+      config: { containerCommand: ["node", fx.fakeDsh] },
+    });
+
+    // Pre-provision DSH's own credential store inside the opaque native
+    // state the container mounts at $DSH_HOME — the same shape the real
+    // harness reads (existence is the only signal AgentFabric inspects).
+    const seeded = await h.nativeStates.ensureForRuntime((await h.runtimes.get(runtime.id))!, "/root/.dsh");
+    writeFileSync(join(seeded.path, ".credentials.yaml"), "version: 1\nrefs: {}\nrecords: {}\n");
+
+    const { task, run } = await h.runService.submit({ prompt: "Remember NEBULA-5", runtimeId: runtime.id, workspaceId: ws.id });
+    const first = await waitForRun(h.runService, run.id);
+    assert.equal(first.status, "completed", first.error);
+    assert.ok(first.containerId, "ran inside a container");
+
+    // The native session reference is captured from the container stream
+    // and the opaque native state really holds the session log.
+    const ref = h.runtimeSessions.list({ taskId: task.id })[0];
+    assert.ok(ref, "native session reference captured from the container stream");
+    assert.ok(ref.nativeSessionRef?.startsWith("session-"), `dsh session ids are session--prefixed, got ${ref.nativeSessionRef}`);
+    assert.equal(ref.executionBackend, "docker");
+    const state = h.nativeStates.get(ref.nativeStateId!)!;
+    assert.equal(state.mountPath, "/root/.dsh");
+    assert.ok(existsSync(join(state.path, "sessions")), "session persisted in the opaque native state");
+    assert.ok((first.usage?.inputTokens ?? 0) > 0, "usage survived the container boundary");
+
+    // Run #2: a NEW container reattaches workspace + state and resumes.
+    const cont = await h.runService.continueTask(task.id, { prompt: "What was the secret word?" });
+    assert.equal(cont.continuity, "resume");
+    const second = await waitForRun(h.runService, cont.run.id);
+    assert.equal(second.status, "completed", second.error);
+    assert.notEqual(second.containerId, first.containerId, "containers are disposable — a new one ran Run #2");
+    assert.equal(second.nativeStateId, state.id, "Run #2 reattached the exact native state");
+
+    const messages = (await h.runService.events(cont.run.id))
+      .filter((e) => e.type === "agent.message")
+      .map((e) => String(e.data?.content ?? ""))
+      .join("\n");
+    assert.match(messages, /NEBULA-5/, "containerized dsh resume continues Run #1's context");
+
+    // The image the runtime named is what ran, with the native state and
+    // workspace mounted at the contract paths.
+    const run2 = dockerCalls(fx).filter((c) => c.includes("fake/dsh:1")).pop()!;
+    assert.ok(run2.includes(`${state.path}:/root/.dsh:rw`), "native state reattached at the DSH home path");
+    assert.ok(run2.some((a, i) => a === "-v" && String(run2[i + 1]).endsWith(":/workspace:rw")), "workspace mounted");
   } finally {
     restore();
   }

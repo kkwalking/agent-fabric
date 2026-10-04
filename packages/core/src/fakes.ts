@@ -203,6 +203,111 @@ emit("tool_use", { part: { type: "tool", callID: "call_1", tool: "bash", state: 
 emit("step_finish", { part: { type: "step-finish", reason: "stop", cost: 0.0031, tokens: { total: 2450, input: 1200, output: 300, reasoning: 50, cache: { read: 800, write: 100 } } } });
 `;
 
+/**
+ * Fake dsh CLI implementing the verified headless wire protocol
+ * (`dsh --profile headless --json [--session-id <id>] -- <task>`):
+ * a `session` opener, `status` turn/step phases with per-step usage,
+ * committed `text`/`thinking` messages, `tool_call`/`tool_result` pairs
+ * and a terminal `final`; failures raised inside a turn end with
+ * `turn_end` reason + exit 1, like the real runner.
+ *
+ * Sessions are persisted under $DSH_HOME/sessions/<encoded-cwd>/<id>/,
+ * mirroring DSH's own layout, and `--session-id` adopts an id only when
+ * that log exists — an unknown id fails before the task runs, exactly as
+ * DSH does. Credential handling mirrors the harness too: with no
+ * .credentials.yaml in $DSH_HOME and no DEEPSEEK_API_KEY in the
+ * environment, the run reports MISSING_CREDENTIAL and exits 1, so
+ * containerized auth failures are testable offline.
+ */
+export const FAKE_DSH_SCRIPT = `#!/usr/bin/env node
+import { mkdirSync, existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const args = process.argv.slice(2);
+
+// E2E observability (v4 §26–§29): dump what the harness process actually
+// received — env (whitelisted), argv and cwd.
+if (process.env.FAKE_HARNESS_DUMP) {
+  appendFileSync(process.env.FAKE_HARNESS_DUMP, JSON.stringify({
+    harness: "dsh",
+    argv: args,
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) =>
+      !["PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR", "PWD", "OLDPWD", "SHLVL", "LANG", "TERM", "_"].includes(k) && !k.startsWith("npm_") && !k.startsWith("NPM_"))),
+    cwd: process.cwd(),
+  }) + "\\n");
+}
+
+if (args.includes("--version")) {
+  console.log("0.2.0-fake");
+  process.exit(0);
+}
+
+const sleepMs = Number(process.env.FAKE_DSH_SLEEP_MS ?? 0);
+if (sleepMs > 0) await new Promise((r) => setTimeout(r, Math.min(sleepMs, 60_000)));
+
+// The task is the positional after "--" (real dsh reads it as the task).
+const sep = args.indexOf("--");
+const prompt = sep !== -1 ? (args[sep + 1] ?? "") : "";
+const sessionIdx = args.indexOf("--session-id");
+const resumeId = sessionIdx !== -1 ? args[sessionIdx + 1] : undefined;
+
+const home = process.env.DSH_HOME ?? join(process.env.HOME ?? "/tmp", ".dsh");
+// Same layout as the real store: <encoded-cwd>/<session-id>/session.jsonl.
+const cwdSlug = "--" + process.cwd().replace(/^\\//, "").replace(/[\\\\/]/g, "-") + "--";
+const sessionDir = join(home, "sessions", cwdSlug);
+const emit = (obj) => console.log(JSON.stringify(obj));
+
+// Credentials are harness-native: DSH's own store, or the provider key in
+// the environment. Neither present => the runner refuses the turn.
+const hasCreds = existsSync(join(home, ".credentials.yaml")) || Boolean(process.env.DEEPSEEK_API_KEY);
+
+let id;
+let entries;
+if (resumeId) {
+  const file = join(sessionDir, resumeId, "session.jsonl");
+  if (!existsSync(file)) {
+    console.error("dsh: session not found: " + resumeId);
+    process.exit(1);
+  }
+  id = resumeId;
+  entries = readFileSync(file, "utf8").split("\\n").filter(Boolean).map((l) => JSON.parse(l));
+  entries.push({ type: "user/message", text: prompt });
+  writeFileSync(file, entries.map((e) => JSON.stringify(e)).join("\\n") + "\\n");
+} else {
+  id = "session-" + Array.from({ length: 36 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");
+  entries = [{ type: "session", id, cwd: process.cwd() }, { type: "user/message", text: prompt }];
+  mkdirSync(join(sessionDir, id), { recursive: true });
+  writeFileSync(join(sessionDir, id, "session.jsonl"), entries.map((e) => JSON.stringify(e)).join("\\n") + "\\n");
+}
+
+emit({ type: "session", sessionId: id, cwd: process.cwd() });
+emit({ type: "status", phase: "turn_start", turn: resumeId ? 2 : 1 });
+emit({ type: "status", phase: "step_start", turn: resumeId ? 2 : 1, step: 1 });
+
+if (!hasCreds) {
+  emit({ type: "status", phase: "step_end", turn: 1, step: 1 });
+  emit({ type: "status", phase: "turn_end", turn: 1, reason: { kind: "error", error: { message: 'no API key for provider route "deepseek-official"', code: "MISSING_CREDENTIAL" } } });
+  emit({ type: "final", text: "" });
+  console.error("dsh: MISSING_CREDENTIAL: no API key for provider route \\"deepseek-official\\"");
+  process.exit(1);
+}
+
+const firstEntry = entries.find((e) => e.type === "user/message");
+const reply = resumeId
+  ? "dsh resumed session " + id + '; prior context: "' + (firstEntry ? firstEntry.text : "") + '"'
+  : "dsh fresh session " + id;
+
+// One tool round, like a real coding turn.
+emit({ type: "tool_call", callId: "call_1", tool: "bash", input: { command: "ls" } });
+emit({ type: "tool_result", callId: "call_1", status: "completed", result: "README.md src" });
+emit({ type: "thinking", text: "listing files first" });
+emit({ type: "text", text: reply });
+emit({ type: "status", phase: "step_end", turn: resumeId ? 2 : 1, step: 1, usage: { inputTokens: 546, outputTokens: 72, totalTokens: 7274, cacheReadTokens: 6656 } });
+emit({ type: "status", phase: "turn_end", turn: resumeId ? 2 : 1, reason: { kind: "completed" } });
+emit({ type: "final", text: reply });
+`;
+
 export const FAKE_DOCKER_SCRIPT = `#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
@@ -226,6 +331,11 @@ function mountsToEnv(volumes) {
     const [host, container] = vol.split(":");
     if (container === "/root/.pi") {
       env.PI_CODING_AGENT_DIR = host + "/agent";
+    } else if (container === "/root/.dsh") {
+      // DSH keeps sessions, profiles and credentials under $DSH_HOME;
+      // mounting the opaque native state there is what makes native
+      // resume survive container destruction.
+      env.DSH_HOME = host;
     } else if (container === "/root/.local/share/opencode") {
       // XDG_DATA_HOME/<opencode> must resolve to the mounted host dir.
       const alt = mkdtempSync(join(tmpdir(), "af-xdg-"));

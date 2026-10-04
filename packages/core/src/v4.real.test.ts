@@ -77,6 +77,29 @@ const opencodeOk = enabled && (await binaryWorks("opencode"));
 const dockerOk = enabled && (await dockerReady());
 const key = enabled ? deepseekKey() : undefined;
 
+/**
+ * opencode runtime image: prebuilt via env, or built from the reference
+ * Dockerfile. The official image alone is not enough — it ships neither
+ * python3 nor curl, so the contract image derives from it.
+ */
+async function ensureOpenCodeImage(): Promise<string | undefined> {
+  if (process.env.AGENTFABRIC_OPENCODE_IMAGE) return process.env.AGENTFABRIC_OPENCODE_IMAGE;
+  if (!dockerOk) return undefined;
+  const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+  const tag = "agentfabric-opencode-itest:latest";
+  try {
+    await exec(
+      "docker",
+      ["build", "-t", tag, "-f", join(repoRoot, "docker", "opencode.Dockerfile"), join(repoRoot, "docker")],
+      { timeout: 10 * 60_000 }
+    );
+    return tag;
+  } catch {
+    return undefined;
+  }
+}
+const opencodeImage = enabled && dockerOk ? await ensureOpenCodeImage() : undefined;
+
 function gate(ready: boolean, missing: string): string | false {
   if (ready) return false;
   if (!enabled) return "set AGENTFABRIC_REAL_INTEGRATION=1 to run real-harness integration tests";
@@ -252,7 +275,7 @@ test(
 
 test(
   "REAL v4 §27: containerized opencode uses the injected provider config",
-  { skip: gate(dockerOk && opencodeOk && Boolean(key), "docker daemon + opencode image pull + DeepSeek key") },
+  { skip: gate(dockerOk && opencodeOk && Boolean(key) && Boolean(opencodeImage), "docker daemon + opencode runtime image + DeepSeek key") },
   async () => {
     const h = await realHarness();
     const provider = await h.providers.create({
@@ -266,7 +289,8 @@ test(
     const runtime = await h.runtimes.create({
       name: "v4-real-oc-docker",
       kind: "opencode",
-      containerized: true, // default image: ghcr.io/anomalyco/opencode
+      containerized: true,
+      image: opencodeImage!, // built from docker/opencode.Dockerfile
     });
 
     const { run } = await h.runService.submit({
