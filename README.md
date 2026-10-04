@@ -113,6 +113,17 @@ Projects 页列出项目并支持创建（名称 / Repository URL / Credential�
 
 `/projects/:id/tasks/new` 是 Project-based Coding Task 的创建页：Instruction、Base ref、Working branch（留空即自动生成 `af/<task>-<slug>`）、Branch mode（new / continue）、Runtime / Model 覆盖、Validation 覆盖。**不需要也不能手工创建 Workspace**。
 
+### New task（`/new`）：Project 优先，Workspace 是高级回退
+
+侧边栏的 **New task** 是同一个 composer 的两种模式，由 **Project 选择器**决定走哪一种——这正是 v11 §39 的第一步（`Select Project`）：
+
+* **Project 模式**（存在 Project 时默认）：先选 Project，再只填这个 Task 真正拥有的决定——Base ref / Working branch / Branch mode / Runtime·Model 覆盖。**没有 Workspace 选择器**：`1 Task = 1 Managed Workspace`（v11 §5.1），工作副本由平台创建，不是用户的选择项。提交走 `POST /api/projects/:id/tasks`。Runtime 列表读 `/api/runtimes/project-eligible`（enabled + usableInTask + sandboxed），与服务端 submit 时的判据一致——界面上不会出现会被拒绝的 Runtime；一个隔离 Runtime 都没有时提前报错并禁用提交，不会静默降级到 Host。
+* **Workspace 模式**（选 `Project: none`）：v11 §5.4 与 hardening §37 要求保留的高级路径（non-project task、Local Runtime、External Workspace）。没有 Project 就没有 codebase 定义，工作副本本身就是用户的决定，因此**这时才出现 Workspace 选择器**。提交走经典 `POST /api/runs`。
+
+两种模式都在创建后落在 **Task Thread**（`/tasks/:id`，v5 §14）：创建完就看到 Agent 在跑，而不是先看到一张状态表。Project Task 的 header 额外给一个 **Lifecycle** 入口进入 `/tasks/:id/lifecycle`（v11 §40）。
+
+Workspace 因此不是被移除，而是被降级：它只在没有 Project 时才是输入项。Project 模式的提交体里不包含 `workspaceId`。
+
 ### Task Lifecycle（`/tasks/:id/lifecycle`）
 
 Task Detail 页面回答「Agent 现在到底在开发、测试、提交，还是 push」：Project / Source、Base Ref 与 Base Commit、Working Branch、Workspace、Current Phase、Agent / Validation / Publish 三个状态、Final Commit、Remote Branch、Validation 每个 step 的输出，以及可用的 Retry（agent / validation / publish）与 Cancel。运行中每 2 秒自动刷新。
@@ -153,7 +164,7 @@ Runs 页每个产生过 native session 的 Run 在操作列提供 **copy session
 
 ### Task 可用的 Runtime（usableInTask）
 
-每个 Runtime 记录带 `usableInTask` 属性：**是否可作为 Task 的执行目标**。可用列表由后端给出——`GET /api/runtimes?usableInTask=true` 返回启用的、允许执行任务的 Runtime，New task 与 Task Thread 页面渲染这个列表（不自行派生）；服务端在 submit / continue 时做同一校验，目标 Runtime 不可用即拒绝（`code: "runtime-not-usable"`），所以前端过滤不可能被 API 绕过。接管（adopt）来的会话不受此限制、照常进入 Task（接管只投影历史、不执行模型），但继续执行时同样要过这道校验。
+每个 Runtime 记录带 `usableInTask` 属性：**是否可作为 Task 的执行目标**。可用列表由后端给出——`GET /api/runtimes?usableInTask=true` 返回启用的、允许执行任务的 Runtime，New task 的 Workspace 模式与 Task Thread 页面渲染这个列表（不自行派生）；服务端在 submit / continue 时做同一校验，目标 Runtime 不可用即拒绝（`code: "runtime-not-usable"`），所以前端过滤不可能被 API 绕过。接管（adopt）来的会话不受此限制、照常进入 Task（接管只投影历史、不执行模型），但继续执行时同样要过这道校验。Project 模式读的是更严的 `GET /api/runtimes/project-eligible`（见下节）。
 
 取值来源是 kind 级默认表，创建 Runtime 时写入，显式传入的值优先：
 
@@ -274,7 +285,7 @@ runtimeIsolation(runtime).sandboxed = true   → 允许
 
 * 用户显式选择不满足要求的 Runtime 时，在 **Task / Run 创建之前**拒绝：`runtime-not-isolated`（HTTP 403）。不会先启动再失败。
 * 没有显式指定时，自动选择的候选只包含隔离 Runtime；一个都没有就报错，**不会静默降级**到 Host Runtime。
-* `GET /api/runtimes/:id/isolation` 返回判定结果；`GET /api/runtimes/project-eligible` 返回可用于 Project Task 的 Runtime 列表（Projects / New Task 页读它，因此界面上不会出现会被拒绝的选项）。
+* `GET /api/runtimes/:id/isolation` 返回判定结果；`GET /api/runtimes/project-eligible` 返回可用于 Project Task 的 Runtime 列表（Projects 页与 New task 的 Project 模式读它，因此界面上不会出现会被拒绝的选项）。
 * **Local Runtime 依然保留**：development、debugging、non-project task、advanced usage、internal test 都继续可用。只有 Project Coding Task 受约束。
 * 高级逃生阀：`allowHostExecution`（`SupervisorOptions` 或 `Project.execution.allowHostExecution`，默认关闭）。这是 operator 级别的显式安全策略，**Task 请求体无法自行开启**。开启后仅放宽 Agent Runtime；Validation 的隔离要求不受它影响。
 

@@ -331,6 +331,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           <a className="switch-link" onClick={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}>
             <Icon name="refresh" size={12} /> Switch runtime
           </a>
+          {/* Project Coding Tasks answer "developing, testing, committing or
+              pushing?" on the lifecycle page (v11 §40). It is a detail view
+              of this task, so the entry point lives here rather than being
+              the page the composer lands on. */}
+          {thread.task.projectId && (
+            <a className="switch-link" onClick={() => navigate(`/tasks/${thread.task.id}/lifecycle`)}>
+              <Icon name="box" size={12} /> Lifecycle
+            </a>
+          )}
         </div>
         {syncError && <ErrorBox message={`Native session sync failed: ${syncError}`} />}
       </header>

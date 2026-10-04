@@ -1907,6 +1907,38 @@ button.stat.clickable:hover {
 .new-task-composer input {
   margin: 8px 0 10px;
 }
+/* Branch decisions for a Project Task (base ref / working branch / branch
+   mode). They live inside the composer, so the inputs keep its borderless
+   treatment but need their own label rhythm and full grid width. */
+.new-task-branch {
+  border-top: 1px solid var(--border-soft);
+  margin: 0 0 6px;
+  padding-top: 4px;
+}
+.new-task-branch > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 4px 2px;
+}
+.new-task-branch > summary:hover {
+  color: var(--text);
+}
+.new-task-branch .form-grid-2 {
+  padding: 0 4px 4px;
+}
+.new-task-branch label {
+  margin-top: 4px;
+}
+/* The composer's own `input` rule drops the side padding and the width these
+   fields need now that they sit in a two-column grid. */
+.new-task-branch input,
+.new-task-branch select {
+  width: 100%;
+  padding-left: 4px;
+  padding-right: 4px;
+}
 
 /* ---------- Run inspector ---------- */
 
