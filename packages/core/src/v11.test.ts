@@ -799,6 +799,26 @@ describe("v11 source: base revision and branch creation", () => {
     assert.equal(h.scripted.runs(), 0, "the agent never starts without a valid base revision");
   });
 
+  test("a failure before the agent stage settles its run record — the retry is not refused as task-busy", async () => {
+    // The failure happens in source preparation, before `executeRun` ever
+    // ran. A run record left "pending" would report a run in flight forever,
+    // and the retry the failure permits would be refused with `task-busy` —
+    // the task would be stuck for good.
+    const h = await makeHarness();
+    const { remote } = await makeRemote();
+    const project = await h.projects.create({ name: "Demo", source: { remoteUrl: remote } });
+    const { task, run } = await startTask(h, project, { baseRef: "does-not-exist" });
+    assert.equal(task.execution!.status, "failed");
+    assert.equal(h.runService.get(run.id)!.status, "failed", "the run that never started is settled, not left in flight");
+
+    await h.supervisor.retryRun(task.id);
+    await h.supervisor.whenSettled(task.id);
+    const after = h.tasks.get(task.id)!;
+    assert.equal(after.execution!.status, "failed", "the base ref is still missing, so the retry fails again");
+    assert.equal(after.execution!.failure!.code, "base-ref-not-found");
+    assert.equal(h.runService.forTask(task.id).length, 2, "the retry started a new run");
+  });
+
   test("branch collision with an existing remote branch is refused (v11 §8.1)", async () => {
     const h = await makeHarness();
     const { remote, seed } = await makeRemote();

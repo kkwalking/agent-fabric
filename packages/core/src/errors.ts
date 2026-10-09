@@ -244,3 +244,31 @@ export function retryKindForFailure(stage: FailureStage | undefined): RetryKind 
       return "none";
   }
 }
+
+/**
+ * Whether a failure is *transient* — the environment broke, not the work.
+ *
+ * This is the one classification automatic retry keys off. It deliberately
+ * stays a small allowlist rather than "everything except a denylist":
+ * `agent-failed` / `agent-timeout` (the work itself), `validation-failed`
+ * (a test that ran and failed), `git-push-auth-failed` (a credential that
+ * will not fix itself) and every configuration error are permanent as far as
+ * an automatic retry is concerned — retrying them either burns model budget
+ * for nothing or hides a real signal.
+ *
+ * `runtime-create-failed` / `runtime-start-failed` look infrastructural but
+ * are configuration errors in this codebase (runtime missing / disabled / no
+ * adapter registered), and `runtime-lost` / `runtime-timeout` are never
+ * raised — none of them belong here.
+ */
+export function isTransientErrorCode(code: string): boolean {
+  switch (code) {
+    case "source-network-failed":
+    case "validation-runtime-failed":
+    case "validation-runtime-unavailable":
+    case "git-push-failed":
+      return true;
+    default:
+      return false;
+  }
+}
