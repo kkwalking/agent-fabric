@@ -20,7 +20,7 @@ import { Store } from "./store.js";
 import { RuntimeRegistry, type AgentRuntimeAdapter, type RuntimeContext, type RuntimeResult } from "./runtime.js";
 import { RunService } from "./orchestrator.js";
 import { ExecutionSupervisor } from "./supervisor.js";
-import { ProjectService, RuntimeService, TaskService, WorkspaceService } from "./services.js";
+import { ArtifactService, ProjectService, RuntimeService, TaskService, WorkspaceService } from "./services.js";
 import { DomainError } from "./errors.js";
 import { createGitOps, type GitOps } from "./git.js";
 import type { Project, Run, Task } from "./types.js";
@@ -272,6 +272,37 @@ describe("v11 hardening: the final revision is frozen", () => {
 
     const types = (await h.store.readEvents(run.id)).map((e) => e.type);
     assert.ok(types.includes("git.revision.frozen"));
+  });
+
+  test("the frozen revision is captured as a replayable diff artifact", async () => {
+    const h = await makeHarness();
+    const { remote } = await makeRemote();
+    const project = await h.projects.create({ name: "Demo", source: { remoteUrl: remote } });
+    h.setAgent(writeFiles({ "src/a.ts": "export const a = 1;\n", "README.md": "# demo\n" }));
+    const { task, run } = await startTask(h, project);
+
+    const artifacts = new ArtifactService(h.store).list(run.id);
+    const diffArtifact = artifacts.find((a) => a.kind === "diff");
+    assert.ok(diffArtifact, `a diff artifact is attached to the run (got: ${artifacts.map((a) => a.kind).join(", ")})`);
+
+    // The artifact covers exactly the frozen pair — the same revision publish
+    // pushed, so what the user reads is what was published.
+    const frozen = task.execution!.frozenRevision!;
+    assert.equal(diffArtifact.meta!.baseCommitSha, frozen.baseCommitSha);
+    assert.equal(diffArtifact.meta!.finalCommitSha, frozen.finalCommitSha);
+    assert.equal(diffArtifact.meta!.branch, task.workingBranch);
+
+    const patch = diffArtifact.content!;
+    assert.match(patch, /src\/a\.ts/, "the added file appears in the patch");
+    assert.match(patch, /^\+export const a = 1;/m, "the added line is a + line");
+    // README.md is written with the content the seed already has, so the only
+    // change in this range is the new file.
+    assert.equal(diffArtifact.meta!.filesChanged, 1);
+    assert.equal(diffArtifact.meta!.insertions, 1);
+    assert.equal(diffArtifact.meta!.truncated, false);
+
+    const types = (await h.store.readEvents(run.id)).map((e) => e.type);
+    assert.ok(types.includes("git.diff.captured"));
   });
 
   test("AC-18: publish pushes the frozen revision by SHA, not a branch ref", async () => {

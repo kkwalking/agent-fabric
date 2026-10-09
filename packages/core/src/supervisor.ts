@@ -20,9 +20,10 @@
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { EventBus } from "./eventbus.js";
 import { Store, newId } from "./store.js";
-import { DomainError, asDomainError, retryKindForFailure, type FailureStage, type RetryKind } from "./errors.js";
+import { DomainError, asDomainError, isDomainError, retryKindForFailure, type FailureStage, type RetryKind } from "./errors.js";
 import {
   createGitOps,
+  diffBetween,
   generateWorkingBranch,
   materializeGitCredential,
   validateBranchName,
@@ -44,6 +45,7 @@ import {
   type ValidationRunner,
 } from "./validation.js";
 import { dockerValidationExecutor } from "./validationDocker.js";
+import { taskDiffArtifactDraft } from "./taskDiff.js";
 import { RunService } from "./orchestrator.js";
 import {
   ArtifactService,
@@ -1285,6 +1287,46 @@ export class ExecutionSupervisor {
         workingBranch: frozenRevision.workingBranch,
         remote: frozenRevision.remote,
       });
+
+      // The development result, as a replayable artifact. The frozen pair
+      // (`baseCommitSha..finalCommitSha`) is the same revision publishing
+      // uses, so what the user reads here is exactly what was published.
+      //
+      // A diff is verification evidence, not a publish precondition: a
+      // workspace pruned before a retry can make this fail, and that must
+      // never block the push. The failure is still loud — it becomes an
+      // event with its own code.
+      try {
+        const diff = await diffBetween(
+          { bin: this.git.bin, signal: abort.signal, redactor },
+          workspace.path,
+          finalization.baseCommitSha,
+          finalization.finalCommitSha
+        );
+        await this.artifacts().create({
+          runId,
+          ...taskDiffArtifactDraft({
+            diff,
+            provenance: {
+              baseCommitSha: finalization.baseCommitSha,
+              finalCommitSha: finalization.finalCommitSha,
+              branch: task.workingBranch,
+            },
+          }),
+        });
+        await this.emit(runId, "git.diff.captured", {
+          filesChanged: diff.files.filesChanged,
+          insertions: diff.files.insertions,
+          deletions: diff.files.deletions,
+          truncated: diff.truncated,
+        });
+      } catch (err) {
+        const domain = isDomainError(err) ? err : undefined;
+        await this.emit(runId, "git.diff.failed", {
+          error: redactor.redact(err instanceof Error ? err.message : String(err)),
+          code: domain?.code ?? "git-diff-failed",
+        });
+      }
 
       /* ---- 7. Publishing (v11 §18) ---- */
       const policy = this.effectiveGitPolicy(project, task.git);

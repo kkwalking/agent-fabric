@@ -1316,6 +1316,8 @@ export type EventType =
   | "validation.failed"
   | "git.finalized"
   | "git.revision.frozen"
+  | "git.diff.captured"
+  | "git.diff.failed"
   | "git.pushed"
   | "publish.failed"
   | "publish.retry.started"

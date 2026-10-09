@@ -496,6 +496,7 @@ Agent 结束后平台检查仓库状态：当前 branch、working tree status、
 * **不破坏 Agent 已有 commit**：不 squash、不 rebase、不丢弃；只有当仍有 dirty changes 时才**追加**一个最终 commit。
 * 记录 `baseCommitSha` / `finalCommitSha` / `workingBranch` / `remoteBranch` / `pushedAt` / publish 结果。
 * 纯 no-op Task（没有任何改动）仍会把 working branch 发布到 base revision，Task 正常完成。
+* **开发结果落成 diff artifact**：冻结 revision 的同时，平台把 `baseCommitSha..finalCommitSha` 的 diff 存为 `kind: "diff"` 的 artifact（`git.diff.captured` 事件带 files/insertions/deletions/truncated）。它与 publish 推的是同一个 revision 对，所以用户在 Task 页读到的就是被发布的内容。diff 是证据不是发布前置条件：workspace 已被清理等原因导致取 diff 失败时，只记录 `git.diff.failed` 事件，不阻塞 push。
 
 ### Frozen Final Revision：Finalization 成功后冻结 revision
 
@@ -1043,6 +1044,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * DSH 没有官方容器镜像，容器化执行需自备镜像（参考 `docker/dsh.Dockerfile`）；Pi 同理（`docker/pi.Dockerfile`）。两者都不会自动构建镜像，也不会回退到普通 node 镜像——未配置 `runtime.image` 时拒绝启动。
 * Network `allowedHosts` / `blockedHosts` 与 Filesystem `allowedPaths` / `deniedPaths` 未做细粒度强制（仅支持整体开关与只读挂载）。
 * Agent Profiles 的 Web UI 入口未开放（API 与 CLI 可用）。
+* Workspace 的 Snapshot / Fork / Diff 等高级能力未提供（Managed Workspace 的 Lock 已提供；Task 的最终 diff 以 artifact 形式提供）。
 * **Secret 加密不做数据迁移**：升级前写入的明文 Secret 在读取时按 `secret-legacy-format` 明确报错，需要重新录入一次（值本身无法从旧记录恢复）。`secret.key` 必须随数据目录一起备份，丢失后已加密的值不可恢复。
 * **Project Coding Task 本期边界**：
   * 一个 Project 只支持一个 primary source（单 Repository）；monorepo 多 Source、mirror、submodule 独立管理未实现。
