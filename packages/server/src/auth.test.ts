@@ -152,6 +152,68 @@ describe("api-key reveal confirmation", () => {
     assert.equal(allowed.status, 200);
   });
 });
+
+describe("config round-trip", () => {
+  let running: Running;
+  let savedDockerBin: string | undefined;
+
+  before(async () => {
+    savedDockerBin = process.env.AGENTFABRIC_DOCKER_BIN;
+    process.env.AGENTFABRIC_DOCKER_BIN = NO_DOCKER;
+    running = await startApp();
+  });
+  after(async () => {
+    await running.close();
+    if (savedDockerBin === undefined) delete process.env.AGENTFABRIC_DOCKER_BIN;
+    else process.env.AGENTFABRIC_DOCKER_BIN = savedDockerBin;
+  });
+
+  const WEBHOOK = "https://webhook.invalid/hooks/team-channel/supersecret";
+  const put = (body: unknown) =>
+    fetch(`${running.base}/api/config`, {
+      method: "PUT",
+      headers: { ...bearer(running.token), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const get = async () => (await (await fetch(`${running.base}/api/config`, { headers: bearer(running.token) })).json()) as Record<string, any>;
+
+  test("the read redacts the webhook URL but says whether one is set", async () => {
+    await put({ notifications: { enabled: true, url: WEBHOOK } });
+    const body = await get();
+    assert.equal(body.notifications.url, "https://webhook.invalid/***");
+    assert.equal(body.notifications.urlSet, true);
+  });
+
+  test("editing another field by round-trip does not clobber the stored URL", async () => {
+    // `af config <key> <value>` and the Settings page both GET the document,
+    // change one field and PUT the whole thing back. The redacted URL comes
+    // back with it, and the placeholder is a syntactically valid URL — so
+    // storing it verbatim would silently replace the real webhook.
+    await put({ notifications: { enabled: true, url: WEBHOOK } });
+    const fetched = await get();
+    fetched.notifications.timeoutMs = 4321;
+    const res = await put(fetched);
+    assert.equal(res.status, 200);
+
+    const after = await get();
+    assert.equal(after.notifications.urlSet, true, "the webhook is still configured");
+    assert.equal(after.notifications.timeoutMs, 4321, "the edit landed");
+
+    // The real value survives: a delivery attempt still targets it.
+    const db = readFileSync(join(running.dataDir, "db.json"), "utf8");
+    assert.match(db, /supersecret/, "the stored URL is untouched by the round-trip");
+    assert.equal(db.includes("webhook.invalid/***"), false, "the redacted placeholder was never persisted");
+  });
+
+  test("a genuinely new URL is stored as sent", async () => {
+    await put({ notifications: { enabled: true, url: WEBHOOK } });
+    await put({ notifications: { enabled: true, url: "https://example.test/other-hook" } });
+    const db = readFileSync(join(running.dataDir, "db.json"), "utf8");
+    assert.match(db, /other-hook/);
+    assert.equal(db.includes("supersecret"), false, "the old URL was replaced, not kept alongside");
+  });
+});
+
 describe("token storage", () => {
   test("is generated once, kept at mode 0600 and never written to db.json", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "af-token-"));

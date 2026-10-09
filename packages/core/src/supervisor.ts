@@ -46,6 +46,7 @@ import {
 } from "./validation.js";
 import { dockerValidationExecutor } from "./validationDocker.js";
 import { taskDiffArtifactDraft } from "./taskDiff.js";
+import { deliverTaskNotification } from "./notifications.js";
 import { RunService } from "./orchestrator.js";
 import {
   ArtifactService,
@@ -1434,6 +1435,31 @@ export class ExecutionSupervisor {
         updatedAt: now(),
       });
     }
+
+    // Outbound notification (fire-and-forget, deliberately after the terminal
+    // write). It is a side channel: `deliverTaskNotification` never rejects,
+    // and awaiting it here is bounded (timeout × attempts), so a slow or
+    // broken webhook can delay this lifecycle tail but can never change the
+    // outcome that was just written. The result is recorded either way — a
+    // dropped notification is visible, never silent.
+    if (finalTask) {
+      const result = await deliverTaskNotification(this.store.config().notifications, {
+        task: this.tasks().get(taskId) ?? finalTask,
+        run: finalRun,
+      });
+      if (result) {
+        await this.emit(runId, "log", {
+          line: result.delivered
+            ? `notification delivered (${result.event} → ${result.url})`
+            : `notification failed (${result.event} → ${result.url}): ${result.error ?? "unknown error"}`,
+          kind: result.delivered ? "notification-delivered" : "notification-failed",
+          event: result.event,
+          attempts: result.attempts,
+          errorKind: result.errorKind,
+        });
+      }
+    }
+
     this.redactors.delete(runId);
     this.lifecycleAborts.delete(taskId);
   }

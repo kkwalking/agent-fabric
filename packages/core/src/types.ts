@@ -1497,4 +1497,26 @@ export interface AppConfig {
      */
     modelId?: string;
   };
+  notifications?: NotificationConfig;
+}
+
+/**
+ * Outbound webhook fired when a Task reaches a terminal state.
+ *
+ * `enabled` is the user's switch and `url` is required whenever it is on —
+ * the pair is not "optional with a default", because a user who turns
+ * notifications on and gets silence because they forgot the URL has been
+ * lied to. The URL is treated as a secret: it is redacted everywhere it is
+ * reported and never returned by `GET /api/config`.
+ */
+export interface NotificationConfig {
+  enabled: boolean;
+  /** Webhook endpoint. Required when `enabled`; treated as a secret. */
+  url?: string;
+  /** Extra request headers (authorization, custom routing, …). */
+  headers?: Record<string, string>;
+  /** Per-attempt timeout. */
+  timeoutMs?: number;
+  /** Total attempts including the first. */
+  maxAttempts?: number;
 }

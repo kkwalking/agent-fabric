@@ -15,6 +15,7 @@ export * from "./errors.js";
 export * from "./redaction.js";
 export * from "./git.js";
 export * from "./taskDiff.js";
+export * from "./notifications.js";
 export * from "./secrets.js";
 export * from "./secretCrypto.js";
 export * from "./validation.js";

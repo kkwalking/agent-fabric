@@ -903,6 +903,26 @@ Execution Policy 在 Run 中强制执行：
 
 ## 任务完成通知（Webhook）
 
+一个 Coding Task 可能跑几十分钟，通知让「任务结束了」不必靠盯着页面。配置在 `config.notifications`（Settings 页或 `PUT /api/config`）：
+
+```jsonc
+{
+  "notifications": {
+    "enabled": true,
+    "url": "https://hooks.example.com/services/T000/B000/xxx",  // 必填；开启后缺 URL 是报错，不是静默跳过
+    "headers": { "authorization": "Bearer xxx" },               // 可选，覆盖默认头
+    "timeoutMs": 10000,                                          // 每次尝试的超时
+    "maxAttempts": 3                                             // 含首次；1s/2s/… 指数退避，封顶 30s
+  }
+}
+```
+
+* **只在终态触发**：`task.completed` / `task.failed` / `task.cancelled` 各一次。中间阶段（如 `agent.completed`）不通知——此时 validation / finalization / publish 都还没跑完，提前说「完成」会在之后被推翻。
+* **载荷来自记录本身**：`event`、`taskId`、`status`、`phase`、逐阶段 `stages`（原样拷贝，不重算）、`failure{stage,code,message}`、`finalCommitSha`、`workingBranch`、`durationMs`、`link`（`/tasks/<id>`，主机名由接收方决定）。instruction 默认截断到 300 字符并置 `instructionTruncated`。
+* **通知永远不能改变 Task 的结果**：投递发生在终态写入**之后**，且 `deliverTaskNotification` 不抛异常——失败以 `DeliveryResult` 返回，写成 Run 上的 `notification-failed` 事件（带 `attempts` / `errorKind`）。Webhook 挂掉不会让任务变 failed。
+* **重试策略**：网络错误、超时、429、5xx 重试；其余 4xx（token 错、路径错）立即放弃——重复不会让它变对。
+* **URL 是密钥**：事件、日志、`GET /api/config` 里一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 与 Settings 页都是「读出整份 → 改一个字段 → 整份写回」）若收到恰好等于脱敏形式的 URL，按「未改动」处理并保留原值——占位符本身是合法 URL，原样入库会静默把真 webhook 换成它。
+
 ## Proxy
 
 全局出网代理（Web UI 的 Proxy 页 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机。Proxy 页提供连通性测试（`POST /api/proxy/test`）。
@@ -917,7 +937,7 @@ Execution Policy 在 Run 中强制执行：
 * API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码；`GET /api/providers/:id/api-key` 需带 `X-AgentFabric-Reveal: 1` 请求头确认，返回的明文不进入任何日志。
 * Git 凭据只在单次 Git 操作期间 materialize 到 `AGENTFABRIC_DATA_DIR/git-credentials/<op>-<random>`（操作结束立即删除）：HTTPS 走 `GIT_ASKPASS` + 子进程环境变量，SSH 走 `0600` 私钥文件 + `core.sshCommand`（`StrictHostKeyChecking=yes`）。远端 URL 始终不含凭据，`.git/config` 里也没有。
 * Skill / MCP provisioning 落在 `AGENTFABRIC_DATA_DIR/provisioning/<runId>`，Run 结束即删除；生成的 MCP 配置是 `0600` 文件（可能含注入的 Secret 值），同样不进入日志与 API 响应。
-* API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码。
+* 通知 Webhook 的 URL 本身即凭据（Slack Incoming Webhook 的路径就是 token），因此在事件、日志与 `GET /api/config` 中一律脱敏为 `scheme://host/***`；配置错误的通知在 Run 上以 `notification-failed` 事件可见，绝不静默丢弃。
 * 存储层只保存生成时算出来的结果，读路径不重新解析、不重新投影、不做格式修补。
 
 ## CLI
@@ -1046,6 +1066,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * Agent Profiles 的 Web UI 入口未开放（API 与 CLI 可用）。
 * Workspace 的 Snapshot / Fork / Diff 等高级能力未提供（Managed Workspace 的 Lock 已提供；Task 的最终 diff 以 artifact 形式提供）。
 * **Secret 加密不做数据迁移**：升级前写入的明文 Secret 在读取时按 `secret-legacy-format` 明确报错，需要重新录入一次（值本身无法从旧记录恢复）。`secret.key` 必须随数据目录一起备份，丢失后已加密的值不可恢复。
+* 通知只在**终态**触发一次，没有「开始 / 进度 / 卡住」类事件，也没有按事件类型分别配置订阅。
 * **Project Coding Task 本期边界**：
   * 一个 Project 只支持一个 primary source（单 Repository）；monorepo 多 Source、mirror、submodule 独立管理未实现。
   * Source Credential 只实现 HTTPS Token 与 SSH Private Key；GitHub App / Deploy Key / OAuth / Short-lived Credential 预留未实现。
@@ -1084,6 +1105,8 @@ v11 hardening 的专项测试：
 | `src/v11.publish.test.ts` | Frozen final revision、Retry Publish 是纯发布（同 commit、不新增 commit、不跑 agent/validation/finalization、SHA 不变）、workspace 漂移检测、stage-specific crash recovery（Agent/Validation/Finalization/Publish/Cleanup）、状态单调性、取消与并发 |
 | `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
 | `src/v11.inheritance.test.ts` | Project → Task 继承：`execution.profileId` 的 preset、`execution.networkPolicy`（一路断言到容器 argv 的 `--network none`）、Task 级 `skills` / `mcpServers` 的整体替换语义，以及 Task 显式值优先于 Project |
+| `src/v11.notify.test.ts` | 通知接线：终态 Task 恰好发一次 webhook（载荷含 frozen revision 与逐阶段 stages）、未配置不发、失败任务带 `failure{stage,code}`、webhook 挂掉不影响 Task 终态、URL 里的 token 不进 Run 事件 |
+| `src/notifications.test.ts` | 载荷投影、退避与重试策略、URL 脱敏、配置错误不抛异常（`errorKind: "config"`） |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
 
 `packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、api-key reveal 确认、config 往返（脱敏 URL 不被写回覆盖）与优雅停机。

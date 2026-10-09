@@ -25,12 +25,14 @@ import {
   effectiveCapabilities,
   runtimeIsolation,
   renderHandoffBody,
+  redactWebhookUrl,
   toHandoffListRow,
   HandoffUnavailableError,
   HandoffRequiredError,
   DomainError,
   isDomainError,
   httpStatusForCode,
+  type AppConfig,
   type NewTaskInput,
   type ContinueTaskInput,
   type StartProjectTaskInput,
@@ -1146,10 +1148,63 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /* ---------------- usage & config ---------------- */
 
   app.get("/api/usage", (_req, res) => ok(res, usage.summary()));
-  app.get("/api/config", (_req, res) => ok(res, store.config()));
-  app.put("/api/config", async (req, res) => {
-    ok(res, await store.updateConfig(req.body));
-  });
+
+  /**
+   * A webhook URL *is* its credential (Slack's incoming webhooks are the path
+   * itself), so the read is redacted the same way `DeliveryResult.url` is.
+   * The write returns the same redacted shape — echoing the URL back would
+   * put the secret in the browser for no benefit, since the caller just sent
+   * it. `urlSet` tells a client whether a webhook is configured without
+   * revealing which one.
+   */
+  const configForClient = () => {
+    const config = store.config();
+    const notifications = config.notifications;
+    if (!notifications) return config;
+    const { url, ...rest } = notifications;
+    return {
+      ...config,
+      notifications: {
+        ...rest,
+        ...(url ? { url: redactWebhookUrl(url), urlSet: true } : { urlSet: false }),
+      },
+    };
+  };
+
+  /**
+   * The inverse of `configForClient`, for the write path.
+   *
+   * Every config client edits by round-trip — `af config <key> <value>` and
+   * the Settings page both GET the document, change one field and PUT the
+   * whole thing back — so the redacted URL comes back in the body. Storing it
+   * verbatim would replace the real webhook with the literal
+   * `https://host/***`, silently: the placeholder is a syntactically valid
+   * URL, so nothing downstream would complain. An incoming URL that is
+   * exactly the redacted form of the stored one therefore means "unchanged";
+   * anything else is stored as sent. `urlSet` is a read-side projection and
+   * is never persisted.
+   */
+  const configFromClient = (body: unknown): AppConfig => {
+    const incoming = (body ?? {}) as Record<string, unknown>;
+    const next = incoming.notifications;
+    if (!next || typeof next !== "object") return incoming as AppConfig;
+    const { urlSet: _urlSet, ...notifications } = next as Record<string, unknown>;
+    const stored = store.config().notifications?.url;
+    const url =
+      typeof notifications.url === "string" && stored && notifications.url === redactWebhookUrl(stored)
+        ? stored
+        : notifications.url;
+    return { ...incoming, notifications: { ...notifications, ...(url !== undefined ? { url } : {}) } } as AppConfig;
+  };
+
+  app.get("/api/config", (_req, res) => ok(res, configForClient()));
+  app.put(
+    "/api/config",
+    ah(async (req, res) => {
+      await store.updateConfig(configFromClient(req.body));
+      ok(res, configForClient());
+    })
+  );
 
   /* ---------------- proxy ---------------- */
 
