@@ -620,7 +620,9 @@ describe("v11 hardening: validation runner contract", () => {
       })
     );
     assert.equal(result.status, "failed");
-    assert.equal(result.errorCode, "validation-failed");
+    // The sandbox's own code survives: a runtime that could not start is a
+    // 502 (`validation-runtime-*`), not the 400 a failing test would get.
+    assert.equal(result.errorCode, "validation-runtime-unavailable");
     assert.match(result.error!, /isolated validation runtime/);
     assert.equal(result.steps[0].status, "failed");
   });

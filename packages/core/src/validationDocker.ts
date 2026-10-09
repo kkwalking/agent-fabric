@@ -125,7 +125,12 @@ export function dockerValidationExecutor(dataDir?: string): (image?: string) => 
         await execDocker(["rm", "-f", name], 30_000);
         return { exitCode: null, timedOut: false, output, error: "Validation was cancelled", errorCode: "validation-runtime-failed" };
       }
-      if (outcome.timedOut || elapsed >= timeoutMs) {
+      // `timedOut` is set by the very timer that killed the container, so it
+      // is the only honest signal. Comparing wall-clock elapsed time against
+      // the budget instead would misreport a step that *finished in time* as
+      // a timeout whenever the measurement lands on the boundary (Date.now()
+      // is millisecond-granular), discarding a passing result.
+      if (outcome.timedOut) {
         // Best effort: `--rm` reaps it, but a killed client can leave it behind.
         await execDocker(["rm", "-f", name], 30_000);
         return { exitCode: null, timedOut: true, output };

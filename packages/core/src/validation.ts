@@ -33,7 +33,14 @@ export interface ValidationRunResult {
   status: "passed" | "failed" | "timeout" | "skipped";
   steps: ValidationStepResult[];
   error?: string;
-  errorCode?: "validation-failed" | "validation-timeout";
+  /**
+   * The runner's own code, plus the executor's when the sandbox itself failed
+   * to start (`validation-runtime-*`, v11 hardening §6.3). Those two are *not*
+   * a failing test: the API maps them to 502 so a client retries the runtime
+   * rather than the code under test. Collapsing them into `validation-failed`
+   * would tell the user to go fix a test that never ran.
+   */
+  errorCode?: "validation-failed" | "validation-timeout" | "validation-runtime-failed" | "validation-runtime-unavailable";
 }
 
 export interface ValidationRunOptions {
@@ -149,7 +156,10 @@ async function runSteps(
         status: "failed",
         steps: results,
         error: outcome.error,
-        errorCode: outcome.errorCode === "validation-timeout" ? "validation-timeout" : "validation-failed",
+        // Carry the executor's classification through unchanged: a sandbox
+        // that could not start is `validation-runtime-*` (502), not a test
+        // failure (400). Only an unclassified error falls back to the default.
+        errorCode: outcome.errorCode ?? "validation-failed",
       };
     }
     const required = step.required ?? true;
