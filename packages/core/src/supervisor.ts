@@ -1432,8 +1432,21 @@ export class ExecutionSupervisor {
     });
     const finalRun = this.runService.get(runId);
     if (finalRun) {
+      // A failure before the agent stage means `executeRun` never ran, so
+      // nothing settled the run record — leaving it "pending" would report a
+      // run in flight forever and make the retry the failure permits answer
+      // `task-busy`. Settle it here; a run the orchestrator already finished
+      // (agent failure, cancellation) keeps its own terminal status.
+      const unsettled = ["pending", "starting", "running"].includes(finalRun.status);
       await this.store.update<Run>("runs", runId, {
         phase: failure ? (cancelled ? "cancelled" : "failed") : "completed",
+        ...(failure && unsettled
+          ? {
+              status: cancelled ? ("cancelled" as const) : ("failed" as const),
+              error: failure.message,
+              endTime: now(),
+            }
+          : {}),
         updatedAt: now(),
       });
     }
