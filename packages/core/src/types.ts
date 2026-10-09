@@ -791,6 +791,14 @@ export interface Task {
   validation?: ValidationConfig;
   /** Task-level publish policy override. */
   git?: GitPublishPolicy;
+  /**
+   * Task-level skill override (v11 §25). Declared here, the Task's list
+   * **replaces** the Project's; absent (the normal case) the Project's list
+   * applies. Resolved when the execution environment is provisioned.
+   */
+  skills?: ProjectSkill[];
+  /** Task-level MCP server override (v11 §26); same replace-or-inherit rule. */
+  mcpServers?: McpServerConfig[];
   /** Project-based lifecycle state (v11 §6/§40). */
   execution?: TaskExecution;
   /**

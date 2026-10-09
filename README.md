@@ -649,7 +649,7 @@ Project
   PUT    /api/projects/:id                 更新
   DELETE /api/projects/:id                 删除
   GET    /api/projects/:id/tasks           该项目的 Task
-  POST   /api/projects/:id/tasks           创建并启动 Coding Task（instruction, baseRef?, workingBranch?, branchMode?, runtimeId?, modelId?, validation?, git?）
+  POST   /api/projects/:id/tasks           创建并启动 Coding Task（instruction, baseRef?, workingBranch?, branchMode?, runtimeId?, modelId?, validation?, git?, skills?, mcpServers?, policy?, env?）
 
 Source Credential
   GET    /api/source-credentials           列表（只含掩码）
@@ -900,6 +900,8 @@ Execution Policy 在 Run 中强制执行：
 
 默认 Run 超时 `DEFAULT_RUN_TIMEOUT_MS` = 30 分钟。Policy 可在 Agent Profile、Task、Run 各层给出，Run 级覆盖 Task 级。
 
+## 任务完成通知（Webhook）
+
 ## Proxy
 
 全局出网代理（Web UI 的 Proxy 页 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机。Proxy 页提供连通性测试（`POST /api/proxy/test`）。
@@ -1053,6 +1055,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
   * Skills provisioning 提供 canonical 目录 + 只读挂载 + `AGENTFABRIC_SKILLS_DIR`，是否被某个 harness 自动发现取决于该 harness；MCP 配置按统一 `mcpServers` 文档生成并通过 `AGENTFABRIC_MCP_CONFIG` 交付，未逐 harness 写入各自的私有配置格式。
   * Repository-local config（`.agentfabric.yml`）本期不读取（不可信输入），只在领域上划清 Control Plane Configuration 与 Repository Configuration 的边界。
   * Project 的 `execution` 继承模型已覆盖 Runtime / Model / Profile / Env / Secrets / Timeout / Resource Limit / Network Policy / Lifecycle / Tools；Secret references 与 Validation / Git publish 走 Project→Task 覆盖，Run 级仅继承 Task 快照。
+  * 继承在 Supervisor 里真实生效（不只是声明）：`execution.profileId` 的 preset（runtime / model / policy / env / tools / systemInstructions）适用于该 Project 的所有 Task；`execution.networkPolicy` 作为 Project 级默认物化到 Task（Task 显式值优先），并一路传到 agent 与 validation 容器；Task 的 `skills` / `mcpServers` 一旦声明就**整体替换** Project 的列表（未声明则继承）。指向已不存在的 profile / model / runtime 的引用一律明确报错（`profile-not-found` / `model-not-found`），绝不静默降级。
 
 ## 测试
 
@@ -1078,6 +1081,7 @@ v11 hardening 的专项测试：
 | `src/v11.credential.test.ts` | Remote host 解析、host binding（HTTPS/SSH match & mismatch、wildcard）、transport 兼容（HTTPS token × SSH remote 等）、Project create/update 尽早失败、`.git/config` 与全生命周期防泄漏 |
 | `src/v11.publish.test.ts` | Frozen final revision、Retry Publish 是纯发布（同 commit、不新增 commit、不跑 agent/validation/finalization、SHA 不变）、workspace 漂移检测、stage-specific crash recovery（Agent/Validation/Finalization/Publish/Cleanup）、状态单调性、取消与并发 |
 | `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
+| `src/v11.inheritance.test.ts` | Project → Task 继承：`execution.profileId` 的 preset、`execution.networkPolicy`（一路断言到容器 argv 的 `--network none`）、Task 级 `skills` / `mcpServers` 的整体替换语义，以及 Task 显式值优先于 Project |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
 
 `packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、api-key reveal 确认、config 往返（脱敏 URL 不被写回覆盖）与优雅停机。

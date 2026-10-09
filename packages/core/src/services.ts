@@ -815,6 +815,10 @@ export interface NewTaskInput {
   branchMode?: BranchMode;
   validation?: ValidationConfig;
   git?: GitPublishPolicy;
+  /** Task-level skills override (v11 §25); absent = the Project's. */
+  skills?: ProjectSkill[];
+  /** Task-level MCP server override (v11 §26); absent = the Project's. */
+  mcpServers?: McpServerConfig[];
   execution?: TaskExecution;
 }
 
@@ -870,6 +874,8 @@ export class TaskService {
       branchMode: input.branchMode,
       validation: input.validation,
       git: input.git,
+      skills: input.skills,
+      mcpServers: input.mcpServers,
       execution: input.execution,
       createdAt: now(),
     };

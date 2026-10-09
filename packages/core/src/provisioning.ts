@@ -2,12 +2,19 @@
  * Runtime provisioning (v11 §25/§26).
  *
  * Before a runtime starts, the supervisor makes sure the execution
- * environment has what the Project asked for:
+ * environment has what the Project asked for — as overridden by the Task:
  *
- * - **Skills** — Project skill directories copied into a per-run provisioning
+ * - **Skills** — skill directories copied into a per-run provisioning
  *   directory and mounted read-only into the runtime.
- * - **MCP** — the final MCP configuration generated from the Project's MCP
+ * - **MCP** — the final MCP configuration generated from the resolved MCP
  *   servers, with Secret references resolved at provisioning time.
+ *
+ * Both lists resolve as `Task 显式 > Project`: a Task that declares its own
+ * `skills` / `mcpServers` **replaces** the Project's list (it does not merge
+ * with it), and a Task that declares neither inherits the Project's. The
+ * replacement is deliberate: a skill/MCP list is a set of capabilities, and
+ * an override that silently kept the inherited entries could not express
+ * "this Task must not have that one".
  *
  * The properties the spec requires (v11 §25/§26) fall out of the design:
  * every run gets its own directory under `dataDir/provisioning/<runId>`,
@@ -66,11 +73,26 @@ export interface ProvisionedEnvironment {
 
 /**
  * Copies one skill directory. `source` is the host path configured on the
- * Project; a missing directory is a loud failure (a silently missing skill
- * would make the agent behave differently than configured).
+ * Project (or on the Task, when it overrides the list); a missing directory
+ * is a loud failure (a silently missing skill would make the agent behave
+ * differently than configured).
  */
 async function provisionSkill(skill: ProjectSkill, dest: string): Promise<void> {
   await cp(skill.path, dest, { recursive: true, dereference: true, force: true });
+}
+
+/**
+ * The skills this run provisions: the Task's list when it declares one,
+ * else the Project's. `undefined` (not declared) inherits; an explicit empty
+ * list means "no skills", which is a legitimate override.
+ */
+export function resolveSkills(task?: Pick<Task, "skills">, project?: Pick<Project, "skills">): ProjectSkill[] {
+  return (task?.skills ?? project?.skills) ?? [];
+}
+
+/** The MCP servers this run generates configuration for. Same rule as `resolveSkills`. */
+export function resolveMcpServers(task?: Pick<Task, "mcpServers">, project?: Pick<Project, "mcpServers">): McpServerConfig[] {
+  return (task?.mcpServers ?? project?.mcpServers) ?? [];
 }
 
 /**
@@ -119,7 +141,7 @@ export async function provisionEnvironment(opts: ProvisionEnvironmentOptions): P
   const extraMounts: Array<{ hostPath: string; containerPath: string }> = [];
   const env: Record<string, string> = {};
 
-  const skills = opts.project?.skills ?? [];
+  const skills = resolveSkills(opts.task, opts.project);
   const skillsMountPath = opts.skillsMountPath ?? SKILLS_MOUNT_PATH;
   let skillsHostDir: string | undefined;
   if (skills.length > 0) {
@@ -133,7 +155,7 @@ export async function provisionEnvironment(opts: ProvisionEnvironmentOptions): P
     env[SKILLS_ENV_VAR] = skillsMountPath;
   }
 
-  const servers = opts.project?.mcpServers ?? [];
+  const servers = resolveMcpServers(opts.task, opts.project);
   const mcpConfigMountPath = opts.mcpConfigMountPath ?? MCP_CONFIG_MOUNT_PATH;
   let mcpConfigHostPath: string | undefined;
   const provisionedServers: string[] = [];

@@ -61,10 +61,13 @@ import {
 } from "./services.js";
 import { assertSecretAllowed, secretEnvironment } from "./secrets.js";
 import type {
+  AgentProfile,
   FrozenFinalRevision,
   GitPublishPolicy,
   ID,
+  McpServerConfig,
   Project,
+  ProjectSkill,
   Run,
   RunEvent,
   RunPhase,
@@ -172,6 +175,12 @@ export interface StartProjectTaskInput {
   branchMode?: "new" | "continue";
   runtimeId?: ID;
   modelId?: ID;
+  /**
+   * Agent profile for this Task (v4 §10). The explicit choice wins; absent,
+   * the Project's `execution.profileId` applies. The profile is the *lowest*
+   * of the three configured layers: an explicit task/project runtime or model
+   * still wins (Task > Project > Profile).
+   */
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: ID[];
@@ -189,6 +198,13 @@ export interface StartProjectTaskInput {
   validation?: ValidationConfig;
   /** Task-level publish policy override. */
   git?: GitPublishPolicy;
+  /**
+   * Task-level skill override (v11 §25). Declared here, the Task's list
+   * **replaces** the Project's; absent, the Project's list applies.
+   */
+  skills?: ProjectSkill[];
+  /** Task-level MCP server override (v11 §26); same replace-or-inherit rule. */
+  mcpServers?: McpServerConfig[];
   /**
    * Secrets the validation commands may receive (v11 hardening §6.2). Never
    * git-scoped: those belong to the credential broker alone.
@@ -419,9 +435,9 @@ export class ExecutionSupervisor {
       assertCredentialBinding(credential, project.source.remoteUrl);
     }
 
-    const runtime = this.resolveRuntime(project, input.runtimeId);
-    const modelId = this.resolveModelId(project, runtime, input.modelId);
-    const profile = input.profileId ? this.profiles().get(input.profileId) : undefined;
+    const profile = this.resolveProfile(input.profileId, project.execution?.profileId);
+    const runtime = this.resolveRuntime(project, input.runtimeId, profile);
+    const modelId = this.resolveModelId(project, runtime, input.modelId, profile);
 
     // Validation secrets are resolved (and scope-checked) up front too: a
     // git-scoped secret must be refused before the task exists, not when
@@ -471,19 +487,23 @@ export class ExecutionSupervisor {
       workspaceId: workspace.id,
       runtimeId: runtime.id,
       modelId,
-      profileId: input.profileId,
+      profileId: profile?.id,
       baseRef,
       workingBranch,
       branchMode,
       validation: input.validation,
       git: input.git,
-      env: this.mergeEnv(project, input.env),
-      secretIds: [...new Set([...(project.execution?.secretIds ?? []), ...(input.secretIds ?? [])])],
+      skills: input.skills,
+      mcpServers: input.mcpServers,
+      env: this.mergeEnv(project, profile, input.env),
+      secretIds: [
+        ...new Set([...(profile?.secretIds ?? []), ...(project.execution?.secretIds ?? []), ...(input.secretIds ?? [])]),
+      ],
       validationSecretIds: validationSecretIds ? [...new Set(validationSecretIds)] : undefined,
       tools: input.tools ?? project.execution?.tools,
       resourceLimits: input.resourceLimits ?? project.execution?.resourceLimits,
       timeoutMs: input.timeoutMs ?? project.execution?.timeoutMs,
-      policy: input.policy ?? project.execution?.policy,
+      policy: this.mergePolicy(project, input.policy),
       // Passed through as declared; `TaskService.create` materializes and
       // freezes it on the record.
       lifecycle: input.lifecycle,
@@ -501,7 +521,9 @@ export class ExecutionSupervisor {
       inputInstruction: instruction,
       userPrompt: instruction,
       systemInstructions: profile?.systemInstructions,
-      profileId: input.profileId,
+      // The resolved profile id, not the raw request field: a Project-level
+      // profile must be snapshotted onto the Run exactly like a task-level one.
+      profileId: profile?.id,
       phase: "workspace.preparing",
     });
     await this.setPhase(task.id, run.id, "workspace.preparing", "preparing");
@@ -579,10 +601,14 @@ export class ExecutionSupervisor {
     const project = this.projects().get(task.projectId);
     if (!project) throw new DomainError("project-not-found", `Project not found: ${task.projectId}`);
 
-    const runtime = this.resolveRuntime(project, input.runtimeId ?? task.runtimeId);
-    const modelId = this.resolveModelId(project, runtime, input.modelId ?? task.modelId);
+    // The Task record carries the profile resolved at creation (Task choice
+    // or Project default), so a retry runs under the same profile — and a
+    // reference that stopped resolving fails loudly instead of silently
+    // dropping the profile's instructions and tools.
+    const profile = this.resolveProfile(task.profileId, project.execution?.profileId);
+    const runtime = this.resolveRuntime(project, input.runtimeId ?? task.runtimeId, profile);
+    const modelId = this.resolveModelId(project, runtime, input.modelId ?? task.modelId, profile);
     const instruction = input.instruction?.trim() || task.prompt;
-    const profile = task.profileId ? this.profiles().get(task.profileId) : undefined;
 
     const run = await this.runService.createRunForTask(task, {
       runtimeId: runtime.id,
@@ -595,7 +621,7 @@ export class ExecutionSupervisor {
       inputInstruction: instruction,
       userPrompt: instruction,
       systemInstructions: profile?.systemInstructions,
-      profileId: task.profileId,
+      profileId: profile?.id,
       phase: "workspace.preparing",
     });
     await this.patchExecution(taskId, {
@@ -2046,21 +2072,97 @@ export class ExecutionSupervisor {
     };
   }
 
-  private mergeEnv(project: Project, taskEnv?: Record<string, string>): Record<string, string> | undefined {
-    const merged = { ...(project.execution?.env ?? {}), ...(taskEnv ?? {}) };
+  private mergeEnv(
+    project: Project,
+    profile: AgentProfile | undefined,
+    taskEnv?: Record<string, string>
+  ): Record<string, string> | undefined {
+    const merged = { ...(profile?.env ?? {}), ...(project.execution?.env ?? {}), ...(taskEnv ?? {}) };
     return Object.keys(merged).length ? merged : undefined;
   }
 
   /**
-   * Runtime resolution (v11 §24): explicit task override > project default >
-   * the first enabled runtime usable in tasks — followed by the isolation
-   * gate (v11 hardening §4): a Project Coding Task runs in an isolated
-   * runtime or it does not run at all.
+   * The Task's execution policy: the explicit task value wins, else the
+   * Project's. The profile's policy is *not* folded in here — it stays the
+   * lowest layer and is merged into the single resolved policy by
+   * `resolveRunConfig` (Task > Project > Profile).
+   *
+   * The Project's `execution.networkPolicy` is a Project-level default like
+   * `env` / `tools` / `resourceLimits`, so it is materialized onto the Task
+   * here; an explicit Task network policy still wins.
    */
-  private resolveRuntime(project: Project, explicit?: ID): Runtime {
-    const id = explicit ?? project.execution?.runtimeId;
+  private mergePolicy(project: Project, taskPolicy?: Task["policy"]): Task["policy"] {
+    const policy = taskPolicy ?? project.execution?.policy;
+    const network = policy?.network ?? project.execution?.networkPolicy;
+    if (network === undefined) return policy;
+    return { ...(policy ?? {}), network };
+  }
+
+  /**
+   * Agent profile resolution (v4 §10): the explicit Task choice wins, else
+   * the inherited (Project) reference.
+   *
+   * A reference that does not resolve is a loud failure (「失败要响」):
+   * silently running without the profile would change the agent's model,
+   * tools and instructions without anyone noticing.
+   *
+   * The same applies to a profile *preset* (its `runtimeId` / `modelId`) the
+   * store no longer has: a dangling preset cannot be honoured, and dropping
+   * it would run the agent somewhere other than the profile says. A merely
+   * *disabled* preset is only refused when it actually wins — see
+   * `resolveRuntime` / `resolveModelId`.
+   */
+  private resolveProfile(explicit?: ID, inherited?: ID): AgentProfile | undefined {
+    const id = explicit ?? inherited;
+    if (!id) return undefined;
+    const profile = this.profiles().get(id);
+    if (!profile) {
+      throw new DomainError(
+        "profile-not-found",
+        `Agent profile not found: ${id}`,
+        explicit ? "the task references a profile that no longer exists" : "the project's execution.profileId no longer resolves"
+      );
+    }
+    if (profile.runtimeId && !this.runtimes().get(profile.runtimeId)) {
+      throw new DomainError(
+        "runtime-create-failed",
+        `Agent profile "${profile.name}" references a runtime that no longer exists: ${profile.runtimeId}`,
+        "repoint the profile at an existing runtime, or clear its runtimeId"
+      );
+    }
+    if (profile.modelId && !this.models().get(profile.modelId)) {
+      throw new DomainError(
+        "model-not-found",
+        `Agent profile "${profile.name}" references a model that no longer exists: ${profile.modelId}`,
+        "repoint the profile at an existing model, or clear its modelId"
+      );
+    }
+    return profile;
+  }
+
+  /**
+   * Runtime resolution (v11 §24): explicit task override > project default >
+   * the profile's preset > the first enabled runtime usable in tasks —
+   * followed by the isolation gate (v11 hardening §4): a Project Coding Task
+   * runs in an isolated runtime or it does not run at all.
+   */
+  private resolveRuntime(project: Project, explicit?: ID, profile?: AgentProfile): Runtime {
+    const configured = explicit ?? project.execution?.runtimeId;
+    const id = configured ?? profile?.runtimeId;
     const runtime = id ? this.runtimes().get(id) : undefined;
     if (runtime) {
+      // A profile preset that wins but is disabled is refused here rather
+      // than deep in the lifecycle: the profile is why this runtime was
+      // picked, so inheriting it in a non-running state is a configuration
+      // error, not an execution failure. An explicit Task/Project choice is
+      // left to the lifecycle's own, equally loud `runtime-create-failed`.
+      if (configured === undefined && profile?.runtimeId && !runtime.enabled) {
+        throw new DomainError(
+          "runtime-create-failed",
+          `Agent profile "${profile.name}" presets the runtime "${runtime.name}", which is disabled`,
+          "enable the runtime, or pick one explicitly on the task or project"
+        );
+      }
       // A runtime that cannot be used at all keeps its existing, more specific
       // failure (`runtime-create-failed` / `policy-denied`, recorded on the
       // task by the lifecycle). The isolation gate applies to runtimes that
@@ -2110,15 +2212,29 @@ export class ExecutionSupervisor {
     );
   }
 
-  /** Model resolution: harness-native runtimes keep their own model (v6 §3). */
-  private resolveModelId(project: Project, runtime: Runtime, explicit?: ID): ID | undefined {
+  /**
+   * Model resolution: harness-native runtimes keep their own model (v6 §3).
+   * Precedence is Task > Project > Profile, matching every other execution
+   * default — the profile's preset is the lowest configured layer.
+   *
+   * A profile preset that wins but is disabled is refused: the run would
+   * otherwise fail later inside the harness, or (worse) silently pick the
+   * runtime's default model instead of the configured one.
+   */
+  private resolveModelId(project: Project, runtime: Runtime, explicit?: ID, profile?: AgentProfile): ID | undefined {
     if (this.isHarnessNative(runtime)) return undefined;
-    return (
-      explicit ??
-      project.execution?.modelId ??
-      runtime.defaultModelId ??
-      this.models().list().find((m) => m.enabled)?.id
-    );
+    const configured = explicit ?? project.execution?.modelId;
+    if (configured === undefined && profile?.modelId) {
+      const model = this.models().get(profile.modelId);
+      if (model && !model.enabled) {
+        throw new DomainError(
+          "model-not-found",
+          `Agent profile "${profile.name}" presets the model "${model.alias ?? model.name}", which is disabled`,
+          "enable the model, or pick one explicitly on the task or project"
+        );
+      }
+    }
+    return configured ?? profile?.modelId ?? runtime.defaultModelId ?? this.models().list().find((m) => m.enabled)?.id;
   }
 
   private isHarnessNative(runtime: Runtime): boolean {

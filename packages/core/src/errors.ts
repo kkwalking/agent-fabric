@@ -63,6 +63,8 @@ export type ErrorCode =
   | "project-not-found"
   | "project-invalid"
   | "credential-not-found"
+  | "profile-not-found"
+  | "model-not-found"
   | "task-not-found"
   | "task-state-invalid"
   | "task-busy"
@@ -131,6 +133,10 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "secret-legacy-format": "workspace",
   "secret-key-invalid": "workspace",
   "secret-decrypt-failed": "workspace",
+  // A profile the Task or Project references no longer resolves: the failure
+  // belongs to run preparation, and the agent never started.
+  "profile-not-found": "agent",
+  "model-not-found": "runtime",
 };
 
 export function stageForCode(code: ErrorCode): FailureStage {
