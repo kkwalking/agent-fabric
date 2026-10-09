@@ -38,6 +38,7 @@ import {
   type Task,
 } from "@agentfabric/core";
 import { loadOrCreateToken, requireToken, TOKEN_COOKIE } from "./auth.js";
+import { teardownWork } from "./shutdown.js";
 import {
   buildRegistry,
   codexThreadSource,
@@ -51,6 +52,18 @@ import {
 export interface ServerOptions {
   dataDir: string;
   staticDir?: string;
+}
+
+/** What `createServer` hands back: the Express app plus its teardown. */
+export interface ServerHandle {
+  app: Express;
+  /**
+   * Stops everything this server started: the background purge timer and the
+   * processes/containers of the work in flight. **Synchronous on purpose** —
+   * see the shutdown section in `createServer` for why it must not yield to
+   * the event loop.
+   */
+  shutdown(): void;
 }
 
 /**
@@ -174,7 +187,14 @@ function sseHeaders(res: Response): void {
   res.write(": connected\n\n");
 }
 
-export async function createApp(options: ServerOptions): Promise<Express> {
+/**
+ * Builds the API server and returns it together with its teardown.
+ *
+ * `createApp` (below) is the narrow form used by tests and callers that never
+ * stop the server; the process entry point uses this one so SIGTERM/SIGINT
+ * have something to call.
+ */
+export async function createServer(options: ServerOptions): Promise<ServerHandle> {
   const store = await Store.open(options.dataDir);
   await seedDefaults(store);
   const bus = new EventBus();
@@ -1084,7 +1104,34 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     });
   }
 
-  return app;
+  /* ---------------- shutdown ---------------- */
+
+  // The work this process is still doing. A shutdown must stop it, and the
+  // records must not claim anything about it (v11 §32: only the user
+  // cancels): the Run keeps the phase the lifecycle last wrote, and the next
+  // start's `recoverInterrupted()` reads that phase and names the honest next
+  // step (retry agent / validation / publish).
+  const inFlightTaskIds = () => tasks.list({ deleted: false }).filter((t) => supervisor.isRunning(t.id)).map((t) => t.id);
+  const inFlightRunIds = () => runs.list().filter((r) => runs.isExecuting(r.id)).map((r) => r.id);
+
+  let stopped = false;
+  const shutdown = (): void => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(purgeTimer);
+    const taskIds = inFlightTaskIds();
+    const runIds = inFlightRunIds();
+    if (taskIds.length === 0 && runIds.length === 0) return;
+    console.log(`[agent-fabric] stopping in-flight work: ${taskIds.length} task(s), ${runIds.length} run(s)`);
+    teardownWork({ taskIds, runIds, log: (message) => console.log(`[agent-fabric] ${message}`) });
+  };
+
+  return { app, shutdown };
+}
+
+/** The app alone (tests, callers that never stop the server). */
+export async function createApp(options: ServerOptions): Promise<Express> {
+  return (await createServer(options)).app;
 }
 
 function reqClose(req: Request, res: Response, onClose: () => void): void {

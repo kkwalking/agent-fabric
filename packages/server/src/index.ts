@@ -2,9 +2,12 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createApp } from "./app.js";
+import { createServer } from "./app.js";
 
 const __dirname = resolve(fileURLToPath(import.meta.url), "..");
+
+/** Bound for the whole shutdown; the process exits even if a step hangs. */
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 /** Loopback hosts. Anything else is reachable from the network. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -27,8 +30,8 @@ async function main(): Promise<void> {
   ];
   const staticDir = distCandidates.find((d) => existsSync(resolve(d, "index.html")));
 
-  const app = await createApp({ dataDir, staticDir });
-  app.listen(port, host, () => {
+  const { app, shutdown } = await createServer({ dataDir, staticDir });
+  const server = app.listen(port, host, () => {
     console.log(`[agent-fabric] API server listening on http://${host}:${port}`);
     console.log(`[agent-fabric] Data directory: ${dataDir}`);
     console.log(`[agent-fabric] Web UI: ${staticDir ? `http://localhost:${port}` : "(not built; run npm run build -w @agentfabric/web)"}`);
@@ -40,6 +43,44 @@ async function main(): Promise<void> {
       );
     }
   });
+
+  let stopping = false;
+  const stop = (signal: string): void => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`[agent-fabric] ${signal} received — shutting down`);
+
+    // A watchdog, not the normal path: if any teardown step wedges, the
+    // process still exits instead of hanging around half-stopped.
+    const watchdog = setTimeout(() => {
+      console.error(`[agent-fabric] shutdown did not finish within ${SHUTDOWN_TIMEOUT_MS}ms — exiting`);
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+
+    try {
+      // Stop the work first (harness processes, git/docker clients,
+      // containers — all synchronous), then stop accepting requests. The
+      // Run records stay non-terminal on purpose: the next start's
+      // `recoverInterrupted()` reads their phase and reports the exact
+      // next step, which a "cancelled" write would destroy.
+      shutdown();
+      server.close(() => {
+        clearTimeout(watchdog);
+        process.exit(0);
+      });
+      // Drop whatever is still open — including SSE streams, which `close()`
+      // alone would wait on — so the process exits promptly. Nothing is
+      // being produced any more; there is nothing to drain.
+      server.closeAllConnections();
+    } catch (err) {
+      console.error("[agent-fabric] error during shutdown:", err);
+      clearTimeout(watchdog);
+      process.exit(1);
+    }
+  };
+
+  process.on("SIGTERM", () => stop("SIGTERM"));
+  process.on("SIGINT", () => stop("SIGINT"));
 }
 
 main().catch((err) => {

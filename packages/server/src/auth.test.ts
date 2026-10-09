@@ -7,13 +7,15 @@
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { createApp } from "./app.js";
+import { createApp, createServer } from "./app.js";
 import { loadOrCreateToken, tokenPath } from "./auth.js";
+import { descendantPids, killDescendants } from "./shutdown.js";
 
 /** The fake docker binary: a path that cannot exist, so no probe hangs. */
 const NO_DOCKER = join(tmpdir(), "af-test-no-such-docker-binary");
@@ -168,3 +170,100 @@ describe("token storage", () => {
     }
   });
 });
+
+describe("shutdown teardown", () => {
+  test("stops the process tree a run started", async () => {
+    // A stand-in for a harness CLI: the shell spawns a grandchild, exactly
+    // like a harness spawning its own helpers.
+    const child = spawn("sh", ["-c", "sleep 60"], { stdio: "ignore" });
+    try {
+      await once(child, "spawn");
+      const pids = descendantPids(process.pid);
+      assert.ok(pids.includes(child.pid!), `expected ${child.pid} among ${pids.join(",")}`);
+      const killed = killDescendants(process.pid);
+      assert.ok(killed.includes(child.pid!));
+      await once(child, "exit");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  test("is a no-op when nothing is running, and idempotent", async () => {
+    const savedDockerBin = process.env.AGENTFABRIC_DOCKER_BIN;
+    process.env.AGENTFABRIC_DOCKER_BIN = NO_DOCKER;
+    const dataDir = mkdtempSync(join(tmpdir(), "af-shutdown-"));
+    try {
+      const { shutdown } = await createServer({ dataDir });
+      // Nothing is running: the teardown must not throw, and must not probe
+      // docker for containers it has no reason to touch.
+      shutdown();
+      shutdown();
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      if (savedDockerBin === undefined) delete process.env.AGENTFABRIC_DOCKER_BIN;
+      else process.env.AGENTFABRIC_DOCKER_BIN = savedDockerBin;
+    }
+  });
+
+  test("stops an in-flight run without recording it as a user cancellation", async () => {
+    const savedDockerBin = process.env.AGENTFABRIC_DOCKER_BIN;
+    process.env.AGENTFABRIC_DOCKER_BIN = NO_DOCKER;
+    const dataDir = mkdtempSync(join(tmpdir(), "af-shutdown-run-"));
+    let server: Server | undefined;
+    try {
+      const handle = await createServer({ dataDir });
+      server = await new Promise<Server>((resolve) => {
+        const s = handle.app.listen(0, "127.0.0.1", () => resolve(s));
+      });
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const token = readFileSync(tokenPath(dataDir), "utf8").trim();
+      const headers = { ...bearer(token), "Content-Type": "application/json" };
+
+      // A mock runtime that runs long enough to still be executing.
+      const created = await fetch(`${base}/api/runtimes`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ name: "Slow Mock", kind: "mock", enabled: true, usableInTask: true, config: { modelCalls: 60, delayMs: 700 } }),
+      });
+      const runtime = (await created.json()) as { id: string };
+      const submitted = (await (
+        await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ runtimeId: runtime.id, prompt: "long running work" }),
+        })
+      ).json()) as { run: { id: string } };
+      const runId = submitted.run.id;
+
+      // Wait until the run is genuinely executing.
+      const deadline = Date.now() + 10_000;
+      let status = "pending";
+      while (status !== "running" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+        status = ((await (await fetch(`${base}/api/runs/${runId}`, { headers: bearer(token) })).json()) as { status: string }).status;
+      }
+      assert.equal(status, "running", "the run never started executing");
+
+      handle.shutdown();
+
+      const after = (await (await fetch(`${base}/api/runs/${runId}`, { headers: bearer(token) })).json()) as { status: string; error?: string };
+      // The whole point: a shutdown is not a user action (v11 §32). The run
+      // keeps its non-terminal state so the next start's
+      // `recoverInterrupted()` can read the task's phase and name the honest
+      // next step.
+      assert.notEqual(after.status, "cancelled", "a shutdown must never be recorded as a user cancellation");
+      assert.equal(after.status, "running");
+      assert.equal(after.error, undefined);
+    } finally {
+      await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+      rmSync(dataDir, { recursive: true, force: true });
+      if (savedDockerBin === undefined) delete process.env.AGENTFABRIC_DOCKER_BIN;
+      else process.env.AGENTFABRIC_DOCKER_BIN = savedDockerBin;
+    }
+  });
+});
+
+/** Waits for one named event (avoids importing node:events for two uses). */
+function once(emitter: { once(event: string, listener: (...args: never[]) => void): unknown }, event: string): Promise<unknown> {
+  return new Promise((resolve) => emitter.once(event, resolve));
+}
