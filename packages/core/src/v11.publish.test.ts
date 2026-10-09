@@ -370,6 +370,9 @@ describe("v11 hardening: retry publish never re-finalizes", () => {
 
   test("§30 Case B/AC-24: workspace changes after finalization are never published", async () => {
     const h = await makeHarness();
+    // The test drives the manual Retry Publish itself; the automatic one is
+    // covered by v11.retry.test.ts and would consume the flaky failure here.
+    await h.store.updateConfig({ autoRetry: { enabled: false } });
     const { remote } = await makeRemote();
     const inner = createGitOps();
     const failing = flakyPushGit(inner, 1, new DomainError("source-network-failed", "network unreachable"));
@@ -419,6 +422,8 @@ describe("v11 hardening: retry publish never re-finalizes", () => {
 
   test("§30 Case C: retry publish leaves agent / validation / finalization counts untouched", async () => {
     const h = await makeHarness();
+    // The manual Retry Publish is the operation under test; see Case B.
+    await h.store.updateConfig({ autoRetry: { enabled: false } });
     const { remote } = await makeRemote();
     const inner = createGitOps();
     const failing = flakyPushGit(inner, 1, new DomainError("git-push-failed", "push failed"));
@@ -1023,6 +1028,9 @@ describe("v11 hardening: cancellation and concurrency", () => {
 
   test("§32 retry publish on Task A does not block or pollute Task B's workspace", async () => {
     const h = await makeHarness();
+    // Task A's push is retried by hand below; automatic retry would repair it
+    // first and leave nothing for the manual call to prove.
+    await h.store.updateConfig({ autoRetry: { enabled: false } });
     const { remote } = await makeRemote();
     const inner = createGitOps();
     // Task A's first push fails; Task B's does not.

@@ -21,6 +21,7 @@ import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { EventBus } from "./eventbus.js";
 import { Store, newId } from "./store.js";
 import { DomainError, asDomainError, isDomainError, retryKindForFailure, type FailureStage, type RetryKind } from "./errors.js";
+import { planAutoRetry, type AutoRetryDecision } from "./autoRetry.js";
 import {
   createGitOps,
   diffBetween,
@@ -298,6 +299,11 @@ export interface SupervisorOptions {
    * grantable from a task request.
    */
   allowHostExecution?: boolean;
+  /**
+   * The wait between an automatic retry's schedule and its start. Defaults to
+   * a real timer; tests inject a recorder so backoff never costs wall clock.
+   */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -333,6 +339,16 @@ export class ExecutionSupervisor {
   private readonly validationExecutor: ValidationExecutorFactory;
   private readonly gitTimeoutMs: number;
   private readonly allowHostExecution: boolean;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * The auto-retry decision each settled lifecycle computed for its own
+   * failure, keyed by task. The lifecycle tail reads it to decide whether to
+   * suppress the terminal notification, and `maybeAutoRetry` consumes it once
+   * the lifecycle promise resolves — one decision, computed once, so a cancel
+   * between "decided" and "acted" cannot produce a suppressed notification
+   * with no retry behind it.
+   */
+  private readonly autoRetryDecisions = new Map<ID, AutoRetryDecision>();
   /** In-flight lifecycles, keyed by task id. */
   private readonly active = new Map<ID, Promise<void>>();
   /**
@@ -367,6 +383,17 @@ export class ExecutionSupervisor {
     this.validationExecutor = options.validationExecutor ?? dockerValidationExecutor(this.store.dataDir);
     this.gitTimeoutMs = options.gitTimeoutMs ?? 10 * 60 * 1000;
     this.allowHostExecution = options.allowHostExecution ?? false;
+    this.sleep =
+      options.sleep ??
+      ((ms, signal) =>
+        new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          const timer = setTimeout(resolve, ms);
+          signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        }));
   }
 
   /* ---------------- services ---------------- */
@@ -1014,7 +1041,47 @@ export class ExecutionSupervisor {
       await this.emitRecovery(task.id, stage);
       interrupted.push(task.id);
     }
+    await this.settlePendingAutoRetries(interrupted);
     return { tasks: interrupted, workspaces: released };
+  }
+
+  /**
+   * A scheduled automatic retry does not survive the process (v11 hardening
+   * §18 — after a restart nothing re-runs an agent on its own). Two shapes:
+   *
+   *   - a retry was scheduled but never started (the task is not in flight;
+   *     the backoff timer died with the process): the pending marker is
+   *     cleared and the manual retry is the honest next step;
+   *   - a retry was in flight when the process died: recovery just settled
+   *     the task, but the outcome's notification was never sent — the
+   *     failure it was retrying had its notification suppressed.
+   *
+   * Either way the withheld webhook is delivered here. A retry whose
+   * notification was *not* withheld is untouched, so nothing is announced
+   * twice.
+   */
+  private async settlePendingAutoRetries(interrupted: ID[]): Promise<void> {
+    for (const task of this.tasks().list({ deleted: false })) {
+      const autoRetry = task.execution?.autoRetry;
+      if (!autoRetry) continue;
+      if (autoRetry.nextAt) {
+        await this.patchExecution(task.id, {
+          autoRetry: {
+            attempts: autoRetry.attempts,
+            code: autoRetry.code,
+            ...(autoRetry.at ? { at: autoRetry.at } : {}),
+          },
+        });
+        const runId = this.eventRunId(task);
+        if (runId) await this.notifyTerminal(task.id, runId, task);
+        continue;
+      }
+      // Started, then the crash took the outcome: recovery settled it above.
+      if (autoRetry.at && interrupted.includes(task.id)) {
+        const runId = this.eventRunId(task);
+        if (runId) await this.notifyTerminal(task.id, runId, task);
+      }
+    }
   }
 
   /**
@@ -1068,12 +1135,19 @@ export class ExecutionSupervisor {
 
   private startLifecycle(taskId: ID, runId: ID, mode: LifecycleMode): Promise<void> {
     const previous = this.active.get(taskId);
-    const promise = (async () => {
+    const promise: Promise<void> = (async () => {
       if (previous) await previous.catch(() => {});
       await this.lifecycle(taskId, runId, mode);
     })()
       .catch(() => {
         /* every failure is recorded on the task; nothing escapes */
+      })
+      // Automatic retry of a transient failure runs inside this promise, so
+      // `whenSettled` means "the retry has been started", never "the backoff
+      // is still ticking" (v11 §31).
+      .then(() => this.maybeAutoRetry(taskId, runId, promise))
+      .catch(() => {
+        /* an auto-retry bookkeeping failure must not escape either */
       })
       .finally(() => {
         if (this.active.get(taskId) === promise) this.active.delete(taskId);
@@ -1454,6 +1528,9 @@ export class ExecutionSupervisor {
       phase: failure ? (cancelled ? "cancelled" : "failed") : "completed",
       status: failure ? (cancelled ? "cancelled" : "failed") : "completed",
       failure,
+      // The retry budget belongs to a failure episode: a task that reached
+      // `completed` starts the next failure from a full budget.
+      ...(failure ? {} : { autoRetry: undefined }),
     });
     const finalRun = this.runService.get(runId);
     if (finalRun) {
@@ -1476,32 +1553,331 @@ export class ExecutionSupervisor {
       });
     }
 
+    // Will this failure be retried automatically? The decision is computed
+    // once, here, from the settled record, and handed to `maybeAutoRetry`.
+    // A retry in flight means this is not the Task's final outcome — the
+    // webhook is suppressed so the user is told about the end of the story,
+    // not about every attempt in the middle (a `skip` decision is a final
+    // outcome and still notifies). Cancellation is included in the decision,
+    // and `cancelTask` keeps its flag set until the lifecycle settles, so a
+    // cancel landing right now is honored rather than raced.
+    const decision = finalTask
+      ? planAutoRetry({
+          task: this.tasks().get(taskId) ?? finalTask,
+          config: this.store.config().autoRetry,
+          cancelled: this.cancelRequested.has(taskId),
+        })
+      : undefined;
+    if (decision) this.autoRetryDecisions.set(taskId, decision);
+
     // Outbound notification (fire-and-forget, deliberately after the terminal
     // write). It is a side channel: `deliverTaskNotification` never rejects,
     // and awaiting it here is bounded (timeout × attempts), so a slow or
     // broken webhook can delay this lifecycle tail but can never change the
     // outcome that was just written. The result is recorded either way — a
     // dropped notification is visible, never silent.
-    if (finalTask) {
-      const result = await deliverTaskNotification(this.store.config().notifications, {
-        task: this.tasks().get(taskId) ?? finalTask,
-        run: finalRun,
-      });
-      if (result) {
-        await this.emit(runId, "log", {
-          line: result.delivered
-            ? `notification delivered (${result.event} → ${result.url})`
-            : `notification failed (${result.event} → ${result.url}): ${result.error ?? "unknown error"}`,
-          kind: result.delivered ? "notification-delivered" : "notification-failed",
-          event: result.event,
-          attempts: result.attempts,
-          errorKind: result.errorKind,
-        });
-      }
+    if (finalTask && decision?.action !== "retry") {
+      await this.notifyTerminal(taskId, runId, finalTask);
     }
 
     this.redactors.delete(runId);
     this.lifecycleAborts.delete(taskId);
+  }
+
+  /**
+   * Delivers the one terminal-state webhook for a Task. Called by the
+   * lifecycle tail, and by the publish auto-retry chain — which settles
+   * outside the lifecycle and is the only other path that ends a Task.
+   */
+  private async notifyTerminal(taskId: ID, runId: ID, fallbackTask: Task): Promise<void> {
+    const result = await deliverTaskNotification(this.store.config().notifications, {
+      task: this.tasks().get(taskId) ?? fallbackTask,
+      run: this.runService.get(runId),
+    });
+    if (result) {
+      await this.emit(runId, "log", {
+        line: result.delivered
+          ? `notification delivered (${result.event} → ${result.url})`
+          : `notification failed (${result.event} → ${result.url}): ${result.error ?? "unknown error"}`,
+        kind: result.delivered ? "notification-delivered" : "notification-failed",
+        event: result.event,
+        attempts: result.attempts,
+        errorKind: result.errorKind,
+      });
+    }
+  }
+
+  /* ---------------- automatic retry (v11 §31) ---------------- */
+
+  /**
+   * Runs a transient failure's automatic retry, if the settled lifecycle
+   * decided one is warranted. It executes inside the lifecycle promise, after
+   * the terminal write, so `whenSettled` means "the retry has been started".
+   *
+   * The decision may go stale during the backoff (the user cancels, the
+   * workspace disappears), and every guard failure is recorded as a visible
+   * `task.retry.skipped` event — a withheld retry is never silent
+   * (「失败要响」).
+   */
+  private async maybeAutoRetry(taskId: ID, runId: ID, self: Promise<void>): Promise<void> {
+    const decision = this.autoRetryDecisions.get(taskId);
+    this.autoRetryDecisions.delete(taskId);
+    if (!decision) return;
+    if (decision.action === "skip") {
+      await this.emit(runId, "task.retry.skipped", {
+        reason: decision.reason,
+        code: decision.code,
+        stage: decision.stage,
+      });
+      return;
+    }
+
+    // The backoff is interruptible: cancelling during the wait must stop the
+    // retry before it starts, not race it. `cancelTask` aborts whatever
+    // controller is registered here.
+    const abort = new AbortController();
+    this.lifecycleAborts.set(taskId, abort);
+    try {
+      if (decision.kind === "publish") {
+        await this.runPublishAutoRetry(taskId, runId, decision, abort, self);
+      } else {
+        await this.runLifecycleAutoRetry(taskId, runId, decision, abort, self);
+      }
+    } finally {
+      // Only our own controller: `retryPublish` installs and clears its own.
+      if (this.lifecycleAborts.get(taskId) === abort) this.lifecycleAborts.delete(taskId);
+    }
+  }
+
+  /**
+   * Hands the task's "running" slot over to the retry operation. The retry
+   * methods guard with `assertNotRunning`, and until this runs the settled
+   * lifecycle is still the tracked promise — without the handover every
+   * automatic retry would refuse itself with `task-busy`. Only our own
+   * promise is ever removed, so a concurrent lifecycle is never dropped.
+   */
+  private releaseActive(taskId: ID, self: Promise<void>): void {
+    if (this.active.get(taskId) === self) this.active.delete(taskId);
+  }
+
+  /**
+   * The Agent / Validation retry: schedule, wait out the backoff, then call
+   * the same stage-specific operation the UI and API expose (v11 §31). The
+   * new lifecycle carries any further rounds — its own tail re-plans against
+   * the budget and notifies the eventual final outcome.
+   */
+  private async runLifecycleAutoRetry(
+    taskId: ID,
+    runId: ID,
+    decision: Extract<AutoRetryDecision, { action: "retry" }>,
+    abort: AbortController,
+    self: Promise<void>
+  ): Promise<void> {
+    await this.emit(runId, "task.retry.scheduled", {
+      kind: decision.kind,
+      attempt: decision.attempt,
+      delayMs: decision.delayMs,
+      code: decision.code,
+      stage: decision.stage,
+    });
+    await this.patchExecution(taskId, {
+      autoRetry: {
+        attempts: decision.attempt,
+        code: decision.code,
+        nextAt: new Date(Date.now() + decision.delayMs).toISOString(),
+      },
+    });
+
+    await this.sleep(decision.delayMs, abort.signal);
+    if (await this.retryAborted(taskId, runId, decision, abort, self)) return;
+
+    await this.patchExecution(taskId, {
+      autoRetry: { attempts: decision.attempt, code: decision.code, at: now() },
+    });
+    // The last check before the point of no return: a cancel that landed
+    // while the record was being written must still win.
+    if (await this.retryAborted(taskId, runId, decision, abort, self)) return;
+
+    await this.emit(runId, "task.retry.started", {
+      kind: decision.kind,
+      attempt: decision.attempt,
+      code: decision.code,
+      stage: decision.stage,
+    });
+
+    // From here the retry operation is the task's running work; the settled
+    // lifecycle's slot is released so the operation's own guard passes and
+    // its new lifecycle does not chain back onto this promise. The retry is
+    // then awaited in full: this promise settling means the automatic retry
+    // has completely settled too, so `whenSettled` never returns mid-retry.
+    this.releaseActive(taskId, self);
+
+    try {
+      if (decision.kind === "agent") {
+        // `retryRun` starts the new lifecycle without awaiting it; wait for
+        // that lifecycle here so the chain is linear and observable.
+        await this.retryRun(taskId);
+        await this.whenSettled(taskId);
+      } else {
+        // `retryValidation` awaits its own lifecycle's settlement.
+        await this.retryValidation(taskId);
+      }
+    } catch (err) {
+      // The retry methods only throw before they start anything (guards), so
+      // the failure is still the task's final outcome — and its notification
+      // was suppressed for a retry that never happened.
+      await this.emitRetrySkipped(runId, err, decision);
+      await this.notifyTerminalFinal(taskId, runId);
+    }
+  }
+
+  /**
+   * The Publish retry: `retryPublish` settles outside the lifecycle, so this
+   * loop carries the budget itself — each failed push re-plans against the
+   * freshly written record until it succeeds or the budget is spent, and the
+   * final outcome is notified here (the lifecycle tail suppressed its own
+   * notification when it scheduled this retry).
+   */
+  private async runPublishAutoRetry(
+    taskId: ID,
+    runId: ID,
+    first: Extract<AutoRetryDecision, { action: "retry" }>,
+    abort: AbortController,
+    self: Promise<void>
+  ): Promise<void> {
+    let next: Extract<AutoRetryDecision, { action: "retry" }> | undefined = first;
+    let released = false;
+    while (next) {
+      await this.emit(runId, "task.retry.scheduled", {
+        kind: "publish",
+        attempt: next.attempt,
+        delayMs: next.delayMs,
+        code: next.code,
+        stage: next.stage,
+      });
+      await this.patchExecution(taskId, {
+        autoRetry: {
+          attempts: next.attempt,
+          code: next.code,
+          nextAt: new Date(Date.now() + next.delayMs).toISOString(),
+        },
+      });
+
+      await this.sleep(next.delayMs, abort.signal);
+      if (await this.retryAborted(taskId, runId, next, abort, self)) return;
+
+      await this.patchExecution(taskId, { autoRetry: { attempts: next.attempt, code: next.code, at: now() } });
+      // The last check before the point of no return: a cancel that landed
+      // while the record was being written must still win.
+      if (await this.retryAborted(taskId, runId, next, abort, self)) return;
+
+      await this.emit(runId, "task.retry.started", {
+        kind: "publish",
+        attempt: next.attempt,
+        code: next.code,
+        stage: next.stage,
+      });
+
+      if (!released) {
+        this.releaseActive(taskId, self);
+        released = true;
+      }
+
+      try {
+        await this.retryPublish(taskId);
+      } catch (err) {
+        await this.emitRetrySkipped(runId, err, next);
+        await this.notifyTerminalFinal(taskId, runId);
+        return;
+      } finally {
+        // `retryPublish` deletes the task's abort-controller entry when it
+        // settles; re-register ours so a cancel during the next backoff still
+        // interrupts the chain.
+        this.lifecycleAborts.set(taskId, abort);
+      }
+
+      const task = this.tasks().get(taskId);
+      if (!task || task.execution?.status !== "failed") {
+        // The push landed: this is the Task's final, successful outcome.
+        await this.notifyTerminalFinal(taskId, runId);
+        return;
+      }
+      const replanned = planAutoRetry({
+        task,
+        config: this.store.config().autoRetry,
+        cancelled: this.cancelRequested.has(taskId),
+      });
+      if (replanned?.action !== "retry") {
+        if (replanned?.action === "skip") {
+          await this.emit(runId, "task.retry.skipped", {
+            reason: replanned.reason,
+            code: replanned.code,
+            stage: replanned.stage,
+          });
+        }
+        await this.notifyTerminalFinal(taskId, runId);
+        return;
+      }
+      next = replanned;
+    }
+  }
+
+  /**
+   * Whether the scheduled retry must be abandoned: a cancel landed (the
+   * abort), or the task is no longer in the failed state the decision was
+   * made from (someone retried it by hand, or deleted it). Emits the visible
+   * skip and — because the settle-time notification was suppressed for a
+   * retry that will now never happen — delivers the final notification.
+   */
+  private async retryAborted(
+    taskId: ID,
+    runId: ID,
+    decision: Extract<AutoRetryDecision, { action: "retry" }>,
+    abort: AbortController,
+    self: Promise<void>
+  ): Promise<boolean> {
+    const task = this.tasks().get(taskId);
+    const active = this.active.get(taskId);
+    const superseded = !task || task.execution?.status !== "failed" || (active !== undefined && active !== self);
+    if (!abort.signal.aborted && !superseded) return false;
+    // The schedule is off; the record must not keep claiming a retry is
+    // coming. The spend stays recorded, so a later manual retry still counts
+    // against this episode's budget.
+    await this.patchExecution(taskId, {
+      autoRetry: { attempts: decision.attempt, code: decision.code },
+    });
+    await this.emit(runId, "task.retry.skipped", {
+      reason: abort.signal.aborted ? "cancelled" : "superseded",
+      code: decision.code,
+      stage: decision.stage,
+    });
+    // A cancel leaves the failure standing and nobody else will announce it —
+    // the settle-time notification was suppressed for a retry that is now
+    // abandoned. A superseded task belongs to whoever took it over: their own
+    // path carries whatever notification semantics it has (a manual
+    // `retryPublish`, like the manual path always did, announces nothing).
+    if (abort.signal.aborted && task) await this.notifyTerminal(taskId, runId, task);
+    return true;
+  }
+
+  /** The task's final state after a publish auto-retry chain concluded. */
+  private async notifyTerminalFinal(taskId: ID, runId: ID): Promise<void> {
+    const task = this.tasks().get(taskId);
+    if (task) await this.notifyTerminal(taskId, runId, task);
+  }
+
+  private async emitRetrySkipped(
+    runId: ID,
+    err: unknown,
+    decision: Extract<AutoRetryDecision, { action: "retry" }>
+  ): Promise<void> {
+    const domain = asDomainError(err, "task-state-invalid");
+    await this.emit(runId, "task.retry.skipped", {
+      reason: "guard",
+      code: domain.code,
+      stage: decision.stage,
+      error: domain.message,
+    });
   }
 
   /* ---------------- stages ---------------- */

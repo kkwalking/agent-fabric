@@ -19,14 +19,17 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
   const [busy, setBusy] = useState<string | null>(null);
 
   const inFlight = detail.data && ["preparing", "running", "validating", "finalizing", "publishing"].includes(detail.data.status);
+  // A failed task with a retry scheduled is still moving: poll it too, so the
+  // retry starting (and the phase advancing past "failed") shows up.
+  const retryPending = Boolean(detail.data?.task?.execution?.autoRetry?.nextAt);
 
   // Poll while the lifecycle is in flight so the phase advances visibly.
   useEffect(() => {
-    if (!inFlight) return;
+    if (!inFlight && !retryPending) return;
     const timer = window.setInterval(() => detail.reload(), 2000);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inFlight]);
+  }, [inFlight, retryPending]);
 
   if (detail.error) return <ErrorBox message={detail.error} />;
   if (!detail.data) return <div className="muted">Loading…</div>;
@@ -75,6 +78,13 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
                 : `Failed during ${failure.stage}`}
           </div>
           <div className="fail-reason">[{failure.code}] {failure.message}</div>
+          {execution.autoRetry?.nextAt && (
+            <div className="fail-reason muted">
+              Automatic retry {execution.autoRetry.attempts} of [{execution.autoRetry.code}] scheduled — starting in
+              about {Math.max(0, Math.round((Date.parse(execution.autoRetry.nextAt) - Date.now()) / 1000))}s. The manual
+              actions below stay available.
+            </div>
+          )}
           <div className="fail-actions">
             {d.retry.agent && (
               <button className="small primary" disabled={busy !== null} onClick={() => act("retry-run", "agent")}>

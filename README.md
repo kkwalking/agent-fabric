@@ -926,6 +926,30 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 * **重试策略**：网络错误、超时、429、5xx 重试；其余 4xx（token 错、路径错）立即放弃——重复不会让它变对。
 * **URL 是密钥**：事件、日志、`GET /api/config` 里一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 与 Settings 页都是「读出整份 → 改一个字段 → 整份写回」）若收到恰好等于脱敏形式的 URL，按「未改动」处理并保留原值——占位符本身是合法 URL，原样入库会静默把真 webhook 换成它。
 
+## 自动重试（环境类失败）
+
+一个跑了几十分钟的 Task 因为 docker 抽风、网络抖动、push 超时而失败，重试一次往往就好——不必等人盯页面。策略在 `config.autoRetry`（Settings 页或 `PUT /api/config`）：
+
+```jsonc
+{
+  "autoRetry": {
+    "enabled": true,        // 默认 true；显式 false 关闭
+    "maxAttempts": 2,       // 一次失败事件内的总尝试数（含首次），默认 2 = 自动重试 1 次
+    "baseDelayMs": 30000,   // 退避基数：第 N 次等待 base × 2^(N-1)
+    "maxDelayMs": 300000    // 退避上限
+  }
+}
+```
+
+* **只重试「环境坏了」，不重试「活干砸了」**。可自动重试的失败码只有这些：`source-network-failed`（clone/fetch/push 网络类；若失败发生在 push 且修订版已冻结，重推冻结 SHA 而不是重跑 agent）、`git-push-failed`（远端状态复核后仍失败的 push）、`validation-runtime-failed` / `validation-runtime-unavailable`（沙箱起不来、跑挂了）。`agent-failed` / `agent-timeout` / `validation-failed`（测试没过）/ `git-push-auth-failed` 等一律**不**自动重试——要么烧模型预算，要么掩盖真实信号，保持人工决策。
+* **按阶段走既有操作，绝不发明通用 Retry Task**（v11 §31）：重试调用的就是 UI / API 上的 Retry Agent Run / Retry Validation / Retry Publish，三者语义不变。
+* **预算属于一次失败事件**：`maxAttempts` 计的是同一失败事件内的总尝试数（含首次）；只有 Task 成功到达 `completed` 才清零。手动 retry 不重置计数，但三个手动入口永远可用。
+* **全程可见**：`task.retry.scheduled`（含 `kind` / `attempt` / `delayMs` / `code`）、`task.retry.started`、`task.retry.skipped`（`reason` 为 `budget-exhausted` / `cancelled` / `superseded` / `guard`）都写在失败 run 的事件流上；Task 记录上的 `execution.autoRetry{attempts,code,nextAt,at}` 给出「已安排 / 已用次数」，Task 详情页在退避期间显示倒计时。
+* **通知只报最终结局**：中间失败尝试不发 webhook（发了会被随后的重试推翻）；重试成功发 `task.completed`，预算耗尽发 `task.failed`——各恰好一次。
+* **取消永远优先**：退避期间取消会中止重试（`task.retry.skipped`，reason `cancelled`）；被取消的 Task 无论失败码是什么都不会被重试唤醒（包括「取消落进 validation、沙箱把它报成 runtime 失败」这条路）。
+* **不跨进程重启恢复**：进程死了，待发的重试一并作废（对齐 v11-hardening §18「重启后不得自动重新运行 Agent」）——恢复时清掉 `nextAt`、投递被抑制的终态通知，留一条诚实的失败记录，手动 retry 是下一步。
+* 范围之外：agent 失败/超时、validation 断言失败不自动重试；没有 per-Project / per-Task 重试配置（只有全局 `config.autoRetry`）；不做并发队列或调度器。
+
 ## Proxy
 
 全局出网代理（Web UI 的 Proxy 页 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机。Proxy 页提供连通性测试（`POST /api/proxy/test`）。
@@ -1109,6 +1133,8 @@ v11 hardening 的专项测试：
 | `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
 | `src/v11.inheritance.test.ts` | Project → Task 继承：`execution.profileId` 的 preset、`execution.networkPolicy`（一路断言到容器 argv 的 `--network none`）、Task 级 `skills` / `mcpServers` 的整体替换语义，以及 Task 显式值优先于 Project |
 | `src/v11.notify.test.ts` | 通知接线：终态 Task 恰好发一次 webhook（载荷含 frozen revision 与逐阶段 stages）、未配置不发、失败任务带 `failure{stage,code}`、webhook 挂掉不影响 Task 终态、URL 里的 token 不进 Run 事件 |
+| `src/v11.retry.test.ts` | 自动重试接线：瞬态失败按阶段走既有 Retry（push 网络失败重推冻结 SHA 而非重跑 agent、validation 环境失败只重跑检查）、永久失败不重试、预算与退避、退避期间取消、重启不恢复、中间失败不发 webhook |
+| `src/autoRetry.test.ts` | 自动重试纯策略：瞬态码分类、配置默认与 clamp、退避倍增封顶、`planAutoRetry` 决策映射（阶段分派 / 取消 / 关闭 / 预算耗尽） |
 | `src/validationDocker.test.ts` | disposable 容器 executor 的 `docker run` argv（allowlist 环境、唯一挂载、`--network none`）、超时/取消/daemon 不可达的分类，以及 supervisor → 真实 executor 的生产路径 |
 | `src/notifications.test.ts` | 载荷投影、退避与重试策略、URL 脱敏、配置错误不抛异常（`errorKind: "config"`） |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |

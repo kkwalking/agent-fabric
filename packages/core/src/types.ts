@@ -724,7 +724,26 @@ export interface TaskExecution {
    * a stage that completed stays completed, whatever a later stage does.
    */
   stages?: TaskStageStates;
+  /**
+   * Auto-retry bookkeeping for the current failure episode: how many automatic
+   * retries the policy has already spent, and — while one is scheduled — when
+   * it will start. Cleared only when the task completes; a task that keeps
+   * failing transiently cannot retry forever.
+   */
+  autoRetry?: TaskAutoRetryState;
   updatedAt: string;
+}
+
+/** See `TaskExecution.autoRetry`. */
+export interface TaskAutoRetryState {
+  /** Automatic retries already spent in this failure episode. */
+  attempts: number;
+  /** The transient code that triggered the latest retry. */
+  code: string;
+  /** Set while a retry is scheduled (waiting out the backoff). */
+  nextAt?: string;
+  /** Set when the latest automatic retry actually started. */
+  at?: string;
 }
 
 /** Monotonic per-stage outcomes of one Project task (v11 hardening §36). */
@@ -1322,6 +1341,9 @@ export type EventType =
   | "publish.failed"
   | "publish.retry.started"
   | "task.recovered"
+  | "task.retry.scheduled"
+  | "task.retry.started"
+  | "task.retry.skipped"
   | "container.reused"
   | "container.retained"
   | "container.destroyed"
@@ -1498,6 +1520,28 @@ export interface AppConfig {
     modelId?: string;
   };
   notifications?: NotificationConfig;
+  autoRetry?: AutoRetryConfig;
+}
+
+/**
+ * Automatic retry of transient (environment / infrastructure) failures.
+ *
+ * Only failures the environment caused are retried automatically — a network
+ * blip, a validation sandbox that could not start, a push that failed after
+ * its remote-state re-check. An agent that failed its task, timed out, or a
+ * test that failed stays a human decision (v11 §31). The automatic path calls
+ * exactly the same Retry Agent / Retry Validation / Retry Publish operations
+ * the UI and API expose; it never invents a generic "retry task".
+ */
+export interface AutoRetryConfig {
+  /** Default true; set false to disable automatic retries entirely. */
+  enabled?: boolean;
+  /** Total attempts in one failure episode, including the first. Default 2. */
+  maxAttempts?: number;
+  /** Backoff base; the wait before the Nth retry is `base * 2^(N-1)`. */
+  baseDelayMs?: number;
+  /** Backoff cap. */
+  maxDelayMs?: number;
 }
 
 /**
