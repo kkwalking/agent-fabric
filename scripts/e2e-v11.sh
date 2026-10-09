@@ -39,12 +39,20 @@ assert_token_confined() {
   node -e "
     const fs=require('fs');
     const db=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
-    const inSecrets=JSON.stringify(db.secrets??[]).includes(process.argv[2]);
-    delete db.secrets;
-    const elsewhere=JSON.stringify(db).includes(process.argv[2]);
-    if (!inSecrets) { console.error('token missing from the secret store'); process.exit(1); }
-    if (elsewhere) { console.error('token leaked outside the secret store'); process.exit(1); }
-    console.log('token confined to the secret store');
+    const stored=JSON.stringify(db.secrets??[]);
+    if (stored.includes(process.argv[2])) {
+      console.error('the credential is stored in plaintext — secrets must be encrypted at rest');
+      process.exit(1);
+    }
+    if (!stored.includes('enc:v1:')) {
+      console.error('the credential is missing from the (encrypted) secret store');
+      process.exit(1);
+    }
+    if (JSON.stringify(db).includes(process.argv[2])) {
+      console.error('the credential leaked into another collection');
+      process.exit(1);
+    }
+    console.log('credential stored encrypted and confined to the secret store');
   " "$file" "$token"
 }
 

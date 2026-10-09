@@ -5,8 +5,9 @@ import { dirname, join, resolve } from "node:path";
 import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { emptyUsage, addUsage, estimateCost } from "./cost.js";
-import { DomainError } from "./errors.js";
+import { DomainError, isDomainError } from "./errors.js";
 import { validateRemoteUrl, checkCredentialBinding, type CredentialBindingCheck, type GitCredentialInput } from "./git.js";
+import { decryptSecretValue, encryptSecretValue, isEncryptedSecretValue } from "./secretCrypto.js";
 import { assertSecretAllowed, resolveSecretsForPurpose, type SecretPurpose } from "./secrets.js";
 import { taskLifecycle } from "./lifecycle.js";
 import type {
@@ -121,7 +122,7 @@ export class ProviderService {
       const secret = await this.store.insert<Secret>("secrets", {
         id: newId("sec"),
         name: `${input.name} api key`,
-        value: input.apiKey,
+        value: SecretService.encryptPlaintext(this.store, input.apiKey),
         masked: maskSecret(input.apiKey),
         scope: "provider",
         createdAt: now(),
@@ -160,7 +161,7 @@ export class ProviderService {
       const secret: Secret = {
         id: provider.apiKeySecretId ?? newId("sec"),
         name: `${provider.name} api key`,
-        value: patch.apiKey,
+        value: SecretService.encryptPlaintext(this.store, patch.apiKey),
         masked: maskSecret(patch.apiKey),
         scope: "provider",
         createdAt: now(),
@@ -576,8 +577,21 @@ export interface NewSecretInput {
   scope?: Secret["scope"];
 }
 
+/**
+ * Stores whose legacy-plaintext Secret scan already ran. The scan is a
+ * startup concern; several services construct their own `SecretService` over
+ * the same store (the credential broker does so per Git operation), and the
+ * warning must not repeat for each of them.
+ */
+const legacySecretScanDone = new WeakSet<Store>();
+
 export class SecretService {
-  constructor(private store: Store) {}
+  constructor(private store: Store) {
+    if (!legacySecretScanDone.has(store)) {
+      legacySecretScanDone.add(store);
+      this.warnAboutLegacyPlaintextSecrets();
+    }
+  }
 
   list(): Secret[] {
     return this.store.list<Secret>("secrets").map(({ value: _v, ...rest }) => rest);
@@ -590,25 +604,95 @@ export class SecretService {
     return rest;
   }
 
+  /**
+   * The one read path that materializes a Secret's value. Stored values are
+   * ciphertext; a record written before encryption existed fails loudly here
+   * rather than being read as-is (the read path never rescues dirty data).
+   * `list()` / `get()` / `remove()` never decrypt, so such a record stays
+   * listable and deletable — which is exactly how a user repairs it.
+   */
   getWithValue(id: ID): Secret | undefined {
-    return this.store.get<Secret>("secrets", id);
+    const secret = this.store.get<Secret>("secrets", id);
+    if (!secret) return undefined;
+    return { ...secret, value: this.decryptStoredValue(secret) };
   }
 
   async create(input: NewSecretInput): Promise<Secret> {
-    const secret: Secret = {
+    const stored: Secret = {
       id: newId("sec"),
       name: input.name,
-      value: input.value,
+      value: this.encryptPlaintextValue(input.value),
       masked: maskSecret(input.value),
       scope: input.scope ?? "env",
       createdAt: now(),
       updatedAt: now(),
     };
-    return this.store.insert("secrets", secret);
+    await this.store.insert("secrets", stored);
+    // The plaintext is echoed back exactly once, to the caller that just
+    // supplied it. db.json — and every later read — carries the ciphertext.
+    return { ...stored, value: input.value };
   }
 
   async remove(id: ID): Promise<boolean> {
     return this.store.remove("secrets", id);
+  }
+
+  /**
+   * Turns a plaintext value into its stored form. Shared by every writer of
+   * the `secrets` collection (provider API keys, source credentials), so no
+   * service can store a plaintext value of its own. A key problem surfaces as
+   * `secret-key-invalid`; a write failure surfaces as its own fs error.
+   */
+  static encryptPlaintext(store: Store, plaintext: string): string {
+    return encryptSecretValue(store.dataDir, plaintext);
+  }
+
+  /** Instance form of `SecretService.encryptPlaintext` for this service's store. */
+  encryptPlaintextValue(plaintext: string): string {
+    return SecretService.encryptPlaintext(this.store, plaintext);
+  }
+
+  /** Decrypts a stored record's value, failing loudly on a legacy plaintext one. */
+  private decryptStoredValue(secret: Secret): string | undefined {
+    const stored = secret.value;
+    if (stored === undefined) return undefined;
+    if (!isEncryptedSecretValue(stored)) {
+      throw new DomainError(
+        "secret-legacy-format",
+        `Secret "${secret.name}" (${secret.id}) was stored before Secret values were encrypted and cannot be read — remove it and create it again with the same value`
+      );
+    }
+    try {
+      return decryptSecretValue(this.store.dataDir, stored);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // The code says which failure it was; the message never carries the
+      // ciphertext or the key, only which record failed.
+      throw new DomainError(
+        isDomainError(err) ? err.code : "secret-decrypt-failed",
+        `Secret "${secret.name}" (${secret.id}) could not be read: ${message}`
+      );
+    }
+  }
+
+  /**
+   * One scan at construction: a plaintext record is called out loudly with
+   * its id and name so the user can find and re-create it, and the server
+   * still starts (otherwise there would be no UI to repair it from). Never
+   * an O(n) scan on a read path.
+   */
+  private warnAboutLegacyPlaintextSecrets(): void {
+    const legacy = this.store.list<Secret>("secrets").filter((s) => s.value !== undefined && !isEncryptedSecretValue(s.value));
+    if (legacy.length === 0) return;
+    console.error(
+      `[agent-fabric] ${legacy.length} Secret(s) are stored in the pre-encryption plaintext format and can no longer be read:`
+    );
+    for (const s of legacy) {
+      console.error(`[agent-fabric]   - ${s.id} "${s.name}"`);
+    }
+    console.error(
+      "[agent-fabric] Remove each one (its value is not recoverable here) and create it again with the same value; providers and source credentials referencing them will need re-saving."
+    );
   }
 
   /**
@@ -1390,7 +1474,7 @@ export class SourceCredentialService {
       const secret = await this.store.insert<Secret>("secrets", {
         id: newId("sec"),
         name: `${name} ${input.type === "https-token" ? "token" : "private key"}`,
-        value: input.value,
+        value: this.encrypt(input.value),
         masked: maskSecret(input.value),
         scope: "git",
         createdAt: now(),
@@ -1403,7 +1487,7 @@ export class SourceCredentialService {
       const secret = await this.store.insert<Secret>("secrets", {
         id: newId("sec"),
         name: `${name} passphrase`,
-        value: input.passphrase,
+        value: this.encrypt(input.passphrase),
         masked: maskSecret(input.passphrase),
         scope: "git",
         createdAt: now(),
@@ -1438,7 +1522,7 @@ export class SourceCredentialService {
     if (patch.value) {
       const secret = this.store.get<Secret>("secrets", credential.secretId);
       await this.store.update<Secret>("secrets", credential.secretId, {
-        value: patch.value,
+        value: this.encrypt(patch.value),
         masked: maskSecret(patch.value),
         updatedAt: now(),
         ...(secret ? {} : { id: credential.secretId, name: `${credential.name} secret`, scope: "git", createdAt: now() }),
@@ -1449,12 +1533,12 @@ export class SourceCredentialService {
         ? this.store.get<Secret>("secrets", credential.passphraseSecretId)
         : undefined;
       if (existing) {
-        await this.store.update<Secret>("secrets", existing.id, { value: patch.passphrase, masked: maskSecret(patch.passphrase), updatedAt: now() });
+        await this.store.update<Secret>("secrets", existing.id, { value: this.encrypt(patch.passphrase), masked: maskSecret(patch.passphrase), updatedAt: now() });
       } else {
         const secret = await this.store.insert<Secret>("secrets", {
           id: newId("sec"),
           name: `${credential.name} passphrase`,
-          value: patch.passphrase,
+          value: this.encrypt(patch.passphrase),
           masked: maskSecret(patch.passphrase),
           scope: "git",
           createdAt: now(),
@@ -1488,7 +1572,7 @@ export class SourceCredentialService {
     if (!id) return undefined;
     const credential = this.get(id);
     if (!credential) throw new DomainError("credential-not-found", `Source credential not found: ${id}`);
-    const secret = this.store.get<Secret>("secrets", credential.secretId);
+    const secret = this.secretService().getWithValue(credential.secretId);
     if (!secret?.value) {
       throw new DomainError(
         "source-credential-invalid",
@@ -1500,7 +1584,7 @@ export class SourceCredentialService {
     // remote.
     assertSecretAllowed(secret, "git");
     const passphrase = credential.passphraseSecretId
-      ? this.store.get<Secret>("secrets", credential.passphraseSecretId)?.value
+      ? this.secretService().getWithValue(credential.passphraseSecretId)?.value
       : undefined;
     if (credential.type === "https-token") {
       return { type: "https-token", username: credential.username, token: secret.value };
@@ -1512,6 +1596,16 @@ export class SourceCredentialService {
       passphrase,
       knownHosts: credential.knownHosts,
     };
+  }
+
+  /** Delegates to the SecretService so both share one encryption path. */
+  private secretService(): SecretService {
+    return new SecretService(this.store);
+  }
+
+  /** Encrypts a credential value for storage (delegates to `SecretService`). */
+  private encrypt(plaintext: string): string {
+    return SecretService.encryptPlaintext(this.store, plaintext);
   }
 
   /**

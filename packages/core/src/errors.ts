@@ -67,6 +67,10 @@ export type ErrorCode =
   | "task-state-invalid"
   | "task-busy"
   | "policy-denied"
+  /* Secrets at rest */
+  | "secret-legacy-format"
+  | "secret-key-invalid"
+  | "secret-decrypt-failed"
   /* Platform */
   | "supervisor-restarted"
   | "internal-error";
@@ -121,6 +125,12 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "remote-branch-conflict": "publish",
   "publish-revision-missing": "publish",
   "workspace-diverged-after-finalization": "publish",
+  // Secret material that cannot be read. Not a lifecycle stage — these codes
+  // are raised at the store boundary and reported by whichever API or service
+  // touched the secret.
+  "secret-legacy-format": "workspace",
+  "secret-key-invalid": "workspace",
+  "secret-decrypt-failed": "workspace",
 };
 
 export function stageForCode(code: ErrorCode): FailureStage {

@@ -910,6 +910,8 @@ Execution Policy 在 Run 中强制执行：
 * Run 事件不进 db.json：事件负载按 run 分片，append-only 追加到 `~/.fabric/events/<runId>.jsonl`；db.json 只保留每 run 一行的索引（`eventShards`：文件、条数、字节数、`lastSeq` 高水位，`lastSeq` 同时用于重启后恢复全局 seq 计数器）。读取按需从分片文件载入。
 * `git` 类型 Workspace 在创建时克隆到 `AGENTFABRIC_DATA_DIR/workspaces/<id>`，Run 时挂载真实目录；Project-based Task 的 Managed Workspace 同样落在这里，由平台自动创建与（软删除满 30 天后）自动清理。
 * Secrets 值仅在创建时返回一次，其余接口返回掩码；Secrets 不进入日志与事件；按 `secretIds` 注入 Runtime 环境变量。
+* **Secret 值在 db.json 中静态加密**（AES-256-GCM）：密钥是 `<dataDir>/secret.key`（32 字节随机，hex 存储，`0600`，首次使用时生成），存储格式为 `enc:v1:<iv>:<authTag>:<ciphertext>`。没有兜底路径：不是 `enc:v1:` 格式的存量值按 `secret-legacy-format` 明确报错（升级前的明文 Secret 需重新录入一次），认证失败的按 `secret-decrypt-failed` 报错——绝不返回密文、空串或垃圾数据。`secret.key` 丢失或替换后旧值不可恢复。
+* API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码；`GET /api/providers/:id/api-key` 需带 `X-AgentFabric-Reveal: 1` 请求头确认，返回的明文不进入任何日志。
 * Git 凭据只在单次 Git 操作期间 materialize 到 `AGENTFABRIC_DATA_DIR/git-credentials/<op>-<random>`（操作结束立即删除）：HTTPS 走 `GIT_ASKPASS` + 子进程环境变量，SSH 走 `0600` 私钥文件 + `core.sshCommand`（`StrictHostKeyChecking=yes`）。远端 URL 始终不含凭据，`.git/config` 里也没有。
 * Skill / MCP provisioning 落在 `AGENTFABRIC_DATA_DIR/provisioning/<runId>`，Run 结束即删除；生成的 MCP 配置是 `0600` 文件（可能含注入的 Secret 值），同样不进入日志与 API 响应。
 * API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码。
@@ -1039,7 +1041,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * DSH 没有官方容器镜像，容器化执行需自备镜像（参考 `docker/dsh.Dockerfile`）；Pi 同理（`docker/pi.Dockerfile`）。两者都不会自动构建镜像，也不会回退到普通 node 镜像——未配置 `runtime.image` 时拒绝启动。
 * Network `allowedHosts` / `blockedHosts` 与 Filesystem `allowedPaths` / `deniedPaths` 未做细粒度强制（仅支持整体开关与只读挂载）。
 * Agent Profiles 的 Web UI 入口未开放（API 与 CLI 可用）。
-* Workspace 的 Snapshot / Fork / Diff 等高级能力未提供（Managed Workspace 的 Lock 已提供）。
+* **Secret 加密不做数据迁移**：升级前写入的明文 Secret 在读取时按 `secret-legacy-format` 明确报错，需要重新录入一次（值本身无法从旧记录恢复）。`secret.key` 必须随数据目录一起备份，丢失后已加密的值不可恢复。
 * **Project Coding Task 本期边界**：
   * 一个 Project 只支持一个 primary source（单 Repository）；monorepo 多 Source、mirror、submodule 独立管理未实现。
   * Source Credential 只实现 HTTPS Token 与 SSH Private Key；GitHub App / Deploy Key / OAuth / Short-lived Credential 预留未实现。
@@ -1076,6 +1078,7 @@ v11 hardening 的专项测试：
 | `src/v11.credential.test.ts` | Remote host 解析、host binding（HTTPS/SSH match & mismatch、wildcard）、transport 兼容（HTTPS token × SSH remote 等）、Project create/update 尽早失败、`.git/config` 与全生命周期防泄漏 |
 | `src/v11.publish.test.ts` | Frozen final revision、Retry Publish 是纯发布（同 commit、不新增 commit、不跑 agent/validation/finalization、SHA 不变）、workspace 漂移检测、stage-specific crash recovery（Agent/Validation/Finalization/Publish/Cleanup）、状态单调性、取消与并发 |
 | `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
+| `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
 
 `packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、api-key reveal 确认、config 往返（脱敏 URL 不被写回覆盖）与优雅停机。
 

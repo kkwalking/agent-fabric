@@ -289,11 +289,10 @@ grep -q "$AUTH_TOKEN" "$WORK/server.log" && fail "the API token was printed in t
 node -e "
   const fs=require('fs');
   const db=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
-  const inSecrets=JSON.stringify(db.secrets??[]).includes(process.argv[2]);
-  delete db.secrets;
-  const elsewhere=JSON.stringify(db).includes(process.argv[2]);
-  if(!inSecrets){console.error('the token is missing from the secret store');process.exit(1);}
-  if(elsewhere){console.error('the token leaked outside the secret store');process.exit(1);}
+  const stored=JSON.stringify(db.secrets??[]);
+  if(stored.includes(process.argv[2])){console.error('the credential is stored in plaintext');process.exit(1);}
+  if(!stored.includes('enc:v1:')){console.error('the credential is missing from the (encrypted) secret store');process.exit(1);}
+  if(JSON.stringify(db).includes(process.argv[2])){console.error('the credential leaked into another collection');process.exit(1);}
 " "$WORK/data/db.json" "$TOKEN" || fail "the credential leaked outside the secret store"
 grep -q "$TOKEN" "$WS_PATH/.git/config" && fail "the credential was found in .git/config"
 grep -q "url = $REMOTE" "$WS_PATH/.git/config" || fail "the remote URL is not credential-free"

@@ -322,7 +322,8 @@ describe("v11 hardening: credential leakage prevention", () => {
   });
 
   test("AC-16/§29: the full lifecycle leaves no copy of the canary outside the secret store", async () => {
-    const store = await Store.open(tempDir("af-leak-store-"));
+    const dir = tempDir("af-leak-store-");
+    const store = await Store.open(dir);
     const credentials = new SourceCredentialService(store);
     const credential = await credentials.create({
       name: "canary",
@@ -330,10 +331,12 @@ describe("v11 hardening: credential leakage prevention", () => {
       host: "github.com",
       value: LEAK_CANARY,
     });
-    // The Secret store holds it (that is what a Secret is)…
+    // The Secret store holds it — encrypted at rest, so not even the store's
+    // own file carries the plaintext…
     const stored = store.get<{ value?: string }>("secrets", credential.secretId)!;
-    assert.equal(stored.value, LEAK_CANARY);
-    // …and nothing the API serves does.
+    assert.equal(stored.value!.startsWith("enc:v1:"), true, "the stored value is ciphertext");
+    assert.equal(readFileSync(join(dir, "db.json"), "utf8").includes(LEAK_CANARY), false, "db.json holds no plaintext secret");
+    // …and neither does anything the API serves.
     const served = JSON.stringify(credentials.list()) + JSON.stringify(credentials.getView(credential.id));
     assert.equal(served.includes(LEAK_CANARY), false);
     // The credential record itself is metadata only.

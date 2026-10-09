@@ -355,21 +355,15 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
     assert.equal(eventText.includes(LEAK_CANARY), false, "the credential is not in the event log");
     assert.equal(output.includes(LEAK_CANARY), false, "the credential is not in the runtime stdout/stderr");
     const dbText = readFileSync(join(dataDir, "db.json"), "utf8");
-    const secretsOnly = (() => {
-      const db = JSON.parse(dbText) as Record<string, unknown>;
-      const secrets = JSON.stringify(db.secrets ?? []);
-      delete db.secrets;
-      return { secrets, rest: JSON.stringify(db) };
-    })();
-    assert.equal(secretsOnly.secrets.includes(LEAK_CANARY), true, "the value lives in the Secret store (that is its job)");
-    if (secretsOnly.rest.includes(LEAK_CANARY)) {
-      const db = JSON.parse(dbText) as Record<string, unknown>;
-      delete db.secrets;
-      const offenders = Object.entries(db)
-        .filter(([, v]) => JSON.stringify(v).includes(LEAK_CANARY))
-        .map(([k]) => k);
-      assert.fail(`the value leaked outside the Secret store: ${offenders.join(", ")}`);
-    }
+    const db = JSON.parse(dbText) as { secrets?: { value?: string }[] };
+    // The Secret store holds the value — encrypted, so even db.json itself no
+    // longer carries the plaintext anywhere, the secret rows included.
+    assert.equal(
+      (db.secrets ?? []).some((s) => s.value?.startsWith("enc:v1:")),
+      true,
+      "the credential's Secret is stored encrypted"
+    );
+    assert.equal(dbText.includes(LEAK_CANARY), false, "the credential is nowhere in db.json, not even in the secret store");
     // Not in .git/config — the remote URL stays credential-free.
     const gitConfig = readFileSync(join(workspacePath, ".git", "config"), "utf8");
     assert.equal(gitConfig.includes(LEAK_CANARY), false, ".git/config never carries the credential");
