@@ -171,6 +171,56 @@ describe("token storage", () => {
   });
 });
 
+describe("async handler failures", () => {
+  test("answer 500 instead of leaving the request hanging", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "af-fail-"));
+    let restore = false;
+    try {
+      const app = await createApp({ dataDir });
+      const server = await new Promise<Server>((resolve) => {
+        const s = app.listen(0, "127.0.0.1", () => resolve(s));
+      });
+      const { port } = server.address() as AddressInfo;
+      const base = `http://127.0.0.1:${port}`;
+      const token = readFileSync(tokenPath(dataDir), "utf8").trim();
+
+      // Make the store's atomic write fail: no temp file can be created in a
+      // read-only data directory. This is the exact failure the error
+      // middleware exists for — an `await` inside a handler rejecting.
+      chmodSync(dataDir, 0o500);
+      restore = true;
+      let writable = false;
+      try {
+        writeFileSync(join(dataDir, "probe"), "x");
+        writable = true;
+      } catch {
+        writable = false;
+      }
+      if (writable) return; // running as root: the directory stays writable, nothing to assert
+
+      const providers = (await (
+        await fetch(`${base}/api/providers`, { headers: bearer(token) })
+      ).json()) as Array<{ id: string }>;
+      const id = providers[0].id;
+
+      // `POST /api/providers/:id/enable` writes to the store through an `ah`
+      // wrapper. Without the wrapper and the error middleware this request
+      // would hang forever.
+      const res = await withTimeout(
+        fetch(`${base}/api/providers/${id}/enable`, { method: "POST", headers: bearer(token) }),
+        5_000
+      );
+      assert.equal(res.status, 500);
+      assert.equal(((await res.json()) as { code?: string }).code, "internal-error");
+
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    } finally {
+      if (restore) chmodSync(dataDir, 0o700);
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("shutdown teardown", () => {
   test("stops the process tree a run started", async () => {
     // A stand-in for a harness CLI: the shell spawns a grandchild, exactly
@@ -262,6 +312,21 @@ describe("shutdown teardown", () => {
     }
   });
 });
+
+/** A promise that rejects if `work` does not settle in time (no hanging test). */
+async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`request did not settle within ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Waits for one named event (avoids importing node:events for two uses). */
 function once(emitter: { once(event: string, listener: (...args: never[]) => void): unknown }, event: string): Promise<unknown> {

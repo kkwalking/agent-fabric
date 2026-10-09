@@ -1,4 +1,4 @@
-import express, { type Express, type Request, type RequestHandler, type Response } from "express";
+import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import cors from "cors";
 import { execFile } from "node:child_process";
 import {
@@ -65,6 +65,16 @@ export interface ServerHandle {
    */
   shutdown(): void;
 }
+
+/**
+ * Wraps an async route handler so a rejected promise reaches the error
+ * middleware below. Express 4 does not catch rejections itself: without this,
+ * a failed `await` (e.g. `store.persist()` hitting a full disk) leaves the
+ * client waiting forever instead of answering 500.
+ */
+export const ah = <T extends RequestHandler>(fn: T): RequestHandler => (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
 
 /**
  * CORS is reflected for loopback origins only (`http://localhost:<port>`,
@@ -333,18 +343,27 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       fail(res, e);
     }
   });
-  app.post("/api/providers/:id/enable", async (req, res) => {
-    const p = await providers.setEnabled(req.params.id, true);
-    p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
-  });
-  app.post("/api/providers/:id/disable", async (req, res) => {
-    const p = await providers.setEnabled(req.params.id, false);
-    p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
-  });
-  app.delete("/api/providers/:id", async (req, res) => {
-    const removed = await providers.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Provider not found"), 404);
-  });
+  app.post(
+    "/api/providers/:id/enable",
+    ah(async (req, res) => {
+      const p = await providers.setEnabled(req.params.id, true);
+      p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
+    })
+  );
+  app.post(
+    "/api/providers/:id/disable",
+    ah(async (req, res) => {
+      const p = await providers.setEnabled(req.params.id, false);
+      p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
+    })
+  );
+  app.delete(
+    "/api/providers/:id",
+    ah(async (req, res) => {
+      const removed = await providers.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Provider not found"), 404);
+    })
+  );
 
   /* ---------------- models ---------------- */
 
@@ -360,14 +379,20 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const m = models.get(req.params.id);
     m ? ok(res, m) : fail(res, new Error("Model not found"), 404);
   });
-  app.put("/api/models/:id", async (req, res) => {
-    const m = await models.update(req.params.id, req.body);
-    m ? ok(res, m) : fail(res, new Error("Model not found"), 404);
-  });
-  app.delete("/api/models/:id", async (req, res) => {
-    const removed = await models.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Model not found"), 404);
-  });
+  app.put(
+    "/api/models/:id",
+    ah(async (req, res) => {
+      const m = await models.update(req.params.id, req.body);
+      m ? ok(res, m) : fail(res, new Error("Model not found"), 404);
+    })
+  );
+  app.delete(
+    "/api/models/:id",
+    ah(async (req, res) => {
+      const removed = await models.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Model not found"), 404);
+    })
+  );
 
   /* ---------------- runtimes ---------------- */
 
@@ -404,22 +429,34 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const r = runtimes.get(req.params.id);
     r ? ok(res, r) : fail(res, new Error("Runtime not found"), 404);
   });
-  app.put("/api/runtimes/:id", async (req, res) => {
-    const r = await runtimes.update(req.params.id, req.body);
-    r ? ok(res, r) : fail(res, new Error("Runtime not found"), 404);
-  });
-  app.post("/api/runtimes/:id/enable", async (req, res) => {
-    const r = await runtimes.setEnabled(req.params.id, true);
-    r ? ok(res, r) : fail(res, new Error("Runtime not found"), 404);
-  });
-  app.post("/api/runtimes/:id/disable", async (req, res) => {
-    const r = await runtimes.setEnabled(req.params.id, false);
-    r ? ok(res, r) : fail(res, new Error("Runtime not found"), 404);
-  });
-  app.delete("/api/runtimes/:id", async (req, res) => {
-    const removed = await runtimes.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Runtime not found"), 404);
-  });
+  app.put(
+    "/api/runtimes/:id",
+    ah(async (req, res) => {
+      const r = await runtimes.update(req.params.id, req.body);
+      r ? ok(res, r) : fail(res, new Error("Runtime not found"), 404);
+    })
+  );
+  app.post(
+    "/api/runtimes/:id/enable",
+    ah(async (req, res) => {
+      const r = await runtimes.setEnabled(req.params.id, true);
+      r ? ok(res, r) : fail(res, new Error("Runtime not found"), 404);
+    })
+  );
+  app.post(
+    "/api/runtimes/:id/disable",
+    ah(async (req, res) => {
+      const r = await runtimes.setEnabled(req.params.id, false);
+      r ? ok(res, r) : fail(res, new Error("Runtime not found"), 404);
+    })
+  );
+  app.delete(
+    "/api/runtimes/:id",
+    ah(async (req, res) => {
+      const removed = await runtimes.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Runtime not found"), 404);
+    })
+  );
 
   // Effective harness capabilities (spec v1 §17): adapter declarations
   // overridden by the runtime record.
@@ -530,10 +567,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const w = workspaces.get(req.params.id);
     w ? ok(res, w) : fail(res, new Error("Workspace not found"), 404);
   });
-  app.put("/api/workspaces/:id", async (req, res) => {
-    const w = await workspaces.update(req.params.id, req.body);
-    w ? ok(res, w) : fail(res, new Error("Workspace not found"), 404);
-  });
+  app.put(
+    "/api/workspaces/:id",
+    ah(async (req, res) => {
+      const w = await workspaces.update(req.params.id, req.body);
+      w ? ok(res, w) : fail(res, new Error("Workspace not found"), 404);
+    })
+  );
   // Persist/verify the workspace after a run (spec v1 §11 Save).
   app.post("/api/workspaces/:id/save", async (req, res) => {
     try {
@@ -549,10 +589,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     if (!w) return fail(res, new Error("Workspace not found"), 404);
     ok(res, workspaces.usage(req.params.id));
   });
-  app.delete("/api/workspaces/:id", async (req, res) => {
-    const removed = await workspaces.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Workspace not found"), 404);
-  });
+  app.delete(
+    "/api/workspaces/:id",
+    ah(async (req, res) => {
+      const removed = await workspaces.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Workspace not found"), 404);
+    })
+  );
 
   /* ---------------- secrets ---------------- */
 
@@ -564,10 +607,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       fail(res, e);
     }
   });
-  app.delete("/api/secrets/:id", async (req, res) => {
-    const removed = await secrets.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Secret not found"), 404);
-  });
+  app.delete(
+    "/api/secrets/:id",
+    ah(async (req, res) => {
+      const removed = await secrets.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Secret not found"), 404);
+    })
+  );
 
   /* ---------------- agent profiles ---------------- */
 
@@ -583,14 +629,20 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const p = profiles.get(req.params.id);
     p ? ok(res, p) : fail(res, new Error("Agent not found"), 404);
   });
-  app.put("/api/agents/:id", async (req, res) => {
-    const p = await profiles.update(req.params.id, req.body);
-    p ? ok(res, p) : fail(res, new Error("Agent not found"), 404);
-  });
-  app.delete("/api/agents/:id", async (req, res) => {
-    const removed = await profiles.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Agent not found"), 404);
-  });
+  app.put(
+    "/api/agents/:id",
+    ah(async (req, res) => {
+      const p = await profiles.update(req.params.id, req.body);
+      p ? ok(res, p) : fail(res, new Error("Agent not found"), 404);
+    })
+  );
+  app.delete(
+    "/api/agents/:id",
+    ah(async (req, res) => {
+      const removed = await profiles.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Agent not found"), 404);
+    })
+  );
 
   /* ---------------- projects (v11 §2/§3) ---------------- */
 
@@ -614,10 +666,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       failDomain(res, e);
     }
   });
-  app.delete("/api/projects/:id", async (req, res) => {
-    const removed = await projects.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Project not found"), 404);
-  });
+  app.delete(
+    "/api/projects/:id",
+    ah(async (req, res) => {
+      const removed = await projects.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Project not found"), 404);
+    })
+  );
   // Tasks that belong to this project (the Project detail page's list).
   app.get("/api/projects/:id/tasks", (req, res) => {
     if (!projects.get(req.params.id)) return fail(res, new Error("Project not found"), 404);
@@ -627,7 +682,10 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
 
   // Start a Project-based Task (v11 §39): the platform creates the managed
   // workspace, prepares the source and runs the whole lifecycle. Users never
-  // create a Workspace by hand.
+  // create a Workspace by hand. The body is the `StartProjectTaskInput`
+  // contract verbatim — including the Task-level `skills` / `mcpServers`
+  // overrides (v11 §25/§26), which fall back to the Project's lists when the
+  // field is absent.
   app.post("/api/projects/:id/tasks", async (req, res) => {
     if (!projects.get(req.params.id)) return fail(res, new Error("Project not found"), 404);
     try {
@@ -663,10 +721,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       failDomain(res, e);
     }
   });
-  app.delete("/api/source-credentials/:id", async (req, res) => {
-    const removed = await sourceCredentials.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Source credential not found"), 404);
-  });
+  app.delete(
+    "/api/source-credentials/:id",
+    ah(async (req, res) => {
+      const removed = await sourceCredentials.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Source credential not found"), 404);
+    })
+  );
 
   /* ---------------- tasks ---------------- */
 
@@ -687,14 +748,20 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   });
   // Soft delete: the task (with its runs and history) stays recoverable
   // until the retention window expires and the purge pass removes it.
-  app.delete("/api/tasks/:id", async (req, res) => {
-    const t = await tasks.softDelete(req.params.id);
-    t ? ok(res, t) : fail(res, new Error("Task not found"), 404);
-  });
-  app.post("/api/tasks/:id/restore", async (req, res) => {
-    const t = await tasks.restore(req.params.id);
-    t ? ok(res, t) : fail(res, new Error("Deleted task not found"), 404);
-  });
+  app.delete(
+    "/api/tasks/:id",
+    ah(async (req, res) => {
+      const t = await tasks.softDelete(req.params.id);
+      t ? ok(res, t) : fail(res, new Error("Task not found"), 404);
+    })
+  );
+  app.post(
+    "/api/tasks/:id/restore",
+    ah(async (req, res) => {
+      const t = await tasks.restore(req.params.id);
+      t ? ok(res, t) : fail(res, new Error("Deleted task not found"), 404);
+    })
+  );
   app.get("/api/tasks/:id/runs", (req, res) => ok(res, runs.forTask(req.params.id)));
 
   /* ---------------- project task lifecycle (v11 §23/§31/§32/§40) ---------------- */
@@ -765,35 +832,38 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   // thread page renders — task, workspace, and per-run events, artifacts
   // and consumed handoff. Pure projection over existing records; no new
   // Message/Conversation/Session domain model.
-  app.get("/api/tasks/:id/thread", async (req, res) => {
-    const task = tasks.getLive(req.params.id);
-    if (!task) return fail(res, new Error("Task not found"), 404);
-    const taskRuns = runs.forTask(task.id);
-    // The thread's current workspace follows the latest run (a continuation
-    // may have overridden it), falling back to the task default.
-    const currentWorkspaceId = taskRuns[taskRuns.length - 1]?.workspaceId ?? task.workspaceId;
-    // Explicitly requested handoff waiting in the thread: the next turn
-    // (any harness) consumes it as the sole context. It is looked up by the
-    // flag that turn actually consumes (`awaitingNextTurn`), not through the
-    // latest run's `generatedHandoffId` — that pointer is history: it names
-    // whichever handoff was generated from that run, possibly long ago and
-    // possibly since discarded. Reading it hid a freshly armed handoff as
-    // soon as the page that requested it went away.
-    const pendingHandoff = handoffs.list({ taskId: task.id }).find((h) => h.awaitingNextTurn) ?? null;
-    ok(res, {
-      task,
-      workspace: currentWorkspaceId ? workspaces.get(currentWorkspaceId) ?? null : null,
-      pendingHandoff,
-      runs: await Promise.all(
-        taskRuns.map(async (run) => ({
-          run,
-          events: await runs.events(run.id),
-          artifacts: artifacts.list(run.id),
-          previousHandoff: run.previousHandoffId ? handoffs.get(run.previousHandoffId) ?? null : null,
-        }))
-      ),
-    });
-  });
+  app.get(
+    "/api/tasks/:id/thread",
+    ah(async (req, res) => {
+      const task = tasks.getLive(req.params.id);
+      if (!task) return fail(res, new Error("Task not found"), 404);
+      const taskRuns = runs.forTask(task.id);
+      // The thread's current workspace follows the latest run (a continuation
+      // may have overridden it), falling back to the task default.
+      const currentWorkspaceId = taskRuns[taskRuns.length - 1]?.workspaceId ?? task.workspaceId;
+      // Explicitly requested handoff waiting in the thread: the next turn
+      // (any harness) consumes it as the sole context. It is looked up by the
+      // flag that turn actually consumes (`awaitingNextTurn`), not through the
+      // latest run's `generatedHandoffId` — that pointer is history: it names
+      // whichever handoff was generated from that run, possibly long ago and
+      // possibly since discarded. Reading it hid a freshly armed handoff as
+      // soon as the page that requested it went away.
+      const pendingHandoff = handoffs.list({ taskId: task.id }).find((h) => h.awaitingNextTurn) ?? null;
+      ok(res, {
+        task,
+        workspace: currentWorkspaceId ? workspaces.get(currentWorkspaceId) ?? null : null,
+        pendingHandoff,
+        runs: await Promise.all(
+          taskRuns.map(async (run) => ({
+            run,
+            events: await runs.events(run.id),
+            artifacts: artifacts.list(run.id),
+            previousHandoff: run.previousHandoffId ? handoffs.get(run.previousHandoffId) ?? null : null,
+          }))
+        ),
+      });
+    })
+  );
 
   // Preview of the resume-vs-handoff decision (spec v1 §18: make the
   // continuity explicit before executing).
@@ -862,32 +932,41 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const r = runs.get(req.params.id);
     r ? ok(res, r) : fail(res, new Error("Run not found"), 404);
   });
-  app.post("/api/runs/:id/cancel", async (req, res) => {
-    const r = await runs.cancel(req.params.id);
-    r ? ok(res, r) : fail(res, new Error("Run not found"), 404);
-  });
-  app.get("/api/runs/:id/events", async (req, res) => ok(res, await runs.events(req.params.id)));
-  app.get("/api/runs/:id/logs", async (req, res) => {
-    res.type("text/plain").send((await runs.logs(req.params.id)).join("\n"));
-  });
+  app.post(
+    "/api/runs/:id/cancel",
+    ah(async (req, res) => {
+      const r = await runs.cancel(req.params.id);
+      r ? ok(res, r) : fail(res, new Error("Run not found"), 404);
+    })
+  );
+  app.get("/api/runs/:id/events", ah(async (req, res) => ok(res, await runs.events(req.params.id))));
+  app.get(
+    "/api/runs/:id/logs",
+    ah(async (req, res) => {
+      res.type("text/plain").send((await runs.logs(req.params.id)).join("\n"));
+    })
+  );
 
   // SSE: real-time events for a single run.
-  app.get("/api/runs/:id/events/stream", async (req, res) => {
-    const runId = req.params.id;
-    sseHeaders(res);
-    const initial = await runs.events(runId);
-    for (const evt of initial) {
-      res.write(`data: ${JSON.stringify(evt)}\n\n`);
-    }
-    const unsubscribe = bus.onRun(runId, (evt) => {
-      res.write(`data: ${JSON.stringify(evt)}\n\n`);
-    });
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
-    req.on("close", () => {
-      clearInterval(heartbeat);
-      unsubscribe();
-    });
-  });
+  app.get(
+    "/api/runs/:id/events/stream",
+    ah(async (req, res) => {
+      const runId = req.params.id;
+      sseHeaders(res);
+      const initial = await runs.events(runId);
+      for (const evt of initial) {
+        res.write(`data: ${JSON.stringify(evt)}\n\n`);
+      }
+      const unsubscribe = bus.onRun(runId, (evt) => {
+        res.write(`data: ${JSON.stringify(evt)}\n\n`);
+      });
+      const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
+      req.on("close", () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      });
+    })
+  );
 
   // SSE: global event stream across all runs (dashboard).
   app.get("/api/events/stream", (req, res) => {
@@ -939,19 +1018,22 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       ...(modelId ? { usable: Boolean(model?.enabled && provider?.enabled) } : {}),
     });
   });
-  app.put("/api/handoffs/model", async (req, res) => {
-    const { modelId } = (req.body ?? {}) as { modelId?: string | null };
-    if (modelId == null || modelId === "") {
-      await store.updateConfig({ handoff: {} });
-      return ok(res, { modelId: null });
-    }
-    const model = models.get(modelId);
-    if (!model || !model.enabled) return fail(res, `Model not found or disabled: ${modelId}`, 404);
-    const provider = providers.get(model.providerId);
-    if (!provider || !provider.enabled) return fail(res, `The model's provider is missing or disabled: ${modelId}`, 400);
-    await store.updateConfig({ handoff: { modelId } });
-    ok(res, { modelId: model.id, modelName: model.alias ?? model.name, providerName: provider.name, usable: true });
-  });
+  app.put(
+    "/api/handoffs/model",
+    ah(async (req, res) => {
+      const { modelId } = (req.body ?? {}) as { modelId?: string | null };
+      if (modelId == null || modelId === "") {
+        await store.updateConfig({ handoff: {} });
+        return ok(res, { modelId: null });
+      }
+      const model = models.get(modelId);
+      if (!model || !model.enabled) return fail(res, `Model not found or disabled: ${modelId}`, 404);
+      const provider = providers.get(model.providerId);
+      if (!provider || !provider.enabled) return fail(res, `The model's provider is missing or disabled: ${modelId}`, 400);
+      await store.updateConfig({ handoff: { modelId } });
+      ok(res, { modelId: model.id, modelName: model.alias ?? model.name, providerName: provider.name, usable: true });
+    })
+  );
   app.get("/api/handoffs/:id", (req, res) => {
     const h = handoffs.get(req.params.id);
     if (!h) return fail(res, new Error("Handoff not found"), 404);
@@ -971,10 +1053,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       fail(res, e);
     }
   });
-  app.delete("/api/handoffs/:id", async (req, res) => {
-    const removed = await handoffs.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Handoff not found"), 404);
-  });
+  app.delete(
+    "/api/handoffs/:id",
+    ah(async (req, res) => {
+      const removed = await handoffs.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Handoff not found"), 404);
+    })
+  );
 
   /* ---------------- runtime session references (spec v1 §3/§9) ---------------- */
 
@@ -988,14 +1073,20 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const s = runtimeSessions.get(req.params.id);
     s ? ok(res, s) : fail(res, new Error("Runtime session not found"), 404);
   });
-  app.post("/api/runtime-sessions/:id/expire", async (req, res) => {
-    const s = await runtimeSessions.expire(req.params.id);
-    s ? ok(res, s) : fail(res, new Error("Runtime session not found"), 404);
-  });
-  app.delete("/api/runtime-sessions/:id", async (req, res) => {
-    const removed = await runtimeSessions.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Runtime session not found"), 404);
-  });
+  app.post(
+    "/api/runtime-sessions/:id/expire",
+    ah(async (req, res) => {
+      const s = await runtimeSessions.expire(req.params.id);
+      s ? ok(res, s) : fail(res, new Error("Runtime session not found"), 404);
+    })
+  );
+  app.delete(
+    "/api/runtime-sessions/:id",
+    ah(async (req, res) => {
+      const removed = await runtimeSessions.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Runtime session not found"), 404);
+    })
+  );
 
   /* ---------------- runtime native states (v2 §13–§15) ---------------- */
   // Opaque per-runtime state directories harnesses need for native
@@ -1011,10 +1102,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const s = nativeStates.get(req.params.id);
     s ? ok(res, s) : fail(res, new Error("Native state not found"), 404);
   });
-  app.delete("/api/native-states/:id", async (req, res) => {
-    const removed = await nativeStates.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Native state not found"), 404);
-  });
+  app.delete(
+    "/api/native-states/:id",
+    ah(async (req, res) => {
+      const removed = await nativeStates.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Native state not found"), 404);
+    })
+  );
 
   /* ---------------- containers (keep-alive inspection) ---------------- */
 
@@ -1041,10 +1135,13 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       fail(res, new Error("Artifact has no content"), 404);
     }
   });
-  app.delete("/api/artifacts/:id", async (req, res) => {
-    const removed = await artifacts.remove(req.params.id);
-    removed ? ok(res, { ok: true }) : fail(res, new Error("Artifact not found"), 404);
-  });
+  app.delete(
+    "/api/artifacts/:id",
+    ah(async (req, res) => {
+      const removed = await artifacts.remove(req.params.id);
+      removed ? ok(res, { ok: true }) : fail(res, new Error("Artifact not found"), 404);
+    })
+  );
 
   /* ---------------- usage & config ---------------- */
 
@@ -1093,6 +1190,20 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
         });
       }
     );
+  });
+
+  /* ---------------- errors ---------------- */
+  //
+  // Registered after every route: a handler routed through `ah` (or one that
+  // calls `next(err)` itself) ends up here. Domain failures keep their stable
+  // code → HTTP mapping (`failDomain`); anything else is a platform bug and
+  // answers 500 instead of leaving the request open.
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) return next(err);
+    if (isDomainError(err)) return failDomain(res, err);
+    console.error("[agent-fabric] unhandled error in request handler:", err);
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: message, code: "internal-error" });
   });
 
   /* ---------------- static web UI ---------------- */
