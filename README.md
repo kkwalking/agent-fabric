@@ -1055,6 +1055,8 @@ npm run test -w @agentfabric/core                # 只跑 core
 npm run build                                    # 构建全部 workspace（含 Web 产物）
 ```
 
+测试脚本按 glob 收集 `src/*.test.ts`（core / runtimes / server），新增测试文件不需要改配置。
+
 core 测试覆盖 store / secret / mock run / cost / event bus / policy / git workspace，容器生命周期策略与 keep-alive 租约，同 Harness Native Resume 与跨 Harness Handoff，Handoff 上下文选择、预算账目与渲染语义，能力声明与随执行后端收窄。
 
 `src/v11.test.ts` 覆盖 Project / Source Credential / Coding Task 生命周期：Project 与 Credential 的创建与校验、公开与私有仓库、URL 与分支名校验、凭据 materialize 与脱敏、clone/fetch/base ref/working branch、分支冲突与 continue 模式、baseCommitSha 冻结、Validation（失败/超时/重试）、Git finalization（自动 commit / Agent 已有 commit / dirty + commit / no-op / autoCommit=false）、Publish（成功 / 认证失败 / 远端拒绝 / 冲突 / 重试 / 幂等）、并发隔离、Workspace lock、取消、崩溃恢复、Skill/MCP provisioning，以及 §41.11 的 Case A–F。Git 部分使用**真实 `git` CLI 与本地 bare 仓库**作为远端，只有 Agent Harness 是脚本化的。
