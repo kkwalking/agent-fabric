@@ -1363,17 +1363,26 @@ export class ExecutionSupervisor {
       }
     } catch (err) {
       const domain = asDomainError(err, "internal-error");
+      // The user's cancel is the truth. `cancelTask` aborts this lifecycle's
+      // controller; the stage that noticed reports whatever its own failure
+      // looks like (an aborted validation run reports
+      // `validation-runtime-failed`). Settling that as a plain failure would
+      // contradict the `cancelled` state `cancelTask` already wrote — and,
+      // because the incidental code can be transient, would hand a task the
+      // user stopped to the automatic retry. The stage where the cancel
+      // landed is kept, matching what `cancelTask` writes directly.
+      const cancelledByUser = abort.signal.aborted;
       failure = {
         stage: domain.stage,
-        code: domain.code,
-        message: redactor.redact(domain.message),
+        code: cancelledByUser ? "agent-cancelled" : domain.code,
+        message: cancelledByUser ? "Cancelled by user" : redactor.redact(domain.message),
         at: now(),
       };
       // A cancellation that landed before the harness started still has to be
       // reported as a cancellation, not as an agent failure (v11 §32) — but a
       // cancellation during validation or publishing must not walk the
       // completed agent back (v11 hardening §36).
-      if (domain.code === "agent-cancelled") {
+      if (cancelledByUser) {
         const current = this.tasks().get(taskId)?.execution?.agent;
         if (current?.status === "completed") {
           await this.patchExecution(taskId, {
@@ -1385,20 +1394,36 @@ export class ExecutionSupervisor {
             stages: this.stagePatch(taskId, "agent", { status: "cancelled", at: now(), errorCode: failure.code }),
           });
         }
+        // A cancel that landed during validation left the stage record saying
+        // the sandbox failed — the same shape `cancelTask` writes directly,
+        // kept consistent however the cancel was noticed.
+        if (domain.stage === "validation") {
+          const currentValidation = this.tasks().get(taskId)?.execution?.validation;
+          await this.patchExecution(taskId, {
+            validation: {
+              ...(currentValidation ?? { status: "pending", attempts: 0 }),
+              status: "interrupted",
+              error: "Cancelled by user",
+              errorCode: failure.code,
+              endedAt: now(),
+            },
+            stages: this.stagePatch(taskId, "validation", { status: "cancelled", at: now(), errorCode: failure.code }),
+          });
+        }
       }
-      await this.emit(runId, domain.code === "agent-cancelled" ? "run.cancelled" : "run.failed", {
+      await this.emit(runId, cancelledByUser ? "run.cancelled" : "run.failed", {
         error: failure.message,
         code: failure.code,
         stage: failure.stage,
       });
-      if (domain.stage === "publish") {
+      if (domain.stage === "publish" && !cancelledByUser) {
         // The publish stage's own outcome (v11 hardening §36): the failure is
         // recorded against publish, never against the stages that succeeded.
         await this.patchExecution(taskId, {
           stages: this.stagePatch(taskId, "publish", { status: "failed", at: now(), errorCode: domain.code }),
         });
         await this.emit(runId, "publish.failed", { error: failure.message, code: failure.code });
-      } else if (domain.stage === "validation") {
+      } else if (domain.stage === "validation" && !cancelledByUser) {
         await this.emit(runId, "validation.failed", { error: failure.message, code: failure.code });
       }
     } finally {

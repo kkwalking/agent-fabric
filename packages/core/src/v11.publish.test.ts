@@ -944,6 +944,52 @@ describe("v11 hardening: cancellation and concurrency", () => {
     assert.equal(branches.trim(), "");
   });
 
+  test("§32/§33 a cancel during validation settles as a cancellation, not as the sandbox failure it caused", async () => {
+    // The real isolated executor kills the step when the lifecycle aborts and
+    // reports the sandbox failure it observed (`validation-runtime-failed`).
+    // That incidental code must not overwrite the user's cancel into a failed
+    // task — the abort signal, not the failure code, is the cancel's proof.
+    const h = await makeHarness();
+    const { remote } = await makeRemote();
+    const project = await h.projects.create({
+      name: "Demo",
+      source: { remoteUrl: remote },
+      validation: { steps: [{ name: "test", command: "sleep 60" }] },
+    });
+    h.setAgent(writeFiles({ "x.txt": "x\n" }));
+    let validationStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolvePromise) => (validationStarted = resolvePromise));
+    const supervised = new ExecutionSupervisor(h.store, h.bus, h.runService, {
+      validationExecutor: () => async (opts) => {
+        validationStarted!();
+        await new Promise<void>((resolvePromise) => {
+          opts.signal?.addEventListener("abort", () => resolvePromise(), { once: true });
+          if (opts.signal?.aborted) resolvePromise();
+        });
+        return {
+          exitCode: -1,
+          timedOut: false,
+          output: "killed",
+          error: "Validation was cancelled",
+          errorCode: "validation-runtime-failed",
+        };
+      },
+    });
+
+    const result = await supervised.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
+    await started;
+    await supervised.cancelTask(result.task.id);
+    await supervised.whenSettled(result.task.id);
+
+    const task = h.tasks.get(result.task.id)!;
+    assert.equal(task.execution!.status, "cancelled");
+    assert.equal(task.execution!.failure!.code, "agent-cancelled", "the cancel is reported as one, not as a sandbox failure");
+    assert.equal(task.execution!.failure!.stage, "validation", "the stage the cancel landed in is kept");
+    assert.equal(task.execution!.validation!.status, "interrupted");
+    assert.equal(task.execution!.agent!.status, "completed", "the agent's completed state survives the cancel");
+    assert.equal(task.execution!.publish!.status, "pending", "nothing was published");
+  });
+
   test("§32 concurrency: two tasks on one project stay fully independent", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
