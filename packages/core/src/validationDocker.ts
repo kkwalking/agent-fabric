@@ -42,14 +42,38 @@ export function validationImage(configured?: string): string {
   return configured?.trim() || process.env.AGENTFABRIC_VALIDATION_IMAGE || DEFAULT_VALIDATION_IMAGE;
 }
 
-/** Runs one `docker` invocation, bounded by `timeoutMs`. */
-function execDocker(
-  args: string[],
-  timeoutMs: number,
-  signal?: AbortSignal
-): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+/** The buffered result of one `docker` invocation. */
+interface DockerCallResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+/** The process surface `execDocker` needs; `node:child_process` provides it. */
+export interface DockerChildProcess {
+  readonly stdout: { on(event: "data", listener: (chunk: Buffer) => void): unknown } | null;
+  readonly stderr: { on(event: "data", listener: (chunk: Buffer) => void): unknown } | null;
+  on(event: "error", listener: (err: Error) => void): unknown;
+  on(event: "close", listener: (code: number | null) => void): unknown;
+  kill(signal?: NodeJS.Signals): boolean;
+}
+
+/**
+ * The one process seam of this module: it launches `docker` and returns the
+ * pipes `execDocker` reads. The default is `node:child_process.spawn`; tests
+ * inject a fake to assert the constructed argv/env without a real daemon.
+ */
+export type DockerSpawn = (
+  command: string,
+  args: readonly string[],
+  options: { stdio: ["ignore", "pipe", "pipe"] }
+) => DockerChildProcess;
+
+/** Runs one `docker` invocation through `spawnImpl`, bounded by `timeoutMs`. */
+function execDocker(spawnImpl: DockerSpawn, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<DockerCallResult> {
   return new Promise((resolvePromise) => {
-    const child = spawn(dockerBin(), args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnImpl(dockerBin(), args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -59,8 +83,8 @@ function execDocker(
     }, timeoutMs);
     const onAbort = () => child.kill("SIGKILL");
     signal?.addEventListener("abort", onAbort, { once: true });
-    child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
-    child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
+    child.stdout?.on("data", (c: Buffer) => (stdout += c.toString()));
+    child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
     const done = (code: number | null) => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
@@ -81,14 +105,27 @@ export interface DockerValidationExecutorOptions {
   image?: string;
   /** Per-step wall clock budget for the container itself. */
   graceMs?: number;
+  /**
+   * Process launcher. Defaults to `node:child_process.spawn`; tests inject a
+   * fake so the constructed argv/env can be asserted without a Docker daemon.
+   */
+  spawnImpl?: DockerSpawn;
 }
 
 /**
  * Builds the disposable-container validation executor. `image` is the
  * toolchain image the container runs (the task runtime's image when it names
  * one, else the configured default).
+ *
+ * `dataDirOrOptions` keeps the original `dockerValidationExecutor(dataDir)`
+ * call shape; the options form exists so a test can inject `spawnImpl`.
  */
-export function dockerValidationExecutor(dataDir?: string): (image?: string) => SandboxedStepExecutor {
+export function dockerValidationExecutor(
+  dataDirOrOptions?: string | DockerValidationExecutorOptions
+): (image?: string) => SandboxedStepExecutor {
+  const options: DockerValidationExecutorOptions =
+    typeof dataDirOrOptions === "string" ? { dataDir: dataDirOrOptions } : (dataDirOrOptions ?? {});
+  const spawnImpl = options.spawnImpl ?? spawn;
   return (imageOverride?: string): SandboxedStepExecutor => {
     return async (opts): Promise<StepOutcome> => {
       const image = validationImage(imageOverride);
@@ -105,6 +142,11 @@ export function dockerValidationExecutor(dataDir?: string): (image?: string) => 
         VALIDATION_WORKSPACE_MOUNT,
         // The allowlisted environment, verbatim — no host inheritance.
         ...Object.entries(opts.env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+        // Egress policy: validation commands are untrusted code, so they run
+        // under the Task's resolved network policy — the same rule the agent
+        // container follows (runtimes/docker.ts). `enabled === false` means
+        // no network at all, never docker's default bridge.
+        ...(opts.network?.enabled === false ? ["--network", "none"] : []),
         "--label",
         "agentfabric.validation=true",
         image,
@@ -116,13 +158,11 @@ export function dockerValidationExecutor(dataDir?: string): (image?: string) => 
       const timeoutMs = opts.timeoutMs;
       // The step's own timeout kills the container; docker's own client is
       // bounded slightly above it so the container is reaped first.
-      const started = Date.now();
-      const outcome = await execDocker(args, timeoutMs, opts.signal);
-      const elapsed = Date.now() - started;
+      const outcome = await execDocker(spawnImpl, args, timeoutMs, opts.signal);
 
       const output = `${outcome.stdout}${outcome.stderr}`;
       if (opts.signal?.aborted) {
-        await execDocker(["rm", "-f", name], 30_000);
+        await execDocker(spawnImpl, ["rm", "-f", name], 30_000);
         return { exitCode: null, timedOut: false, output, error: "Validation was cancelled", errorCode: "validation-runtime-failed" };
       }
       // `timedOut` is set by the very timer that killed the container, so it
@@ -132,7 +172,7 @@ export function dockerValidationExecutor(dataDir?: string): (image?: string) => 
       // is millisecond-granular), discarding a passing result.
       if (outcome.timedOut) {
         // Best effort: `--rm` reaps it, but a killed client can leave it behind.
-        await execDocker(["rm", "-f", name], 30_000);
+        await execDocker(spawnImpl, ["rm", "-f", name], 30_000);
         return { exitCode: null, timedOut: true, output };
       }
       // A docker-level failure (no daemon, missing image) is NOT a failing

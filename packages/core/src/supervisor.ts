@@ -47,6 +47,7 @@ import {
 import { dockerValidationExecutor } from "./validationDocker.js";
 import { taskDiffArtifactDraft } from "./taskDiff.js";
 import { deliverTaskNotification } from "./notifications.js";
+import { resolveRunConfig } from "./policy.js";
 import { RunService } from "./orchestrator.js";
 import {
   ArtifactService,
@@ -69,6 +70,7 @@ import type {
   GitPublishPolicy,
   ID,
   McpServerConfig,
+  NetworkPolicy,
   Project,
   ProjectSkill,
   Run,
@@ -1698,6 +1700,14 @@ export class ExecutionSupervisor {
     for (const secret of validationSecrets) redactor.add(secret.value);
     const env: Record<string, string> = { ...(task.env ?? {}), ...secretEnvironment(validationSecrets) };
 
+    // The egress policy the agent ran under, resolved by the *same* resolver
+    // with the same inputs (policy.ts). Validation commands are untrusted
+    // repository code (§5), so they must never get more network than the
+    // agent had: a Task that ran `--network none` validates `--network none`
+    // too. `undefined` means nothing configured a policy anywhere, and
+    // docker's default applies — exactly as it did for the agent.
+    const validationNetwork = this.resolvedNetworkPolicy(task, runId, runtime);
+
     const execution: ValidationExecutionInfo = {
       backend: "isolated",
       runtimeId: runtime.id,
@@ -1738,6 +1748,7 @@ export class ExecutionSupervisor {
             cwd: workspace.path!,
             steps,
             env,
+            network: validationNetwork,
             signal: abort,
             onStepStart: async (step) => {
               await this.emit(runId, "shell.command", {
@@ -2164,6 +2175,25 @@ export class ExecutionSupervisor {
     const network = policy?.network ?? project.execution?.networkPolicy;
     if (network === undefined) return policy;
     return { ...(policy ?? {}), network };
+  }
+
+  /**
+   * The egress policy a Task's validation stage must enforce.
+   *
+   * Resolved through `resolveRunConfig` — the same resolver, with the same
+   * inputs (the run record's policy snapshot, the task, the profile, the
+   * runtime default) that produced the *agent* container's `--network none`.
+   * Re-deriving it any other way would let the two drift, and validation runs
+   * untrusted repository code: it must never have more network than the agent.
+   */
+  private resolvedNetworkPolicy(task: Task, runId: ID, runtime: Runtime): NetworkPolicy | undefined {
+    const run = this.runService.get(runId);
+    return resolveRunConfig({
+      task,
+      run: run ?? {},
+      profile: run?.profileId ? this.profiles().get(run.profileId) : undefined,
+      runtime: { networkPolicy: runtime.networkPolicy },
+    }).policy.network;
   }
 
   /**

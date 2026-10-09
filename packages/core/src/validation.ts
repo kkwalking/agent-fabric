@@ -24,7 +24,7 @@
  * it is never selected for a Project Coding Task.
  */
 import { execFile } from "node:child_process";
-import type { ValidationStep, ValidationStepResult } from "./types.js";
+import type { NetworkPolicy, ValidationStep, ValidationStepResult } from "./types.js";
 
 /** Default per-step budget. */
 export const DEFAULT_VALIDATION_STEP_TIMEOUT_MS = 10 * 60 * 1000;
@@ -53,6 +53,17 @@ export interface ValidationRunOptions {
    * (v11 hardening §6.1/AC-7).
    */
   env?: Record<string, string>;
+  /**
+   * The resolved execution policy's network policy for this Task
+   * (`policy.network`, Task > Project > Profile — see `policy.ts`).
+   *
+   * Validation commands are untrusted code (v11 hardening §5), so they must
+   * run under the same egress policy as the agent, not docker's default
+   * bridge. Without this a Project that declared `network.enabled = false`
+   * still handed repository-controlled code full network access for the
+   * whole validation stage.
+   */
+  network?: NetworkPolicy;
   signal?: AbortSignal;
   /** Streamed as `shell.command` / `shell.output` events by the caller. */
   onStepStart?: (step: ValidationStep, command: string) => void | Promise<void>;
@@ -83,6 +94,8 @@ export type SandboxedStepExecutor = (opts: {
   cwd: string;
   /** Allowlisted environment the command must receive. */
   env: Record<string, string>;
+  /** Resolved egress policy the sandbox must enforce (see `ValidationRunOptions.network`). */
+  network?: NetworkPolicy;
   timeoutMs: number;
   signal?: AbortSignal;
   onOutput?: (chunk: string, stream: "stdout" | "stderr") => void | Promise<void>;
@@ -198,6 +211,7 @@ export function runSandboxedValidation(opts: ValidationRunOptions, execute: Sand
       step,
       cwd: opts.cwd,
       env,
+      network: opts.network,
       timeoutMs,
       signal: opts.signal,
       onOutput: (chunk, stream) => opts.onOutput?.(step, chunk, stream),

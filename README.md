@@ -316,9 +316,10 @@ Workspace（唯一挂载的宿主路径）
 必要 runtime environment（PATH / HOME / TMPDIR / LANG / CI / AGENTFABRIC_VALIDATION）
 明确允许的 Task env
 明确允许的 build/test secret（Project/Task 的 validationSecretIds，scope 不得为 git）
+Task 解析出的 network policy（enabled=false → --network none）
 ```
 
-Validation **不会**获得：Git Source Credential、所有 Task Secret、Docker socket、Workspace 以外的宿主文件系统、宿主 `process.env`。
+Validation **不会**获得：Git Source Credential、所有 Task Secret、Docker socket、Workspace 以外的宿主文件系统、宿主 `process.env`，也不会获得比 agent 容器更大的网络权限——两者用同一个 resolver 解析同一份 policy。
 
 * 每个 step 仍然记录 `status / exitCode / durationMs / output`，并产出 `validation-report.txt`；
 * `validation.execution` 记录隔离证据（`backend: "isolated"`、`runtimeKind`、`image`、`disposable`）；
@@ -901,6 +902,8 @@ Execution Policy 在 Run 中强制执行：
 
 默认 Run 超时 `DEFAULT_RUN_TIMEOUT_MS` = 30 分钟。Policy 可在 Agent Profile、Task、Run 各层给出，Run 级覆盖 Task 级。
 
+Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容器用**同一个 resolver**（`policy.ts`）解析出同一份 `network`，`network.enabled=false` 时验证容器也是 `--network none`。validation 执行的是仓库里的不可信代码，网络权限绝不能比 agent 更大。
+
 ## 任务完成通知（Webhook）
 
 一个 Coding Task 可能跑几十分钟，通知让「任务结束了」不必靠盯着页面。配置在 `config.notifications`（Settings 页或 `PUT /api/config`）：
@@ -1062,7 +1065,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * Codex / Claude Code 仅支持本地执行，容器化被明确拒绝。
 * ZCode 只有本地会话探测（读 `~/.zcode/cli/db/db.sqlite`），没有运行适配器——接管后继续执行会明确报错，跨 Harness 用 Handoff。
 * DSH 没有官方容器镜像，容器化执行需自备镜像（参考 `docker/dsh.Dockerfile`）；Pi 同理（`docker/pi.Dockerfile`）。两者都不会自动构建镜像，也不会回退到普通 node 镜像——未配置 `runtime.image` 时拒绝启动。
-* Network `allowedHosts` / `blockedHosts` 与 Filesystem `allowedPaths` / `deniedPaths` 未做细粒度强制（仅支持整体开关与只读挂载）。
+* Network `allowedHosts` / `blockedHosts` 与 Filesystem `allowedPaths` / `deniedPaths` 未做细粒度强制（仅支持整体开关与只读挂载：`enabled=false` → `--network none`，`readOnly` → 只读挂载）。agent 容器与 validation 容器都遵守同一个整体开关。
 * Agent Profiles 的 Web UI 入口未开放（API 与 CLI 可用）。
 * Workspace 的 Snapshot / Fork / Diff 等高级能力未提供（Managed Workspace 的 Lock 已提供；Task 的最终 diff 以 artifact 形式提供）。
 * **Secret 加密不做数据迁移**：升级前写入的明文 Secret 在读取时按 `secret-legacy-format` 明确报错，需要重新录入一次（值本身无法从旧记录恢复）。`secret.key` 必须随数据目录一起备份，丢失后已加密的值不可恢复。
@@ -1106,6 +1109,7 @@ v11 hardening 的专项测试：
 | `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
 | `src/v11.inheritance.test.ts` | Project → Task 继承：`execution.profileId` 的 preset、`execution.networkPolicy`（一路断言到容器 argv 的 `--network none`）、Task 级 `skills` / `mcpServers` 的整体替换语义，以及 Task 显式值优先于 Project |
 | `src/v11.notify.test.ts` | 通知接线：终态 Task 恰好发一次 webhook（载荷含 frozen revision 与逐阶段 stages）、未配置不发、失败任务带 `failure{stage,code}`、webhook 挂掉不影响 Task 终态、URL 里的 token 不进 Run 事件 |
+| `src/validationDocker.test.ts` | disposable 容器 executor 的 `docker run` argv（allowlist 环境、唯一挂载、`--network none`）、超时/取消/daemon 不可达的分类，以及 supervisor → 真实 executor 的生产路径 |
 | `src/notifications.test.ts` | 载荷投影、退避与重试策略、URL 脱敏、配置错误不抛异常（`errorKind: "config"`） |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
 
