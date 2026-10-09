@@ -87,7 +87,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 npm install
 npm run build          # 构建全部包（含 Web UI → packages/web/dist）
 
-# 启动 API 服务器（默认 http://localhost:7377，自动托管 Web UI）
+# 启动 API 服务器（默认 http://127.0.0.1:7377，自动托管 Web UI）
 npm start
 
 # 开发模式：分别启动 server 与 web（web 走 vite 代理到 7377）
@@ -96,6 +96,8 @@ npm run dev:web
 ```
 
 打开 http://localhost:7377 查看 Web UI。
+
+服务器默认只监听 `127.0.0.1`（`AGENTFABRIC_HOST` 可覆盖）。所有 `/api/*`（`/api/health` 除外）都要求 Bearer Token：首次启动时在数据目录生成 `<dataDir>/token`（`0600`），浏览器通过首屏下发的 `af_token` Cookie 携带，CLI 自动读取该文件。用 `AGENTFABRIC_HOST` 绑到非 loopback 地址时服务器会打印警告——此时 API Token 是保护全部凭据的唯一屏障。
 
 ## Web UI
 
@@ -918,6 +920,10 @@ Execution Policy 在 Run 中强制执行：
 ```bash
 # 数据目录默认 ~/.fabric，可用 AGENTFABRIC_DATA_DIR 覆盖；API 地址默认 http://localhost:7377
 # （可用 AGENTFABRIC_API 或全局 --api <url> 覆盖，--json 输出原始 JSON）
+# API Token 按 --token > AGENTFABRIC_TOKEN > <dataDir>/token 的顺序解析；找不到就报错，
+# 绝不发出未认证的请求。token 值不会出现在任何输出里，只有文件路径。
+# 注意 --token 的两种含义：写在子命令之前是 API token（全局选项），
+# `af source-credentials add-https --token` 是 Git 凭据值（子命令选项）。
 
 # Provider / Model
 af providers list | add | update | remove
@@ -1070,6 +1076,8 @@ v11 hardening 的专项测试：
 | `src/v11.credential.test.ts` | Remote host 解析、host binding（HTTPS/SSH match & mismatch、wildcard）、transport 兼容（HTTPS token × SSH remote 等）、Project create/update 尽早失败、`.git/config` 与全生命周期防泄漏 |
 | `src/v11.publish.test.ts` | Frozen final revision、Retry Publish 是纯发布（同 commit、不新增 commit、不跑 agent/validation/finalization、SHA 不变）、workspace 漂移检测、stage-specific crash recovery（Agent/Validation/Finalization/Publish/Cleanup）、状态单调性、取消与并发 |
 | `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
+
+`packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、api-key reveal 确认、config 往返（脱敏 URL 不被写回覆盖）与优雅停机。
 
 端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
 

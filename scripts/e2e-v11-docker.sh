@@ -35,6 +35,11 @@ export AGENTFABRIC_HOST_ONLY_SECRET="AGENTFABRIC_HOST_ONLY_DO_NOT_LEAK"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
 jqr() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);console.log(eval('j'+process.argv[1]))})" "$1"; }
+# Every /api call except /api/health presents this bearer token (the server
+# writes it to $AGENTFABRIC_DATA_DIR/token on first start; read below once the
+# server is up). The value is never echoed — only its path.
+AUTH_TOKEN=""
+acurl() { curl "$@" -H "Authorization: Bearer $AUTH_TOKEN"; }
 
 step "preconditions: docker daemon + image $IMAGE"
 docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || fail "no reachable Docker daemon"
@@ -83,38 +88,50 @@ done
 curl -sf "$BASE/api/health" >/dev/null || { cat "$WORK/server.log"; fail "server did not start"; }
 echo "server up: $(curl -s "$BASE/api/health")"
 
+# The token file appears with the server's first start; wait briefly for the
+# write to land, then fail loudly instead of continuing unauthenticated.
+for _ in $(seq 1 50); do [ -s "$WORK/data/token" ] && break; sleep 0.1; done
+AUTH_TOKEN=$(cat "$WORK/data/token" 2>/dev/null) || fail "the server did not write an API token to $WORK/data/token"
+[ -n "$AUTH_TOKEN" ] || fail "the API token at $WORK/data/token is empty"
+echo "api token loaded from $WORK/data/token"
+
+step "auth: an unauthenticated /api request is refused"
+UNAUTH=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/runtimes")
+[ "$UNAUTH" = "401" ] || fail "expected 401 without a token, got $UNAUTH"
+echo "unauthenticated request refused with 401"
+
 step "AC-9/AC-12: create a git-scoped Source Credential"
 TOKEN="AGENTFABRIC_TEST_SECRET_DO_NOT_LEAK"
-CRED=$(curl -sf -X POST "$BASE/api/source-credentials" -H 'Content-Type: application/json' \
+CRED=$(acurl -sf -X POST "$BASE/api/source-credentials" -H 'Content-Type: application/json' \
   -d "{\"name\":\"E2E Git\",\"type\":\"https-token\",\"username\":\"e2e\",\"value\":\"$TOKEN\"}")
 CRED_ID=$(echo "$CRED" | jqr .id)
 echo "credential=$CRED_ID masked=$(echo "$CRED" | jqr .secretMasked)"
-curl -s "$BASE/api/source-credentials" | grep -q "$TOKEN" && fail "the credential value was served by the API"
+acurl -s "$BASE/api/source-credentials" | grep -q "$TOKEN" && fail "the credential value was served by the API"
 echo "the credential value is never served"
 
 step "AC-9: a git-scoped secret cannot be injected into a runtime via Task secretIds"
-PROJ=$(curl -sf -X POST "$BASE/api/projects" -H 'Content-Type: application/json' \
+PROJ=$(acurl -sf -X POST "$BASE/api/projects" -H 'Content-Type: application/json' \
   -d "{\"name\":\"E2E Docker\",\"source\":{\"remoteUrl\":\"$REMOTE\",\"credentialId\":\"$CRED_ID\",\"defaultBranch\":\"main\"},\"skills\":[{\"name\":\"fake-agent\",\"path\":\"$WORK/skills/fake-agent\"}]}")
 PROJ_ID=$(echo "$PROJ" | jqr .id)
 echo "project=$PROJ_ID"
 
 step "AC-1/AC-2: a Project task on a host runtime is refused before execution"
-HOST_RT=$(curl -sf -X POST "$BASE/api/runtimes" -H 'Content-Type: application/json' \
+HOST_RT=$(acurl -sf -X POST "$BASE/api/runtimes" -H 'Content-Type: application/json' \
   -d '{"name":"E2E host runtime","kind":"docker","containerized":false,"executionBackend":"host","usableInTask":true,"enabled":true}' | jqr .id)
-REFUSAL=$(curl -s -o "$WORK/refusal.json" -w '%{http_code}' -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
+REFUSAL=$(acurl -s -o "$WORK/refusal.json" -w '%{http_code}' -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
   -d "{\"instruction\":\"must be refused\",\"runtimeId\":\"$HOST_RT\"}")
 REFUSAL_CODE=$(node -e "console.log(require('$WORK/refusal.json').code)")
 echo "http=$REFUSAL code=$REFUSAL_CODE"
 [ "$REFUSAL" = "403" ] || fail "expected 403 for a host runtime, got $REFUSAL"
 [ "$REFUSAL_CODE" = "runtime-not-isolated" ] || fail "expected runtime-not-isolated, got $REFUSAL_CODE"
-TASK_COUNT=$(curl -s "$BASE/api/projects/$PROJ_ID/tasks" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")
+TASK_COUNT=$(acurl -s "$BASE/api/projects/$PROJ_ID/tasks" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")
 [ "$TASK_COUNT" = "0" ] || fail "a task was created despite the refusal"
 echo "refused before anything was created"
 
 step "AC-3/AC-6: create a real isolated Docker runtime (agent + validation image)"
-RT=$(curl -sf -X POST "$BASE/api/runtimes" -H 'Content-Type: application/json' \
+RT=$(acurl -sf -X POST "$BASE/api/runtimes" -H 'Content-Type: application/json' \
   -d "{\"name\":\"E2E Docker runtime\",\"kind\":\"docker\",\"containerized\":true,\"executionBackend\":\"isolated\",\"image\":\"$IMAGE\",\"command\":[\"sh\",\"/root/.agentfabric/skills/fake-agent/run.sh\"],\"usableInTask\":true,\"enabled\":true,\"ephemeral\":true,\"config\":{\"mountPath\":\"/workspace\"}}" | jqr .id)
-echo "runtime=$RT isolation=$(curl -s "$BASE/api/runtimes/$RT/isolation")"
+echo "runtime=$RT isolation=$(acurl -s "$BASE/api/runtimes/$RT/isolation")"
 
 step "create the Project task (managed workspace → clone → branch → Docker runtime)"
 # The validation steps are built as a JSON document (nested quoting in a
@@ -140,7 +157,7 @@ START=$(node -e '
     validation: JSON.parse(process.argv[2]),
   };
   console.log(JSON.stringify(body));
-' "$RT" "$VALIDATION" | curl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d @-)
+' "$RT" "$VALIDATION" | acurl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d @-)
 TASK_ID=$(echo "$START" | jqr .task.id)
 RUN_ID=$(echo "$START" | jqr .run.id)
 WS_PATH=$(echo "$START" | jqr .workspace.path)
@@ -149,7 +166,7 @@ echo "task=$TASK_ID run=$RUN_ID workspace=$WS_PATH"
 
 step "wait for the lifecycle to finish"
 for _ in $(seq 1 240); do
-  DETAIL=$(curl -sf "$BASE/api/tasks/$TASK_ID/detail")
+  DETAIL=$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail")
   STATUS=$(echo "$DETAIL" | jqr .status)
   case "$STATUS" in completed|failed|cancelled) break;; esac
   sleep 0.5
@@ -170,7 +187,7 @@ console.log('frozenRevision :',d.frozenRevision&&d.frozenRevision.finalCommitSha
 
 step "AC-30/AC-3: the agent really ran inside a Docker container"
 # `/logs` is plain text (one line per log/shell-output/agent-message event).
-AGENT_LINES=$(curl -s "$BASE/api/runs/$RUN_ID/logs")
+AGENT_LINES=$(acurl -s "$BASE/api/runs/$RUN_ID/logs")
 echo "$AGENT_LINES" | grep -q "AF_IN_CONTAINER=yes" || fail "the agent did not run inside a container"
 AGENT_HOST=$(echo "$AGENT_LINES" | sed -n 's/^.*AF_CONTAINER_HOSTNAME=\(.*\)$/\1/p' | head -1)
 [ -n "$AGENT_HOST" ] || fail "the agent did not report a container hostname"
@@ -230,10 +247,10 @@ git --git-dir="$REMOTE" ls-tree -r --name-only "$BRANCH" | grep -q "src/feature.
 echo "the exact frozen commit is on the remote branch, no tags"
 
 step "AC-21/AC-22/AC-23: retry publish re-pushes the frozen revision, nothing else"
-BEFORE_RUNS=$(curl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
-curl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish" >/dev/null
-AFTER_RUNS=$(curl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
-AFTER=$(curl -sf "$BASE/api/tasks/$TASK_ID/detail")
+BEFORE_RUNS=$(acurl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
+acurl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish" >/dev/null
+AFTER_RUNS=$(acurl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
+AFTER=$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail")
 [ "$BEFORE_RUNS" = "$AFTER_RUNS" ] || fail "retry publish created a new run"
 [ "$(echo "$AFTER" | jqr .frozenRevision.finalCommitSha)" = "$FROZEN" ] || fail "the frozen revision changed on retry publish"
 [ "$(echo "$AFTER" | jqr .agent.status)" = "completed" ] || fail "retry publish disturbed the agent stage"
@@ -242,7 +259,7 @@ echo "runs before=$BEFORE_RUNS after=$AFTER_RUNS frozen=$FROZEN unchanged"
 
 step "AC-24: workspace changes after finalization are never silently published"
 echo "drift" > "$WS_PATH/drift.txt"
-DRIFT=$(curl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish")
+DRIFT=$(acurl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish")
 DRIFT_CODE=$(echo "$DRIFT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const t=JSON.parse(s);console.log(t.execution.failure?t.execution.failure.code:'none')})")
 echo "retry publish after drift → $DRIFT_CODE"
 [ "$DRIFT_CODE" = "workspace-diverged-after-finalization" ] || fail "expected workspace-diverged-after-finalization, got $DRIFT_CODE"
@@ -252,14 +269,14 @@ rm -f "$WS_PATH/drift.txt"
 echo "the drift was reported, not published"
 
 step "AC-29: the refusal names the right next action, and retry publish then succeeds"
-REFUSED=$(curl -sf "$BASE/api/tasks/$TASK_ID/detail")
+REFUSED=$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail")
 [ "$(echo "$REFUSED" | jqr .retry.kind)" = "publish" ] || fail "the refusal did not offer retry publish"
 [ "$(echo "$REFUSED" | jqr .retry.publish)" = "true" ] || fail "retry publish was not offered"
 [ "$(echo "$REFUSED" | jqr .retry.agent)" = "false" ] || fail "retry agent was wrongly offered"
 [ "$(echo "$REFUSED" | jqr .agent.status)" = "completed" ] || fail "the agent stage was disturbed"
 [ "$(echo "$REFUSED" | jqr .validation.status)" = "passed" ] || fail "the validation stage was disturbed"
-curl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish" >/dev/null
-RECOVERED_DETAIL=$(curl -sf "$BASE/api/tasks/$TASK_ID/detail")
+acurl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish" >/dev/null
+RECOVERED_DETAIL=$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail")
 [ "$(echo "$RECOVERED_DETAIL" | jqr .status)" = "completed" ] || fail "retry publish did not complete after the workspace was restored"
 [ "$(echo "$RECOVERED_DETAIL" | jqr .frozenRevision.finalCommitSha)" = "$FROZEN" ] || fail "the frozen revision changed"
 echo "retry publish offered and succeeded; frozen revision still $FROZEN"
@@ -268,6 +285,7 @@ step "AC-15/AC-16: the credential never leaked anywhere"
 grep -rq "$TOKEN" "$WS_PATH" 2>/dev/null && fail "the credential was found in the workspace"
 grep -q "$TOKEN" "$WORK/server.log" && fail "the credential was found in the server log"
 grep -rq "$TOKEN" "$WORK/data/events" 2>/dev/null && fail "the credential was found in the event log"
+grep -q "$AUTH_TOKEN" "$WORK/server.log" && fail "the API token was printed in the server log"
 node -e "
   const fs=require('fs');
   const db=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
@@ -283,7 +301,7 @@ grep -q "url = $REMOTE" "$WS_PATH/.git/config" || fail "the remote URL is not cr
 echo "no credential material anywhere"
 
 step "AC-27/AC-28/AC-36: the stage record is monotonic across the whole lifecycle"
-RECOVERED=$(curl -sf "$BASE/api/tasks/$TASK_ID/detail" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const d=JSON.parse(s);
+RECOVERED=$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const d=JSON.parse(s);
 console.log('agent='+d.stages.agent.status,'validation='+d.stages.validation.status,'finalization='+d.stages.finalization.status,'publish='+d.stages.publish.status);})")
 echo "$RECOVERED"
 [ "$RECOVERED" = "agent=completed validation=completed finalization=completed publish=completed" ] || fail "stage record is not monotonic: $RECOVERED"

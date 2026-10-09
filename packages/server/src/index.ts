@@ -6,11 +6,17 @@ import { createApp } from "./app.js";
 
 const __dirname = resolve(fileURLToPath(import.meta.url), "..");
 
+/** Loopback hosts. Anything else is reachable from the network. */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
 async function main(): Promise<void> {
   // Data lives in a stable per-user directory so the store does not move
   // with whatever cwd the server happened to be started from.
   const dataDir = process.env.AGENTFABRIC_DATA_DIR ?? join(homedir(), ".fabric");
-  const host = process.env.AGENTFABRIC_HOST ?? "0.0.0.0";
+  // Loopback by default: this server holds every configured credential and
+  // can start processes, so it must not be reachable from the network unless
+  // the operator says so explicitly.
+  const host = process.env.AGENTFABRIC_HOST ?? "127.0.0.1";
   const port = Number(process.env.AGENTFABRIC_PORT ?? 7377);
 
   // Serve the built web UI if it exists (packages/web/dist).
@@ -26,6 +32,13 @@ async function main(): Promise<void> {
     console.log(`[agent-fabric] API server listening on http://${host}:${port}`);
     console.log(`[agent-fabric] Data directory: ${dataDir}`);
     console.log(`[agent-fabric] Web UI: ${staticDir ? `http://localhost:${port}` : "(not built; run npm run build -w @agentfabric/web)"}`);
+    if (!LOOPBACK_HOSTS.has(host)) {
+      console.warn(
+        `[agent-fabric] WARNING: bound to ${host}, not loopback — this server is reachable from the network, ` +
+          `and the API token is the only thing protecting every configured credential, workspace and process. ` +
+          `Unset AGENTFABRIC_HOST to listen on 127.0.0.1 only.`
+      );
+    }
   });
 }
 

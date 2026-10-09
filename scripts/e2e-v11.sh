@@ -25,8 +25,15 @@ export GIT_COMMITTER_EMAIL="e2e@example.test"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
 jqr() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);console.log(eval('j'+process.argv[1]))})" "$1"; }
-# The token may only live inside the Secret store (that is what Secrets are);
-# it must not appear in any other collection (tasks / runs / projects / …).
+# Every /api call except /api/health presents this bearer token (the server
+# writes it to $AGENTFABRIC_DATA_DIR/token on first start; read below once the
+# server is up). The value is never echoed — only its path.
+AUTH_TOKEN=""
+acurl() { curl "$@" -H "Authorization: Bearer $AUTH_TOKEN"; }
+# The credential value must not appear anywhere in db.json at all: the Secret
+# store keeps it encrypted (AES-256-GCM, `enc:v1:`), and every other collection
+# (tasks / runs / projects / …) must hold no copy. The value being *usable* is
+# proven by the lifecycle itself (clone / push succeed with it).
 assert_token_confined() {
   local token="$1" file="$2"
   node -e "
@@ -69,36 +76,48 @@ done
 curl -sf "$BASE/api/health" >/dev/null || { cat "$WORK/server.log"; fail "server did not start"; }
 echo "server up: $(curl -s "$BASE/api/health")"
 
+# The token file appears with the server's first start; wait briefly for the
+# write to land, then fail loudly instead of continuing unauthenticated.
+for _ in $(seq 1 50); do [ -s "$WORK/data/token" ] && break; sleep 0.1; done
+AUTH_TOKEN=$(cat "$WORK/data/token" 2>/dev/null) || fail "the server did not write an API token to $WORK/data/token"
+[ -n "$AUTH_TOKEN" ] || fail "the API token at $WORK/data/token is empty"
+echo "api token loaded from $WORK/data/token"
+
+step "auth: an unauthenticated /api request is refused"
+UNAUTH=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/runtimes")
+[ "$UNAUTH" = "401" ] || fail "expected 401 without a token, got $UNAUTH"
+echo "unauthenticated request refused with 401"
+
 step "AC-2: create a Source Credential (HTTPS token)"
 TOKEN="ghp_e2e_supersecrettoken"
-CRED=$(curl -sf -X POST "$BASE/api/source-credentials" -H 'Content-Type: application/json' \
+CRED=$(acurl -sf -X POST "$BASE/api/source-credentials" -H 'Content-Type: application/json' \
   -d "{\"name\":\"E2E GitHub\",\"type\":\"https-token\",\"host\":\"github.com\",\"username\":\"e2e\",\"value\":\"$TOKEN\"}")
 CRED_ID=$(echo "$CRED" | jqr .id)
 echo "credential=$CRED_ID masked=$(echo "$CRED" | jqr .secretMasked)"
 # The value must never be served back.
-if curl -s "$BASE/api/source-credentials" | grep -q "$TOKEN"; then fail "credential value leaked in the list API"; fi
+if acurl -s "$BASE/api/source-credentials" | grep -q "$TOKEN"; then fail "credential value leaked in the list API"; fi
 assert_token_confined "$TOKEN" "$WORK/data/db.json" || fail "credential value leaked outside the secret store"
 echo "credential value is not served by the API"
 
 step "AC-1/AC-3: create a Project on a public repository (no credential)"
-PROJ=$(curl -sf -X POST "$BASE/api/projects" -H 'Content-Type: application/json' \
+PROJ=$(acurl -sf -X POST "$BASE/api/projects" -H 'Content-Type: application/json' \
   -d "{\"name\":\"E2E Demo\",\"source\":{\"remoteUrl\":\"$REMOTE\",\"defaultBranch\":\"main\"},\"validation\":{\"steps\":[{\"name\":\"readme\",\"command\":\"test -f README.md\"}]}}")
 PROJ_ID=$(echo "$PROJ" | jqr .id)
 echo "project=$PROJ_ID provider=$(echo "$PROJ" | jqr .source.provider)"
 
 step "make a runtime usable for tasks (the mock harness)"
-RT=$(curl -s "$BASE/api/runtimes" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s).find(x=>x.kind==='mock');console.log(r.id)})")
-curl -sf -X PUT "$BASE/api/runtimes/$RT" -H 'Content-Type: application/json' -d '{"usableInTask":true}' >/dev/null
+RT=$(acurl -s "$BASE/api/runtimes" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s).find(x=>x.kind==='mock');console.log(r.id)})")
+acurl -sf -X PUT "$BASE/api/runtimes/$RT" -H 'Content-Type: application/json' -d '{"usableInTask":true}' >/dev/null
 echo "runtime=$RT"
 
 step "AC-1/AC-2: the mock runtime is a HOST runtime — a Project task on it is refused"
-REFUSED=$(curl -s -o "$WORK/refused.json" -w '%{http_code}' -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
+REFUSED=$(acurl -s -o "$WORK/refused.json" -w '%{http_code}' -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
   -d "{\"instruction\":\"refused\",\"runtimeId\":\"$RT\"}")
 REFUSED_CODE=$(node -e "console.log(require('$WORK/refused.json').code)")
 echo "http=$REFUSED code=$REFUSED_CODE"
 [ "$REFUSED" = "403" ] || fail "expected 403 for a host runtime, got $REFUSED"
 [ "$REFUSED_CODE" = "runtime-not-isolated" ] || fail "expected runtime-not-isolated, got $REFUSED_CODE"
-[ "$(curl -s "$BASE/api/projects/$PROJ_ID/tasks" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")" = "0" ] \
+[ "$(acurl -s "$BASE/api/projects/$PROJ_ID/tasks" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")" = "0" ] \
   || fail "a task was created despite the isolation refusal"
 
 step "AC-2: declare the mock runtime isolated, with a real image for the validation sandbox"
@@ -106,12 +125,12 @@ step "AC-2: declare the mock runtime isolated, with a real image for the validat
 # container), but Validation is untrusted code and must genuinely run in an
 # isolated runtime — so the image named here has to exist locally. This is
 # the honest consequence of the hardening: this suite now needs Docker.
-curl -sf -X PUT "$BASE/api/runtimes/$RT" -H 'Content-Type: application/json' \
+acurl -sf -X PUT "$BASE/api/runtimes/$RT" -H 'Content-Type: application/json' \
   -d "{\"usableInTask\":true,\"executionBackend\":\"isolated\",\"containerized\":true,\"image\":\"$IMAGE\"}" >/dev/null
-echo "isolation=$(curl -s "$BASE/api/runtimes/$RT/isolation")"
+echo "isolation=$(acurl -s "$BASE/api/runtimes/$RT/isolation")"
 
 step "AC-4..AC-13: start a Project task (managed workspace → clone → branch → runtime → agent → validation → finalize → push)"
-START=$(curl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
+START=$(acurl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' \
   -d "{\"instruction\":\"Add a project model\",\"runtimeId\":\"$RT\",\"baseRef\":\"main\"}")
 TASK_ID=$(echo "$START" | jqr .task.id)
 RUN_ID=$(echo "$START" | jqr .run.id)
@@ -123,7 +142,7 @@ echo "task=$TASK_ID run=$RUN_ID workspace=$WS_PATH"
 step "wait for the lifecycle to finish"
 STATUS=""
 for _ in $(seq 1 120); do
-  DETAIL=$(curl -sf "$BASE/api/tasks/$TASK_ID/detail")
+  DETAIL=$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail")
   STATUS=$(echo "$DETAIL" | jqr .status)
   case "$STATUS" in completed|failed|cancelled) break;; esac
   sleep 0.5
@@ -154,54 +173,55 @@ if grep -rq "$TOKEN" "$WS_PATH" 2>/dev/null; then fail "credential found in the 
 assert_token_confined "$TOKEN" "$WORK/data/db.json" || fail "credential leaked outside the secret store"
 if grep -q "$TOKEN" "$WORK/server.log"; then fail "credential found in the server log"; fi
 if grep -rq "$TOKEN" "$WORK/data/events" 2>/dev/null; then fail "credential found in the event log"; fi
+if grep -q "$AUTH_TOKEN" "$WORK/server.log"; then fail "the API token was printed in the server log"; fi
 echo "no credential material anywhere"
 
 step "AC-14/AC-15: the workspace survives and a second run reuses it"
-RETRY=$(curl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-run" -H 'Content-Type: application/json' -d '{}')
+RETRY=$(acurl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-run" -H 'Content-Type: application/json' -d '{}')
 RETRY_RUN=$(echo "$RETRY" | jqr .run.id)
 for _ in $(seq 1 120); do
-  STATUS=$(curl -sf "$BASE/api/tasks/$TASK_ID/detail" | jqr .status)
+  STATUS=$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail" | jqr .status)
   case "$STATUS" in completed|failed|cancelled) break;; esac
   sleep 0.5
 done
 [ "$STATUS" = "completed" ] || fail "the retried run did not complete"
 [ -d "$WS_PATH" ] || fail "the workspace disappeared after the second run"
-RUNS=$(curl -s "$BASE/api/tasks/$TASK_ID/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")
+RUNS=$(acurl -s "$BASE/api/tasks/$TASK_ID/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")
 echo "runs on the task: $RUNS (workspace reused: $WS_PATH)"
 
 step "AC-24/AC-25: retry publish does not re-run the agent"
-BEFORE=$(curl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
-curl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish" >/dev/null
-AFTER=$(curl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
+BEFORE=$(acurl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
+acurl -sf -X POST "$BASE/api/tasks/$TASK_ID/retry-publish" >/dev/null
+AFTER=$(acurl -s "$BASE/api/runs" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).filter(r=>r.taskId==='$TASK_ID').length))")
 echo "runs before=$BEFORE after=$AFTER"
 [ "$BEFORE" = "$AFTER" ] || fail "retry publish started a new run"
-[ "$(curl -sf "$BASE/api/tasks/$TASK_ID/detail" | jqr .publish.status)" = "pushed" ] || fail "retry publish did not report success"
+[ "$(acurl -sf "$BASE/api/tasks/$TASK_ID/detail" | jqr .publish.status)" = "pushed" ] || fail "retry publish did not report success"
 
 step "AC-26: two tasks on the same project are isolated"
-A=$(curl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d "{\"instruction\":\"Task A\",\"runtimeId\":\"$RT\",\"workingBranch\":\"af/e2e-a\"}")
-B=$(curl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d "{\"instruction\":\"Task B\",\"runtimeId\":\"$RT\",\"workingBranch\":\"af/e2e-b\"}")
+A=$(acurl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d "{\"instruction\":\"Task A\",\"runtimeId\":\"$RT\",\"workingBranch\":\"af/e2e-a\"}")
+B=$(acurl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d "{\"instruction\":\"Task B\",\"runtimeId\":\"$RT\",\"workingBranch\":\"af/e2e-b\"}")
 A_ID=$(echo "$A" | jqr .task.id); B_ID=$(echo "$B" | jqr .task.id)
 A_WS=$(echo "$A" | jqr .workspace.path); B_WS=$(echo "$B" | jqr .workspace.path)
 for _ in $(seq 1 160); do
-  SA=$(curl -sf "$BASE/api/tasks/$A_ID/detail" | jqr .status)
-  SB=$(curl -sf "$BASE/api/tasks/$B_ID/detail" | jqr .status)
+  SA=$(acurl -sf "$BASE/api/tasks/$A_ID/detail" | jqr .status)
+  SB=$(acurl -sf "$BASE/api/tasks/$B_ID/detail" | jqr .status)
   case "$SA$SB" in *preparing*|*running*|*validating*|*finalizing*|*publishing*) sleep 0.5;; *) break;; esac
 done
 echo "A=$SA ($A_WS)"; echo "B=$SB ($B_WS)"
 [ "$A_WS" != "$B_WS" ] || fail "the two tasks share a workspace"
-[ "$(git --git-dir="$REMOTE" rev-parse refs/heads/af/e2e-a)" = "$(curl -sf "$BASE/api/tasks/$A_ID/detail" | jqr .publish.finalCommitSha)" ] || fail "task A was not published independently"
-[ "$(git --git-dir="$REMOTE" rev-parse refs/heads/af/e2e-b)" = "$(curl -sf "$BASE/api/tasks/$B_ID/detail" | jqr .publish.finalCommitSha)" ] || fail "task B was not published independently"
+[ "$(git --git-dir="$REMOTE" rev-parse refs/heads/af/e2e-a)" = "$(acurl -sf "$BASE/api/tasks/$A_ID/detail" | jqr .publish.finalCommitSha)" ] || fail "task A was not published independently"
+[ "$(git --git-dir="$REMOTE" rev-parse refs/heads/af/e2e-b)" = "$(acurl -sf "$BASE/api/tasks/$B_ID/detail" | jqr .publish.finalCommitSha)" ] || fail "task B was not published independently"
 
 step "AC-29: cancel keeps the workspace and reports cancellation"
-C=$(curl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d "{\"instruction\":\"Long task\",\"runtimeId\":\"$RT\",\"workingBranch\":\"af/e2e-c\"}")
+C=$(acurl -sf -X POST "$BASE/api/projects/$PROJ_ID/tasks" -H 'Content-Type: application/json' -d "{\"instruction\":\"Long task\",\"runtimeId\":\"$RT\",\"workingBranch\":\"af/e2e-c\"}")
 C_ID=$(echo "$C" | jqr .task.id); C_WS=$(echo "$C" | jqr .workspace.path)
 sleep 1.5
-curl -sf -X POST "$BASE/api/tasks/$C_ID/cancel" >/dev/null
-CANCELLED=$(curl -sf "$BASE/api/tasks/$C_ID/detail" | jqr .status)
+acurl -sf -X POST "$BASE/api/tasks/$C_ID/cancel" >/dev/null
+CANCELLED=$(acurl -sf "$BASE/api/tasks/$C_ID/detail" | jqr .status)
 echo "cancelled task status=$CANCELLED workspace=$C_WS"
 [ "$CANCELLED" = "cancelled" ] || fail "the cancelled task did not report cancellation"
 [ -d "$C_WS" ] || fail "the workspace was removed on cancel"
-[ -z "$(curl -s "$BASE/api/workspace-locks")" ] || [ "$(curl -s "$BASE/api/workspace-locks" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")" = "0" ] || fail "a workspace lock was left behind"
+[ -z "$(acurl -s "$BASE/api/workspace-locks")" ] || [ "$(acurl -s "$BASE/api/workspace-locks" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).length))")" = "0" ] || fail "a workspace lock was left behind"
 
 step "CLI surface: af projects / af tasks detail"
 CLI="node --import tsx packages/cli/src/index.ts --api $BASE"

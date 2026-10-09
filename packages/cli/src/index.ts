@@ -9,20 +9,37 @@ function apiUrl(): string {
   return process.env.AGENTFABRIC_API ?? "http://localhost:7377";
 }
 
+/** Global flags, mirrored onto subcommands further down. */
+const GLOBAL_FLAGS = ["--api <url>", "--json", "--token <t>"];
+
 function buildProgram(): Command {
   const program = new Command();
   program
     .name("af")
     .description("AgentFabric CLI — run any agent, on any model, in any environment")
     .version("0.1.0")
-    .option("--api <url>", "AgentFabric API base URL", apiUrl())
+    .option("--api <url>", `AgentFabric API base URL (default: $AGENTFABRIC_API or ${apiUrl()})`)
     .option("--json", "output raw JSON")
-    .showHelpAfterError();
+    .option("--token <t>", "API token (default: $AGENTFABRIC_TOKEN, then $AGENTFABRIC_DATA_DIR/token)")
+    .showHelpAfterError()
+    // Global options may only be written before the subcommand: `--token` is
+    // also a subcommand option (`source-credentials`), and without positional
+    // parsing commander would hand that one to the global flag. The globals
+    // are mirrored onto the subcommands below, so `af runs list --json` keeps
+    // working.
+    .enablePositionalOptions();
 
   // Global options live on the program; a subcommand's own `opts()` does not
   // include them, so `optsWithGlobals()` is what actually resolves `--api` /
-  // `--json` wherever they are written on the command line.
-  const client = (cmd: Command): ApiClient => new ApiClient(cmd.optsWithGlobals().api ?? apiUrl());
+  // `--json` wherever they are written on the command line. The token is
+  // resolved lazily by the client, so a usage error is still reported before
+  // a missing-credential error.
+  const cliToken = (cmd: Command): string | undefined =>
+    // `source-credentials` owns `--token` for the Git credential value, so
+    // only the global occurrence (written before the subcommand) is an API
+    // token there.
+    cmd.name() === "source-credentials" ? program.opts().token : (cmd.opts().token ?? program.opts().token);
+  const client = (cmd: Command): ApiClient => new ApiClient(cmd.optsWithGlobals().api ?? apiUrl(), cliToken(cmd));
   const json = (cmd: Command): boolean => Boolean(cmd.optsWithGlobals().json);
 
   /* ---------------- config ---------------- */
@@ -977,6 +994,16 @@ function buildProgram(): Command {
       }
       throw new Error(`unknown action: ${action}`);
     });
+
+  // Positional options make commander stop scanning for global flags at the
+  // subcommand name, so mirror them onto every subcommand to keep invocations
+  // like `af runs list --json` working. `source-credentials` is the exception:
+  // its `--token <token>` is the Git credential value, and the API token has
+  // to be written before the subcommand there.
+  for (const cmd of program.commands) {
+    const flags = cmd.name() === "source-credentials" ? GLOBAL_FLAGS.filter((flag) => !flag.startsWith("--token")) : GLOBAL_FLAGS;
+    for (const flag of flags) cmd.addOption(new Option(flag).hideHelp());
+  }
 
   return program;
 }

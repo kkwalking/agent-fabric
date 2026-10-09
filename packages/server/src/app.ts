@@ -1,4 +1,4 @@
-import express, { type Express, type Request, type Response } from "express";
+import express, { type Express, type Request, type RequestHandler, type Response } from "express";
 import cors from "cors";
 import { execFile } from "node:child_process";
 import {
@@ -37,6 +37,7 @@ import {
   type Run,
   type Task,
 } from "@agentfabric/core";
+import { loadOrCreateToken, requireToken, TOKEN_COOKIE } from "./auth.js";
 import {
   buildRegistry,
   codexThreadSource,
@@ -51,6 +52,57 @@ export interface ServerOptions {
   dataDir: string;
   staticDir?: string;
 }
+
+/**
+ * CORS is reflected for loopback origins only (`http://localhost:<port>`,
+ * `http://127.0.0.1:<port>`). Everything else gets no CORS header at all, so
+ * a page on another origin cannot read a response even if it reaches the
+ * port — and it cannot get a preflight approved for the custom headers below.
+ */
+const LOOPBACK_ORIGIN = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/;
+
+function isLoopbackOrigin(origin: string | undefined): boolean {
+  return origin !== undefined && LOOPBACK_ORIGIN.test(origin);
+}
+
+const corsOptions = {
+  origin: (origin: string | undefined, callback: (err: Error | null, origin?: string) => void) => {
+    callback(null, isLoopbackOrigin(origin) ? origin : undefined);
+  },
+  // `Authorization` for the bearer token, `X-AgentFabric-Reveal` for the
+  // explicit api-key reveal confirmation below.
+  allowedHeaders: ["Authorization", "Content-Type", "X-AgentFabric-Reveal"],
+};
+
+/**
+ * Sets the browser's API credential as a middleware. Only plain page loads
+ * get the cookie — API responses and static assets do not need it, and not
+ * re-setting it keeps every API response free of credential material.
+ */
+const authCookie: (token: string) => RequestHandler = (token) => (req, res, next) => {
+  if (req.method === "GET" && !req.path.startsWith("/api")) {
+    res.cookie(TOKEN_COOKIE, token, { httpOnly: true, sameSite: "strict", path: "/" });
+  }
+  next();
+};
+
+/**
+ * Extra guard on the one endpoint that returns a stored API key in the
+ * clear: the caller must state the intent in a custom header. A cross-site
+ * page cannot set a custom header without a CORS preflight, and this server
+ * only approves preflights for loopback origins — so this is defense in
+ * depth behind the token, not a substitute for it.
+ */
+const requireRevealConfirmation: RequestHandler = (req, res, next) => {
+  if (req.get("X-AgentFabric-Reveal") !== "1") {
+    res.status(403).json({
+      error: "Revealing a stored API key requires the X-AgentFabric-Reveal: 1 header",
+      code: "reveal-not-confirmed",
+    });
+    return;
+  }
+  next();
+};
 
 function ok(res: Response, data: unknown, status = 200): void {
   res.status(status).json(data);
@@ -178,8 +230,29 @@ export async function createApp(options: ServerOptions): Promise<Express> {
   purgeTimer.unref();
 
   const app = express();
-  app.use(cors());
+  // The token is generated on first start and lives in the data directory
+  // (`<dataDir>/token`, mode 0o600). It never reaches a log line, the store
+  // or any response body.
+  const token = await loadOrCreateToken(options.dataDir);
+  app.use(cors(corsOptions));
   app.use(express.json({ limit: "10mb" }));
+
+  /* ---------------- authentication ---------------- */
+
+  // Static assets stay open: the browser cannot load the page (and therefore
+  // cannot obtain the cookie) if the page itself needs the cookie. Loading a
+  // GET page is what hands the browser its credential.
+  app.use(authCookie(token));
+
+  // Everything under /api requires the token. `GET /api/health` is the one
+  // exemption: it carries no sensitive information and is what a supervisor
+  // or e2e script probes before any credential is available.
+  const auth = requireToken(token);
+  app.use((req, res, next) => {
+    if (!req.path.startsWith("/api")) return next();
+    if (req.method === "GET" && req.path === "/api/health") return next();
+    auth(req, res, next);
+  });
 
   /* ---------------- health ---------------- */
 
@@ -223,8 +296,10 @@ export async function createApp(options: ServerOptions): Promise<Express> {
     p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
   });
   // Reveal the stored API key on demand (the eye button in the provider
-  // editor). Raw keys never appear in list/get responses, only here.
-  app.get("/api/providers/:id/api-key", (req, res) => {
+  // editor). Raw keys never appear in list/get responses, only here — and
+  // only for a caller that states the intent in a header (see
+  // `requireRevealConfirmation`).
+  app.get("/api/providers/:id/api-key", requireRevealConfirmation, (req, res) => {
     const p = providers.get(req.params.id);
     if (!p) return fail(res, new Error("Provider not found"), 404);
     const secret = p.apiKeySecretId ? secrets.getWithValue(p.apiKeySecretId) : undefined;

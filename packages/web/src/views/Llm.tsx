@@ -213,7 +213,10 @@ function ProviderEditor({
     if (!effectiveId || !existing.data?.apiKeyMasked) return;
     try {
       setError(null);
-      const d = await get<{ apiKey?: string }>(`/api/providers/${effectiveId}/api-key`);
+      // 已保存的 Key 属于敏感内容：服务端只认显式确认头（X-AgentFabric-Reveal: 1）才回传。
+      const d = await get<{ apiKey?: string }>(`/api/providers/${effectiveId}/api-key`, {
+        "X-AgentFabric-Reveal": "1",
+      });
       if (d.apiKey) {
         setForm((f) => ({ ...f, apiKey: d.apiKey! }));
         setRevealedSavedKey(true);

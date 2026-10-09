@@ -16,10 +16,11 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: options?.body ? { "Content-Type": "application/json" } : undefined,
-    ...options,
-  });
+  const headers = new Headers(options?.headers);
+  if (options?.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const res = await fetch(path, { ...options, headers });
   const text = await res.text();
   let data: unknown = null;
   try {
@@ -39,11 +40,13 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   return data as T;
 }
 
-export const get = <T>(p: string) => api<T>(p);
-export const post = <T>(p: string, body?: unknown, signal?: AbortSignal) =>
-  api<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined, signal });
-export const put = <T>(p: string, body?: unknown) => api<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined });
-export const del = <T>(p: string) => api<T>(p, { method: "DELETE" });
+/** `headers` carries per-call custom headers, e.g. the explicit reveal confirmation. */
+export const get = <T>(p: string, headers?: HeadersInit) => api<T>(p, { headers });
+export const post = <T>(p: string, body?: unknown, signal?: AbortSignal, headers?: HeadersInit) =>
+  api<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined, signal, headers });
+export const put = <T>(p: string, body?: unknown, headers?: HeadersInit) =>
+  api<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined, headers });
+export const del = <T>(p: string, headers?: HeadersInit) => api<T>(p, { method: "DELETE", headers });
 
 /** Subscribe to an SSE endpoint. Returns an unsubscribe function. */
 export function subscribeSSE(path: string, onEvent: (data: unknown) => void): () => void {
