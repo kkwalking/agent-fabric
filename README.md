@@ -984,10 +984,17 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 # 绝不发出未认证的请求。token 值不会出现在任何输出里，只有文件路径。
 # 注意 --token 的两种含义：写在子命令之前是 API token（全局选项），
 # `af source-credentials add-https --token` 是 Git 凭据值（子命令选项）。
+# 可重复选项（providers --header、models --param、agents --tool、run --tool）
+# 每次出现追加一个值：`--tool read --tool edit` 得到两个工具；给 `providers update`
+# 传 --header 同样生效（此前被静默丢弃）；`providers --enabled false` 可把已禁用的
+# provider 重新启用或禁用，未传则 update 保持原值、add 默认启用。
+# runtimes add --command 按 shell 引号切分：--command 'codex exec "fix the bug"'
+# 是三个 argv，而不是五个。
 
 # Provider / Model
 af providers list | add | update | remove
 af providers add my-openai --type openai-completions --base-url https://api.openai.com/v1 --api-key sk-xxx
+af providers update my-openai --enabled false      # 禁用；--enabled true 重新启用
 af models list | add | remove
 af models add gpt-4o --provider <provider-id> --alias gpt-4o
 
