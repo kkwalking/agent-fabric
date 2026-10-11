@@ -9,7 +9,7 @@ Orchestrator 共同依赖的接口；镜像不满足时 Run 会失败（且**不
 
 | 镜像 | Kind | 来源 |
 | --- | --- | --- |
-| `agentfabric-opencode:latest` | `opencode` | `docker/opencode.Dockerfile`（派生自官方 `ghcr.io/anomalyco/opencode`） |
+| `agentfabric-opencode:latest` | `opencode` | `docker/opencode.Dockerfile`（派生自官方 `ghcr.io/anomalyco/opencode` 的 **2.x** 标签，当前钉 `2.0.26`） |
 | `agentfabric-pi:latest` | `pi` | `docker/pi.Dockerfile` |
 | `agentfabric-dsh:latest` | `dsh` | `docker/dsh.Dockerfile` |
 
@@ -19,7 +19,9 @@ bash scripts/build-harness-images.sh        # 构建 opencode + pi + dsh
 
 三个镜像都**没有** `defaultImage`：容器化 Runtime 必须显式指定 `runtime.image`。官方
 OpenCode 镜像虽然是官方维护的，但它是一个只带 ripgrep 的极简 Alpine 构建，不满足下面
-第 7 条，因此不能作为默认值。
+第 7 条，因此不能作为默认值。另外官方 `latest` 标签仍解析到 1.19.0，而 Adapter 面向
+v2 协议（`--standalone`、`-m provider/model#variant`），所以基础镜像必须钉 2.x 标签，
+不能用 `latest`。
 
 ## 契约条目
 
@@ -55,7 +57,8 @@ OpenCode 镜像虽然是官方维护的，但它是一个只带 ripgrep 的极�
 7. **python3 与 curl 必须可用**。Agent 的日常命令大量使用这两者：跑一段脚本用
    `python3`，取一个 URL 用 `curl`。缺了它们，任务会因为一个跟任务本身无关的原因失败。
    这条要求针对**所有** Harness 镜像，与具体 Harness 无关——所以官方 OpenCode 镜像
-   必须派生（`docker/opencode.Dockerfile` 只加这两个包，其它一概不动）。
+   必须派生（`docker/opencode.Dockerfile` 只加这两个包、把基础 tag 钉到 2.x，其它一概
+   不动）。
 
 ## 认证
 

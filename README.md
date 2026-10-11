@@ -778,7 +778,7 @@ Checkpoint 模型不可用（未配置 provider/model、调用失败、回答不
 | `docker` | 容器 | — | — |
 | `mock` | 本地 | — | — |
 
-OpenCode / Pi / DSH 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` / `AGENTFABRIC_DSH_BIN` 可覆盖）。**三个容器化 Runtime 都必须显式配置镜像**（`runtime.image`，或用 `AGENTFABRIC_OPENCODE_IMAGE` / `AGENTFABRIC_PI_IMAGE` / `AGENTFABRIC_DSH_IMAGE` 覆盖），未配置时**拒绝启动**并提示契约——参考镜像见 `docker/` 下的三个 Dockerfile，一次构建全部：
+OpenCode / Pi / DSH 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` / `AGENTFABRIC_DSH_BIN` 可覆盖；OpenCode 适配器面向 **v2** CLI，本地装 1.x 会因未知 flag 失败）。**三个容器化 Runtime 都必须显式配置镜像**（`runtime.image`，或用 `AGENTFABRIC_OPENCODE_IMAGE` / `AGENTFABRIC_PI_IMAGE` / `AGENTFABRIC_DSH_IMAGE` 覆盖），未配置时**拒绝启动**并提示契约——参考镜像见 `docker/` 下的三个 Dockerfile，一次构建全部：
 
 ```bash
 bash scripts/build-harness-images.sh            # 或只构建一部分：… opencode / … pi / … dsh
@@ -797,11 +797,13 @@ af runtimes add "DSH (containerized)"       --kind dsh      --isolated --image a
 
 | 镜像 | Kind | Native State 挂载点 | 说明 |
 | --- | --- | --- | --- |
-| `agentfabric-opencode:latest` | `opencode` | `/root/.local/share/opencode` | `docker/opencode.Dockerfile`；派生自官方镜像 |
+| `agentfabric-opencode:latest` | `opencode` | `/root/.local/share/opencode` | `docker/opencode.Dockerfile`；派生自官方 v2 镜像 |
 | `agentfabric-pi:latest` | `pi` | `/root/.pi` | `docker/pi.Dockerfile`；无官方镜像 |
 | `agentfabric-dsh:latest` | `dsh` | `/root/.dsh` | `docker/dsh.Dockerfile`；无官方镜像 |
 
-**为什么 OpenCode 也要自建**：官方镜像 `ghcr.io/anomalyco/opencode` 是只带 ripgrep 的极简 Alpine 构建，**没有 python3 也没有 curl**，不满足契约第 7 条。`docker/opencode.Dockerfile` 从它派生，只 `apk add python3 curl`，ENTRYPOINT 与其它一切都不动。基础镜像用 `--build-arg OPENCODE_BASE=<镜像>` 可换（内网 mirror 或固定 tag）。
+**为什么 OpenCode 也要自建**：官方镜像 `ghcr.io/anomalyco/opencode` 是只带 ripgrep 的极简 Alpine 构建，**没有 python3 也没有 curl**，不满足契约第 7 条。`docker/opencode.Dockerfile` 从它派生，只 `apk add python3 curl`，ENTRYPOINT 与其它一切都不动。
+
+**OpenCode 基础镜像钉在 v2**（`ARG OPENCODE_BASE=…:2.0.26`）：`latest` 标签至今仍解析到 1.19.0，而 Adapter 面向 v2 协议——`--variant` 已被删除（variant 改为 `-m provider/model#variant`），且 `run` 会拉起后台常驻进程并缓存首次读到的配置（每个 Run 因此带 `--standalone`）。用 `latest` 构建出的 v1 镜像与 Adapter 不匹配，故 Dockerfile 显式钉版。基础镜像用 `--build-arg OPENCODE_BASE=<镜像>` 可换（内网 mirror 或更新到已验证的 2.x tag）。
 
 ```bash
 bash scripts/build-harness-images.sh            # 构建 pi + dsh（AGENTFABRIC_IMAGE_TAG_PREFIX 可改前缀）
@@ -819,7 +821,7 @@ bash scripts/build-harness-images.sh            # 构建 pi + dsh（AGENTFABRIC_
 Local 与 Docker 共用同一个 Harness Parser（事件 / Session Ref / Usage / 错误），Execution Backend 只做传输：容器的 stdout/stderr 以原始行流交给对应 Harness Adapter，由同一套解析器处理。
 
 * **Pi**（`pi --print --mode json`）：`session` 头、`agent_start/end`、`turn_start/end`、`message_start/update/end`、`tool_execution_start/update/end` → `run.progress` / `agent.message` / `agent.thinking` / `tool.started` / `tool.progress` / `tool.completed` / `runtime.error`。
-* **OpenCode**（`opencode run --format json`）：`step_start` / `text` / `reasoning` / `tool_use` / `step_finish` / `error`（每行携带 `sessionID`）→ 同一套标准事件。
+* **OpenCode**（`opencode run --standalone --format json`，v2）：`step_start` / `text` / `reasoning` / `tool_use` / `step_finish` / `error`（每行携带 `sessionID`）→ 同一套标准事件。v2 的 `tool_use` part 用 `id` 承载 call id（v1 是 `callID`）、错误用 `error.type` 承载类型（v1 是 `error.name`），Adapter 两者都读。**已知上游缺陷**：v2 的 `run --format json` 不再为最后一步输出 `step_finish`（[multica#8892](https://github.com/multica-ai/multica/issues/8892)，数据仍在 session DB 里，只是 stdout 流被提前拆掉），因此 v2 下 Run 的 Usage / Cost 会少算最后一步（纯文本回答的 Run 显示为 0）——这是 opencode v2 CLI 的行为，不是 Adapter 的解析问题。
 * **Codex**（`codex exec --json`）：agent_message / reasoning / command_execution / file_change / mcp_tool_call / web_search / turn usage。
 * **Claude Code**（`claude -p --output-format stream-json --verbose`）：assistant text / thinking / tool_use→Bash·Edit·Write·Read… / tool_result / result usage。
 * **DSH**（`dsh --profile headless --json [--session-id <id>] -- "<task>"`）：`session` → `status`（turn/step，`step_end` 携带该次模型请求的 usage）→ `text` / `thinking`（已提交的助手消息投影，重试中的尝试不会外泄）→ `tool_call` / `tool_result`（按 callId 配对）→ `final`。退出码 0 = 完成、1 = 中止/出错。
@@ -903,7 +905,7 @@ Execution Policy 在 Run 中强制执行：
 * `maxDurationMs` 超时、`maxModelCalls` / `maxTokens` / `maxCost` 超限即中止 Run（failed）；
 * `cpu` / `memory` 传给容器；
 * `network.enabled=false` 时容器 `--network none`；
-* `shell` / `toolPermissions` 与 `autoApprove`（如 OpenCode `--auto`）传递给 Harness Adapter。
+* `shell` / `toolPermissions` 与 `autoApprove`（如 OpenCode `--auto`）传递给 Harness Adapter。OpenCode 侧 `toolPermissions` 只认 v2 规范工具名：`apply_patch` / `edit` / `execute` / `glob` / `grep` / `list` / `question` / `read` / `shell` / `skill` / `subagent` / `todowrite` / `todoread` / `webfetch` / `websearch`（v1 的 `bash` / `write` / `patch` / `task` 会收到 "unknown tools" 告警并被忽略）。
 
 默认 Run 超时 `DEFAULT_RUN_TIMEOUT_MS` = 30 分钟。Policy 可在 Agent Profile、Task、Run 各层给出，Run 级覆盖 Task 级。
 

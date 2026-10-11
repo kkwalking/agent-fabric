@@ -23,11 +23,15 @@
 #   ✓ `--session <id>` resumes sessions persisted in the mounted state
 #   ✓ python3 + curl available for the agent's own commands
 #
-# The base tag is an ARG so the image can track the official release (or an
-# internal mirror) without editing this file:
+# The base tag is pinned to the OpenCode 2 line on purpose. `latest` still
+# resolves to 1.19.0 (the two tags share a manifest digest), so an
+# unpinned base would silently keep building v1 images while the adapter
+# speaks v2 — `--variant` was replaced by `-m provider/model#variant` and
+# `run` now spawns a background service unless `--standalone` is passed.
+# Bump this when a newer 2.x is validated:
 #
-#   docker build --build-arg OPENCODE_BASE=ghcr.io/anomalyco/opencode:1.2.3 …
-ARG OPENCODE_BASE=ghcr.io/anomalyco/opencode:latest
+#   docker build --build-arg OPENCODE_BASE=ghcr.io/anomalyco/opencode:2.0.27 …
+ARG OPENCODE_BASE=ghcr.io/anomalyco/opencode:2.0.26
 FROM ${OPENCODE_BASE}
 
 # Alpine base: add the contract tools and leave the rest untouched. The

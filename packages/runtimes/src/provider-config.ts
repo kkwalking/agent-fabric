@@ -10,7 +10,7 @@
  *   (baseUrl + api + apiKey via `$ENV` interpolation + headers + models).
  * - opencode: a generated `opencode.json` referenced via `OPENCODE_CONFIG`
  *   (provider entry with npm package + baseURL + apiKey via `{env:…}` +
- *   headers, plus permission/agent policy sections).
+ *   headers, plus the v2 `permissions` rule list and agent section).
  *
  * The API key itself always travels as the `AGENTFABRIC_PROVIDER_API_KEY`
  * environment variable and is referenced from the generated files — the
@@ -297,13 +297,27 @@ export function piAgentDir(env: Record<string, string | undefined>, homeDir: str
   return env.PI_CODING_AGENT_DIR ?? `${homeDir}/.pi/agent`;
 }
 
+/**
+ * One opencode 2 permission rule. v2 replaced v1's `permission` map
+ * (`{bash: "deny"}`) with an ordered rule list; the last matching rule
+ * wins, so callers must emit the broad rule before the specific ones.
+ */
+export interface OpenCodePermissionRule {
+  action: string;
+  resource: string;
+  effect: "allow" | "deny" | "ask";
+}
+
 export interface OpenCodeConfigOptions {
   provider: Provider;
   models: Model[];
-  /** `permission` block from the resolved execution policy (v4 §15/§16). */
-  permission?: Record<string, unknown>;
-  /** Custom agent definition (system instructions + tools, v4 §10/§11). */
-  agent?: { prompt?: string; tools?: Record<string, boolean>; model?: string };
+  /**
+   * `permissions` rules from the resolved execution policy (v4 §15/§16).
+   * Ordered: the caller puts the shell policy before the tool allowlist.
+   */
+  permissions?: OpenCodePermissionRule[];
+  /** Custom agent definition (system instructions + model, v4 §10/§11). */
+  agent?: { prompt?: string; model?: string };
   /** Extra top-level config merged in (e.g. default model). */
   extra?: Record<string, unknown>;
   /**
@@ -354,7 +368,7 @@ export function buildOpenCodeConfig(opts: OpenCodeConfigOptions): OpenCodeConfig
     };
     config.provider = { [providerSlug(provider)]: providerEntry };
   }
-  if (opts.permission && Object.keys(opts.permission).length > 0) config.permission = opts.permission;
+  if (opts.permissions && opts.permissions.length > 0) config.permissions = opts.permissions;
   if (opts.agent) config.agent = { agentfabric: opts.agent };
   return { ...config, ...(opts.extra ?? {}) };
 }
