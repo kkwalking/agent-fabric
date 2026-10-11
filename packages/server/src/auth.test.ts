@@ -93,6 +93,19 @@ describe("API authentication", () => {
     assert.equal(res.status, 401);
   });
 
+  test("case variants of an API path are still authenticated", async () => {
+    // Express's router matches routes case-insensitively, so `/API/tasks`
+    // runs the same handler as `/api/tasks` — the auth gate must not be
+    // the one place that treats them as different paths.
+    for (const path of ["/API/tasks", "/Api/tasks"]) {
+      const res = await fetch(`${running.base}${path}`);
+      assert.equal(res.status, 401, `${path} must not bypass auth`);
+    }
+    // The health exemption applies to the same path in any case, too.
+    const health = await fetch(`${running.base}/API/health`);
+    assert.equal(health.status, 200);
+  });
+
   test("exempts GET /api/health from authentication", async () => {
     const res = await fetch(`${running.base}/api/health`);
     assert.equal(res.status, 200);

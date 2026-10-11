@@ -641,6 +641,8 @@ Platform      project-not-found · project-invalid · credential-not-found
 
 HTTP 映射：隔离/授权类失败（`runtime-not-isolated`、`credential-host-mismatch`、`credential-transport-mismatch`、`secret-scope-not-allowed`、`validation-secret-not-allowed`、`policy-denied`）为 **403**；并发/状态冲突类（`workspace-diverged-after-finalization`、`publish-revision-missing`、`workspace-locked`、`remote-branch-conflict`、`task-busy`、`task-state-invalid`、`branch-conflict`）为 **409**；`validation-runtime-*` 与 `runtime-*` 为 **502**。
 
+API 路径的认证判定大小写不敏感（Express 路由本身大小写不敏感，`/API/…` 与 `/api/…` 是同一路由，认证必须一致）。
+
 **Run 的执行异常不会杀死进程**：Run 在进入 harness 之前的准备阶段抛出的异常（例如 secret scope 被拒、引用的 Secret 无法读取）会把该 Run 记录结算为 `failed`（DomainError 的 message 原样呈现），而不是逃逸成 unhandled rejection——后者在 Node 默认行为下会终止整个服务器，连带杀死所有并发 Run。run 执行中 adapter 抛出的异常同样结算为 `failed` 并保留错误信息。
 
 ### API

@@ -90,6 +90,15 @@ function isLoopbackOrigin(origin: string | undefined): boolean {
   return origin !== undefined && LOOPBACK_ORIGIN.test(origin);
 }
 
+/**
+ * Whether a request path is under the API. Case-insensitive because Express's
+ * router matches routes case-insensitively: `/API/providers` runs the same
+ * handler as `/api/providers`, so the auth gate must treat them the same.
+ */
+function isApiPath(path: string): boolean {
+  return path.toLowerCase().startsWith("/api");
+}
+
 const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, origin?: string) => void) => {
     callback(null, isLoopbackOrigin(origin) ? origin : undefined);
@@ -283,10 +292,15 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   // Everything under /api requires the token. `GET /api/health` is the one
   // exemption: it carries no sensitive information and is what a supervisor
   // or e2e script probes before any credential is available.
+  //
+  // The path test is case-insensitive on purpose: Express routes match
+  // case-insensitively (`/API/providers` reaches the `/api/providers`
+  // handler), so a case-sensitive gate here would leave an unauthenticated
+  // route reachable by capitalization alone.
   const auth = requireToken(token);
   app.use((req, res, next) => {
-    if (!req.path.startsWith("/api")) return next();
-    if (req.method === "GET" && req.path === "/api/health") return next();
+    if (!isApiPath(req.path)) return next();
+    if (req.method === "GET" && req.path.toLowerCase() === "/api/health") return next();
     auth(req, res, next);
   });
 
