@@ -106,6 +106,16 @@ describe("API authentication", () => {
     assert.equal(health.status, 200);
   });
 
+  test("a malformed JSON body answers 400, not 500", async () => {
+    const res = await fetch(`${running.base}/api/tasks`, {
+      method: "POST",
+      headers: { ...bearer(running.token), "Content-Type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 400);
+    assert.equal(((await res.json()) as { code?: string }).code, "invalid-request");
+  });
+
   test("exempts GET /api/health from authentication", async () => {
     const res = await fetch(`${running.base}/api/health`);
     assert.equal(res.status, 200);

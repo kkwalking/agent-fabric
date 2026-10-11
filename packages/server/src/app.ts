@@ -1063,16 +1063,22 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     ok(res, { ...h, renderedPrompt: renderHandoffBody(h), consumedByRunIds });
   });
   // Fold user-provided notes into an existing handoff (spec v1 §7).
-  app.post("/api/handoffs/:id/notes", async (req, res) => {
-    const { notes } = (req.body ?? {}) as { notes?: string };
-    if (!notes?.trim()) return fail(res, new Error("notes is required"));
-    try {
+  //
+  // Routed through `ah`: a rejected `await` here must reach the error
+  // middleware, never surface as an unhandled rejection (which kills the
+  // process). `notes` is validated as a string up front — a JSON number or
+  // object would otherwise throw on `.trim()`.
+  app.post(
+    "/api/handoffs/:id/notes",
+    ah(async (req, res) => {
+      const notes = (req.body as { notes?: unknown } | undefined)?.notes;
+      if (typeof notes !== "string" || !notes.trim()) {
+        return fail(res, new Error("notes is required"));
+      }
       const h = await handoffs.addUserNotes(req.params.id, notes);
       h ? ok(res, h) : fail(res, new Error("Handoff not found"), 404);
-    } catch (e) {
-      fail(res, e);
-    }
-  });
+    })
+  );
   app.delete(
     "/api/handoffs/:id",
     ah(async (req, res) => {
@@ -1148,7 +1154,18 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const a = artifacts.get(req.params.id);
     if (!a) return fail(res, new Error("Artifact not found"), 404);
     if (a.content != null) {
-      res.type(a.mime ?? "text/plain").send(a.content);
+      // `res.type()` throws on a malformed mime, and the throw would land in
+      // the error middleware *after* the header is half-set — answer with a
+      // plain text/plain instead of crashing the request. A bad mime on a
+      // stored artifact is data, not a platform failure; the fallback is
+      // logged so it is visible rather than silent.
+      try {
+        res.type(a.mime ?? "text/plain");
+      } catch {
+        console.error(`[agent-fabric] artifact ${a.id} has an invalid mime (${JSON.stringify(a.mime)}); serving as text/plain`);
+        res.type("text/plain");
+      }
+      res.send(a.content);
     } else if (a.path) {
       res.send({ path: a.path, note: "Artifact is stored on disk; use workspace path to read it." });
     } else {
@@ -1269,14 +1286,30 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   //
   // Registered after every route: a handler routed through `ah` (or one that
   // calls `next(err)` itself) ends up here. Domain failures keep their stable
-  // code → HTTP mapping (`failDomain`); anything else is a platform bug and
-  // answers 500 instead of leaving the request open.
+  // code → HTTP mapping (`failDomain`); a client error the middleware itself
+  // produced (body-parser rejects a malformed JSON body with `.status` 400,
+  // an oversized one with 413) answers that status instead of a misleading
+  // 500; anything else is a platform bug and answers 500 instead of leaving
+  // the request open.
   app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) return next(err);
     if (isDomainError(err)) return failDomain(res, err);
-    console.error("[agent-fabric] unhandled error in request handler:", err);
+    const clientStatus = (err as { status?: unknown } | undefined)?.status;
+    const isClientError = typeof clientStatus === "number" && clientStatus >= 400 && clientStatus < 500;
+    if (!isClientError) console.error("[agent-fabric] unhandled error in request handler:", err);
     const message = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ error: message, code: "internal-error" });
+    const status = isClientError ? clientStatus : 500;
+    const body = { error: message, code: isClientError ? "invalid-request" : "internal-error" };
+    // The failing handler may have set a Content-Type this response cannot
+    // serialize under (that is exactly how one artifact bug produced a 500
+    // whose body was a stack trace): drop it, and if `.json()` still throws,
+    // end the response so the client is never left waiting.
+    res.removeHeader("Content-Type");
+    try {
+      res.status(status).json(body);
+    } catch {
+      res.status(status).end();
+    }
   });
 
   /* ---------------- static web UI ---------------- */
