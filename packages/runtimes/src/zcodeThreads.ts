@@ -1,6 +1,6 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   HarnessThreadDetail,
@@ -261,6 +261,26 @@ function withDb<T>(dir: string, fn: (db: DatabaseSync) => T): T {
  * walk stops at `filter.limit`, so a bounded request never parses the
  * whole store. Sessions with no readable conversation are skipped.
  */
+/**
+ * A workspace cwd must be matched in its literal and symlink-resolved
+ * forms (macOS /tmp → /private/tmp) — the same rule every sibling thread
+ * source applies; ZCode records whichever spelling the session started in.
+ */
+function cwdCandidates(cwd: string): string[] {
+  const out = new Set<string>([cwd]);
+  try {
+    out.add(resolve(cwd));
+  } catch {
+    /* keep the literal form */
+  }
+  try {
+    out.add(realpathSync(cwd));
+  } catch {
+    /* path may not exist anymore */
+  }
+  return [...out];
+}
+
 export async function listZcodeSessions(
   filter: HarnessThreadFilter = {},
   opts: { dbDir?: string } = {}
@@ -269,8 +289,9 @@ export async function listZcodeSessions(
   if (!existsSync(join(dir, "db.sqlite"))) return [];
   return withDb(dir, (db) => {
     const out: HarnessThreadSummary[] = [];
+    const cwdFilter = filter.cwd ? cwdCandidates(filter.cwd) : undefined;
     for (const row of mainSessionRows(db)) {
-      if (filter.cwd && row.directory !== filter.cwd) continue;
+      if (cwdFilter && !(row.directory !== null && cwdFilter.includes(row.directory))) continue;
       const parse = parseSession(row, db);
       if (!parse.hasConversation) continue;
       // Temp-directory constraint: probe/CI/fixture sessions are not the
