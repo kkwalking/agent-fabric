@@ -1153,6 +1153,7 @@ v11 hardening 的专项测试：
 | `src/validationDocker.test.ts` | disposable 容器 executor 的 `docker run` argv（allowlist 环境、唯一挂载、`--network none`）、超时/取消/daemon 不可达的分类，以及 supervisor → 真实 executor 的生产路径 |
 | `src/notifications.test.ts` | 载荷投影、退避与重试策略、URL 脱敏、配置错误不抛异常（`errorKind: "config"`） |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
+| `src/v4.test.ts` | 闭环 E2E（Provider→Model→Run、Profile、Policy、keep-alive 复用）：每个用户配置面真的到达 harness / 容器 argv；含 provider key 与 task secret 不进入 Run 事件日志、keep-alive 无 `containerCommand` 时 exec 的是 harness 二进制而非其 flags |
 
 `packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、大小写变体的 API 路径同样要求认证、api-key reveal 确认、config 往返（脱敏 URL 与 header 掩码不被写回覆盖；掩码但无存储值 → 400 `config-invalid`；畸形 JSON → 400 `invalid-request`）与优雅停机。
 
