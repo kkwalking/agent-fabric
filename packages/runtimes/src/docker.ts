@@ -176,7 +176,14 @@ export async function runDockerContainer(
   if (opts.entrypoint) args.push(...opts.entrypoint);
   args.push(...opts.command);
 
-  const display = `docker run ${args.slice(1, -opts.command.length).join(" ")} ${opts.image} ${opts.command.join(" ")}`;
+  // The display string is what the user reads to diagnose the run; it must
+  // show the command that actually ran, once. `args` already ends with
+  // image + command — appending the image again produced
+  // `… image image sh -c …`. Env pairs are the caller's secret-bearing
+  // channel (provider key, task secrets); the run's event redactor scrubs
+  // their values from this event, but the *keys* remain visible, which is
+  // the diagnostic part.
+  const display = `docker ${args.join(" ")}`;
   await ctx.emit("shell.command", { command: display, cwd: ctx.workspacePath ?? ".", container: name });
 
   return new Promise<DockerRunOutcome>((resolve, reject) => {
