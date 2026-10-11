@@ -13,6 +13,7 @@ import { RuntimeRegistry } from "./runtime.js";
 import { RunService } from "./orchestrator.js";
 import {
   RuntimeService,
+  SecretService,
   WorkspaceService,
   RuntimeSessionService,
   seedDefaults,
@@ -633,6 +634,38 @@ test("a task with no lifecycle declared runs ephemeral", async () => {
   const { run } = await h.runService.submit({ prompt: "default lifecycle", runtimeId: mockRuntime.id });
   await waitForRun(h.runService, run.id);
   assert.equal(h.runService.get(run.id)!.lifecycle?.mode, "ephemeral");
+});
+
+test("a preamble refusal settles the run as failed instead of crashing the process", async () => {
+  // A classic run whose secret resolution is refused (a git-scoped secret
+  // in the agent environment) throws before runOne's own safety net. The
+  // launcher holds only a fire-and-forget `void this.executeContained(...)`,
+  // so an escaping rejection would kill the whole server — every other
+  // in-flight run with it. The run record must settle as failed with the
+  // refusal's own message, and nothing may escape.
+  const h = await freshHarness();
+  const secrets = new SecretService(h.store);
+  const gitScoped = await secrets.create({ name: "GIT_ONLY_TOKEN", value: "ghp_never_to_agent", scope: "git" });
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+
+  const rejections: unknown[] = [];
+  const onRejection = (err: unknown) => rejections.push(err);
+  process.on("unhandledRejection", onRejection);
+  try {
+    const { run } = await h.runService.submit({
+      prompt: "uses a git-scoped secret by mistake",
+      runtimeId: mockRuntime.id,
+      secretIds: [gitScoped.id],
+    });
+    const settled = await waitForRun(h.runService, run.id);
+    // Give a stray rejection a beat to surface before asserting none did.
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(settled.status, "failed");
+    assert.match(settled.error ?? "", /GIT_ONLY_TOKEN.*cannot be used for the agent runtime environment/);
+    assert.deepEqual(rejections, [], "nothing escaped as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
 });
 
 test("keep-alive containers are re-armed from docker labels after a restart", async () => {

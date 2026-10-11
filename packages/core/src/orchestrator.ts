@@ -1,4 +1,5 @@
 import { Store, newId } from "./store.js";
+import { DomainError } from "./errors.js";
 import { EventBus } from "./eventbus.js";
 import { existsSync } from "node:fs";
 import {
@@ -506,7 +507,9 @@ export class RunService {
   /**
    * Runs a Run that was created by `createRunForTask` (or by submit/continue,
    * which call it internally). Awaiting it resolves once the run reached a
-   * terminal status.
+   * terminal status — and rejects when the run could not even start (a
+   * preamble throw, e.g. a refused secret scope), so the awaiting caller (the
+   * execution supervisor) can classify the failure by its own domain code.
    */
   async executeRun(runId: string): Promise<void> {
     await this.execute(runId);
@@ -530,7 +533,7 @@ export class RunService {
       profileId: resolved.profileId,
       systemInstructions: profile?.systemInstructions,
     });
-    void this.execute(run.id);
+    void this.executeContained(run.id);
     return { task, run };
   }
 
@@ -641,7 +644,7 @@ export class RunService {
         policy: mergedPolicy,
         systemInstructions: profile?.systemInstructions,
       });
-      void this.execute(run.id);
+      void this.executeContained(run.id);
       return {
         task,
         run,
@@ -691,7 +694,7 @@ export class RunService {
         await this.store.update<Handoff>("handoffs", awaiting.id, { awaitingNextTurn: false });
       }
     }
-    void this.execute(run.id);
+    void this.executeContained(run.id);
     const reason = forcedHandoff
       ? `Handoff requested explicitly.`
       : handoffArmed
@@ -1883,10 +1886,43 @@ export class RunService {
     const task = prev ?? this.runOne(runId);
     this.active.set(runId, task);
     try {
+      // A preamble throw (a refused secret scope, a missing record) never
+      // reaches runOne's own safety net; it propagates here so an awaiting
+      // caller can classify it — and so a `void` caller must go through
+      // `executeContained` below.
       await task;
     } finally {
       this.active.delete(runId);
       this.executionExtras.delete(runId);
+    }
+  }
+
+  /**
+   * `execute` for fire-and-forget callers (submit / continue): an exception
+   * escaping a `void`-launched promise is an unhandled rejection, which
+   * under Node's default kills the whole server and every other in-flight
+   * run with it. The run record is settled as failed instead, so the
+   * failure stays visible where the user looks for it. The supervisor's
+   * awaited `executeRun` deliberately does *not* come through here: it
+   * needs the original DomainError to classify the failed stage.
+   */
+  private async executeContained(runId: string): Promise<void> {
+    try {
+      await this.execute(runId);
+    } catch (err) {
+      // A DomainError's message is already user-facing (an authorization
+      // refusal, a missing reference); anything else is a platform bug and
+      // says so.
+      const message =
+        err instanceof DomainError
+          ? err.message
+          : `Internal error: ${err instanceof Error ? err.message : String(err)}`;
+      try {
+        await this.finish(runId, "failed", message, emptyUsage());
+      } catch {
+        /* the record may be gone; there is nothing left to settle */
+      }
+      console.error(`[agent-fabric] run ${runId} failed before execution: ${message}`);
     }
   }
 
