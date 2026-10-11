@@ -44,6 +44,17 @@ function readDumps(path: string): HarnessDump[] {
     .map((line) => JSON.parse(line) as HarnessDump);
 }
 
+/**
+ * The effective effect for one v2 permission action, honoring the
+ * last-match-wins rule order the CLI applies.
+ */
+function permissionEffect(cfg: Record<string, any>, action: string): string | undefined {
+  const rules = (cfg.permissions ?? []) as Array<{ action: string; effect: string }>;
+  let effect: string | undefined;
+  for (const rule of rules) if (rule.action === action) effect = rule.effect;
+  return effect;
+}
+
 /** One provider→model→runtime stack wired like a real user would. */
 async function setupStack(
   h: Harness,
@@ -235,6 +246,14 @@ test("v4 §27: custom OpenAI-compatible provider reaches containerized opencode"
     const dump = dumps[0];
     assert.equal(dump.harness, "opencode");
     assert.equal(dump.env.AGENTFABRIC_PROVIDER_API_KEY, "sk-proxy-e2e-77");
+    // v2's `run` otherwise spawns a background service that caches the
+    // first config it read, so a later run of the same runtime would keep
+    // the previous OPENCODE_CONFIG. --standalone keeps every run in its
+    // own process — and it must follow the `run` subcommand (v2 rejects
+    // it before).
+    const runIdx = dump.argv.indexOf("run");
+    assert.ok(runIdx >= 0);
+    assert.equal(dump.argv[runIdx + 1], "--standalone");
     const modelIdx = dump.argv.indexOf("-m");
     assert.equal(dump.argv[modelIdx + 1], "edge-proxy/gpt-custom-e2e");
 
@@ -443,18 +462,17 @@ test("v4 §28/§15/§16: agent profile drives the opencode config (agent, permis
     // The generated agent carries the profile's system prompt (v4 §10)…
     assert.equal(cfg.agent?.agentfabric?.prompt, "You are a meticulous code reviewer.");
     assert.equal(cfg.agent?.agentfabric?.model, "oc-profile-prov/m1");
-    // …the resolved tool allowlist (v4 §11/§16)…
+    // …the resolved tool allowlist as explicit v2 permission rules
+    // (v4 §11/§16): an allowlist denies everything it does not name.
     assert.deepEqual(
       {
-        read: cfg.agent.agentfabric.tools.read,
-        grep: cfg.agent.agentfabric.tools.grep,
-        edit: cfg.agent.agentfabric.tools.edit,
-        bash: cfg.agent.agentfabric.tools.bash,
+        read: permissionEffect(cfg, "read"),
+        grep: permissionEffect(cfg, "grep"),
+        edit: permissionEffect(cfg, "edit"),
+        shell: permissionEffect(cfg, "shell"),
       },
-      { read: true, grep: true, edit: false, bash: false }
+      { read: "allow", grep: "allow", edit: "deny", shell: "deny" }
     );
-    // …and shell=deny became an explicit harness permission (v4 §15).
-    assert.equal(cfg.permission?.bash, "deny");
     const agentIdx = dump.argv.indexOf("--agent");
     assert.equal(dump.argv[agentIdx + 1], "agentfabric");
   } finally {
@@ -512,9 +530,136 @@ test("v4 §15/§16: headless opencode permission mapping follows the resolved sh
 
     const dumps = readDumps(dumpPath);
     assert.equal(dumps.length, 2);
-    assert.deepEqual(dumps[0].config?.permission, { bash: "allow", external_directory: "allow" });
+    // shell=allow allows the shell tool and the external_directory access
+    // the shell tool's workdir parameter needs.
+    assert.deepEqual(dumps[0].config?.permissions, [
+      { action: "shell", resource: "*", effect: "allow" },
+      { action: "external_directory", resource: "*", effect: "allow" },
+    ]);
     assert.equal(dumps[0].argv.includes("--auto"), false, "no --auto without policy.autoApprove");
-    assert.deepEqual(dumps[1].config?.permission, { bash: "ask" });
+    // shell=ask is translated faithfully (the run is warned it cannot answer).
+    assert.deepEqual(dumps[1].config?.permissions, [{ action: "shell", resource: "*", effect: "ask" }]);
+  } finally {
+    restore();
+  }
+});
+
+test("v4 §7: the opencode model variant rides the -m selector (v2 removed --variant)", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const dumpPath = join(fx.dir, "oc-variant-dump.jsonl");
+  try {
+    const h = await freshHarness();
+    const providers = new ProviderService(h.store);
+    const models = new ModelService(h.store);
+    const provider = await providers.create({
+      name: "Variant Prov",
+      type: "openai-completions",
+      baseUrl: "https://variant.example/v1",
+      apiKey: "sk-var-1",
+    });
+    const model = await models.create({
+      providerId: provider.id,
+      name: "vm1",
+      parameters: { maxTokens: 1024, reasoningEffort: "high" },
+    });
+    const ws = await h.workspaces.create({
+      name: "oc-variant-ws",
+      type: "local",
+      path: mkdtempSync(join(tmpdir(), "af-v4-ocvar-")),
+    });
+    const runtime = await h.runtimes.create({
+      name: `v4-oc-variant-${Date.now()}`,
+      kind: "opencode",
+      config: { variant: "medium" },
+      env: { XDG_DATA_HOME: join(fx.dir, "oc-var-xdg"), FAKE_HARNESS_DUMP: dumpPath },
+    });
+    // A profile with system instructions forces the generated agent into
+    // the config, so the agent.model assertion below is meaningful.
+    const profiles = new ProfileService(h.store);
+    const profile = await profiles.create({
+      name: "VariantProfile",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      systemInstructions: "Be brief.",
+    });
+
+    const { run } = await h.runService.submit({
+      prompt: "Reply OK",
+      profileId: profile.id,
+      workspaceId: ws.id,
+    });
+    await waitCompleted(h, run.id);
+
+    const dump = readDumps(dumpPath).at(-1)!;
+    // v2 hard-rejects `--variant` ("Unrecognized flag"), so it must never
+    // appear; the variant goes into the -m selector as `#variant`. The
+    // model-level reasoningEffort overrides the runtime-level variant.
+    assert.equal(dump.argv.includes("--variant"), false, "v2 removed --variant");
+    const modelIdx = dump.argv.indexOf("-m");
+    assert.equal(dump.argv[modelIdx + 1], "variant-prov/vm1#high");
+    // The generated agent's model field stays variant-free: v2 does not
+    // parse `#` there and the CLI -m selector wins anyway.
+    assert.equal(dump.config?.agent?.agentfabric?.model, "variant-prov/vm1");
+  } finally {
+    restore();
+  }
+});
+
+test("v4 §16: the v2 tool vocabulary has no alias collisions in the generated config", async () => {
+  // v2 folds `write`/`patch` into the single `edit` action and `bash`
+  // into `shell`, last rule winning. Emitting both spellings let a
+  // trailing alias silently override the canonical action — a user
+  // allowlisting `edit` got it denied by the `patch` key. The generated
+  // config must contain exactly one rule per action, under the canonical
+  // name only.
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const dumpPath = join(fx.dir, "oc-vocab-dump.jsonl");
+  try {
+    const h = await freshHarness();
+    const providers = new ProviderService(h.store);
+    const models = new ModelService(h.store);
+    const provider = await providers.create({
+      name: "Vocab Prov",
+      type: "openai-completions",
+      baseUrl: "https://vocab.example/v1",
+      apiKey: "sk-vocab-1",
+    });
+    const model = await models.create({ providerId: provider.id, name: "vm2" });
+    const ws = await h.workspaces.create({
+      name: "oc-vocab-ws",
+      type: "local",
+      path: mkdtempSync(join(tmpdir(), "af-v4-ocvocab-")),
+    });
+    const runtime = await h.runtimes.create({
+      name: `v4-oc-vocab-${Date.now()}`,
+      kind: "opencode",
+      env: { XDG_DATA_HOME: join(fx.dir, "oc-vocab-xdg"), FAKE_HARNESS_DUMP: dumpPath },
+    });
+
+    const { run } = await h.runService.submit({
+      prompt: "Edit a file.",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+      policy: { toolPermissions: ["read", "edit"] },
+    });
+    await waitCompleted(h, run.id);
+
+    const cfg = readDumps(dumpPath).at(-1)!.config!;
+    const actions = (cfg.permissions as Array<{ action: string }>).map((r) => r.action);
+    for (const action of actions) {
+      assert.equal(actions.filter((a) => a === action).length, 1, `one rule per action (${action})`);
+    }
+    for (const alias of ["bash", "write", "patch", "task"]) {
+      assert.equal(actions.includes(alias), false, `no v1 alias key in the config (${alias})`);
+    }
+    // The allowlisted `edit` really is allowed (the old alias collision
+    // denied it via the trailing `patch` key).
+    assert.equal(permissionEffect(cfg, "edit"), "allow");
+    assert.equal(permissionEffect(cfg, "read"), "allow");
+    assert.equal(permissionEffect(cfg, "subagent"), "deny");
   } finally {
     restore();
   }

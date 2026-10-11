@@ -18,6 +18,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Store } from "./store.js";
 import { EventBus } from "./eventbus.js";
@@ -505,5 +506,142 @@ test(
     for (const lease of h.runService.keptContainers()) {
       await exec("docker", ["rm", "-f", lease.containerId], { timeout: 60_000 }).catch(() => {});
     }
+  }
+);
+
+/* ------------------------------------------------------------------ */
+/* v2 regressions: the bugs the v2 upgrade fixed (real, no fakes)       */
+/* ------------------------------------------------------------------ */
+
+test(
+  "REAL v2 §7: reasoningEffort reaches the run as a -m variant, not the removed --variant flag",
+  { skip: gate(opencodeOk && Boolean(key), "opencode CLI + DeepSeek key") },
+  async () => {
+    // Before the v2 migration the adapter passed `--variant high`, which
+    // v2 rejects outright ("Unrecognized flag", exit 1) — any run with a
+    // variant / reasoningEffort could not start at all.
+    const h = await realHarness();
+    const provider = await h.providers.create({
+      name: "AF Real Variant",
+      type: "openai-compatible",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: key!,
+    });
+    const model = await h.models.create({
+      providerId: provider.id,
+      name: "deepseek-chat",
+      parameters: { reasoningEffort: "high" },
+    });
+    const ws = await h.workspaces.create({ name: "v4-real-var", type: "local", path: mkdtempSync(join(tmpdir(), "af-v4-rvar-")) });
+    const runtime = await h.runtimes.create({
+      name: "v4-real-var",
+      kind: "opencode",
+      env: { XDG_DATA_HOME: mkdtempSync(join(tmpdir(), "af-v4-var-xdg-")) },
+    });
+
+    const { run } = await h.runService.submit({
+      prompt: "Reply with exactly: VAR-OK",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+      timeoutMs: RUN_TIMEOUT_MS,
+      policy: { autoApprove: true },
+    });
+    const finished = await waitForRunReal(h.runService, run.id);
+    assert.equal(finished.status, "completed", finished.error);
+    assert.match(await agentMessages(h.runService, run.id), /VAR-OK/);
+  }
+);
+
+test(
+  "REAL v2: a second run on the same runtime picks up a model added after the first (no daemon config cache)",
+  { skip: gate(opencodeOk && Boolean(key), "opencode CLI + DeepSeek key") },
+  async () => {
+    // v2's `run` otherwise serves through a background `opencode serve`
+    // daemon that caches the first config it read: run #2 with a model
+    // added to the provider after run #1 failed with "Model unavailable".
+    // `--standalone` keeps each run in its own process reading the current
+    // generated config.
+    const h = await realHarness();
+    const provider = await h.providers.create({
+      name: "AF Real Switch",
+      type: "openai-compatible",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: key!,
+    });
+    const firstModel = await h.models.create({ providerId: provider.id, name: "deepseek-chat" });
+    const ws = await h.workspaces.create({ name: "v4-real-switch", type: "local", path: mkdtempSync(join(tmpdir(), "af-v4-rsw-")) });
+    const runtime = await h.runtimes.create({
+      name: "v4-real-switch",
+      kind: "opencode",
+      env: { XDG_DATA_HOME: mkdtempSync(join(tmpdir(), "af-v4-sw-xdg-")) },
+    });
+
+    const run1 = await h.runService.submit({
+      prompt: "Reply with exactly: ONE",
+      runtimeId: runtime.id,
+      modelId: firstModel.id,
+      workspaceId: ws.id,
+      timeoutMs: RUN_TIMEOUT_MS,
+      policy: { autoApprove: true },
+    });
+    const done1 = await waitForRunReal(h.runService, run1.run.id);
+    assert.equal(done1.status, "completed", done1.error);
+
+    // This model only exists *after* run #1 — the config run #1 read did
+    // not contain it.
+    const secondModel = await h.models.create({ providerId: provider.id, name: "deepseek-reasoner" });
+    const run2 = await h.runService.submit({
+      prompt: "Reply with exactly: TWO",
+      runtimeId: runtime.id,
+      modelId: secondModel.id,
+      workspaceId: ws.id,
+      timeoutMs: RUN_TIMEOUT_MS,
+      policy: { autoApprove: true },
+    });
+    const done2 = await waitForRunReal(h.runService, run2.run.id);
+    assert.equal(done2.status, "completed", done2.error);
+    assert.match(await agentMessages(h.runService, run2.run.id), /TWO/);
+  }
+);
+
+test(
+  "REAL v2 §16: an allowlisted `edit` really writes files (no alias-collision denial)",
+  { skip: gate(opencodeOk && Boolean(key), "opencode CLI + DeepSeek key") },
+  async () => {
+    // The v1 vocabulary listed `edit`/`write`/`patch` as separate tools;
+    // v2 folds them into one `edit` action with last-match-wins, so the
+    // trailing `patch` key silently denied what the user allowed. Shell is
+    // denied here, so the only way the file can appear is the edit action
+    // — the file on disk is the unforgeable proof.
+    const h = await realHarness();
+    const provider = await h.providers.create({
+      name: "AF Real Edit",
+      type: "openai-compatible",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: key!,
+    });
+    const model = await h.models.create({ providerId: provider.id, name: "deepseek-chat" });
+    const wsPath = mkdtempSync(join(tmpdir(), "af-v4-redit-"));
+    const ws = await h.workspaces.create({ name: "v4-real-edit", type: "local", path: wsPath });
+    const runtime = await h.runtimes.create({
+      name: "v4-real-edit",
+      kind: "opencode",
+      env: { XDG_DATA_HOME: mkdtempSync(join(tmpdir(), "af-v4-edit-xdg-")) },
+    });
+
+    const { run } = await h.runService.submit({
+      prompt: "Use your file editing tool to create a file named proof.txt in the workspace containing exactly: EDIT-OK",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+      timeoutMs: RUN_TIMEOUT_MS,
+      policy: { shell: "deny", toolPermissions: ["read", "edit"] },
+    });
+    const finished = await waitForRunReal(h.runService, run.id);
+    assert.equal(finished.status, "completed", finished.error);
+    const proof = join(wsPath, "proof.txt");
+    assert.ok(existsSync(proof), "the allowlisted edit action really created the file");
+    assert.match(readFileSync(proof, "utf8"), /EDIT-OK/);
   }
 );

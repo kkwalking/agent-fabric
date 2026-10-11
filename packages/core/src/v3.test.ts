@@ -161,8 +161,16 @@ test("opencode native events map to AgentFabric events (v3 §6)", () => {
   );
   assert.equal(tool?.type, "tool.completed");
   assert.equal(tool?.data.tool, "bash");
+  assert.equal(tool?.data.callID, "call_1");
   assert.equal(tool?.data.output, "README.md");
   assert.equal(tool?.data.status, "completed");
+
+  // v2 renamed the part's call id from `callID` to `id`; the mapper must
+  // still surface it as `callID` so the UI can pair call and result.
+  const toolV2 = mapOc(
+    '{"type":"tool_use","timestamp":1,"sessionID":"ses_1","part":{"type":"tool","id":"call_v2","tool":"shell","state":{"status":"completed","input":{"command":"ls"},"output":"ok"}}}'
+  );
+  assert.equal(toolV2?.data.callID, "call_v2");
 
   const toolErr = mapOc(
     '{"type":"tool_use","timestamp":1,"sessionID":"ses_1","part":{"type":"tool","tool":"bash","state":{"status":"error","input":{},"error":"exit 1"}}}'
@@ -178,6 +186,13 @@ test("opencode native events map to AgentFabric events (v3 §6)", () => {
   const err = mapOc('{"type":"error","timestamp":1,"sessionID":"ses_1","error":{"name":"APIError","data":{"message":"429"}}}');
   assert.equal(err?.type, "runtime.error");
   assert.equal(err?.data.error, "429");
+  assert.equal(err?.data.name, "APIError");
+
+  // v2 names the error kind `type` (e.g. "provider.no-route") where v1
+  // used `name`; the mapper keeps surfacing it as `name`.
+  const errV2 = mapOc('{"type":"error","timestamp":1,"sessionID":"ses_1","error":{"type":"provider.no-route","data":{"message":"Model unavailable"}}}');
+  assert.equal(errV2?.data.error, "Model unavailable");
+  assert.equal(errV2?.data.name, "provider.no-route");
 
   // Legacy AgentFabric-style names (message.*, tool.started, shell.*) are
   // NOT opencode events — they must not be special-cased (v3 §6).
