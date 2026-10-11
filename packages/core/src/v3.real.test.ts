@@ -311,7 +311,7 @@ test("REAL: opencode local native resume continues Run #1's context (v3 §20/§2
   const runtime = await h.runtimes.create({ name: "oc-real", kind: "opencode", env: { XDG_DATA_HOME: xdg } });
 
   const { task, run } = await h.runService.submit({
-    prompt: "Remember the secret word MANGO-9. Reply with exactly: OK",
+    prompt: "Remember the secret word MANGO-9. First run the shell command `echo READY`, then reply with exactly: OK",
     runtimeId: runtime.id,
     workspaceId: ws.id,
     timeoutMs: RUN_TIMEOUT_MS,
@@ -325,6 +325,10 @@ test("REAL: opencode local native resume continues Run #1's context (v3 §20/§2
   assert.ok(ref, "opencode persisted a native session reference");
   assert.ok(ref.nativeSessionRef.startsWith("ses_"));
   assert.ok(harnessStatePersisted(join(xdg, "opencode")), "opencode persisted its session state (opencode.db)");
+  // opencode 2 never emits the final step_finish (anomalyco/opencode#53207),
+  // so a single-step run reports no usage at all. The prompts ask for a
+  // tool call on purpose: that step's step_finish still reaches the Run,
+  // so a broken usage pipeline still fails here.
   assert.ok((first.usage?.inputTokens ?? 0) > 0, "step_finish tokens reached Run Usage");
   assert.ok((first.usage?.modelRequests ?? 0) >= 1);
 
@@ -358,7 +362,7 @@ test("REAL: opencode docker native resume across destroyed containers (v3 §20/�
   writeFileSync(join(state.path, "auth.json"), opencodeAuthJson()!);
 
   const { task, run } = await h.runService.submit({
-    prompt: "Remember the secret word NEBULA-5. Reply with exactly: OK",
+    prompt: "Remember the secret word NEBULA-5. First run the shell command `echo READY`, then reply with exactly: OK",
     runtimeId: runtime.id,
     workspaceId: ws.id,
     timeoutMs: RUN_TIMEOUT_MS,
@@ -372,6 +376,8 @@ test("REAL: opencode docker native resume across destroyed containers (v3 §20/�
   const ref = rs.list({ taskId: task.id })[0];
   assert.ok(ref, "session reference captured from the container stream");
   assert.ok(harnessStatePersisted(state.path), "session persisted in the opaque native state");
+  // Same anchor as the local test: the tool step's step_finish is what
+  // opencode 2 still emits (anomalyco/opencode#53207).
   assert.ok((first.usage?.inputTokens ?? 0) > 0, "usage survived the container boundary");
 
   const cont = await h.runService.continueTask(task.id, { prompt: "What was the secret word I told you? Reply with just the word." });

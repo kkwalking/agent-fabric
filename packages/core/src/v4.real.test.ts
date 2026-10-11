@@ -253,7 +253,7 @@ test(
     });
 
     const { run } = await h.runService.submit({
-      prompt: "Reply with exactly: PONG",
+      prompt: "First run the shell command `echo READY`, then reply with exactly: PONG",
       runtimeId: runtime.id,
       modelId: model.id,
       workspaceId: ws.id,
@@ -266,6 +266,10 @@ test(
     const injected = await configInjectionEvent(h.runService, run.id);
     assert.ok(injected, "config-injected event present");
     assert.equal(injected!.slug, "af-real-oc");
+    // The prompt asks for a shell call on purpose: opencode 2 never emits
+    // the final step_finish (anomalyco/opencode#53207), so only a run with
+    // a tool step still reports usage — and a broken usage pipeline still
+    // fails here.
     assert.ok((finished.usage?.inputTokens ?? 0) > 0, "usage recorded through the generated config");
   }
 );
@@ -295,7 +299,7 @@ test(
     });
 
     const { run } = await h.runService.submit({
-      prompt: "Reply with exactly: DOCK-OK",
+      prompt: "First run the shell command `echo READY`, then reply with exactly: DOCK-OK",
       runtimeId: runtime.id,
       modelId: model.id,
       workspaceId: ws.id,
@@ -306,6 +310,7 @@ test(
     assert.equal(finished.status, "completed", finished.error);
     assert.ok(finished.containerId, "ran inside a real container");
     assert.match(await agentMessages(h.runService, run.id), /DOCK-OK/, "containerized opencode used the injected provider");
+    // Same tool-step anchor as the local §27 test (anomalyco/opencode#53207).
     assert.ok((finished.usage?.inputTokens ?? 0) > 0, "usage recorded across the container boundary");
   }
 );

@@ -294,6 +294,17 @@ export function extractOpenCodeSessionRef(raw: string): string | undefined {
  * Extracts per-step usage from an opencode `step_finish` line (v3 §8):
  * tokens {input, output, reasoning, cache{read, write}} and a single
  * USD cost number. Each step_finish is one completed model request.
+ *
+ * Known upstream defect (anomalyco/opencode#53207): the v2 CLI drops the
+ * FINAL step_finish from stdout — its forwarding loop goes into
+ * finalizing once `session.wait()` resolves and only lets
+ * `session.execution.*` through (which carry no usage), so a text-only
+ * run reports nothing and every run undercounts its last step. The
+ * server-side event stream and the session DB still hold the data; only
+ * the CLI's stdout loses it, and AgentFabric consumes stdout by design
+ * (native state stays opaque). Do not "fix" this here — there is no
+ * renamed event to parse; intermediate tool steps still arrive and are
+ * what the real tests anchor their usage assertions to.
  */
 export function parseOpenCodeUsage(raw: string): Usage | undefined {
   let evt: OpenCodeEvent;
