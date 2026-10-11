@@ -161,7 +161,13 @@ export function mapDshEvent(
   }
   const type = evt.type ?? "unknown";
   const timestamp = new Date().toISOString();
-  const base = { id: `evt_${runId}_${seq()}`, runId, seq: seq(), timestamp };
+  // One seq() call per event — the id and the seq must agree. The failing
+  // `turn_end` branch below returns *two* events, so each gets its own.
+  const baseFor = () => {
+    const n = seq();
+    return { id: `evt_${runId}_${n}`, runId, seq: n, timestamp };
+  };
+  const base = baseFor();
 
   switch (type) {
     /* ---- session header: every run opens with the identity it used ---- */
@@ -201,7 +207,7 @@ export function mapDshEvent(
         return [
           progress,
           {
-            ...base,
+            ...baseFor(),
             type: "runtime.error",
             level: "error",
             source: "dsh",

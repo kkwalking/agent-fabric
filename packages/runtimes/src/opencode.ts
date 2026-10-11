@@ -149,10 +149,13 @@ export function mapOpenCodeEvent(raw: string, runId: string, seq: () => number):
   }
   const type = evt.type ?? "unknown";
   const timestamp = new Date(evt.timestamp ?? Date.now()).toISOString();
+  // One seq() call: the id and the seq must agree (two calls gave the id a
+  // number the seq never had).
+  const n = seq();
   const base = {
-    id: `evt_${runId}_${seq()}`,
+    id: `evt_${runId}_${n}`,
     runId,
-    seq: seq(),
+    seq: n,
     timestamp,
   };
 
