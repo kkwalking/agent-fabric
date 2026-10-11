@@ -472,6 +472,7 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
       permission: Object.keys(permission).length > 0 ? permission : undefined,
       agent,
       builtinPassthrough,
+      containerized: Boolean(ctx.runtime.containerized),
     })
   );
 

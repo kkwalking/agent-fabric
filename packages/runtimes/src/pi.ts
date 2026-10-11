@@ -482,7 +482,9 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<void> {
     }
   }
   mkdirSync(agentDir, { recursive: true });
-  writePiModelsJson(agentDir, ctx.provider, ctx.providerModels ?? (ctx.model ? [ctx.model] : []));
+  writePiModelsJson(agentDir, ctx.provider, ctx.providerModels ?? (ctx.model ? [ctx.model] : []), {
+    containerized: Boolean(ctx.runtime.containerized),
+  });
   await ctx.emit(
     "log",
     {

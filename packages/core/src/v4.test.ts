@@ -252,6 +252,61 @@ test("v4 §27: custom OpenAI-compatible provider reaches containerized opencode"
   }
 });
 
+test("v4 §3/§27: a host-loopback provider base URL is rewritten for containerized runs", async () => {
+  // The real failure this guards: a provider on the AgentFabric host
+  // (a local gateway on 127.0.0.1) written into the container's config
+  // verbatim — inside the container loopback is the container itself, so
+  // every model request failed with "Cannot connect to API". The
+  // generated config must carry host.docker.internal, the same rewrite
+  // the proxy env layer applies.
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const dumpPath = join(fx.dir, "oc-loopback-dump.jsonl");
+  try {
+    const h = await freshHarness();
+    const providers = new ProviderService(h.store);
+    const models = new ModelService(h.store);
+    const provider = await providers.create({
+      name: "Local Gateway",
+      type: "anthropic",
+      baseUrl: "http://127.0.0.1:3425",
+      apiKey: "sk-local-1",
+    });
+    const model = await models.create({ providerId: provider.id, name: "local-model" });
+    const ws = await h.workspaces.create({
+      name: "v4-loopback-ws",
+      type: "local",
+      path: mkdtempSync(join(tmpdir(), "af-v4-loopback-")),
+    });
+    const runtime = await h.runtimes.create({
+      name: `v4-oc-loopback-${Date.now()}`,
+      kind: "opencode",
+      containerized: true,
+      image: "fake-opencode-image:latest",
+      config: { containerCommand: ["node", fx.fakeOpenCode] },
+      env: { FAKE_HARNESS_DUMP: dumpPath },
+    });
+
+    const { run } = await h.runService.submit({
+      prompt: "Reply OK",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+    });
+    await waitCompleted(h, run.id);
+
+    const cfg = readDumps(dumpPath)[0].config!;
+    const entry = (cfg.provider as Record<string, { options: { baseURL: string } }>)["local-gateway"];
+    assert.equal(
+      entry.options.baseURL,
+      "http://host.docker.internal:3425",
+      "the container's harness config points at the host, not the container's own loopback"
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("v4 §5: a disabled provider blocks new runs with a clear error", async () => {
   const fx = makeFixtures();
   const restore = useBins(fx);

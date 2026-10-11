@@ -116,6 +116,22 @@ export function effectiveBaseUrl(
   return defaultBaseUrlForType(provider.type);
 }
 
+/**
+ * Rewrites a loopback endpoint host for a containerized run. Inside a
+ * container `127.0.0.1` is the container itself, not the machine running
+ * AgentFabric — a provider that lives on the host (a local gateway, a
+ * mock endpoint) is reachable at `host.docker.internal`, the same
+ * rewrite the proxy env layer applies. Only the host is replaced, so the
+ * user's exact scheme, port, path and formatting survive; non-loopback
+ * URLs pass through untouched.
+ */
+export function containerizedBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(
+    /^([a-z][a-z0-9+.-]*:\/\/)(127\.0\.0\.1|localhost|\[::1\])(?=[:/]|$)/i,
+    "$1host.docker.internal"
+  );
+}
+
 /** pi `api` value for a provider type (pi models.json). */
 export function piApiForType(type: ProviderType): string {
   switch (type) {
@@ -227,7 +243,8 @@ export interface PiModelsJsonProvider {
 export function writePiModelsJson(
   agentDir: string,
   provider: Provider,
-  models: Model[]
+  models: Model[],
+  opts: { containerized?: boolean } = {}
 ): string {
   const path = `${agentDir}/models.json`;
   const doc = readJson(path) as { providers?: Record<string, PiModelsJsonProvider> };
@@ -237,7 +254,7 @@ export function writePiModelsJson(
   const entry: PiModelsJsonProvider = { ...(providers[slug] ?? {}) };
 
   const baseUrl = effectiveBaseUrl(provider, isBuiltinOverride);
-  if (baseUrl) entry.baseUrl = baseUrl;
+  if (baseUrl) entry.baseUrl = opts.containerized ? containerizedBaseUrl(baseUrl) : baseUrl;
   else delete entry.baseUrl;
 
   // The api wire format is only pinned for custom endpoints; overriding a
@@ -296,6 +313,13 @@ export interface OpenCodeConfigOptions {
    * harness's own registry and auth (auth.json) serve the run.
    */
   builtinPassthrough?: boolean;
+  /**
+   * Containerized run: a loopback endpoint (127.0.0.1/localhost/::1) is
+   * rewritten to host.docker.internal — inside the container, loopback
+   * is the container itself, so a host-side gateway would be
+   * unreachable. Same rewrite the proxy env layer applies.
+   */
+  containerized?: boolean;
 }
 
 export type OpenCodeConfig = Record<string, unknown>;
@@ -308,11 +332,12 @@ export function buildOpenCodeConfig(opts: OpenCodeConfigOptions): OpenCodeConfig
   const { provider, models } = opts;
   const config: OpenCodeConfig = { $schema: "https://opencode.ai/config.json" };
   if (!opts.builtinPassthrough) {
+    const baseUrl = effectiveBaseUrl(provider);
     const providerEntry: Record<string, unknown> = {
       npm: npmPackageForType(provider.type),
       name: provider.name,
       options: {
-        ...(effectiveBaseUrl(provider) ? { baseURL: effectiveBaseUrl(provider) } : {}),
+        ...(baseUrl ? { baseURL: opts.containerized ? containerizedBaseUrl(baseUrl) : baseUrl } : {}),
         apiKey: `{env:${PROVIDER_API_KEY_ENV}}`,
         ...(provider.headers && Object.keys(provider.headers).length > 0 ? { headers: provider.headers } : {}),
       },
