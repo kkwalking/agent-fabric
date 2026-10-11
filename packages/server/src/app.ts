@@ -171,6 +171,10 @@ function failContinue(res: Response, err: unknown): void {
     res.status(409).json({ error: err.message, code: err.code, generateHandoff: true });
     return;
   }
+  // A domain error keeps its mapping (a named-but-missing runtime is a 502
+  // with `runtime-create-failed`, not a 404 that hides the real cause);
+  // plain errors keep the historical 404 default (a missing task).
+  if (isDomainError(err)) return failDomain(res, err);
   fail(res, err, 404);
 }
 

@@ -688,7 +688,7 @@ AgentFabric 只保存 Harness 原生 Session 的不透明引用（`RuntimeSessio
 
 * **Runtime Native State**：Harness 用于 Native Resume 的私有状态（Session 存储、内部数据库等）由 AgentFabric 以 Opaque 目录持久化（Create / Mount / Preserve / Reattach / Delete），与 Workspace 严格区分——Workspace 是用户的工作内容，Native State 是 Harness 的私有数据。默认落在 `~/.fabric/native-state/<runtimeId>`，按 Harness 挂载到容器内对应路径（OpenCode `/root/.local/share/opencode`，Pi `/root/.pi`，可用 `runtime.config.nativeStateMountPath` 覆盖）。
 * **Resume**（同 Harness）：`continueTask` 优先用存储的 native ref 恢复 Harness 自己的 Session（本地与容器化执行语义一致）。自动 Resume 需要 **Same Harness × Same Workspace × 有效 RuntimeSessionRef × Native State 真实存在 × 当前执行方式下能力成立**；不满足时不会自动降级，需要显式 Handoff 才能开新 Session。
-* **Continue 的默认目标 runtime**：显式指定 > **最近一次 run 的 runtime** > task 创建时的默认 > 第一个启用的 runtime。中途换过 Harness 的 task，不带目标的「继续」落在最近干活的 Harness 上。预览（`continue-options`）与实际决策（`pickTargetRuntime`）保持同一顺序。
+* **Continue 的默认目标 runtime**：显式指定 > **最近一次 run 的 runtime** > task 创建时的默认 > 第一个启用的 runtime。中途换过 Harness 的 task，不带目标的「继续」落在最近干活的 Harness 上。预览（`continue-options`）与实际决策（`pickTargetRuntime`）保持同一顺序。**只有隐式回退可以降级**（最近一次/创建时的 runtime 已被删除时才落到第一个启用的 runtime）；**显式指定的 runtime 解析不到时明确报错**（`runtime-create-failed`，502），绝不静默换一个 harness 执行——那会让「继续」跑在用户没有选择的 runtime 上。
 * **Resume vs Handoff 预览**：`GET /api/tasks/:id/continue-options` 让用户在执行前明确看到即将发生的是 Resume 还是 Handoff，不生成内容。
 * **Runtime Capability**：adapter 声明 `supportsNativeSession / supportsNativeResume / supportsStreamingEvents / supportsHandoffGeneration / supportsWorkspace / supportsInteractiveExecution`，并可通过 `containerizedCapabilities` 按执行后端收窄——声明的能力必须在当前 Execution Backend 下真实可用。容器化 Runtime 未配置可用镜像时，这些能力自动收窄为 false。`GET /api/runtimes/:id/capabilities` 返回生效的能力集合。
 

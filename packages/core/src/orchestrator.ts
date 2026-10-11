@@ -1055,6 +1055,13 @@ export class RunService {
     const id = runtimeId ?? lastRunRuntimeId ?? task.runtimeId;
     const runtime = id ? this.runtimeService().get(id) : undefined;
     if (!runtime) {
+      // An explicit choice that does not resolve is an error, not a hint:
+      // silently running a different harness would produce a run that is
+      // not the one the caller asked for (or, worse, a cross-harness
+      // handoff to a runtime the user never picked). Only the implicit
+      // fallbacks (a deleted last-run/task runtime) may degrade to the
+      // first enabled runtime.
+      if (runtimeId) throw new DomainError("runtime-create-failed", `Runtime not found: ${runtimeId}`);
       const fallback = this.runtimeService().enabled()[0];
       if (!fallback) throw new Error("No enabled runtime available to continue this task");
       return fallback;
