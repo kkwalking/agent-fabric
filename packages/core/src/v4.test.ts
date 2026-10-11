@@ -55,6 +55,12 @@ async function setupStack(
     runtimeEnv?: Record<string, string>;
     containerized?: boolean;
     networkPolicy?: { enabled: boolean };
+    /**
+     * In-container command prefix. Omit for the standard harness-image
+     * shape (the harness on PATH, no prefix); pass an explicit array (or
+     * `null` to clear it) to exercise the configured-prefix path.
+     */
+    containerCommand?: string[] | null;
   } = {}
 ) {
   const providers = new ProviderService(h.store);
@@ -85,8 +91,12 @@ async function setupStack(
     image: overrides.containerized ? "fake-harness-image:latest" : undefined,
     // The fake docker has no harness entrypoint — run the fake CLI via an
     // explicit in-container command (real harness images don't need this;
-    // their entrypoint is the harness itself).
-    config: overrides.containerized ? { containerCommand: ["node", fx.fakePi] } : undefined,
+    // their entrypoint is the harness itself). Tests targeting the
+    // harness-image shape (entrypoint convention) pass an explicit value
+    // or null.
+    config: overrides.containerized
+      ? { containerCommand: overrides.containerCommand === undefined ? ["node", fx.fakePi] : overrides.containerCommand ?? undefined }
+      : undefined,
     networkPolicy: overrides.networkPolicy,
     env: {
       // Local runs get an isolated pi agent dir; containerized runs read
@@ -605,6 +615,54 @@ test("v4 §30: keep-alive — same task reuses the container, another task does 
     );
   } finally {
     restore();
+  }
+});
+
+test("v4 §30: a keep-alive run without containerCommand execs the harness binary, not its flags", async () => {
+  const fx = makeFixtures();
+  // A harness *image* (no configured containerCommand): the harness binary
+  // is on PATH inside the container. `docker exec` does not apply the
+  // image's ENTRYPOINT — unlike `docker run` — so the exec command must
+  // carry the binary itself. Dropping it (the old behavior) made the
+  // first flag (`--print`) the executable and every keep-alive run failed
+  // with exit 127. The fake docker spawns command[0] via PATH, so adding
+  // the fixtures dir to PATH is what "the harness is on PATH in the
+  // container" means here.
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${fx.dir}:${originalPath}`;
+  // The fake CLI is named fake-pi.mjs; the local binary the adapter
+  // resolves is AGENTFABRIC_PI_BIN, whose basename is what must survive
+  // into the exec command.
+  const restore = useBins(fx, { AGENTFABRIC_PI_BIN: join(fx.dir, "fake-pi.mjs") });
+  const dumpPath = join(fx.dir, "ka-noprefix-dump.jsonl");
+  try {
+    const h = await freshHarness();
+    const { model, ws, runtime } = await setupStack(h, fx, dumpPath, {
+      containerized: true,
+      containerCommand: null,
+      provider: { name: "KA NoPrefix Prov", apiKey: "sk-kanp-1" },
+    });
+
+    const { run } = await h.runService.submit({
+      prompt: "Reply OK.",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
+    });
+    const settled = await waitForRun(h.runService, run.id);
+    assert.equal(settled.status, "completed", settled.error ?? "the keep-alive run must not fail on exec");
+    const exec = dockerCalls(fx).find((c) => c[0] === "exec" && !c.includes("pkill"));
+    assert.ok(exec, "the harness ran via docker exec in the keep-alive container");
+    // The command after the container name leads with the harness binary
+    // (the local binary's basename), not with a flag.
+    const execAt = exec!.findIndex((a) => a.startsWith("af-keep-"));
+    assert.ok(execAt > 0, "the exec names the keep-alive container");
+    assert.equal(exec![execAt + 1], "fake-pi.mjs", `the exec command leads with the harness binary: ${exec!.join(" ")}`);
+    assert.ok(!exec![execAt + 1].startsWith("--"), "never a bare flag as the executable");
+  } finally {
+    restore();
+    process.env.PATH = originalPath;
   }
 });
 

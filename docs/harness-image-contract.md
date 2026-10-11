@@ -27,6 +27,14 @@ OpenCode 镜像虽然是官方维护的，但它是一个只带 ripgrep 的极�
 2. **ENTRYPOINT 就是 Harness**。容器命令形如 `docker run <image> <harness args…>`，
    本地二进制名会被丢掉（`packages/runtimes/src/backend.ts`）。没有 harness
    entrypoint 的镜像用 `runtime.config.containerCommand` 显式给出容器内命令前缀。
+
+   **Keep-alive 复用走 `docker exec`，它不套用镜像 ENTRYPOINT**（keep-alive 容器本身
+   就是 `--entrypoint sh` 创建的），因此 exec 的命令行必须自带 harness 二进制：未配置
+   `containerCommand` 时用本地二进制的 **basename**（例如 `pi`），依赖第 1 条「harness
+   在 PATH 上」——这正是 ephemeral 路径对 ENTRYPOINT 的同一约定；配置了
+   `containerCommand` 时原样使用。自定义 `containerCommand` 若以解释器开头（如
+   `["node", "/pi.js"]`），取消运行时的进程终止模式优先取其中的脚本路径而不是解释器
+   名，避免误杀共享解释器的其他进程。
 3. **Workspace 挂载路径明确**：`/workspace`，同时也是容器的工作目录。AgentFabric 把
    Workspace 以 `rw`（或按 filesystem policy 以 `ro`）挂到这里。
 4. **Native State 挂载路径明确**：该 kind 的 `nativeStateMountPath`，以 `rw` 挂载。

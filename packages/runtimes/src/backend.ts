@@ -163,15 +163,27 @@ export const dockerExecutionBackend: ExecutionBackend = {
       }
       const args = ["exec", "-w", workdir];
       for (const [k, v] of Object.entries(opts.env ?? {})) args.push("-e", `${k}=${v}`);
-      args.push(kept.containerName, ...(opts.containerCommand ?? command.slice(1)));
+      // `docker exec` does NOT apply the image's ENTRYPOINT (unlike
+      // `docker run`), and the keep-alive container is created with
+      // `--entrypoint sh` anyway — so the exec command must carry the
+      // harness binary itself. With no explicit `containerCommand` that is
+      // the local binary's *basename*: the image puts the same harness on
+      // PATH (the very convention the ephemeral path relies on for its
+      // ENTRYPOINT), while the local path (e.g. /opt/homebrew/bin/pi) may
+      // not exist inside the container.
+      const execCommand = opts.containerCommand ?? [basename(command[0]), ...command.slice(1)];
+      args.push(kept.containerName, ...execCommand);
       const child = spawn(dockerBin(), args, { stdio: ["ignore", "pipe", "pipe"] });
       const exited = childExited(child).then((exit) => ({ ...exit, containerId: kept.containerId }));
       // Killing the local docker CLI is not enough: the harness process
       // keeps running inside the container (v4 §23) — pkill it there.
-      // Harness images expose the harness binary as the entrypoint, so
-      // the in-container process matches the local binary's basename
-      // (unless an explicit containerCommand leads with something else).
-      const inContainerBin = opts.containerCommand?.[0] ?? basename(command[0]);
+      // The pattern must identify the harness process, not a whole runtime:
+      // a `containerCommand` like ["node", "/pi.js"] leads with an
+      // interpreter that other processes (MCP servers) may share, so prefer
+      // its script path; the default case matches the harness basename.
+      const inContainerBin = opts.containerCommand
+        ? (opts.containerCommand.find((part) => part.includes("/")) ?? opts.containerCommand[0])
+        : basename(command[0]);
       const stopHarnessProcess = () => {
         if (!inContainerBin) return Promise.resolve();
         return killContainerProcesses(kept.containerName!, inContainerBin).catch(() => {
