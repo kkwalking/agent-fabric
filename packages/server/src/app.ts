@@ -90,6 +90,15 @@ function isLoopbackOrigin(origin: string | undefined): boolean {
   return origin !== undefined && LOOPBACK_ORIGIN.test(origin);
 }
 
+/**
+ * Whether a request path is under the API. Case-insensitive because Express's
+ * router matches routes case-insensitively: `/API/providers` runs the same
+ * handler as `/api/providers`, so the auth gate must treat them the same.
+ */
+function isApiPath(path: string): boolean {
+  return path.toLowerCase().startsWith("/api");
+}
+
 const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, origin?: string) => void) => {
     callback(null, isLoopbackOrigin(origin) ? origin : undefined);
@@ -100,12 +109,19 @@ const corsOptions = {
 };
 
 /**
+ * The placeholder the config read returns in place of every stored secret
+ * (webhook URL path, header values). A write that sends it back verbatim
+ * means "unchanged" — see `configFromClient`. Same token `maskSecret` uses.
+ */
+const REDACTED_SECRET = "***";
+
+/**
  * Sets the browser's API credential as a middleware. Only plain page loads
  * get the cookie — API responses and static assets do not need it, and not
  * re-setting it keeps every API response free of credential material.
  */
 const authCookie: (token: string) => RequestHandler = (token) => (req, res, next) => {
-  if (req.method === "GET" && !req.path.startsWith("/api")) {
+  if (req.method === "GET" && !isApiPath(req.path)) {
     res.cookie(TOKEN_COOKIE, token, { httpOnly: true, sameSite: "strict", path: "/" });
   }
   next();
@@ -171,6 +187,10 @@ function failContinue(res: Response, err: unknown): void {
     res.status(409).json({ error: err.message, code: err.code, generateHandoff: true });
     return;
   }
+  // A domain error keeps its mapping (a named-but-missing runtime is a 502
+  // with `runtime-create-failed`, not a 404 that hides the real cause);
+  // plain errors keep the historical 404 default (a missing task).
+  if (isDomainError(err)) return failDomain(res, err);
   fail(res, err, 404);
 }
 
@@ -279,10 +299,15 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   // Everything under /api requires the token. `GET /api/health` is the one
   // exemption: it carries no sensitive information and is what a supervisor
   // or e2e script probes before any credential is available.
+  //
+  // The path test is case-insensitive on purpose: Express routes match
+  // case-insensitively (`/API/providers` reaches the `/api/providers`
+  // handler), so a case-sensitive gate here would leave an unauthenticated
+  // route reachable by capitalization alone.
   const auth = requireToken(token);
   app.use((req, res, next) => {
-    if (!req.path.startsWith("/api")) return next();
-    if (req.method === "GET" && req.path === "/api/health") return next();
+    if (!isApiPath(req.path)) return next();
+    if (req.method === "GET" && req.path.toLowerCase() === "/api/health") return next();
     auth(req, res, next);
   });
 
@@ -1045,16 +1070,22 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     ok(res, { ...h, renderedPrompt: renderHandoffBody(h), consumedByRunIds });
   });
   // Fold user-provided notes into an existing handoff (spec v1 §7).
-  app.post("/api/handoffs/:id/notes", async (req, res) => {
-    const { notes } = (req.body ?? {}) as { notes?: string };
-    if (!notes?.trim()) return fail(res, new Error("notes is required"));
-    try {
+  //
+  // Routed through `ah`: a rejected `await` here must reach the error
+  // middleware, never surface as an unhandled rejection (which kills the
+  // process). `notes` is validated as a string up front — a JSON number or
+  // object would otherwise throw on `.trim()`.
+  app.post(
+    "/api/handoffs/:id/notes",
+    ah(async (req, res) => {
+      const notes = (req.body as { notes?: unknown } | undefined)?.notes;
+      if (typeof notes !== "string" || !notes.trim()) {
+        return fail(res, new Error("notes is required"));
+      }
       const h = await handoffs.addUserNotes(req.params.id, notes);
       h ? ok(res, h) : fail(res, new Error("Handoff not found"), 404);
-    } catch (e) {
-      fail(res, e);
-    }
-  });
+    })
+  );
   app.delete(
     "/api/handoffs/:id",
     ah(async (req, res) => {
@@ -1130,7 +1161,18 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     const a = artifacts.get(req.params.id);
     if (!a) return fail(res, new Error("Artifact not found"), 404);
     if (a.content != null) {
-      res.type(a.mime ?? "text/plain").send(a.content);
+      // `res.type()` throws on a malformed mime, and the throw would land in
+      // the error middleware *after* the header is half-set — answer with a
+      // plain text/plain instead of crashing the request. A bad mime on a
+      // stored artifact is data, not a platform failure; the fallback is
+      // logged so it is visible rather than silent.
+      try {
+        res.type(a.mime ?? "text/plain");
+      } catch {
+        console.error(`[agent-fabric] artifact ${a.id} has an invalid mime (${JSON.stringify(a.mime)}); serving as text/plain`);
+        res.type("text/plain");
+      }
+      res.send(a.content);
     } else if (a.path) {
       res.send({ path: a.path, note: "Artifact is stored on disk; use workspace path to read it." });
     } else {
@@ -1152,21 +1194,25 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /**
    * A webhook URL *is* its credential (Slack's incoming webhooks are the path
    * itself), so the read is redacted the same way `DeliveryResult.url` is.
-   * The write returns the same redacted shape — echoing the URL back would
-   * put the secret in the browser for no benefit, since the caller just sent
-   * it. `urlSet` tells a client whether a webhook is configured without
-   * revealing which one.
+   * Header values are credentials too — a webhook commonly authenticates with
+   * `Authorization: Bearer …` — so every value is replaced by a fixed mask;
+   * header *names* survive, since they are routing information a settings UI
+   * needs to display. The write returns the same redacted shape — echoing the
+   * URL back would put the secret in the browser for no benefit, since the
+   * caller just sent it. `urlSet` tells a client whether a webhook is
+   * configured without revealing which one.
    */
   const configForClient = () => {
     const config = store.config();
     const notifications = config.notifications;
     if (!notifications) return config;
-    const { url, ...rest } = notifications;
+    const { url, headers, ...rest } = notifications;
     return {
       ...config,
       notifications: {
         ...rest,
         ...(url ? { url: redactWebhookUrl(url), urlSet: true } : { urlSet: false }),
+        ...(headers ? { headers: Object.fromEntries(Object.keys(headers).map((name) => [name, REDACTED_SECRET])) } : {}),
       },
     };
   };
@@ -1176,32 +1222,84 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
    *
    * Every config client edits by round-trip — `af config <key> <value>` and
    * the Settings page both GET the document, change one field and PUT the
-   * whole thing back — so the redacted URL comes back in the body. Storing it
-   * verbatim would replace the real webhook with the literal
-   * `https://host/***`, silently: the placeholder is a syntactically valid
-   * URL, so nothing downstream would complain. An incoming URL that is
-   * exactly the redacted form of the stored one therefore means "unchanged";
-   * anything else is stored as sent. `urlSet` is a read-side projection and
-   * is never persisted.
+   * whole thing back — so the redacted values come back in the body. Storing
+   * them verbatim would replace the real secrets with placeholders, silently:
+   * the URL placeholder is a syntactically valid URL and the header mask is
+   * just a string, so nothing downstream would complain. An incoming value
+   * that is exactly the redacted form of the stored one therefore means
+   * "unchanged"; anything else is stored as sent. `urlSet` is a read-side
+   * projection and is never persisted.
+   *
+   * The shape is validated here rather than trusted: a non-string URL (or a
+   * non-object `notifications`) would otherwise be persisted and poison every
+   * later read (`redactWebhookUrl` calls `url.replace`) and the notification
+   * delivery path. Throwing makes the PUT answer 400 while the stored config
+   * stays untouched.
    */
   const configFromClient = (body: unknown): AppConfig => {
     const incoming = (body ?? {}) as Record<string, unknown>;
     const next = incoming.notifications;
-    if (!next || typeof next !== "object") return incoming as AppConfig;
+    if (next === undefined || next === null) return incoming as AppConfig;
+    if (typeof next !== "object" || Array.isArray(next)) {
+      throw new DomainError("config-invalid", "notifications must be an object");
+    }
     const { urlSet: _urlSet, ...notifications } = next as Record<string, unknown>;
-    const stored = store.config().notifications?.url;
+    const storedNotifications = store.config().notifications;
+    const stored = storedNotifications?.url;
+    if (notifications.url !== undefined && typeof notifications.url !== "string") {
+      throw new DomainError("config-invalid", "notifications.url must be a string");
+    }
     const url =
       typeof notifications.url === "string" && stored && notifications.url === redactWebhookUrl(stored)
         ? stored
         : notifications.url;
-    return { ...incoming, notifications: { ...notifications, ...(url !== undefined ? { url } : {}) } } as AppConfig;
+    const headers = notifications.headers;
+    let restoredHeaders: Record<string, string> | undefined;
+    if (headers !== undefined) {
+      if (typeof headers !== "object" || headers === null || Array.isArray(headers)) {
+        throw new DomainError("config-invalid", "notifications.headers must be an object of strings");
+      }
+      const storedHeaders = storedNotifications?.headers ?? {};
+      restoredHeaders = Object.fromEntries(
+        Object.entries(headers as Record<string, unknown>).map(([name, value]) => {
+          if (typeof value !== "string") {
+            throw new DomainError("config-invalid", `notifications.headers["${name}"] must be a string`);
+          }
+          // The mask means "unchanged": restore the stored value for this
+          // exact header name (matched case-insensitively, like HTTP).
+          if (value === REDACTED_SECRET) {
+            const storedName = Object.keys(storedHeaders).find((k) => k.toLowerCase() === name.toLowerCase());
+            if (storedName === undefined) {
+              throw new DomainError(
+                "config-invalid",
+                `notifications.headers["${name}"] is masked but no stored value exists — send the real value or omit the header`
+              );
+            }
+            return [name, storedHeaders[storedName]];
+          }
+          return [name, value];
+        })
+      );
+    }
+    return {
+      ...incoming,
+      notifications: {
+        ...notifications,
+        ...(url !== undefined ? { url } : {}),
+        ...(restoredHeaders !== undefined ? { headers: restoredHeaders } : {}),
+      },
+    } as AppConfig;
   };
 
   app.get("/api/config", (_req, res) => ok(res, configForClient()));
   app.put(
     "/api/config",
     ah(async (req, res) => {
-      await store.updateConfig(configFromClient(req.body));
+      try {
+        await store.updateConfig(configFromClient(req.body));
+      } catch (e) {
+        return failDomain(res, e);
+      }
       ok(res, configForClient());
     })
   );
@@ -1251,14 +1349,30 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   //
   // Registered after every route: a handler routed through `ah` (or one that
   // calls `next(err)` itself) ends up here. Domain failures keep their stable
-  // code → HTTP mapping (`failDomain`); anything else is a platform bug and
-  // answers 500 instead of leaving the request open.
+  // code → HTTP mapping (`failDomain`); a client error the middleware itself
+  // produced (body-parser rejects a malformed JSON body with `.status` 400,
+  // an oversized one with 413) answers that status instead of a misleading
+  // 500; anything else is a platform bug and answers 500 instead of leaving
+  // the request open.
   app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) return next(err);
     if (isDomainError(err)) return failDomain(res, err);
-    console.error("[agent-fabric] unhandled error in request handler:", err);
+    const clientStatus = (err as { status?: unknown } | undefined)?.status;
+    const isClientError = typeof clientStatus === "number" && clientStatus >= 400 && clientStatus < 500;
+    if (!isClientError) console.error("[agent-fabric] unhandled error in request handler:", err);
     const message = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ error: message, code: "internal-error" });
+    const status = isClientError ? clientStatus : 500;
+    const body = { error: message, code: isClientError ? "invalid-request" : "internal-error" };
+    // The failing handler may have set a Content-Type this response cannot
+    // serialize under (that is exactly how one artifact bug produced a 500
+    // whose body was a stack trace): drop it, and if `.json()` still throws,
+    // end the response so the client is never left waiting.
+    res.removeHeader("Content-Type");
+    try {
+      res.status(status).json(body);
+    } catch {
+      res.status(status).end();
+    }
   });
 
   /* ---------------- static web UI ---------------- */

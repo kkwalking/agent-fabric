@@ -45,3 +45,15 @@ test("containerized runs rewrite a loopback proxy host to host.docker.internal",
   const lan = buildProxyEnv({ enabled: true, host: "192.168.1.10", port: 7890 }, true);
   assert.equal(lan.HTTPS_PROXY, "http://192.168.1.10:7890");
 });
+
+test("containerized runs exempt host.docker.internal from the proxy", () => {
+  // host.docker.internal is the host's loopback as seen from a container:
+  // a run's request to a host-side gateway (the rewritten provider base
+  // URL) must bypass the proxy, exactly like 127.0.0.1 does on the host.
+  const env = buildProxyEnv({ enabled: true, scheme: "http", host: "127.0.0.1", port: 7890 }, true);
+  assert.equal(env.NO_PROXY, "localhost,127.0.0.1,::1,host.docker.internal");
+  assert.equal(env.no_proxy, env.NO_PROXY);
+  // Host runs keep the plain list — there is no host.docker.internal there.
+  const host = buildProxyEnv({ enabled: true, scheme: "http", host: "127.0.0.1", port: 7890 });
+  assert.equal(host.NO_PROXY, "localhost,127.0.0.1,::1");
+});

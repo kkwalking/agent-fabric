@@ -33,6 +33,14 @@ const PROXY_URL_VARS = [
 ] as const;
 
 const NO_PROXY_VALUE = "localhost,127.0.0.1,::1";
+/**
+ * Inside a container, `host.docker.internal` is the host's loopback: a
+ * run's model requests to a host-side gateway (the rewritten provider
+ * base URL) must bypass the proxy, exactly like 127.0.0.1 does on the
+ * host. Without this the request goes proxy → host gateway through the
+ * proxy's own egress path and fails.
+ */
+const NO_PROXY_VALUE_CONTAINERIZED = `${NO_PROXY_VALUE},host.docker.internal`;
 
 export function buildProxyEnv(proxy: ProxyConfig | undefined, containerized = false): Record<string, string> {
   if (!proxy?.enabled) return {};
@@ -46,7 +54,8 @@ export function buildProxyEnv(proxy: ProxyConfig | undefined, containerized = fa
   const url = `${proxy.scheme === "socks5" ? "socks5" : "http"}://${resolvedHost}:${port}`;
   const env: Record<string, string> = {};
   for (const name of PROXY_URL_VARS) env[name] = url;
-  env.NO_PROXY = NO_PROXY_VALUE;
-  env.no_proxy = NO_PROXY_VALUE;
+  const noProxy = containerized ? NO_PROXY_VALUE_CONTAINERIZED : NO_PROXY_VALUE;
+  env.NO_PROXY = noProxy;
+  env.no_proxy = noProxy;
   return env;
 }

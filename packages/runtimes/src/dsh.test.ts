@@ -70,6 +70,11 @@ test("an in-turn failure surfaces DSH's own reason as a runtime.error", () => {
   assert.equal(out[1].level, "error");
   assert.equal(out[1].data.error, 'no API key for provider route "deepseek-official"');
   assert.equal(out[1].data.code, "MISSING_CREDENTIAL");
+  // Two events from one line: each must carry its own identity, or any
+  // consumer keying events by id/seq sees a collision.
+  assert.notEqual(out[0].id, out[1].id, "the two events have distinct ids");
+  assert.notEqual(out[0].seq, out[1].seq, "the two events have distinct seqs");
+  for (const evt of out) assert.match(evt.id, new RegExp(`^evt_run_x_${evt.seq}$`), "id and seq agree");
 
   // A reason without a message keeps the raw line so nothing is lost.
   const bare = map('{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error"}}');

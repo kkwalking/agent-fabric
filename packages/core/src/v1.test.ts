@@ -13,6 +13,8 @@ import { RuntimeRegistry } from "./runtime.js";
 import { RunService } from "./orchestrator.js";
 import {
   RuntimeService,
+  SecretService,
+  TaskService,
   WorkspaceService,
   RuntimeSessionService,
   seedDefaults,
@@ -635,46 +637,141 @@ test("a task with no lifecycle declared runs ephemeral", async () => {
   assert.equal(h.runService.get(run.id)!.lifecycle?.mode, "ephemeral");
 });
 
-test("keep-alive containers are re-armed from docker labels after a restart", async () => {
+test("a preamble refusal settles the run as failed instead of crashing the process", async () => {
+  // A classic run whose secret resolution is refused (a git-scoped secret
+  // in the agent environment) throws before runOne's own safety net. The
+  // launcher holds only a fire-and-forget `void this.executeContained(...)`,
+  // so an escaping rejection would kill the whole server — every other
+  // in-flight run with it. The run record must settle as failed with the
+  // refusal's own message, and nothing may escape.
+  const h = await freshHarness();
+  const secrets = new SecretService(h.store);
+  const gitScoped = await secrets.create({ name: "GIT_ONLY_TOKEN", value: "ghp_never_to_agent", scope: "git" });
+  const mockRuntime = h.store.list("runtimes").find((r: any) => r.kind === "mock")!;
+
+  const rejections: unknown[] = [];
+  const onRejection = (err: unknown) => rejections.push(err);
+  process.on("unhandledRejection", onRejection);
+  try {
+    const { run } = await h.runService.submit({
+      prompt: "uses a git-scoped secret by mistake",
+      runtimeId: mockRuntime.id,
+      secretIds: [gitScoped.id],
+    });
+    const settled = await waitForRun(h.runService, run.id);
+    // Give a stray rejection a beat to surface before asserting none did.
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(settled.status, "failed");
+    assert.match(settled.error ?? "", /GIT_ONLY_TOKEN.*cannot be used for the agent runtime environment/);
+    assert.deepEqual(rejections, [], "nothing escaped as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
+});
+
+test("keep-alive containers are re-armed from the durable Run record after a restart", async () => {
   const destroyed: string[] = [];
+  const h = await freshHarness();
+  const keepLabels = (taskId: string, runtimeId: string, workspaceId: string): Record<string, string> => ({
+    "agentfabric.keepalive": "true",
+    "agentfabric.runtime": runtimeId,
+    "agentfabric.workspace": workspaceId,
+    "agentfabric.task": taskId,
+  });
+  // Containers are matched to runs through a real Task (recovery only
+  // touches containers whose task this store knows), so each fixture
+  // container gets its own task.
+  const tasks = new TaskService(h.store);
+  const insertCase = async (name: string, containerId: string, endTime: string | undefined, status?: Run["status"]) => {
+    const task = await tasks.create({ prompt: `keep-alive fixture ${name}` });
+    await h.store.insert("runs", {
+      id: `run_${name}`,
+      taskId: task.id,
+      taskTitle: task.title,
+      status: status ?? (endTime ? "completed" : "running"),
+      containerId,
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
+      artifactIds: [],
+      eventCount: 0,
+      ...(endTime ? { endTime } : {}),
+      createdAt: new Date(Date.now() - 120_000).toISOString(),
+      updatedAt: endTime ?? new Date().toISOString(),
+    } as any);
+    return task.id;
+  };
+
+  // Recently retained: its window is still open.
+  const liveTask = await insertCase("live", "ctr_live", new Date(Date.now() - 30_000).toISOString());
+  // Window elapsed: must be destroyed on sight, not granted a fresh one.
+  const staleTask = await insertCase("stale", "ctr_stale", new Date(Date.now() - 90_000).toISOString());
+  // The newest run that used the reused container decides its window: the
+  // creating run ended long ago, but the reuse 20s ago re-armed it.
+  const reusedTask = await insertCase("first", "ctr_reused", new Date(Date.now() - 600_000).toISOString());
+  await h.store.insert("runs", {
+    id: "run_reuse",
+    taskId: reusedTask,
+    taskTitle: "keep-alive fixture reuse",
+    status: "completed",
+    containerId: "ctr_reused",
+    lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
+    artifactIds: [],
+    eventCount: 0,
+    endTime: new Date(Date.now() - 20_000).toISOString(),
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    updatedAt: new Date(Date.now() - 20_000).toISOString(),
+  } as any);
+  // No finished run backs this: the process died mid-run, so the harness
+  // state is mid-flight and never reusable (v4 §24).
+  const inflightTask = await insertCase("inflight", "ctr_inflight", undefined);
+  // An aborted run destroys its container (v4 §23/§24); one still listed
+  // means that destroy did not land — never adopt it, however recent.
+  const cancelledTask = await insertCase("cancelled", "ctr_cancelled", new Date(Date.now() - 10_000).toISOString(), "cancelled");
+  // A container of this deployment (its task exists) with no run record at
+  // all: the process died between creating it and recording it.
+  const orphanTask = await tasks.create({ prompt: "keep-alive fixture orphan" });
+
   const ops: ContainerOps = {
     destroy: async (id) => destroyed.push(id),
     listKeepAlive: async () => [
+      { containerId: "ctr_live", name: "af-keep-live", labels: keepLabels(liveTask, "rt_0", "ws_0") },
+      { containerId: "ctr_stale", name: "af-keep-stale", labels: keepLabels(staleTask, "rt_1", "ws_1") },
       {
-        containerId: "ctr_live",
-        name: "af-keep-rt_1",
+        containerId: "ctr_reused",
+        name: "af-keep-reused",
         labels: {
-          "agentfabric.keepalive": "true",
-          "agentfabric.runtime": "rt_1",
-          "agentfabric.workspace": "ws_1",
-          "agentfabric.task": "task_1",
-          "agentfabric.run": "run_1",
-          "agentfabric.expires": new Date(Date.now() + 60_000).toISOString(),
+          ...keepLabels(reusedTask, "rt_2", "ws_2"),
+          // The label names the *creating* run and is immutable — recovery
+          // must not trust it (the container was reused afterwards).
+          "agentfabric.run": "run_first",
         },
       },
-      {
-        containerId: "ctr_stale",
-        name: "af-keep-rt_2",
-        labels: {
-          "agentfabric.keepalive": "true",
-          "agentfabric.runtime": "rt_2",
-          "agentfabric.run": "run_2",
-          "agentfabric.expires": new Date(Date.now() - 30_000).toISOString(),
-        },
-      },
+      { containerId: "ctr_inflight", name: "af-keep-inflight", labels: keepLabels(inflightTask, "rt_3", "ws_3") },
+      { containerId: "ctr_cancelled", name: "af-keep-cancelled", labels: keepLabels(cancelledTask, "rt_4", "ws_4") },
+      { containerId: "ctr_orphan", name: "af-keep-orphan", labels: keepLabels(orphanTask.id, "rt_5", "ws_5") },
+      // Another deployment's container on the same daemon: not ours to
+      // adopt, and not ours to destroy.
+      { containerId: "ctr_foreign", name: "af-keep-foreign", labels: keepLabels("task_elsewhere", "rt_9", "ws_9") },
     ],
   };
-  const h = await freshHarness();
   const runService = new RunService(h.store, new EventBus(), new RuntimeRegistry(), ops);
   await runService.recoverKeepAliveContainers();
 
-  // Expired container destroyed, live container re-armed with its lease.
-  assert.deepEqual(destroyed, ["ctr_stale"]);
-  const kept = runService.keptContainers();
-  assert.equal(kept.length, 1);
-  assert.equal(kept[0].containerId, "ctr_live");
-  assert.equal(kept[0].runtimeId, "rt_1");
-  assert.equal(kept[0].workspaceId, "ws_1");
+  // Expired, mid-flight, aborted and record-less containers are destroyed;
+  // the live ones are re-armed, the reused one with its *reuse* window,
+  // and the foreign container is left strictly alone.
+  assert.deepEqual(destroyed.sort(), ["ctr_cancelled", "ctr_inflight", "ctr_orphan", "ctr_stale"]);
+  const kept = runService.keptContainers().sort((a, b) => a.containerId.localeCompare(b.containerId));
+  assert.deepEqual(
+    kept.map((l) => l.containerId),
+    ["ctr_live", "ctr_reused"]
+  );
+  const reused = kept.find((l) => l.containerId === "ctr_reused")!;
+  assert.equal(reused.runId, "run_reuse", "the newest using run owns the lease");
+  const remaining = Date.parse(reused.expiresAt) - Date.now();
+  assert.ok(remaining > 30_000 && remaining <= 40_000, `reuse window honored, got ${remaining}ms`);
+  const live = kept.find((l) => l.containerId === "ctr_live")!;
+  assert.equal(live.runtimeId, "rt_0");
+  assert.equal(live.workspaceId, "ws_0");
 });
 
 test("continuation without any previous run still records an originating handoff", async () => {

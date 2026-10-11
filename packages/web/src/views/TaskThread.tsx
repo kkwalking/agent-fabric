@@ -105,6 +105,11 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
 
   const bump = () => setReloadTick((t) => t + 1);
   const [syncError, setSyncError] = useState<string | null>(null);
+  // A handoff generation failure is an action failure, not a load failure:
+  // it must not go through `error`, whose early return replaces the whole
+  // thread with an error page (the thread is still perfectly readable — the
+  // generation just did not happen).
+  const [handoffError, setHandoffError] = useState<string | null>(null);
   /** Guards the refresh button against a second sync while one is in flight. */
   const syncingRef = useRef(false);
 
@@ -278,6 +283,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const confirmHandoff = (aimRuntimeId?: string) => {
     setHandoffDialog(null);
     if (!thread) return;
+    setHandoffError(null);
     setPendingHandoff({ stage: "generating", baseRuns: thread.runs.length, cancellable: true });
     if (aimRuntimeId) setRuntimeRequest((prev) => ({ id: aimRuntimeId, n: (prev?.n ?? 0) + 1 }));
     const controller = new AbortController();
@@ -292,7 +298,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         // An explicit handoff never degrades: surface why it could not be
         // generated instead of silently dropping the request.
         if (!(e instanceof DOMException && e.name === "AbortError")) {
-          setError(e instanceof Error ? e.message : String(e));
+          setHandoffError(e instanceof Error ? e.message : String(e));
         }
       })
       .finally(() => {
@@ -342,6 +348,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           )}
         </div>
         {syncError && <ErrorBox message={`Native session sync failed: ${syncError}`} />}
+        {handoffError && <ErrorBox message={`Handoff generation failed: ${handoffError}`} />}
       </header>
 
       {/* ---------- Timeline (v5 §11: each run is one assistant turn) ---------- */}

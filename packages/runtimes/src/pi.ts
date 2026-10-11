@@ -11,6 +11,7 @@ import type {
   Usage,
 } from "@agentfabric/core";
 import { runHarnessCommand } from "./harness.js";
+import { fireAndForget } from "./fireAndForget.js";
 import {
   piAgentDir,
   providerSlug,
@@ -152,7 +153,10 @@ export function mapPiEvent(raw: string, runId: string, seq: () => number): RunEv
   }
   const type = evt.type ?? "unknown";
   const timestamp = (evt.timestamp as string) ?? new Date().toISOString();
-  const base = { id: `evt_${runId}_${seq()}`, runId, seq: seq(), timestamp };
+  // One seq() call: the id and the seq must agree (two calls gave the id a
+  // number the seq never had).
+  const n = seq();
+  const base = { id: `evt_${runId}_${n}`, runId, seq: n, timestamp };
 
   switch (type) {
     /* ---- session header: first line of every run ---- */
@@ -421,16 +425,19 @@ function warnUnsupportedParameters(ctx: RuntimeContext): void {
   const { unsupported } = splitModelParameters(ctx.model.parameters, PI_SUPPORTED_MODEL_PARAMETERS);
   const keys = Object.keys(unsupported);
   if (keys.length === 0) return;
-  void ctx.emit(
-    "log",
-    {
-      line: `pi ignores unsupported model parameters: ${keys.join(", ")} (supported: ${PI_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
-      kind: "config-warning",
-      scope: "model-parameters",
-      unsupported: keys,
-      supported: [...PI_SUPPORTED_MODEL_PARAMETERS],
-    },
-    { level: "warn", source: "pi" }
+  fireAndForget(
+    "pi parameter warning",
+    ctx.emit(
+      "log",
+      {
+        line: `pi ignores unsupported model parameters: ${keys.join(", ")} (supported: ${PI_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
+        kind: "config-warning",
+        scope: "model-parameters",
+        unsupported: keys,
+        supported: [...PI_SUPPORTED_MODEL_PARAMETERS],
+      },
+      { level: "warn", source: "pi" }
+    )
   );
 }
 
@@ -475,7 +482,9 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<void> {
     }
   }
   mkdirSync(agentDir, { recursive: true });
-  writePiModelsJson(agentDir, ctx.provider, ctx.providerModels ?? (ctx.model ? [ctx.model] : []));
+  writePiModelsJson(agentDir, ctx.provider, ctx.providerModels ?? (ctx.model ? [ctx.model] : []), {
+    containerized: Boolean(ctx.runtime.containerized),
+  });
   await ctx.emit(
     "log",
     {

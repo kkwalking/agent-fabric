@@ -1,4 +1,6 @@
 import { Store, newId } from "./store.js";
+import { DomainError } from "./errors.js";
+import { SecretRedactor } from "./redaction.js";
 import { EventBus } from "./eventbus.js";
 import { existsSync } from "node:fs";
 import {
@@ -39,6 +41,7 @@ import {
   DEFAULT_KEEP_ALIVE_IDLE_MS,
   recoverKeepAliveContainers,
   type ContainerOps,
+  type RecoverableContainer,
 } from "./lifecycle.js";
 import { addUsage, emptyUsage, estimateCost } from "./cost.js";
 import { buildProxyEnv } from "./proxy.js";
@@ -469,12 +472,76 @@ export class RunService {
   }
 
   /**
-   * Re-arm keep-alive destroy timers from container labels after a
-   * server restart so retained containers never leak.
+   * Re-arm keep-alive destroy timers after a server restart so retained
+   * containers never leak. Container labels identify the containers, but
+   * they are written at creation and never change — a reused keep-alive
+   * container still carries the *first* run's labels. The retention window
+   * therefore comes from the newest Run record that references the
+   * container: its end time plus the lifecycle that run executed under.
+   *
+   * A container whose backing run never ended (the process died mid-run),
+   * or whose newest run is cancelled/timed out (such a run destroys its
+   * container, so one still listed means the destroy did not land), is
+   * destroyed on sight: its harness state is mid-flight and v4 §24 forbids
+   * handing that to a follow-up run. The same goes for a container that
+   * no run references at all — the process died between creating it and
+   * recording it.
+   *
+   * The docker filter is daemon-wide, not store-scoped, so only containers
+   * whose `agentfabric.task` label names a Task this store knows are
+   * touched — the same rule the shutdown teardown applies: another
+   * deployment's containers on a shared daemon are never adopted, and
+   * never destroyed.
    */
   async recoverKeepAliveContainers(): Promise<void> {
     if (!this.containerOps.listKeepAlive) return;
-    await recoverKeepAliveContainers(this.leaseManager, await this.containerOps.listKeepAlive());
+    const runs = this.store.list<Run>("runs");
+    const ownedTaskIds = new Set(this.taskService().list().map((t) => t.id));
+    const containers: RecoverableContainer[] = [];
+    let foreign = 0;
+    for (const info of await this.containerOps.listKeepAlive()) {
+      const labels = info.labels ?? {};
+      if (labels["agentfabric.keepalive"] !== "true") continue;
+      const taskId = labels["agentfabric.task"];
+      if (!taskId || !ownedTaskIds.has(taskId)) {
+        foreign += 1;
+        continue;
+      }
+      const backing = runs
+        .filter((r) => r.containerId === info.containerId)
+        .sort((a, b) => (a.endTime ?? a.updatedAt).localeCompare(b.endTime ?? b.updatedAt))
+        .at(-1);
+      if (!backing?.endTime || backing.status === "cancelled" || backing.status === "timeout") {
+        // Destroying is best-effort here so one unremovable container does
+        // not keep the rest of the recovery from being armed; the failure
+        // is reported, not swallowed.
+        try {
+          await this.containerOps.destroy(info.containerId);
+        } catch (err) {
+          console.error(
+            `[agent-fabric] failed to destroy non-reusable keep-alive container ${info.containerId}:`,
+            err instanceof Error ? err.message : err
+          );
+        }
+        continue;
+      }
+      const idleTimeoutMs = backing.lifecycle?.idleTimeoutMs ?? DEFAULT_KEEP_ALIVE_IDLE_MS;
+      containers.push({
+        containerId: info.containerId,
+        name: info.name,
+        labels,
+        runId: backing.id,
+        idleTimeoutMs,
+        retainedAt: backing.endTime,
+        expiresAt: new Date(Date.parse(backing.endTime) + idleTimeoutMs).toISOString(),
+      });
+    }
+    if (foreign > 0) {
+      console.error(
+        `[agent-fabric] ${foreign} keep-alive container(s) belong to a Task this deployment does not know; leaving them untouched`
+      );
+    }
+    await recoverKeepAliveContainers(this.leaseManager, containers);
   }
 
   /* ---------------- supervisor-facing execution hooks (v11 §13–§15) ---------------- */
@@ -506,7 +573,9 @@ export class RunService {
   /**
    * Runs a Run that was created by `createRunForTask` (or by submit/continue,
    * which call it internally). Awaiting it resolves once the run reached a
-   * terminal status.
+   * terminal status — and rejects when the run could not even start (a
+   * preamble throw, e.g. a refused secret scope), so the awaiting caller (the
+   * execution supervisor) can classify the failure by its own domain code.
    */
   async executeRun(runId: string): Promise<void> {
     await this.execute(runId);
@@ -530,7 +599,7 @@ export class RunService {
       profileId: resolved.profileId,
       systemInstructions: profile?.systemInstructions,
     });
-    void this.execute(run.id);
+    void this.executeContained(run.id);
     return { task, run };
   }
 
@@ -641,7 +710,7 @@ export class RunService {
         policy: mergedPolicy,
         systemInstructions: profile?.systemInstructions,
       });
-      void this.execute(run.id);
+      void this.executeContained(run.id);
       return {
         task,
         run,
@@ -691,7 +760,7 @@ export class RunService {
         await this.store.update<Handoff>("handoffs", awaiting.id, { awaitingNextTurn: false });
       }
     }
-    void this.execute(run.id);
+    void this.executeContained(run.id);
     const reason = forcedHandoff
       ? `Handoff requested explicitly.`
       : handoffArmed
@@ -987,6 +1056,13 @@ export class RunService {
     const id = runtimeId ?? lastRunRuntimeId ?? task.runtimeId;
     const runtime = id ? this.runtimeService().get(id) : undefined;
     if (!runtime) {
+      // An explicit choice that does not resolve is an error, not a hint:
+      // silently running a different harness would produce a run that is
+      // not the one the caller asked for (or, worse, a cross-harness
+      // handoff to a runtime the user never picked). Only the implicit
+      // fallbacks (a deleted last-run/task runtime) may degrade to the
+      // first enabled runtime.
+      if (runtimeId) throw new DomainError("runtime-create-failed", `Runtime not found: ${runtimeId}`);
       const fallback = this.runtimeService().enabled()[0];
       if (!fallback) throw new Error("No enabled runtime available to continue this task");
       return fallback;
@@ -1883,10 +1959,43 @@ export class RunService {
     const task = prev ?? this.runOne(runId);
     this.active.set(runId, task);
     try {
+      // A preamble throw (a refused secret scope, a missing record) never
+      // reaches runOne's own safety net; it propagates here so an awaiting
+      // caller can classify it — and so a `void` caller must go through
+      // `executeContained` below.
       await task;
     } finally {
       this.active.delete(runId);
       this.executionExtras.delete(runId);
+    }
+  }
+
+  /**
+   * `execute` for fire-and-forget callers (submit / continue): an exception
+   * escaping a `void`-launched promise is an unhandled rejection, which
+   * under Node's default kills the whole server and every other in-flight
+   * run with it. The run record is settled as failed instead, so the
+   * failure stays visible where the user looks for it. The supervisor's
+   * awaited `executeRun` deliberately does *not* come through here: it
+   * needs the original DomainError to classify the failed stage.
+   */
+  private async executeContained(runId: string): Promise<void> {
+    try {
+      await this.execute(runId);
+    } catch (err) {
+      // A DomainError's message is already user-facing (an authorization
+      // refusal, a missing reference); anything else is a platform bug and
+      // says so.
+      const message =
+        err instanceof DomainError
+          ? err.message
+          : `Internal error: ${err instanceof Error ? err.message : String(err)}`;
+      try {
+        await this.finish(runId, "failed", message, emptyUsage());
+      } catch {
+        /* the record may be gone; there is nothing left to settle */
+      }
+      console.error(`[agent-fabric] run ${runId} failed before execution: ${message}`);
     }
   }
 
@@ -1998,7 +2107,15 @@ export class RunService {
     let reusableContainer: ReusableContainer | undefined;
     if (lifecycle.mode === "keep-alive") {
       const lease = this.leaseManager.acquire(runtime.id, workspace?.id, task.id);
-      if (lease) reusableContainer = { containerId: lease.containerId, name: lease.containerName };
+      if (lease) {
+        reusableContainer = { containerId: lease.containerId, name: lease.containerName };
+        // Record the reuse before executing: if this process dies mid-run,
+        // recovery resolves the container's retention window from the
+        // *newest* run referencing it — without this write, that would
+        // still be the creator run, and the container would be adopted
+        // with a window it no longer has.
+        await this.store.update<Run>("runs", runId, { containerId: lease.containerId, updatedAt: now() });
+      }
     }
 
     // Abort controller for cancel/timeout.
@@ -2361,6 +2478,14 @@ export class RunService {
       AGENTFABRIC_PROVIDER: provider?.name ?? "",
     };
 
+    // Every event the adapter emits is persisted and served by the API —
+    // so credential material must never enter one (v11 §34). The run's
+    // resolved secrets and the provider API key are registered here: a
+    // harness that echoes its environment, or any adapter that renders an
+    // env-carrying command line, must not leak them into the event log.
+    // Deliberately NOT the whole env: its non-secret entries (ids, paths,
+    // model names) legitimately appear in event payloads.
+    const eventRedactor = new SecretRedactor([opts.providerApiKey, ...secrets.map((s) => s.value)]);
     const emit = async (
       type: EventType,
       data: Record<string, unknown> = {},
@@ -2372,7 +2497,7 @@ export class RunService {
         seq: store.nextSeq(),
         type,
         timestamp: now(),
-        data,
+        data: eventRedactor.redactValue(data),
         level: eventOpts?.level,
         source: eventOpts?.source ?? "core",
       };

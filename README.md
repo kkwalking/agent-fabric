@@ -111,7 +111,7 @@ Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
 
 ### Projects（`/projects`、`/projects/:id`、`/projects/:id/tasks/new`）
 
-Projects 页列出项目并支持创建（名称 / Repository URL / Credential（可选）/ 默认分支 / 默认 Runtime / 默认 Model / Validation / publish 策略）。项目详情页展示 Source、Credential（只显示掩码）、默认值、Skills、MCP、Validation 与 publish 策略，并列出该项目的 Task 及其生命周期（phase / agent / validation / publish）与按失败阶段提供的 retry 操作。
+Projects 页列出项目并支持创建（名称 / Repository URL / Credential（可选）/ 默认分支 / 默认 Runtime / 默认 Model / Validation / publish 策略）。项目详情页展示 Source、Credential（只显示掩码）、默认值、Skills、MCP、Validation 与 publish 策略，并列出该项目的 Task 及其生命周期（phase / agent / validation / publish）与按失败阶段映射出的 retry 操作（与 `retryKindForFailure` 同一张表：workspace / source / runtime / finalization 失败同样走 **Retry Agent Run**，validation 走 Retry Validation，publish 走 Retry Publish；retry publish 只在存在冻结 revision 且尚未 push 时出现）。
 
 `/projects/:id/tasks/new` 是 Project-based Coding Task 的创建页：Instruction、Base ref、Working branch（留空即自动生成 `af/<task>-<slug>`）、Branch mode（new / continue）、Runtime / Model 覆盖、Validation 覆盖。**不需要也不能手工创建 Workspace**。
 
@@ -182,7 +182,7 @@ Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kin
 | 模式 | 行为 |
 | --- | --- |
 | `ephemeral`（默认） | 每个 Run 新建容器，Run 结束/失败/取消/超时后销毁 |
-| `keep-alive` | Run 结束后容器保留 `idleTimeoutMs`（默认 10 分钟），期间同 Runtime+Workspace 的下一个 Run 通过 `docker exec` 复用；空闲超时自动销毁（重启后由容器 label 恢复定时器，不泄漏） |
+| `keep-alive` | Run 结束后容器保留 `idleTimeoutMs`（默认 10 分钟），期间同 Runtime+Workspace 的下一个 Run 通过 `docker exec` 复用；空闲超时自动销毁。重启后从**持久记录**恢复剩余窗口：取最新使用该容器的 Run 的结束时间 + 它的 lifecycle idle timeout（label 创建后不可变、复用容器仍带首次创建的 Run，只用于识别身份，不作为时间来源）；没有已结束 Run 背书（进程死于 Run 中途）或最新 Run 是取消/超时的容器直接销毁，绝不交给后续 Run 复用（v4 §24）。恢复只处理 `agentfabric.task` 指向本部署已知 Task 的容器——`docker ps` 是 daemon 级的，共享 daemon 上其他部署的容器既不收养也不销毁 |
 | `persistent` | 长期存活容器（Daemon 场景），容器不被销毁 |
 
 生命周期属于 **Task**，在创建 Task 时选定，此后**不可修改**：该 Task 的每一个 Run（首轮、continue、retry、handoff）都继承同一个策略，不存在中途漂移。它既不是 Runtime 的属性（同一个 Runtime 服务需求不同的 Task），也不是按 Run 的覆盖项（下一轮悄悄换回另一种策略，正是这个模型要消除的意外）。
@@ -389,7 +389,7 @@ Git Credential 不会作为长期环境变量、命令参数或 Repository URL �
 * **SSH**：私钥 materialize 成 `0600` 的临时文件，通过 `core.sshCommand` 显式指定 `-i <key>`；始终 `StrictHostKeyChecking=yes`（host key 必须验证，缺省用宿主的 `~/.ssh/known_hosts`，绝不静默信任）；passphrase 通过 `SSH_ASKPASS_REQUIRE=force` 交付。
 * 一次 Git 操作结束后立即删除临时目录；push 需要凭据时再 materialize 一次。
 * **Agent 拿不到仓库写凭据**：Agent Runtime 的环境变量、工作目录与挂载里都没有它。
-* **脱敏**：所有生命周期事件与错误消息经过统一的 `SecretRedactor`，凭据值不会出现在 Log / Event / API Response / Runtime stdout-stderr / error / `.git/config` / task metadata 中（`packages/core/src/v11.test.ts` 与 `scripts/e2e-v11.sh` 都有断言）。
+* **脱敏**：所有生命周期事件与错误消息经过统一的 `SecretRedactor`，凭据值不会出现在 Log / Event / API Response / Runtime stdout-stderr / error / `.git/config` / task metadata 中（`packages/core/src/v11.test.ts` 与 `scripts/e2e-v11.sh` 都有断言）。**Run 事件流同样经过脱敏**：每个 Run 把该 Run 解析出的 Secret 值与 Provider API Key 注册进事件 redactor 后才持久化（`GET /api/runs/:id/events` 与 UI 读到的都是脱敏后的记录）——adapter 渲染一条带 `-e K=V` 的命令行、或 harness 回显环境变量，都不会把凭据写进事件日志。
 
 ### Task：从 Project 创建 Coding Task
 
@@ -639,9 +639,14 @@ Publishing    git-push-failed · git-push-auth-failed · git-push-rejected · re
               publish-revision-missing · workspace-diverged-after-finalization
 Platform      project-not-found · project-invalid · credential-not-found
               task-not-found · task-state-invalid · task-busy · policy-denied · supervisor-restarted
+              config-invalid
 ```
 
-HTTP 映射：隔离/授权类失败（`runtime-not-isolated`、`credential-host-mismatch`、`credential-transport-mismatch`、`secret-scope-not-allowed`、`validation-secret-not-allowed`、`policy-denied`）为 **403**；并发/状态冲突类（`workspace-diverged-after-finalization`、`publish-revision-missing`、`workspace-locked`、`remote-branch-conflict`、`task-busy`、`task-state-invalid`、`branch-conflict`）为 **409**；`validation-runtime-*` 与 `runtime-*` 为 **502**。
+HTTP 映射：隔离/授权类失败（`runtime-not-isolated`、`credential-host-mismatch`、`credential-transport-mismatch`、`secret-scope-not-allowed`、`validation-secret-not-allowed`、`policy-denied`）为 **403**；并发/状态冲突类（`workspace-diverged-after-finalization`、`publish-revision-missing`、`workspace-locked`、`remote-branch-conflict`、`task-busy`、`task-state-invalid`、`branch-conflict`）为 **409**；`validation-runtime-*` 与 `runtime-*` 为 **502**；`config-invalid` 为 **400**。
+
+请求体层面的客户端错误也保留其状态码：请求体不是合法 JSON（400）、超过体积上限（413）等由 body-parser 拒绝的请求，响应 `code` 为 `invalid-request` 而非把客户端错误报成 500。API 路径的认证判定大小写不敏感（Express 路由本身大小写不敏感，`/API/…` 与 `/api/…` 是同一路由，认证必须一致）。
+
+**Run 的执行异常不会杀死进程**：Run 在进入 harness 之前的准备阶段抛出的异常（例如 secret scope 被拒、引用的 Secret 无法读取）会把该 Run 记录结算为 `failed`（DomainError 的 message 原样呈现），而不是逃逸成 unhandled rejection——后者在 Node 默认行为下会终止整个服务器，连带杀死所有并发 Run。run 执行中 adapter 抛出的异常同样结算为 `failed` 并保留错误信息。
 
 ### API
 
@@ -688,7 +693,7 @@ AgentFabric 只保存 Harness 原生 Session 的不透明引用（`RuntimeSessio
 
 * **Runtime Native State**：Harness 用于 Native Resume 的私有状态（Session 存储、内部数据库等）由 AgentFabric 以 Opaque 目录持久化（Create / Mount / Preserve / Reattach / Delete），与 Workspace 严格区分——Workspace 是用户的工作内容，Native State 是 Harness 的私有数据。默认落在 `~/.fabric/native-state/<runtimeId>`，按 Harness 挂载到容器内对应路径（OpenCode `/root/.local/share/opencode`，Pi `/root/.pi`，可用 `runtime.config.nativeStateMountPath` 覆盖）。
 * **Resume**（同 Harness）：`continueTask` 优先用存储的 native ref 恢复 Harness 自己的 Session（本地与容器化执行语义一致）。自动 Resume 需要 **Same Harness × Same Workspace × 有效 RuntimeSessionRef × Native State 真实存在 × 当前执行方式下能力成立**；不满足时不会自动降级，需要显式 Handoff 才能开新 Session。
-* **Continue 的默认目标 runtime**：显式指定 > **最近一次 run 的 runtime** > task 创建时的默认 > 第一个启用的 runtime。中途换过 Harness 的 task，不带目标的「继续」落在最近干活的 Harness 上。预览（`continue-options`）与实际决策（`pickTargetRuntime`）保持同一顺序。
+* **Continue 的默认目标 runtime**：显式指定 > **最近一次 run 的 runtime** > task 创建时的默认 > 第一个启用的 runtime。中途换过 Harness 的 task，不带目标的「继续」落在最近干活的 Harness 上。预览（`continue-options`）与实际决策（`pickTargetRuntime`）保持同一顺序。**只有隐式回退可以降级**（最近一次/创建时的 runtime 已被删除时才落到第一个启用的 runtime）；**显式指定的 runtime 解析不到时明确报错**（`runtime-create-failed`，502），绝不静默换一个 harness 执行——那会让「继续」跑在用户没有选择的 runtime 上。
 * **Resume vs Handoff 预览**：`GET /api/tasks/:id/continue-options` 让用户在执行前明确看到即将发生的是 Resume 还是 Handoff，不生成内容。
 * **Runtime Capability**：adapter 声明 `supportsNativeSession / supportsNativeResume / supportsStreamingEvents / supportsHandoffGeneration / supportsWorkspace / supportsInteractiveExecution`，并可通过 `containerizedCapabilities` 按执行后端收窄——声明的能力必须在当前 Execution Backend 下真实可用。容器化 Runtime 未配置可用镜像时，这些能力自动收窄为 false。`GET /api/runtimes/:id/capabilities` 返回生效的能力集合。
 
@@ -775,7 +780,7 @@ Checkpoint 模型不可用（未配置 provider/model、调用失败、回答不
 | `docker` | 容器 | — | — |
 | `mock` | 本地 | — | — |
 
-OpenCode / Pi / DSH 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` / `AGENTFABRIC_DSH_BIN` 可覆盖）。**三个容器化 Runtime 都必须显式配置镜像**（`runtime.image`，或用 `AGENTFABRIC_OPENCODE_IMAGE` / `AGENTFABRIC_PI_IMAGE` / `AGENTFABRIC_DSH_IMAGE` 覆盖），未配置时**拒绝启动**并提示契约——参考镜像见 `docker/` 下的三个 Dockerfile，一次构建全部：
+OpenCode / Pi / DSH 本地适配器依赖本机已安装的 CLI（`AGENTFABRIC_OPENCODE_BIN` / `AGENTFABRIC_PI_BIN` / `AGENTFABRIC_DSH_BIN` 可覆盖；OpenCode 适配器面向 **v2** CLI，本地装 1.x 会因未知 flag 失败）。**三个容器化 Runtime 都必须显式配置镜像**（`runtime.image`，或用 `AGENTFABRIC_OPENCODE_IMAGE` / `AGENTFABRIC_PI_IMAGE` / `AGENTFABRIC_DSH_IMAGE` 覆盖），未配置时**拒绝启动**并提示契约——参考镜像见 `docker/` 下的三个 Dockerfile，一次构建全部：
 
 ```bash
 bash scripts/build-harness-images.sh            # 或只构建一部分：… opencode / … pi / … dsh
@@ -794,11 +799,13 @@ af runtimes add "DSH (containerized)"       --kind dsh      --isolated --image a
 
 | 镜像 | Kind | Native State 挂载点 | 说明 |
 | --- | --- | --- | --- |
-| `agentfabric-opencode:latest` | `opencode` | `/root/.local/share/opencode` | `docker/opencode.Dockerfile`；派生自官方镜像 |
+| `agentfabric-opencode:latest` | `opencode` | `/root/.local/share/opencode` | `docker/opencode.Dockerfile`；派生自官方 v2 镜像 |
 | `agentfabric-pi:latest` | `pi` | `/root/.pi` | `docker/pi.Dockerfile`；无官方镜像 |
 | `agentfabric-dsh:latest` | `dsh` | `/root/.dsh` | `docker/dsh.Dockerfile`；无官方镜像 |
 
-**为什么 OpenCode 也要自建**：官方镜像 `ghcr.io/anomalyco/opencode` 是只带 ripgrep 的极简 Alpine 构建，**没有 python3 也没有 curl**，不满足契约第 7 条。`docker/opencode.Dockerfile` 从它派生，只 `apk add python3 curl`，ENTRYPOINT 与其它一切都不动。基础镜像用 `--build-arg OPENCODE_BASE=<镜像>` 可换（内网 mirror 或固定 tag）。
+**为什么 OpenCode 也要自建**：官方镜像 `ghcr.io/anomalyco/opencode` 是只带 ripgrep 的极简 Alpine 构建，**没有 python3 也没有 curl**，不满足契约第 7 条。`docker/opencode.Dockerfile` 从它派生，只 `apk add python3 curl`，ENTRYPOINT 与其它一切都不动。
+
+**OpenCode 基础镜像钉在 v2**（`ARG OPENCODE_BASE=…:2.0.26`）：`latest` 标签至今仍解析到 1.19.0，而 Adapter 面向 v2 协议——`--variant` 已被删除（variant 改为 `-m provider/model#variant`），且 `run` 会拉起后台常驻进程并缓存首次读到的配置（每个 Run 因此带 `--standalone`）。用 `latest` 构建出的 v1 镜像与 Adapter 不匹配，故 Dockerfile 显式钉版。基础镜像用 `--build-arg OPENCODE_BASE=<镜像>` 可换（内网 mirror 或更新到已验证的 2.x tag）。
 
 ```bash
 bash scripts/build-harness-images.sh            # 构建 pi + dsh（AGENTFABRIC_IMAGE_TAG_PREFIX 可改前缀）
@@ -816,7 +823,7 @@ bash scripts/build-harness-images.sh            # 构建 pi + dsh（AGENTFABRIC_
 Local 与 Docker 共用同一个 Harness Parser（事件 / Session Ref / Usage / 错误），Execution Backend 只做传输：容器的 stdout/stderr 以原始行流交给对应 Harness Adapter，由同一套解析器处理。
 
 * **Pi**（`pi --print --mode json`）：`session` 头、`agent_start/end`、`turn_start/end`、`message_start/update/end`、`tool_execution_start/update/end` → `run.progress` / `agent.message` / `agent.thinking` / `tool.started` / `tool.progress` / `tool.completed` / `runtime.error`。
-* **OpenCode**（`opencode run --format json`）：`step_start` / `text` / `reasoning` / `tool_use` / `step_finish` / `error`（每行携带 `sessionID`）→ 同一套标准事件。
+* **OpenCode**（`opencode run --standalone --format json`，v2）：`step_start` / `text` / `reasoning` / `tool_use` / `step_finish` / `error`（每行携带 `sessionID`）→ 同一套标准事件。v2 的 `tool_use` part 用 `id` 承载 call id（v1 是 `callID`）、错误用 `error.type` 承载类型（v1 是 `error.name`），Adapter 两者都读。**已知上游缺陷**：v2 CLI 的 stdout 转发会丢掉最后一步的 `step_finish`（[opencode#53207](https://github.com/anomalyco/opencode/issues/53207)；下游报告 [multica#8892](https://github.com/multica-ai/multica/issues/8892)）。实测（2.0.21/2.0.26）稳定复现：服务端事件流与 session DB 里最后一步的 `tokens`/`cost` 完整存在（`session.step.ended`），丢的是 CLI——`session.wait()` 落定后转发循环进入 finalizing、只放行不带 usage 的 `session.execution.*`，最后一步的 `step_finish` 因此到不了 stdout。后果：v2 下 Run 的 Usage / Cost 少算最后一步（纯文本回答的 Run 显示为 0），中间工具步的 `step_finish` 照常输出。这是 CLI 的行为，不是 Adapter 的解析问题。
 * **Codex**（`codex exec --json`）：agent_message / reasoning / command_execution / file_change / mcp_tool_call / web_search / turn usage。
 * **Claude Code**（`claude -p --output-format stream-json --verbose`）：assistant text / thinking / tool_use→Bash·Edit·Write·Read… / tool_result / result usage。
 * **DSH**（`dsh --profile headless --json [--session-id <id>] -- "<task>"`）：`session` → `status`（turn/step，`step_end` 携带该次模型请求的 usage）→ `text` / `thinking`（已提交的助手消息投影，重试中的尝试不会外泄）→ `tool_call` / `tool_result`（按 callId 配对）→ `final`。退出码 0 = 完成、1 = 中止/出错。
@@ -900,7 +907,7 @@ Execution Policy 在 Run 中强制执行：
 * `maxDurationMs` 超时、`maxModelCalls` / `maxTokens` / `maxCost` 超限即中止 Run（failed）；
 * `cpu` / `memory` 传给容器；
 * `network.enabled=false` 时容器 `--network none`；
-* `shell` / `toolPermissions` 与 `autoApprove`（如 OpenCode `--auto`）传递给 Harness Adapter。
+* `shell` / `toolPermissions` 与 `autoApprove`（如 OpenCode `--auto`）传递给 Harness Adapter。OpenCode 侧 `toolPermissions` 只认 v2 规范工具名：`apply_patch` / `edit` / `execute` / `glob` / `grep` / `list` / `question` / `read` / `shell` / `skill` / `subagent` / `todowrite` / `todoread` / `webfetch` / `websearch`（v1 的 `bash` / `write` / `patch` / `task` 会收到 "unknown tools" 告警并被忽略）。
 
 默认 Run 超时 `DEFAULT_RUN_TIMEOUT_MS` = 30 分钟。Policy 可在 Agent Profile、Task、Run 各层给出，Run 级覆盖 Task 级。
 
@@ -926,7 +933,8 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 * **载荷来自记录本身**：`event`、`taskId`、`status`、`phase`、逐阶段 `stages`（原样拷贝，不重算）、`failure{stage,code,message}`、`finalCommitSha`、`workingBranch`、`durationMs`、`link`（`/tasks/<id>`，主机名由接收方决定）。instruction 默认截断到 300 字符并置 `instructionTruncated`。
 * **通知永远不能改变 Task 的结果**：投递发生在终态写入**之后**，且 `deliverTaskNotification` 不抛异常——失败以 `DeliveryResult` 返回，写成 Run 上的 `notification-failed` 事件（带 `attempts` / `errorKind`）。Webhook 挂掉不会让任务变 failed。
 * **重试策略**：网络错误、超时、429、5xx 重试；其余 4xx（token 错、路径错）立即放弃——重复不会让它变对。
-* **URL 是密钥**：事件、日志、`GET /api/config` 里一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 与 Settings 页都是「读出整份 → 改一个字段 → 整份写回」）若收到恰好等于脱敏形式的 URL，按「未改动」处理并保留原值——占位符本身是合法 URL，原样入库会静默把真 webhook 换成它。
+* **URL 与 Header 都是密钥**：事件、日志、`GET /api/config` 里 URL 一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉；`headers` 的值同样全部替换为 `***`（webhook 常用 `Authorization: Bearer …` 认证），只保留 header 名。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 与 Settings 页都是「读出整份 → 改一个字段 → 整份写回」）若收到恰好等于脱敏形式的 URL 或 header 值，按「未改动」处理并保留原值——占位符本身是合法 URL / 合法字符串，原样入库会静默把真 webhook 换成它；一个被打上 `***` 掩码、但存储里并不存在的 header 名按 `config-invalid` 明确报错（400），而不是把掩码存进去。
+* **配置写入口做形状校验**：`notifications` 不是对象、`url` 不是字符串、`headers` 的值不是字符串都会以 `config-invalid`（HTTP 400）拒绝，存储中的原配置保持不变——一个被写坏的配置会让之后每次读取与投递都失败，必须在入口挡住。
 
 ## 自动重试（环境类失败）
 
@@ -954,7 +962,9 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 
 ## Proxy
 
-全局出网代理（Web UI 的 Proxy 页 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机。Proxy 页提供连通性测试（`POST /api/proxy/test`）。
+全局出网代理（Web UI 的 Proxy 页 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机（`host.docker.internal`），且容器的 `NO_PROXY` 同时豁免 `host.docker.internal`——容器内对宿主机 loopback 服务（例如本地 Provider 网关）的请求直达宿主，不经代理绕行。Proxy 页提供连通性测试（`POST /api/proxy/test`）。
+
+**Provider base URL 与容器**：Provider 的 base URL 指向宿主机 loopback（`127.0.0.1` / `localhost` / `::1`，如本地模型网关）时，容器化 Run 生成的 harness 配置（pi `models.json` / opencode `opencode.json`）会自动改写为 `host.docker.internal`——容器内的 `127.0.0.1` 是容器自己，不改写则每次模型请求都连接失败。宿主执行（非容器化）保持原值不变。
 
 ## 数据与安全
 
@@ -966,7 +976,7 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 * API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码；`GET /api/providers/:id/api-key` 需带 `X-AgentFabric-Reveal: 1` 请求头确认，返回的明文不进入任何日志。
 * Git 凭据只在单次 Git 操作期间 materialize 到 `AGENTFABRIC_DATA_DIR/git-credentials/<op>-<random>`（操作结束立即删除）：HTTPS 走 `GIT_ASKPASS` + 子进程环境变量，SSH 走 `0600` 私钥文件 + `core.sshCommand`（`StrictHostKeyChecking=yes`）。远端 URL 始终不含凭据，`.git/config` 里也没有。
 * Skill / MCP provisioning 落在 `AGENTFABRIC_DATA_DIR/provisioning/<runId>`，Run 结束即删除；生成的 MCP 配置是 `0600` 文件（可能含注入的 Secret 值），同样不进入日志与 API 响应。
-* 通知 Webhook 的 URL 本身即凭据（Slack Incoming Webhook 的路径就是 token），因此在事件、日志与 `GET /api/config` 中一律脱敏为 `scheme://host/***`；配置错误的通知在 Run 上以 `notification-failed` 事件可见，绝不静默丢弃。
+* 通知 Webhook 的 URL 与 header 值本身即凭据（Slack Incoming Webhook 的路径就是 token），因此在事件、日志与 `GET /api/config` 中一律脱敏（URL → `scheme://host/***`，header 值 → `***`）；配置错误的通知在 Run 上以 `notification-failed` 事件可见，绝不静默丢弃。
 * 存储层只保存生成时算出来的结果，读路径不重新解析、不重新投影、不做格式修补。
 
 ## CLI
@@ -978,10 +988,17 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 # 绝不发出未认证的请求。token 值不会出现在任何输出里，只有文件路径。
 # 注意 --token 的两种含义：写在子命令之前是 API token（全局选项），
 # `af source-credentials add-https --token` 是 Git 凭据值（子命令选项）。
+# 可重复选项（providers --header、models --param、agents --tool、run --tool）
+# 每次出现追加一个值：`--tool read --tool edit` 得到两个工具；给 `providers update`
+# 传 --header 同样生效（此前被静默丢弃）；`providers --enabled false` 可把已禁用的
+# provider 重新启用或禁用，未传则 update 保持原值、add 默认启用。
+# runtimes add --command 按 shell 引号切分：--command 'codex exec "fix the bug"'
+# 是三个 argv，而不是五个。
 
 # Provider / Model
 af providers list | add | update | remove
 af providers add my-openai --type openai-completions --base-url https://api.openai.com/v1 --api-key sk-xxx
+af providers update my-openai --enabled false      # 禁用；--enabled true 重新启用
 af models list | add | remove
 af models add gpt-4o --provider <provider-id> --alias gpt-4o
 
@@ -1141,8 +1158,9 @@ v11 hardening 的专项测试：
 | `src/validationDocker.test.ts` | disposable 容器 executor 的 `docker run` argv（allowlist 环境、唯一挂载、`--network none`）、超时/取消/daemon 不可达的分类，以及 supervisor → 真实 executor 的生产路径 |
 | `src/notifications.test.ts` | 载荷投影、退避与重试策略、URL 脱敏、配置错误不抛异常（`errorKind: "config"`） |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
+| `src/v4.test.ts` | 闭环 E2E（Provider→Model→Run、Profile、Policy、keep-alive 复用）：每个用户配置面真的到达 harness / 容器 argv；含 provider key 与 task secret 不进入 Run 事件日志、keep-alive 无 `containerCommand` 时 exec 的是 harness 二进制而非其 flags |
 
-`packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、api-key reveal 确认、config 往返（脱敏 URL 不被写回覆盖）与优雅停机。
+`packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、大小写变体的 API 路径同样要求认证、api-key reveal 确认、config 往返（脱敏 URL 与 header 掩码不被写回覆盖；掩码但无存储值 → 400 `config-invalid`；畸形 JSON → 400 `invalid-request`）与优雅停机。
 
 端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
 

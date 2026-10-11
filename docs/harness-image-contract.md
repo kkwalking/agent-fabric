@@ -9,7 +9,7 @@ Orchestrator 共同依赖的接口；镜像不满足时 Run 会失败（且**不
 
 | 镜像 | Kind | 来源 |
 | --- | --- | --- |
-| `agentfabric-opencode:latest` | `opencode` | `docker/opencode.Dockerfile`（派生自官方 `ghcr.io/anomalyco/opencode`） |
+| `agentfabric-opencode:latest` | `opencode` | `docker/opencode.Dockerfile`（派生自官方 `ghcr.io/anomalyco/opencode` 的 **2.x** 标签，当前钉 `2.0.26`） |
 | `agentfabric-pi:latest` | `pi` | `docker/pi.Dockerfile` |
 | `agentfabric-dsh:latest` | `dsh` | `docker/dsh.Dockerfile` |
 
@@ -19,7 +19,9 @@ bash scripts/build-harness-images.sh        # 构建 opencode + pi + dsh
 
 三个镜像都**没有** `defaultImage`：容器化 Runtime 必须显式指定 `runtime.image`。官方
 OpenCode 镜像虽然是官方维护的，但它是一个只带 ripgrep 的极简 Alpine 构建，不满足下面
-第 7 条，因此不能作为默认值。
+第 7 条，因此不能作为默认值。另外官方 `latest` 标签仍解析到 1.19.0，而 Adapter 面向
+v2 协议（`--standalone`、`-m provider/model#variant`），所以基础镜像必须钉 2.x 标签，
+不能用 `latest`。
 
 ## 契约条目
 
@@ -27,6 +29,14 @@ OpenCode 镜像虽然是官方维护的，但它是一个只带 ripgrep 的极�
 2. **ENTRYPOINT 就是 Harness**。容器命令形如 `docker run <image> <harness args…>`，
    本地二进制名会被丢掉（`packages/runtimes/src/backend.ts`）。没有 harness
    entrypoint 的镜像用 `runtime.config.containerCommand` 显式给出容器内命令前缀。
+
+   **Keep-alive 复用走 `docker exec`，它不套用镜像 ENTRYPOINT**（keep-alive 容器本身
+   就是 `--entrypoint sh` 创建的），因此 exec 的命令行必须自带 harness 二进制：未配置
+   `containerCommand` 时用本地二进制的 **basename**（例如 `pi`），依赖第 1 条「harness
+   在 PATH 上」——这正是 ephemeral 路径对 ENTRYPOINT 的同一约定；配置了
+   `containerCommand` 时原样使用。自定义 `containerCommand` 若以解释器开头（如
+   `["node", "/pi.js"]`），取消运行时的进程终止模式优先取其中的脚本路径而不是解释器
+   名，避免误杀共享解释器的其他进程。
 3. **Workspace 挂载路径明确**：`/workspace`，同时也是容器的工作目录。AgentFabric 把
    Workspace 以 `rw`（或按 filesystem policy 以 `ro`）挂到这里。
 4. **Native State 挂载路径明确**：该 kind 的 `nativeStateMountPath`，以 `rw` 挂载。
@@ -47,7 +57,8 @@ OpenCode 镜像虽然是官方维护的，但它是一个只带 ripgrep 的极�
 7. **python3 与 curl 必须可用**。Agent 的日常命令大量使用这两者：跑一段脚本用
    `python3`，取一个 URL 用 `curl`。缺了它们，任务会因为一个跟任务本身无关的原因失败。
    这条要求针对**所有** Harness 镜像，与具体 Harness 无关——所以官方 OpenCode 镜像
-   必须派生（`docker/opencode.Dockerfile` 只加这两个包，其它一概不动）。
+   必须派生（`docker/opencode.Dockerfile` 只加这两个包、把基础 tag 钉到 2.x，其它一概
+   不动）。
 
 ## 认证
 

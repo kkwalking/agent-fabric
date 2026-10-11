@@ -9,6 +9,44 @@ function apiUrl(): string {
   return process.env.AGENTFABRIC_API ?? "http://localhost:7377";
 }
 
+/**
+ * Commander collector for repeatable options. Without one, commander keeps
+ * only the *last* occurrence — and the handlers below treat the value as an
+ * array, so a single string was iterated character by character (`--tool
+ * a,b` became `["a", ",", "b"]`).
+ */
+const collect = (value: string, previous: string[]): string[] => [...previous, value];
+
+/**
+ * Splits a `--command` string into argv words, respecting single/double
+ * quotes. A plain `split(" ")` mangles quoted arguments — `--command 'codex
+ * exec "fix the bug"'` must stay three words, not five.
+ */
+function splitCommand(command: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+  let hasWord = false;
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      else current += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      hasWord = true;
+    } else if (ch === " " || ch === "\t") {
+      if (hasWord) words.push(current);
+      current = "";
+      hasWord = false;
+    } else {
+      current += ch;
+      hasWord = true;
+    }
+  }
+  if (hasWord) words.push(current);
+  return words;
+}
+
 /** Global flags, mirrored onto subcommands further down. */
 const GLOBAL_FLAGS = ["--api <url>", "--json", "--token <t>"];
 
@@ -92,8 +130,12 @@ function buildProgram(): Command {
     .option("--type <type>", "openai | openai-compatible | anthropic | custom")
     .option("--base-url <url>", "custom API endpoint / base URL")
     .option("--api-key <key>", "API key (stored as a Secret)")
-    .option("--header <k=v>", "extra header (repeatable)")
-    .option("--enabled <bool>", "enable/disable", "true")
+    .option("--header <k=v>", "extra header (repeatable)", collect, [] as string[])
+    // No default: `add` treats absence as enabled (true), `update` treats
+    // absence as "leave it as it is". With a `"true"` default the two cases
+    // were indistinguishable, so a disabled provider could never be
+    // re-enabled from the CLI.
+    .option("--enabled <bool>", "enable/disable")
     .action(async (action: string, name: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
       if (action === "list") {
@@ -115,7 +157,7 @@ function buildProgram(): Command {
           baseUrl: cmd.opts().baseUrl,
           apiKey: cmd.opts().apiKey,
           headers: Object.keys(headers).length ? headers : undefined,
-          enabled: cmd.opts().enabled !== "false",
+          enabled: cmd.opts().enabled === undefined ? true : cmd.opts().enabled !== "false",
         });
         console.log(json(cmd) ? pretty(p) : `provider created: ${(p as { id: string }).id}`);
         return;
@@ -126,7 +168,15 @@ function buildProgram(): Command {
         if (cmd.opts().type) body.type = cmd.opts().type;
         if (cmd.opts().baseUrl !== undefined) body.baseUrl = cmd.opts().baseUrl;
         if (cmd.opts().apiKey !== undefined) body.apiKey = cmd.opts().apiKey;
-        if (cmd.opts().enabled !== "true") body.enabled = false;
+        if (cmd.opts().enabled !== undefined) body.enabled = cmd.opts().enabled !== "false";
+        // Headers are accepted on update too — silently dropping them made
+        // `af providers update x --header k=v` a no-op with exit code 0.
+        const headers: Record<string, string> = {};
+        for (const h of (cmd.opts().header ?? []) as string[]) {
+          const idx = h.indexOf("=");
+          if (idx > 0) headers[h.slice(0, idx)] = h.slice(idx + 1);
+        }
+        if (Object.keys(headers).length) body.headers = headers;
         const p = await c.put<unknown>(`/api/providers/${name}`, body);
         console.log(json(cmd) ? pretty(p) : `provider updated: ${(p as { id: string }).id}`);
         return;
@@ -149,7 +199,7 @@ function buildProgram(): Command {
     .argument("[name]", "model name or id")
     .option("--provider <id>", "provider id")
     .option("--alias <alias>", "convenient alias")
-    .option("--param <k=v>", "model parameter (repeatable)")
+    .option("--param <k=v>", "model parameter (repeatable)", collect, [] as string[])
     .action(async (action: string, name: string | undefined, _opts: unknown, cmd: Command) => {
       const c = client(cmd);
       if (action === "list") {
@@ -228,7 +278,7 @@ function buildProgram(): Command {
           name,
           kind: cmd.opts().kind ?? "docker",
           image: cmd.opts().image,
-          command: cmd.opts().command ? String(cmd.opts().command).split(" ") : undefined,
+          command: cmd.opts().command ? splitCommand(String(cmd.opts().command)) : undefined,
           containerized: isolated,
           executionBackend: cmd.opts().host ? "host" : isolated ? "isolated" : undefined,
           description: cmd.opts().description,
@@ -366,7 +416,7 @@ function buildProgram(): Command {
     .option("--runtime <id>", "runtime id")
     .option("--model <id>", "model id or alias")
     .option("--system-prompt <text>", "system instructions")
-    .option("--tool <tool>", "tool allowlist (repeatable)")
+    .option("--tool <tool>", "tool allowlist (repeatable)", collect, [] as string[])
     .option("--shell <policy>", "allow | deny | ask", "allow")
     .option("--max-duration <ms>", "max execution time in ms")
     .action(async (action: string, name: string | undefined, _opts: unknown, cmd: Command) => {
@@ -594,7 +644,7 @@ function buildProgram(): Command {
     .option("--model <id>", "model id or alias")
     .option("--workspace <id>", "workspace id")
     .option("--profile <id>", "agent profile id")
-    .option("--tool <tool>", "tool allowed for this task (repeatable)")
+    .option("--tool <tool>", "tool allowed for this task (repeatable)", collect, [] as string[])
     .option("--timeout <ms>", "task timeout in ms")
     .option("--lifecycle <mode>", "container lifecycle: ephemeral | keep-alive | persistent")
     .option("--idle-timeout <ms>", "keep-alive idle timeout in ms")
@@ -914,7 +964,10 @@ function buildProgram(): Command {
         return;
       }
       if (action === "logs") {
-        const text = await c.get<string>(`/api/runs/${id}/logs`);
+        // A run with no log lines answers with an empty body, which the
+        // client parses to `null` — not a string, and `.endsWith` on it
+        // crashed the CLI.
+        const text = (await c.get<string | null>(`/api/runs/${id}/logs`)) ?? "";
         process.stdout.write(text + (text.endsWith("\n") ? "" : "\n"));
         return;
       }

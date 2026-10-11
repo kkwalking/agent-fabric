@@ -12,6 +12,7 @@ import type {
   RuntimeContext,
   RuntimeResult,
 } from "@agentfabric/core";
+import { fireAndForget } from "./fireAndForget.js";
 
 export interface DockerRunOptions {
   image: string;
@@ -85,8 +86,11 @@ export function createDockerContainerOps(): ContainerOps {
       await execDocker(["rm", "-f", containerId], 30_000);
     },
     async listKeepAlive(): Promise<ManagedContainerInfo[]> {
+      // `--no-trunc`: the default `{{.ID}}` is the 12-char short id, but a
+      // Run record carries the full id from `docker run` / the cidfile —
+      // recovery matches the two, so both must be full ids.
       const { code, stdout } = await execDocker(
-        ["ps", "-a", "--filter", "label=agentfabric.keepalive=true", "--format", "{{.ID}}\t{{.Names}}\t{{.Labels}}"],
+        ["ps", "-a", "--no-trunc", "--filter", "label=agentfabric.keepalive=true", "--format", "{{.ID}}\t{{.Names}}\t{{.Labels}}"],
         30_000
       );
       if (code !== 0) return [];
@@ -172,7 +176,14 @@ export async function runDockerContainer(
   if (opts.entrypoint) args.push(...opts.entrypoint);
   args.push(...opts.command);
 
-  const display = `docker run ${args.slice(1, -opts.command.length).join(" ")} ${opts.image} ${opts.command.join(" ")}`;
+  // The display string is what the user reads to diagnose the run; it must
+  // show the command that actually ran, once. `args` already ends with
+  // image + command — appending the image again produced
+  // `… image image sh -c …`. Env pairs are the caller's secret-bearing
+  // channel (provider key, task secrets); the run's event redactor scrubs
+  // their values from this event, but the *keys* remain visible, which is
+  // the diagnostic part.
+  const display = `docker ${args.join(" ")}`;
   await ctx.emit("shell.command", { command: display, cwd: ctx.workspacePath ?? ".", container: name });
 
   return new Promise<DockerRunOutcome>((resolve, reject) => {
@@ -194,7 +205,7 @@ export async function runDockerContainer(
       const lines = stdoutBuf.split("\n");
       stdoutBuf = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) void ctx.emit("shell.output", { line, stream: "stdout" });
+        if (line.trim()) fireAndForget("container stdout event", ctx.emit("shell.output", { line, stream: "stdout" }));
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -202,7 +213,7 @@ export async function runDockerContainer(
       const lines = stderrBuf.split("\n");
       stderrBuf = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) void ctx.log(line, "warn");
+        if (line.trim()) fireAndForget("container stderr log", ctx.log(line, "warn"));
       }
     });
 
@@ -356,13 +367,13 @@ export async function execDockerInContainer(
       stdoutBuf += chunk.toString();
       const lines = stdoutBuf.split("\n");
       stdoutBuf = lines.pop() ?? "";
-      for (const line of lines) if (line.trim()) void ctx.emit("shell.output", { line, stream: "stdout" });
+      for (const line of lines) if (line.trim()) fireAndForget("container stdout event", ctx.emit("shell.output", { line, stream: "stdout" }));
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBuf += chunk.toString();
       const lines = stderrBuf.split("\n");
       stderrBuf = lines.pop() ?? "";
-      for (const line of lines) if (line.trim()) void ctx.log(line, "warn");
+      for (const line of lines) if (line.trim()) fireAndForget("container stderr log", ctx.log(line, "warn"));
     });
     child.on("error", (err) => {
       ctx.signal.removeEventListener("abort", onAbort);

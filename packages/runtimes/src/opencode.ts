@@ -10,17 +10,19 @@ import type {
   Usage,
 } from "@agentfabric/core";
 import { runHarnessCommand } from "./harness.js";
+import { fireAndForget } from "./fireAndForget.js";
 import {
   buildOpenCodeConfig,
   OPENCODE_KNOWN_PROVIDER_IDS,
   providerSlug,
   splitModelParameters,
   writeOpenCodeConfig,
+  type OpenCodePermissionRule,
 } from "./provider-config.js";
 
 /**
  * OpenCode harness adapter — protocol shapes verified against the
- * current OpenCode CLI (`opencode run --format json`, 1.x line):
+ * OpenCode 2 CLI (`opencode run --format json`, 2.x line):
  *
  * Every stdout line is one JSON object:
  *   {"type":"<t>","timestamp":<epoch ms>,"sessionID":"ses_…",…payload}
@@ -44,15 +46,36 @@ import {
  * (v3 §6: the adapter converts OpenCode's *native* events; it must not
  * invent AgentFabric-style ones).
  *
- * Sessions live under $XDG_DATA_HOME/opencode (~/.local/share/opencode,
- * storage/session/…) and resume with `--session <ses_id>`.
+ * v2 differences from v1 that this adapter depends on:
+ * - `--variant` was removed; a variant rides the model selector as
+ *   `-m <provider>/<model>#<variant>`.
+ * - `run` starts a background service (`opencode serve --service`) and
+ *   serves the run through it, caching the config it first read. Every
+ *   run therefore passes `--standalone` so it owns its process — without
+ *   it, the second run of a runtime keeps using the first run's rewritten
+ *   `OPENCODE_CONFIG` and fails with "Model unavailable".
+ * - the tool_use part carries its call id in `id` (v1 used `callID`).
+ * - an error carries its kind in `error.type` (v1 used `error.name`).
+ * - tools are named `shell` (not `bash`) and `subagent` (not `task`),
+ *   with `edit` covering edit/write/patch.
+ *
+ * Sessions live under $XDG_DATA_HOME/opencode (~/.local/share/opencode)
+ * and resume with `--session <ses_id>`; v2 keeps them in a SQLite
+ * database there rather than per-session JSON files, which is opaque to
+ * this adapter either way.
  */
 interface OpenCodeEvent {
   type?: string;
   timestamp?: number;
   sessionID?: string;
   part?: OpenCodePart;
-  error?: { name?: string; message?: string; data?: { message?: string } };
+  error?: {
+    name?: string;
+    /** v2 error kind, e.g. "provider.no-route". */
+    type?: string;
+    message?: string;
+    data?: { message?: string };
+  };
   [key: string]: unknown;
 }
 
@@ -60,7 +83,12 @@ interface OpenCodePart {
   type?: string;
   text?: string;
   tool?: string;
+  /**
+   * Tool call id. v1 emitted it as `callID`; v2 puts it in `id` and uses
+   * `partID` for the part itself, so both spellings are read here.
+   */
   callID?: string;
+  id?: string;
   reason?: string;
   cost?: number;
   tokens?: {
@@ -148,10 +176,13 @@ export function mapOpenCodeEvent(raw: string, runId: string, seq: () => number):
   }
   const type = evt.type ?? "unknown";
   const timestamp = new Date(evt.timestamp ?? Date.now()).toISOString();
+  // One seq() call: the id and the seq must agree (two calls gave the id a
+  // number the seq never had).
+  const n = seq();
   const base = {
-    id: `evt_${runId}_${seq()}`,
+    id: `evt_${runId}_${n}`,
     runId,
-    seq: seq(),
+    seq: n,
     timestamp,
   };
 
@@ -198,7 +229,9 @@ export function mapOpenCodeEvent(raw: string, runId: string, seq: () => number):
         source: "opencode",
         data: {
           tool: part?.tool ?? "unknown",
-          callID: part?.callID,
+          // v2 moved the call id from `callID` to `id`; without it the UI
+          // cannot pair a tool result with its call.
+          callID: part?.callID ?? part?.id,
           status,
           input: part?.state?.input,
           output: part?.state?.output,
@@ -233,7 +266,8 @@ export function mapOpenCodeEvent(raw: string, runId: string, seq: () => number):
         type: "runtime.error",
         level: "error",
         source: "opencode",
-        data: { error: message, name: err?.name, sessionID: evt.sessionID },
+        // v2 names the error kind `type` ("provider.no-route"); v1 used `name`.
+        data: { error: message, name: err?.name ?? err?.type, sessionID: evt.sessionID },
       };
     }
 
@@ -260,6 +294,17 @@ export function extractOpenCodeSessionRef(raw: string): string | undefined {
  * Extracts per-step usage from an opencode `step_finish` line (v3 §8):
  * tokens {input, output, reasoning, cache{read, write}} and a single
  * USD cost number. Each step_finish is one completed model request.
+ *
+ * Known upstream defect (anomalyco/opencode#53207): the v2 CLI drops the
+ * FINAL step_finish from stdout — its forwarding loop goes into
+ * finalizing once `session.wait()` resolves and only lets
+ * `session.execution.*` through (which carry no usage), so a text-only
+ * run reports nothing and every run undercounts its last step. The
+ * server-side event stream and the session DB still hold the data; only
+ * the CLI's stdout loses it, and AgentFabric consumes stdout by design
+ * (native state stays opaque). Do not "fix" this here — there is no
+ * renamed event to parse; intermediate tool steps still arrive and are
+ * what the real tests anchor their usage assertions to.
  */
 export function parseOpenCodeUsage(raw: string): Usage | undefined {
   let evt: OpenCodeEvent;
@@ -284,20 +329,30 @@ export function parseOpenCodeUsage(raw: string): Usage | undefined {
 /** Model parameter keys opencode genuinely applies (v4 §7/§8). */
 const OPENCODE_SUPPORTED_MODEL_PARAMETERS = ["maxTokens", "contextWindow", "reasoningEffort"] as const;
 
-/** opencode built-in tools an agent tools map can toggle. */
+/**
+ * opencode 2 permission actions a tool allowlist can grant or deny — the
+ * canonical names, verified against the CLI's own resolved config
+ * (`opencode debug config`). The v1 spellings (`bash`, `write`, `patch`,
+ * `task`) are aliases v2 folds into `shell` / `edit` / `subagent`, so
+ * listing them separately would emit several rules for one action and let
+ * the last one silently win.
+ */
 const OPENCODE_TOOLS = [
-  "bash",
+  "apply_patch",
   "edit",
-  "write",
-  "read",
-  "grep",
+  "execute",
   "glob",
+  "grep",
   "list",
-  "patch",
+  "question",
+  "read",
+  "shell",
+  "skill",
+  "subagent",
   "todowrite",
   "todoread",
   "webfetch",
-  "task",
+  "websearch",
 ] as const;
 
 /** Where the generated config is mounted inside a container. */
@@ -316,6 +371,19 @@ export const opencodeProviderCompatibility: ProviderCompatibility = {
 };
 
 /**
+ * The model variant for this run — the provider-specific reasoning effort
+ * (v4 §7). The runtime's configured `variant` is the base; a model-level
+ * `reasoningEffort` overrides it. v2 has no `--variant` flag: the variant
+ * rides the model selector as `<provider>/<model>#<variant>`.
+ */
+function resolveVariant(ctx: RuntimeContext): string | undefined {
+  const reasoningEffort = ctx.model?.parameters?.reasoningEffort;
+  if (typeof reasoningEffort === "string" && reasoningEffort) return reasoningEffort;
+  const configured = ctx.runtime.config?.variant;
+  return configured ? String(configured) : undefined;
+}
+
+/**
  * Builds the opencode CLI args for a run. Policy comes only from the
  * resolved run policy (v4 §13); the model selector uses the AgentFabric
  * provider slug registered in the generated config. When AgentFabric
@@ -325,20 +393,24 @@ export const opencodeProviderCompatibility: ProviderCompatibility = {
  */
 function buildArgs(ctx: RuntimeContext, useAgentfabricAgent: boolean): string[] {
   const policy = ctx.policy;
-  const args = ["run", "--format", "json"];
+  // `--standalone` must follow the `run` subcommand (v2 rejects it before).
+  // It keeps each run in its own process: v2's `run` otherwise starts a
+  // background service that caches the config it first read, so the next
+  // run of the same runtime would silently keep the previous run's
+  // OPENCODE_CONFIG (a rewritten provider/model never takes effect).
+  const args = ["run", "--standalone", "--format", "json"];
+  const variant = resolveVariant(ctx);
+  const selector = variant ? `#${variant}` : "";
   if (ctx.provider && ctx.model) {
-    args.push("-m", `${providerSlug(ctx.provider)}/${ctx.model.name}`);
+    args.push("-m", `${providerSlug(ctx.provider)}/${ctx.model.name}${selector}`);
   } else if (ctx.model) {
-    args.push("-m", ctx.model.name);
+    args.push("-m", `${ctx.model.name}${selector}`);
   }
   if (useAgentfabricAgent) {
     args.push("--agent", "agentfabric");
   } else if (ctx.runtime.config?.agent) {
     args.push("--agent", String(ctx.runtime.config.agent));
   }
-  if (ctx.runtime.config?.variant) args.push("--variant", String(ctx.runtime.config.variant));
-  const reasoningEffort = ctx.model?.parameters?.reasoningEffort;
-  if (typeof reasoningEffort === "string") args.push("--variant", reasoningEffort);
   if (policy?.autoApprove) args.push("--auto");
   // Native resume: pass the harness's own session reference (spec v1 §3).
   if (ctx.runtimeSession?.nativeSessionRef) args.push("--session", ctx.runtimeSession.nativeSessionRef);
@@ -355,16 +427,19 @@ function warnUnsupportedParameters(ctx: RuntimeContext): void {
   const { unsupported } = splitModelParameters(ctx.model.parameters, OPENCODE_SUPPORTED_MODEL_PARAMETERS);
   const keys = Object.keys(unsupported);
   if (keys.length === 0) return;
-  void ctx.emit(
-    "log",
-    {
-      line: `opencode ignores unsupported model parameters: ${keys.join(", ")} (supported: ${OPENCODE_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
-      kind: "config-warning",
-      scope: "model-parameters",
-      unsupported: keys,
-      supported: [...OPENCODE_SUPPORTED_MODEL_PARAMETERS],
-    },
-    { level: "warn", source: "opencode" }
+  fireAndForget(
+    "opencode parameter warning",
+    ctx.emit(
+      "log",
+      {
+        line: `opencode ignores unsupported model parameters: ${keys.join(", ")} (supported: ${OPENCODE_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
+        kind: "config-warning",
+        scope: "model-parameters",
+        unsupported: keys,
+        supported: [...OPENCODE_SUPPORTED_MODEL_PARAMETERS],
+      },
+      { level: "warn", source: "opencode" }
+    )
   );
 }
 
@@ -374,9 +449,10 @@ function warnUnsupportedParameters(ctx: RuntimeContext): void {
  *
  * - provider entry from the AgentFabric provider (npm package per type,
  *   baseURL, `{env:…}` API key, custom headers);
- * - `permission` from the resolved policy (shell deny → bash deny);
+ * - `permissions` rules from the resolved policy (shell → shell rule)
+ *   followed by one rule per tool in the allowlist;
  * - an `agentfabric` agent carrying the profile's system instructions
- *   and the tool allowlist whenever either is configured.
+ *   whenever they are configured.
  *
  * Local runs point at the host file directly; containerized runs mount
  * it read-only and point at the container path.
@@ -386,38 +462,40 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
   const policy = ctx.policy;
   // Shell policy → opencode's native permission system (v4 §15/§16).
   // Headless `opencode run` cannot answer "ask" prompts — the harness
-  // logs "permission requested: …; auto-rejecting" and the tool call
-  // fails. opencode gates bash's `workdir` parameter behind its
+  // reports the request as unanswerable and the tool call fails.
+  // opencode gates the shell tool's `workdir` parameter behind its
   // external_directory permission (built-in default "ask"), so a plain
   // allow policy must allow it too, or any workdir-using call is
-  // auto-rejected even when it points inside the workspace.
+  // rejected even when it points inside the workspace.
   const shell = policy?.shell ?? "allow";
-  const permission: Record<string, unknown> =
-    shell === "deny"
-      ? { bash: "deny" }
-      : shell === "ask"
-        ? { bash: "ask" }
-        : { bash: "allow", external_directory: "allow" };
+  // Ordered rules: v2 matches last-wins, so the shell policy goes first
+  // and the tool allowlist (which skips `shell`) refines it.
+  const permissions: OpenCodePermissionRule[] = [
+    { action: "shell", resource: "*", effect: shell === "deny" ? "deny" : shell === "ask" ? "ask" : "allow" },
+  ];
+  if (shell === "allow") {
+    permissions.push({ action: "external_directory", resource: "*", effect: "allow" });
+  }
 
   const toolAllow = policy?.toolPermissions;
   const unknownTools = (toolAllow ?? []).filter((t) => !(OPENCODE_TOOLS as readonly string[]).includes(t));
-  const needAgent = Boolean(ctx.systemInstructions?.trim()) || Boolean(toolAllow?.length) || shell === "deny";
+  // An allowlist denies everything it does not name: v2 defaults an
+  // unmatched action to "ask", which a headless run cannot answer, so the
+  // denial must be explicit to be honest about what happened.
+  if (toolAllow?.length) {
+    for (const tool of OPENCODE_TOOLS) {
+      if (tool === "shell") continue; // the shell policy already decided this one
+      permissions.push({ action: tool, resource: "*", effect: toolAllow.includes(tool) ? "allow" : "deny" });
+    }
+  }
+
+  const needAgent = Boolean(ctx.systemInstructions?.trim());
   const agent = needAgent
     ? {
-        ...(ctx.systemInstructions?.trim() ? { prompt: ctx.systemInstructions } : {}),
+        prompt: ctx.systemInstructions,
+        // No `#variant` here: v2 does not parse it in the agent's model
+        // field, and the CLI `-m` selector wins over it anyway.
         ...(ctx.model ? { model: `${providerSlug(ctx.provider)}/${ctx.model.name}` } : {}),
-        ...(toolAllow?.length
-          ? {
-              tools: Object.fromEntries(
-                OPENCODE_TOOLS.map((tool) => [
-                  tool,
-                  (shell === "deny" && tool === "bash") ? false : toolAllow.includes(tool),
-                ])
-              ),
-            }
-          : shell === "deny"
-            ? { tools: { bash: false } }
-            : {}),
       }
     : undefined;
 
@@ -437,7 +515,7 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
     await ctx.emit(
       "log",
       {
-        line: "opencode runs headless and cannot answer 'ask' permission prompts — bash tool calls will be auto-rejected (set policy.shell to allow/deny, or policy.autoApprove)",
+        line: "opencode runs headless and cannot answer 'ask' permission prompts — shell tool calls will be rejected (set policy.shell to allow/deny, or policy.autoApprove)",
         kind: "config-warning",
         scope: "permission",
         shell,
@@ -462,9 +540,10 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
     buildOpenCodeConfig({
       provider: ctx.provider,
       models: ctx.providerModels ?? (ctx.model ? [ctx.model] : []),
-      permission: Object.keys(permission).length > 0 ? permission : undefined,
+      permissions,
       agent,
       builtinPassthrough,
+      containerized: Boolean(ctx.runtime.containerized),
     })
   );
 
@@ -485,7 +564,7 @@ async function prepareProviderConfig(ctx: RuntimeContext): Promise<boolean> {
       hasCustomHeaders: Boolean(ctx.provider.headers && Object.keys(ctx.provider.headers).length > 0),
       builtinPassthrough,
       shellPolicy: shell,
-      permission,
+      permissions,
       agentInjected: Boolean(agent),
     },
     { level: "info", source: "opencode" }
