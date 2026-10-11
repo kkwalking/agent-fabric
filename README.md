@@ -387,7 +387,7 @@ Git Credential 不会作为长期环境变量、命令参数或 Repository URL �
 * **SSH**：私钥 materialize 成 `0600` 的临时文件，通过 `core.sshCommand` 显式指定 `-i <key>`；始终 `StrictHostKeyChecking=yes`（host key 必须验证，缺省用宿主的 `~/.ssh/known_hosts`，绝不静默信任）；passphrase 通过 `SSH_ASKPASS_REQUIRE=force` 交付。
 * 一次 Git 操作结束后立即删除临时目录；push 需要凭据时再 materialize 一次。
 * **Agent 拿不到仓库写凭据**：Agent Runtime 的环境变量、工作目录与挂载里都没有它。
-* **脱敏**：所有生命周期事件与错误消息经过统一的 `SecretRedactor`，凭据值不会出现在 Log / Event / API Response / Runtime stdout-stderr / error / `.git/config` / task metadata 中（`packages/core/src/v11.test.ts` 与 `scripts/e2e-v11.sh` 都有断言）。
+* **脱敏**：所有生命周期事件与错误消息经过统一的 `SecretRedactor`，凭据值不会出现在 Log / Event / API Response / Runtime stdout-stderr / error / `.git/config` / task metadata 中（`packages/core/src/v11.test.ts` 与 `scripts/e2e-v11.sh` 都有断言）。**Run 事件流同样经过脱敏**：每个 Run 把该 Run 解析出的 Secret 值与 Provider API Key 注册进事件 redactor 后才持久化（`GET /api/runs/:id/events` 与 UI 读到的都是脱敏后的记录）——adapter 渲染一条带 `-e K=V` 的命令行、或 harness 回显环境变量，都不会把凭据写进事件日志。
 
 ### Task：从 Project 创建 Coding Task
 

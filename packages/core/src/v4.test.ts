@@ -673,6 +673,47 @@ test("v4 §30: keep-alive — same task reuses the container, another task does 
   }
 });
 
+test("v4 §28/§34: the provider key and task secrets never reach the run's event log", async () => {
+  const fx = makeFixtures();
+  const restore = useBins(fx);
+  const dumpPath = join(fx.dir, "leak-dump.jsonl");
+  const API_KEY = "sk-leak-canary-provider-key";
+  const SECRET_VALUE = "leak-canary-task-secret";
+  try {
+    const h = await freshHarness();
+    const { model, ws, runtime } = await setupStack(h, fx, dumpPath, {
+      containerized: true,
+      provider: { name: "Leak Prov", apiKey: API_KEY },
+    });
+    const secrets = new SecretService(h.store);
+    const secret = await secrets.create({ name: "TASK_TOKEN", value: SECRET_VALUE, scope: "runtime" });
+
+    const { run } = await h.runService.submit({
+      prompt: "Reply OK.",
+      runtimeId: runtime.id,
+      modelId: model.id,
+      workspaceId: ws.id,
+      secretIds: [secret.id],
+      lifecycle: { mode: "keep-alive", idleTimeoutMs: 60_000 },
+    });
+    const settled = await waitForRun(h.runService, run.id);
+    assert.equal(settled.status, "completed", settled.error ?? "run completes");
+
+    // The docker invocations carry both secrets as `-e K=V` argv, and the
+    // adapter emits that argv as a shell.command event — which is served
+    // by GET /api/runs/:id/events and rendered in the UI. The values must
+    // be redacted there (v11 §34: nothing in the event log is credential
+    // material).
+    const events = JSON.stringify(await h.runService.events(run.id));
+    assert.equal(events.includes(API_KEY), false, "the provider API key is not in the event log");
+    assert.equal(events.includes(SECRET_VALUE), false, "the task secret is not in the event log");
+    // The redaction replaced the value; it did not drop the event.
+    assert.match(events, /shell\.command/, "the launch command is still recorded (redacted)");
+  } finally {
+    restore();
+  }
+});
+
 test("v4 §30: a keep-alive run without containerCommand execs the harness binary, not its flags", async () => {
   const fx = makeFixtures();
   // A harness *image* (no configured containerCommand): the harness binary

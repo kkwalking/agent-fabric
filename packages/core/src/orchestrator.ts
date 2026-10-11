@@ -1,5 +1,6 @@
 import { Store, newId } from "./store.js";
 import { DomainError } from "./errors.js";
+import { SecretRedactor } from "./redaction.js";
 import { EventBus } from "./eventbus.js";
 import { existsSync } from "node:fs";
 import {
@@ -2477,6 +2478,14 @@ export class RunService {
       AGENTFABRIC_PROVIDER: provider?.name ?? "",
     };
 
+    // Every event the adapter emits is persisted and served by the API —
+    // so credential material must never enter one (v11 §34). The run's
+    // resolved secrets and the provider API key are registered here: a
+    // harness that echoes its environment, or any adapter that renders an
+    // env-carrying command line, must not leak them into the event log.
+    // Deliberately NOT the whole env: its non-secret entries (ids, paths,
+    // model names) legitimately appear in event payloads.
+    const eventRedactor = new SecretRedactor([opts.providerApiKey, ...secrets.map((s) => s.value)]);
     const emit = async (
       type: EventType,
       data: Record<string, unknown> = {},
@@ -2488,7 +2497,7 @@ export class RunService {
         seq: store.nextSeq(),
         type,
         timestamp: now(),
-        data,
+        data: eventRedactor.redactValue(data),
         level: eventOpts?.level,
         source: eventOpts?.source ?? "core",
       };
