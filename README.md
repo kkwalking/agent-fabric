@@ -637,9 +637,10 @@ Publishing    git-push-failed · git-push-auth-failed · git-push-rejected · re
               publish-revision-missing · workspace-diverged-after-finalization
 Platform      project-not-found · project-invalid · credential-not-found
               task-not-found · task-state-invalid · task-busy · policy-denied · supervisor-restarted
+              config-invalid
 ```
 
-HTTP 映射：隔离/授权类失败（`runtime-not-isolated`、`credential-host-mismatch`、`credential-transport-mismatch`、`secret-scope-not-allowed`、`validation-secret-not-allowed`、`policy-denied`）为 **403**；并发/状态冲突类（`workspace-diverged-after-finalization`、`publish-revision-missing`、`workspace-locked`、`remote-branch-conflict`、`task-busy`、`task-state-invalid`、`branch-conflict`）为 **409**；`validation-runtime-*` 与 `runtime-*` 为 **502**。
+HTTP 映射：隔离/授权类失败（`runtime-not-isolated`、`credential-host-mismatch`、`credential-transport-mismatch`、`secret-scope-not-allowed`、`validation-secret-not-allowed`、`policy-denied`）为 **403**；并发/状态冲突类（`workspace-diverged-after-finalization`、`publish-revision-missing`、`workspace-locked`、`remote-branch-conflict`、`task-busy`、`task-state-invalid`、`branch-conflict`）为 **409**；`validation-runtime-*` 与 `runtime-*` 为 **502**；`config-invalid` 为 **400**。
 
 请求体层面的客户端错误也保留其状态码：请求体不是合法 JSON（400）、超过体积上限（413）等由 body-parser 拒绝的请求，响应 `code` 为 `invalid-request` 而非把客户端错误报成 500。API 路径的认证判定大小写不敏感（Express 路由本身大小写不敏感，`/API/…` 与 `/api/…` 是同一路由，认证必须一致）。
 
@@ -928,7 +929,8 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 * **载荷来自记录本身**：`event`、`taskId`、`status`、`phase`、逐阶段 `stages`（原样拷贝，不重算）、`failure{stage,code,message}`、`finalCommitSha`、`workingBranch`、`durationMs`、`link`（`/tasks/<id>`，主机名由接收方决定）。instruction 默认截断到 300 字符并置 `instructionTruncated`。
 * **通知永远不能改变 Task 的结果**：投递发生在终态写入**之后**，且 `deliverTaskNotification` 不抛异常——失败以 `DeliveryResult` 返回，写成 Run 上的 `notification-failed` 事件（带 `attempts` / `errorKind`）。Webhook 挂掉不会让任务变 failed。
 * **重试策略**：网络错误、超时、429、5xx 重试；其余 4xx（token 错、路径错）立即放弃——重复不会让它变对。
-* **URL 是密钥**：事件、日志、`GET /api/config` 里一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 与 Settings 页都是「读出整份 → 改一个字段 → 整份写回」）若收到恰好等于脱敏形式的 URL，按「未改动」处理并保留原值——占位符本身是合法 URL，原样入库会静默把真 webhook 换成它。
+* **URL 与 Header 都是密钥**：事件、日志、`GET /api/config` 里 URL 一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉；`headers` 的值同样全部替换为 `***`（webhook 常用 `Authorization: Bearer …` 认证），只保留 header 名。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 与 Settings 页都是「读出整份 → 改一个字段 → 整份写回」）若收到恰好等于脱敏形式的 URL 或 header 值，按「未改动」处理并保留原值——占位符本身是合法 URL / 合法字符串，原样入库会静默把真 webhook 换成它；一个被打上 `***` 掩码、但存储里并不存在的 header 名按 `config-invalid` 明确报错（400），而不是把掩码存进去。
+* **配置写入口做形状校验**：`notifications` 不是对象、`url` 不是字符串、`headers` 的值不是字符串都会以 `config-invalid`（HTTP 400）拒绝，存储中的原配置保持不变——一个被写坏的配置会让之后每次读取与投递都失败，必须在入口挡住。
 
 ## 自动重试（环境类失败）
 
@@ -970,7 +972,7 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 * API Key 通过 `Provider.apiKeySecretId` 引用 Secret，Provider 记录中只有掩码；`GET /api/providers/:id/api-key` 需带 `X-AgentFabric-Reveal: 1` 请求头确认，返回的明文不进入任何日志。
 * Git 凭据只在单次 Git 操作期间 materialize 到 `AGENTFABRIC_DATA_DIR/git-credentials/<op>-<random>`（操作结束立即删除）：HTTPS 走 `GIT_ASKPASS` + 子进程环境变量，SSH 走 `0600` 私钥文件 + `core.sshCommand`（`StrictHostKeyChecking=yes`）。远端 URL 始终不含凭据，`.git/config` 里也没有。
 * Skill / MCP provisioning 落在 `AGENTFABRIC_DATA_DIR/provisioning/<runId>`，Run 结束即删除；生成的 MCP 配置是 `0600` 文件（可能含注入的 Secret 值），同样不进入日志与 API 响应。
-* 通知 Webhook 的 URL 本身即凭据（Slack Incoming Webhook 的路径就是 token），因此在事件、日志与 `GET /api/config` 中一律脱敏为 `scheme://host/***`；配置错误的通知在 Run 上以 `notification-failed` 事件可见，绝不静默丢弃。
+* 通知 Webhook 的 URL 与 header 值本身即凭据（Slack Incoming Webhook 的路径就是 token），因此在事件、日志与 `GET /api/config` 中一律脱敏（URL → `scheme://host/***`，header 值 → `***`）；配置错误的通知在 Run 上以 `notification-failed` 事件可见，绝不静默丢弃。
 * 存储层只保存生成时算出来的结果，读路径不重新解析、不重新投影、不做格式修补。
 
 ## CLI
@@ -1145,7 +1147,7 @@ v11 hardening 的专项测试：
 | `src/notifications.test.ts` | 载荷投影、退避与重试策略、URL 脱敏、配置错误不抛异常（`errorKind: "config"`） |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
 
-`packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、api-key reveal 确认、config 往返（脱敏 URL 不被写回覆盖）与优雅停机。
+`packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、大小写变体的 API 路径同样要求认证、api-key reveal 确认、config 往返（脱敏 URL 与 header 掩码不被写回覆盖；掩码但无存储值 → 400 `config-invalid`；畸形 JSON → 400 `invalid-request`）与优雅停机。
 
 端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
 

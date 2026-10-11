@@ -109,12 +109,19 @@ const corsOptions = {
 };
 
 /**
+ * The placeholder the config read returns in place of every stored secret
+ * (webhook URL path, header values). A write that sends it back verbatim
+ * means "unchanged" — see `configFromClient`. Same token `maskSecret` uses.
+ */
+const REDACTED_SECRET = "***";
+
+/**
  * Sets the browser's API credential as a middleware. Only plain page loads
  * get the cookie — API responses and static assets do not need it, and not
  * re-setting it keeps every API response free of credential material.
  */
 const authCookie: (token: string) => RequestHandler = (token) => (req, res, next) => {
-  if (req.method === "GET" && !req.path.startsWith("/api")) {
+  if (req.method === "GET" && !isApiPath(req.path)) {
     res.cookie(TOKEN_COOKIE, token, { httpOnly: true, sameSite: "strict", path: "/" });
   }
   next();
@@ -1187,21 +1194,25 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /**
    * A webhook URL *is* its credential (Slack's incoming webhooks are the path
    * itself), so the read is redacted the same way `DeliveryResult.url` is.
-   * The write returns the same redacted shape — echoing the URL back would
-   * put the secret in the browser for no benefit, since the caller just sent
-   * it. `urlSet` tells a client whether a webhook is configured without
-   * revealing which one.
+   * Header values are credentials too — a webhook commonly authenticates with
+   * `Authorization: Bearer …` — so every value is replaced by a fixed mask;
+   * header *names* survive, since they are routing information a settings UI
+   * needs to display. The write returns the same redacted shape — echoing the
+   * URL back would put the secret in the browser for no benefit, since the
+   * caller just sent it. `urlSet` tells a client whether a webhook is
+   * configured without revealing which one.
    */
   const configForClient = () => {
     const config = store.config();
     const notifications = config.notifications;
     if (!notifications) return config;
-    const { url, ...rest } = notifications;
+    const { url, headers, ...rest } = notifications;
     return {
       ...config,
       notifications: {
         ...rest,
         ...(url ? { url: redactWebhookUrl(url), urlSet: true } : { urlSet: false }),
+        ...(headers ? { headers: Object.fromEntries(Object.keys(headers).map((name) => [name, REDACTED_SECRET])) } : {}),
       },
     };
   };
@@ -1211,32 +1222,84 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
    *
    * Every config client edits by round-trip — `af config <key> <value>` and
    * the Settings page both GET the document, change one field and PUT the
-   * whole thing back — so the redacted URL comes back in the body. Storing it
-   * verbatim would replace the real webhook with the literal
-   * `https://host/***`, silently: the placeholder is a syntactically valid
-   * URL, so nothing downstream would complain. An incoming URL that is
-   * exactly the redacted form of the stored one therefore means "unchanged";
-   * anything else is stored as sent. `urlSet` is a read-side projection and
-   * is never persisted.
+   * whole thing back — so the redacted values come back in the body. Storing
+   * them verbatim would replace the real secrets with placeholders, silently:
+   * the URL placeholder is a syntactically valid URL and the header mask is
+   * just a string, so nothing downstream would complain. An incoming value
+   * that is exactly the redacted form of the stored one therefore means
+   * "unchanged"; anything else is stored as sent. `urlSet` is a read-side
+   * projection and is never persisted.
+   *
+   * The shape is validated here rather than trusted: a non-string URL (or a
+   * non-object `notifications`) would otherwise be persisted and poison every
+   * later read (`redactWebhookUrl` calls `url.replace`) and the notification
+   * delivery path. Throwing makes the PUT answer 400 while the stored config
+   * stays untouched.
    */
   const configFromClient = (body: unknown): AppConfig => {
     const incoming = (body ?? {}) as Record<string, unknown>;
     const next = incoming.notifications;
-    if (!next || typeof next !== "object") return incoming as AppConfig;
+    if (next === undefined || next === null) return incoming as AppConfig;
+    if (typeof next !== "object" || Array.isArray(next)) {
+      throw new DomainError("config-invalid", "notifications must be an object");
+    }
     const { urlSet: _urlSet, ...notifications } = next as Record<string, unknown>;
-    const stored = store.config().notifications?.url;
+    const storedNotifications = store.config().notifications;
+    const stored = storedNotifications?.url;
+    if (notifications.url !== undefined && typeof notifications.url !== "string") {
+      throw new DomainError("config-invalid", "notifications.url must be a string");
+    }
     const url =
       typeof notifications.url === "string" && stored && notifications.url === redactWebhookUrl(stored)
         ? stored
         : notifications.url;
-    return { ...incoming, notifications: { ...notifications, ...(url !== undefined ? { url } : {}) } } as AppConfig;
+    const headers = notifications.headers;
+    let restoredHeaders: Record<string, string> | undefined;
+    if (headers !== undefined) {
+      if (typeof headers !== "object" || headers === null || Array.isArray(headers)) {
+        throw new DomainError("config-invalid", "notifications.headers must be an object of strings");
+      }
+      const storedHeaders = storedNotifications?.headers ?? {};
+      restoredHeaders = Object.fromEntries(
+        Object.entries(headers as Record<string, unknown>).map(([name, value]) => {
+          if (typeof value !== "string") {
+            throw new DomainError("config-invalid", `notifications.headers["${name}"] must be a string`);
+          }
+          // The mask means "unchanged": restore the stored value for this
+          // exact header name (matched case-insensitively, like HTTP).
+          if (value === REDACTED_SECRET) {
+            const storedName = Object.keys(storedHeaders).find((k) => k.toLowerCase() === name.toLowerCase());
+            if (storedName === undefined) {
+              throw new DomainError(
+                "config-invalid",
+                `notifications.headers["${name}"] is masked but no stored value exists — send the real value or omit the header`
+              );
+            }
+            return [name, storedHeaders[storedName]];
+          }
+          return [name, value];
+        })
+      );
+    }
+    return {
+      ...incoming,
+      notifications: {
+        ...notifications,
+        ...(url !== undefined ? { url } : {}),
+        ...(restoredHeaders !== undefined ? { headers: restoredHeaders } : {}),
+      },
+    } as AppConfig;
   };
 
   app.get("/api/config", (_req, res) => ok(res, configForClient()));
   app.put(
     "/api/config",
     ah(async (req, res) => {
-      await store.updateConfig(configFromClient(req.body));
+      try {
+        await store.updateConfig(configFromClient(req.body));
+      } catch (e) {
+        return failDomain(res, e);
+      }
       ok(res, configForClient());
     })
   );

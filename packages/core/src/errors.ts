@@ -74,6 +74,7 @@ export type ErrorCode =
   | "secret-key-invalid"
   | "secret-decrypt-failed"
   /* Platform */
+  | "config-invalid"
   | "supervisor-restarted"
   | "internal-error";
 

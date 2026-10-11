@@ -301,6 +301,13 @@ function positiveInt(value: number | undefined, fallback: number): number {
 
 /** Validates the configured URL. Returns it trimmed; throws when unusable. */
 function requireWebhookUrl(config: NotificationConfig): string {
+  // A non-string URL (a hand-edited store file, a client that bypassed the
+  // config write validation) must be rejected here, not crash later inside
+  // `redactWebhookUrl`'s `url.replace` — a throw in the reporting path would
+  // mask the very problem it is reporting.
+  if (config.url !== undefined && typeof config.url !== "string") {
+    throw new NotificationError("notification-config-invalid", "notifications.url is not a string");
+  }
   const url = config.url?.trim();
   if (!url) {
     throw new NotificationError(
@@ -620,7 +627,9 @@ export async function deliverTaskNotification(
     return {
       delivered: false,
       event,
-      url: config?.url ? redactWebhookUrl(config.url) : "***",
+      // A URL that is not even a string cannot be redacted; reporting must
+      // not throw while reporting a configuration problem.
+      url: typeof config?.url === "string" && config.url ? redactWebhookUrl(config.url) : "***",
       attempts: 0,
       error: err instanceof Error ? err.message : String(err),
       errorKind: "config",

@@ -235,6 +235,55 @@ describe("config round-trip", () => {
     assert.match(db, /other-hook/);
     assert.equal(db.includes("supersecret"), false, "the old URL was replaced, not kept alongside");
   });
+
+  test("header values are redacted on read and restored on round-trip", async () => {
+    // A webhook commonly authenticates with `Authorization: Bearer …` — a
+    // header value is credential material, so the read must not echo it.
+    await put({
+      notifications: { enabled: true, url: WEBHOOK, headers: { Authorization: "Bearer hdr-secret-token", "X-Route": "team-a" } },
+    });
+    const fetched = await get();
+    assert.equal(fetched.notifications.headers.Authorization, "***");
+    assert.equal(fetched.notifications.headers["X-Route"], "***");
+
+    // The settings round-trip sends the masks back; the stored values must
+    // survive, matched by header name.
+    fetched.notifications.timeoutMs = 999;
+    const res = await put(fetched);
+    assert.equal(res.status, 200);
+    const db = readFileSync(join(running.dataDir, "db.json"), "utf8");
+    assert.match(db, /hdr-secret-token/, "the real header value survived the round-trip");
+    assert.match(db, /team-a/);
+    assert.equal(db.includes('"Authorization":"***"'), false, "the mask was never persisted");
+
+    // A genuinely new header value replaces the stored one.
+    await put({ notifications: { enabled: true, url: WEBHOOK, headers: { Authorization: "Bearer new-token" } } });
+    const db2 = readFileSync(join(running.dataDir, "db.json"), "utf8");
+    assert.match(db2, /new-token/);
+    assert.equal(db2.includes("hdr-secret-token"), false);
+  });
+
+  test("a masked header with no stored value is refused, not stored as the mask", async () => {
+    const res = await put({ notifications: { enabled: true, url: WEBHOOK, headers: { "X-New": "***" } } });
+    assert.equal(res.status, 400);
+    assert.equal(((await res.json()) as { code?: string }).code, "config-invalid");
+  });
+
+  test("a non-string URL or malformed notifications shape is refused", async () => {
+    for (const body of [
+      { notifications: { enabled: true, url: 12345 } },
+      { notifications: "enabled" },
+      { notifications: { enabled: true, headers: "nope" } },
+    ]) {
+      const res = await put(body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+      assert.equal(((await res.json()) as { code?: string }).code, "config-invalid");
+    }
+    // The refused writes must not have poisoned the stored config: the
+    // read still answers with the previous, valid document.
+    const after = await get();
+    assert.equal(after.notifications.urlSet, true);
+  });
 });
 
 describe("token storage", () => {
