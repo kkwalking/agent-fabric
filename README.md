@@ -182,7 +182,7 @@ Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kin
 | 模式 | 行为 |
 | --- | --- |
 | `ephemeral`（默认） | 每个 Run 新建容器，Run 结束/失败/取消/超时后销毁 |
-| `keep-alive` | Run 结束后容器保留 `idleTimeoutMs`（默认 10 分钟），期间同 Runtime+Workspace 的下一个 Run 通过 `docker exec` 复用；空闲超时自动销毁（重启后由容器 label 恢复定时器，不泄漏） |
+| `keep-alive` | Run 结束后容器保留 `idleTimeoutMs`（默认 10 分钟），期间同 Runtime+Workspace 的下一个 Run 通过 `docker exec` 复用；空闲超时自动销毁。重启后从**持久记录**恢复剩余窗口：取最新使用该容器的 Run 的结束时间 + 它的 lifecycle idle timeout（label 创建后不可变、复用容器仍带首次创建的 Run，只用于识别身份，不作为时间来源）；没有已结束 Run 背书（进程死于 Run 中途）或最新 Run 是取消/超时的容器直接销毁，绝不交给后续 Run 复用（v4 §24）。恢复只处理 `agentfabric.task` 指向本部署已知 Task 的容器——`docker ps` 是 daemon 级的，共享 daemon 上其他部署的容器既不收养也不销毁 |
 | `persistent` | 长期存活容器（Daemon 场景），容器不被销毁 |
 
 生命周期属于 **Task**，在创建 Task 时选定，此后**不可修改**：该 Task 的每一个 Run（首轮、continue、retry、handoff）都继承同一个策略，不存在中途漂移。它既不是 Runtime 的属性（同一个 Runtime 服务需求不同的 Task），也不是按 Run 的覆盖项（下一轮悄悄换回另一种策略，正是这个模型要消除的意外）。

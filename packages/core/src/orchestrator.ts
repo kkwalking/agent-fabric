@@ -40,6 +40,7 @@ import {
   DEFAULT_KEEP_ALIVE_IDLE_MS,
   recoverKeepAliveContainers,
   type ContainerOps,
+  type RecoverableContainer,
 } from "./lifecycle.js";
 import { addUsage, emptyUsage, estimateCost } from "./cost.js";
 import { buildProxyEnv } from "./proxy.js";
@@ -470,12 +471,76 @@ export class RunService {
   }
 
   /**
-   * Re-arm keep-alive destroy timers from container labels after a
-   * server restart so retained containers never leak.
+   * Re-arm keep-alive destroy timers after a server restart so retained
+   * containers never leak. Container labels identify the containers, but
+   * they are written at creation and never change — a reused keep-alive
+   * container still carries the *first* run's labels. The retention window
+   * therefore comes from the newest Run record that references the
+   * container: its end time plus the lifecycle that run executed under.
+   *
+   * A container whose backing run never ended (the process died mid-run),
+   * or whose newest run is cancelled/timed out (such a run destroys its
+   * container, so one still listed means the destroy did not land), is
+   * destroyed on sight: its harness state is mid-flight and v4 §24 forbids
+   * handing that to a follow-up run. The same goes for a container that
+   * no run references at all — the process died between creating it and
+   * recording it.
+   *
+   * The docker filter is daemon-wide, not store-scoped, so only containers
+   * whose `agentfabric.task` label names a Task this store knows are
+   * touched — the same rule the shutdown teardown applies: another
+   * deployment's containers on a shared daemon are never adopted, and
+   * never destroyed.
    */
   async recoverKeepAliveContainers(): Promise<void> {
     if (!this.containerOps.listKeepAlive) return;
-    await recoverKeepAliveContainers(this.leaseManager, await this.containerOps.listKeepAlive());
+    const runs = this.store.list<Run>("runs");
+    const ownedTaskIds = new Set(this.taskService().list().map((t) => t.id));
+    const containers: RecoverableContainer[] = [];
+    let foreign = 0;
+    for (const info of await this.containerOps.listKeepAlive()) {
+      const labels = info.labels ?? {};
+      if (labels["agentfabric.keepalive"] !== "true") continue;
+      const taskId = labels["agentfabric.task"];
+      if (!taskId || !ownedTaskIds.has(taskId)) {
+        foreign += 1;
+        continue;
+      }
+      const backing = runs
+        .filter((r) => r.containerId === info.containerId)
+        .sort((a, b) => (a.endTime ?? a.updatedAt).localeCompare(b.endTime ?? b.updatedAt))
+        .at(-1);
+      if (!backing?.endTime || backing.status === "cancelled" || backing.status === "timeout") {
+        // Destroying is best-effort here so one unremovable container does
+        // not keep the rest of the recovery from being armed; the failure
+        // is reported, not swallowed.
+        try {
+          await this.containerOps.destroy(info.containerId);
+        } catch (err) {
+          console.error(
+            `[agent-fabric] failed to destroy non-reusable keep-alive container ${info.containerId}:`,
+            err instanceof Error ? err.message : err
+          );
+        }
+        continue;
+      }
+      const idleTimeoutMs = backing.lifecycle?.idleTimeoutMs ?? DEFAULT_KEEP_ALIVE_IDLE_MS;
+      containers.push({
+        containerId: info.containerId,
+        name: info.name,
+        labels,
+        runId: backing.id,
+        idleTimeoutMs,
+        retainedAt: backing.endTime,
+        expiresAt: new Date(Date.parse(backing.endTime) + idleTimeoutMs).toISOString(),
+      });
+    }
+    if (foreign > 0) {
+      console.error(
+        `[agent-fabric] ${foreign} keep-alive container(s) belong to a Task this deployment does not know; leaving them untouched`
+      );
+    }
+    await recoverKeepAliveContainers(this.leaseManager, containers);
   }
 
   /* ---------------- supervisor-facing execution hooks (v11 §13–§15) ---------------- */
@@ -2034,7 +2099,15 @@ export class RunService {
     let reusableContainer: ReusableContainer | undefined;
     if (lifecycle.mode === "keep-alive") {
       const lease = this.leaseManager.acquire(runtime.id, workspace?.id, task.id);
-      if (lease) reusableContainer = { containerId: lease.containerId, name: lease.containerName };
+      if (lease) {
+        reusableContainer = { containerId: lease.containerId, name: lease.containerName };
+        // Record the reuse before executing: if this process dies mid-run,
+        // recovery resolves the container's retention window from the
+        // *newest* run referencing it — without this write, that would
+        // still be the creator run, and the container would be adopted
+        // with a window it no longer has.
+        await this.store.update<Run>("runs", runId, { containerId: lease.containerId, updatedAt: now() });
+      }
     }
 
     // Abort controller for cancel/timeout.

@@ -45,27 +45,42 @@ export interface ManagedContainerInfo {
 }
 
 /**
- * Re-arms keep-alive leases from container labels after a restart:
- * containers whose idle timeout already passed are destroyed, the rest
- * get fresh timers so idle containers never leak.
+ * A listed keep-alive container whose retention window the caller resolved
+ * from the durable Run record. The labels only ever carry identity (runtime /
+ * workspace / task) — correct forever, because a keep-alive container is
+ * scoped to one task (v4 §21) — while the *window* cannot live in a label:
+ * labels are written at creation and immutable, but the container is
+ * retained again by every later run that reuses it.
  */
-export async function recoverKeepAliveContainers(manager: ContainerLeaseManager, infos: ManagedContainerInfo[]): Promise<void> {
-  const leases: ContainerLease[] = [];
-  for (const info of infos) {
+export interface RecoverableContainer extends ManagedContainerInfo {
+  /** The newest Run that used this container; its window is the truth. */
+  runId: ID;
+  idleTimeoutMs: number;
+  retainedAt: string;
+  expiresAt: string;
+}
+
+/**
+ * Re-arms keep-alive leases after a restart: containers whose idle
+ * timeout already passed are destroyed, the rest get timers for their
+ * *remaining* window so idle containers never leak — and are never
+ * granted more time than they actually have.
+ */
+export async function recoverKeepAliveContainers(manager: ContainerLeaseManager, containers: RecoverableContainer[]): Promise<void> {
+  const leases: ContainerLease[] = containers.map((info) => {
     const labels = info.labels ?? {};
-    if (labels["agentfabric.keepalive"] !== "true") continue;
-    leases.push({
+    return {
       containerId: info.containerId,
-      containerName: info.name ?? labels["agentfabric.name"],
+      containerName: info.name,
       runtimeId: labels["agentfabric.runtime"] ?? "unknown",
       workspaceId: labels["agentfabric.workspace"] || undefined,
       taskId: labels["agentfabric.task"] || undefined,
-      runId: labels["agentfabric.run"] ?? "unknown",
-      idleTimeoutMs: DEFAULT_KEEP_ALIVE_IDLE_MS,
-      retainedAt: labels["agentfabric.retained"] ?? new Date().toISOString(),
-      expiresAt: labels["agentfabric.expires"] ?? new Date(Date.now() + DEFAULT_KEEP_ALIVE_IDLE_MS).toISOString(),
-    });
-  }
+      runId: info.runId,
+      idleTimeoutMs: info.idleTimeoutMs,
+      retainedAt: info.retainedAt,
+      expiresAt: info.expiresAt,
+    };
+  });
   await manager.recover(leases);
 }
 

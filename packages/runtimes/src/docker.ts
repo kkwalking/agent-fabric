@@ -86,8 +86,11 @@ export function createDockerContainerOps(): ContainerOps {
       await execDocker(["rm", "-f", containerId], 30_000);
     },
     async listKeepAlive(): Promise<ManagedContainerInfo[]> {
+      // `--no-trunc`: the default `{{.ID}}` is the 12-char short id, but a
+      // Run record carries the full id from `docker run` / the cidfile —
+      // recovery matches the two, so both must be full ids.
       const { code, stdout } = await execDocker(
-        ["ps", "-a", "--filter", "label=agentfabric.keepalive=true", "--format", "{{.ID}}\t{{.Names}}\t{{.Labels}}"],
+        ["ps", "-a", "--no-trunc", "--filter", "label=agentfabric.keepalive=true", "--format", "{{.ID}}\t{{.Names}}\t{{.Labels}}"],
         30_000
       );
       if (code !== 0) return [];
