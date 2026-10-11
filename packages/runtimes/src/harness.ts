@@ -1,5 +1,6 @@
 import type { RuntimeContext, RuntimeResult, RunEvent, Usage } from "@agentfabric/core";
 import { selectBackend } from "./backend.js";
+import { fireAndForget } from "./fireAndForget.js";
 
 /**
  * The shared harness execution loop (v2 §8, v3 §7): one code path for
@@ -115,7 +116,7 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
       for await (const line of stream) {
         if (!line.trim()) continue;
         if (stderr) {
-          void ctx.log(line, "warn");
+          fireAndForget("harness stderr log", ctx.log(line, "warn"));
           continue;
         }
         // Capture the harness's own session id (opaque to AgentFabric).
@@ -126,18 +127,21 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
           const usage = opts.parseUsage(line);
           if (usage) {
             ctx.recordUsage(usage);
-            void ctx.emit(
-              "usage.updated",
-              {
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                cachedTokens: usage.cachedTokens ?? 0,
-                reasoningTokens: usage.reasoningTokens ?? 0,
-                modelRequests: usage.modelRequests,
-                cost: usage.estimatedCost,
-                models: usage.byModel ? Object.keys(usage.byModel) : undefined,
-              },
-              { level: "debug", source: opts.source }
+            fireAndForget(
+              "usage.updated event",
+              ctx.emit(
+                "usage.updated",
+                {
+                  inputTokens: usage.inputTokens,
+                  outputTokens: usage.outputTokens,
+                  cachedTokens: usage.cachedTokens ?? 0,
+                  reasoningTokens: usage.reasoningTokens ?? 0,
+                  modelRequests: usage.modelRequests,
+                  cost: usage.estimatedCost,
+                  models: usage.byModel ? Object.keys(usage.byModel) : undefined,
+                },
+                { level: "debug", source: opts.source }
+              )
             );
           }
         }
@@ -148,7 +152,7 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
             const detail = m.data?.error ?? m.data?.message;
             if (typeof detail === "string" && detail.trim()) lastRuntimeError = detail;
           }
-          void ctx.emit(m.type, m.data, { level: m.level, source: opts.source });
+          fireAndForget("harness event", ctx.emit(m.type, m.data, { level: m.level, source: opts.source }));
         }
       }
     })().catch(() => {

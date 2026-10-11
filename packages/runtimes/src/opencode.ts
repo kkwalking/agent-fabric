@@ -10,6 +10,7 @@ import type {
   Usage,
 } from "@agentfabric/core";
 import { runHarnessCommand } from "./harness.js";
+import { fireAndForget } from "./fireAndForget.js";
 import {
   buildOpenCodeConfig,
   OPENCODE_KNOWN_PROVIDER_IDS,
@@ -355,16 +356,19 @@ function warnUnsupportedParameters(ctx: RuntimeContext): void {
   const { unsupported } = splitModelParameters(ctx.model.parameters, OPENCODE_SUPPORTED_MODEL_PARAMETERS);
   const keys = Object.keys(unsupported);
   if (keys.length === 0) return;
-  void ctx.emit(
-    "log",
-    {
-      line: `opencode ignores unsupported model parameters: ${keys.join(", ")} (supported: ${OPENCODE_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
-      kind: "config-warning",
-      scope: "model-parameters",
-      unsupported: keys,
-      supported: [...OPENCODE_SUPPORTED_MODEL_PARAMETERS],
-    },
-    { level: "warn", source: "opencode" }
+  fireAndForget(
+    "opencode parameter warning",
+    ctx.emit(
+      "log",
+      {
+        line: `opencode ignores unsupported model parameters: ${keys.join(", ")} (supported: ${OPENCODE_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
+        kind: "config-warning",
+        scope: "model-parameters",
+        unsupported: keys,
+        supported: [...OPENCODE_SUPPORTED_MODEL_PARAMETERS],
+      },
+      { level: "warn", source: "opencode" }
+    )
   );
 }
 

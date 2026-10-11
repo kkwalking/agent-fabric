@@ -11,6 +11,7 @@ import type {
   Usage,
 } from "@agentfabric/core";
 import { runHarnessCommand } from "./harness.js";
+import { fireAndForget } from "./fireAndForget.js";
 import {
   piAgentDir,
   providerSlug,
@@ -421,16 +422,19 @@ function warnUnsupportedParameters(ctx: RuntimeContext): void {
   const { unsupported } = splitModelParameters(ctx.model.parameters, PI_SUPPORTED_MODEL_PARAMETERS);
   const keys = Object.keys(unsupported);
   if (keys.length === 0) return;
-  void ctx.emit(
-    "log",
-    {
-      line: `pi ignores unsupported model parameters: ${keys.join(", ")} (supported: ${PI_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
-      kind: "config-warning",
-      scope: "model-parameters",
-      unsupported: keys,
-      supported: [...PI_SUPPORTED_MODEL_PARAMETERS],
-    },
-    { level: "warn", source: "pi" }
+  fireAndForget(
+    "pi parameter warning",
+    ctx.emit(
+      "log",
+      {
+        line: `pi ignores unsupported model parameters: ${keys.join(", ")} (supported: ${PI_SUPPORTED_MODEL_PARAMETERS.join(", ")})`,
+        kind: "config-warning",
+        scope: "model-parameters",
+        unsupported: keys,
+        supported: [...PI_SUPPORTED_MODEL_PARAMETERS],
+      },
+      { level: "warn", source: "pi" }
+    )
   );
 }
 

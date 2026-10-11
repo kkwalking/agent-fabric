@@ -12,6 +12,7 @@ import type {
   RuntimeContext,
   RuntimeResult,
 } from "@agentfabric/core";
+import { fireAndForget } from "./fireAndForget.js";
 
 export interface DockerRunOptions {
   image: string;
@@ -194,7 +195,7 @@ export async function runDockerContainer(
       const lines = stdoutBuf.split("\n");
       stdoutBuf = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) void ctx.emit("shell.output", { line, stream: "stdout" });
+        if (line.trim()) fireAndForget("container stdout event", ctx.emit("shell.output", { line, stream: "stdout" }));
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -202,7 +203,7 @@ export async function runDockerContainer(
       const lines = stderrBuf.split("\n");
       stderrBuf = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) void ctx.log(line, "warn");
+        if (line.trim()) fireAndForget("container stderr log", ctx.log(line, "warn"));
       }
     });
 
@@ -356,13 +357,13 @@ export async function execDockerInContainer(
       stdoutBuf += chunk.toString();
       const lines = stdoutBuf.split("\n");
       stdoutBuf = lines.pop() ?? "";
-      for (const line of lines) if (line.trim()) void ctx.emit("shell.output", { line, stream: "stdout" });
+      for (const line of lines) if (line.trim()) fireAndForget("container stdout event", ctx.emit("shell.output", { line, stream: "stdout" }));
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBuf += chunk.toString();
       const lines = stderrBuf.split("\n");
       stderrBuf = lines.pop() ?? "";
-      for (const line of lines) if (line.trim()) void ctx.log(line, "warn");
+      for (const line of lines) if (line.trim()) fireAndForget("container stderr log", ctx.log(line, "warn"));
     });
     child.on("error", (err) => {
       ctx.signal.removeEventListener("abort", onAbort);
