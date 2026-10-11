@@ -121,15 +121,27 @@ export function RunDetailView({ runId }: { runId: string }) {
   }, [runId]);
 
   // Continuity detail: handoffs, native session reference, native state.
+  // Guarded against stale responses: switching runs quickly would otherwise
+  // let the previous run's slower fetch resolve last and overwrite the newly
+  // selected run's continuity data.
   useEffect(() => {
-    if (run?.previousHandoffId) get<any>(`/api/handoffs/${run.previousHandoffId}`).then(setPreviousHandoff).catch(() => {});
-    else setPreviousHandoff(null);
-    if (run?.generatedHandoffId) get<any>(`/api/handoffs/${run.generatedHandoffId}`).then(setGeneratedHandoff).catch(() => {});
-    else setGeneratedHandoff(null);
-    if (run?.runtimeSessionRefId) get<any>(`/api/runtime-sessions/${run.runtimeSessionRefId}`).then(setSessionRef).catch(() => {});
-    else setSessionRef(null);
-    if (run?.nativeStateId) get<any>(`/api/native-states/${run.nativeStateId}`).then(setNativeState).catch(() => {});
-    else setNativeState(null);
+    let alive = true;
+    const set = <T,>(setter: (v: T | null) => void, id: string | undefined, path: string) => {
+      if (!id) {
+        setter(null);
+        return;
+      }
+      get<T>(`${path}/${id}`)
+        .then((v) => alive && setter(v))
+        .catch(() => {});
+    };
+    set(setPreviousHandoff, run?.previousHandoffId, "/api/handoffs");
+    set(setGeneratedHandoff, run?.generatedHandoffId, "/api/handoffs");
+    set(setSessionRef, run?.runtimeSessionRefId, "/api/runtime-sessions");
+    set(setNativeState, run?.nativeStateId, "/api/native-states");
+    return () => {
+      alive = false;
+    };
   }, [run?.previousHandoffId, run?.generatedHandoffId, run?.runtimeSessionRefId, run?.nativeStateId]);
 
   useEffect(() => {

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { get, post, fmtRelative } from "../api";
 import { useAsync, ErrorBox } from "../components";
 
@@ -9,14 +10,22 @@ import { useAsync, ErrorBox } from "../components";
  */
 export function TrashView() {
   const tasks = useAsync<any[]>(() => get("/api/tasks?deleted=true"), []);
+  const [error, setError] = useState<string | null>(null);
 
   if (tasks.error) return <ErrorBox message={tasks.error} />;
 
   const entries = (tasks.data ?? []).sort((a, b) => (b.deletedAt ?? "").localeCompare(a.deletedAt ?? ""));
 
   const restore = async (task: any) => {
-    await post(`/api/tasks/${task.id}/restore`);
-    tasks.reload();
+    setError(null);
+    try {
+      await post(`/api/tasks/${task.id}/restore`);
+      tasks.reload();
+    } catch (e) {
+      // A failed restore (e.g. the retention window expired mid-click)
+      // must not look like nothing happened.
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   return (
@@ -31,6 +40,7 @@ export function TrashView() {
         Deleted tasks are kept here for 30 days, then permanently removed together with their runs and history.
         Restore puts a task back on the Tasks page with everything it had.
       </p>
+      <ErrorBox message={error} />
 
       {entries.length === 0 ? (
         <div className="card muted">No deleted tasks.</div>

@@ -392,6 +392,15 @@ function ModelConfig({ providerId }: { providerId: string }) {
   const rowsRef = useRef<EditableModel[]>([]);
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
+  // 卸载时清掉所有未触发的防抖保存定时器：否则切换页面后它们仍会
+  // 触发，对已卸载组件 setState（React 告警），且保存语义不明确。
+  useEffect(() => {
+    const timers = saveTimers.current;
+    return () => {
+      for (const timer of Object.values(timers)) clearTimeout(timer);
+    };
+  }, []);
+
   const setRows = (updater: (rs: EditableModel[]) => EditableModel[]) => {
     setRowsState((rs) => {
       const next = updater(rs ?? []);

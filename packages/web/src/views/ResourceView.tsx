@@ -287,12 +287,17 @@ export function ResourceView({ kind }: { kind: string }) {
       const body: Record<string, unknown> = { ...form };
       if (cfg.path === "/api/runtimes") {
         if (body.command) body.command = String(body.command).split(" ");
-        // The form carries strings; unset ("") falls back to the server's
-        // kind default.
-        if (body.usableInTask === "true" || body.usableInTask === "false") {
-          body.usableInTask = body.usableInTask === "true";
-        } else {
-          delete body.usableInTask;
+        // The form carries strings; every boolean-typed field must be
+        // coerced, not just the one someone remembered: the server stores
+        // what it is given, and the string "false" is truthy — a runtime
+        // would claim containerized isolation it does not have. Unset ("")
+        // is dropped so the server's kind default applies.
+        for (const key of ["usableInTask", "containerized"]) {
+          if (body[key] === "true" || body[key] === "false") {
+            body[key] = body[key] === "true";
+          } else {
+            delete body[key];
+          }
         }
       }
       await post(cfg.path, body);

@@ -111,7 +111,7 @@ Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
 
 ### Projects（`/projects`、`/projects/:id`、`/projects/:id/tasks/new`）
 
-Projects 页列出项目并支持创建（名称 / Repository URL / Credential（可选）/ 默认分支 / 默认 Runtime / 默认 Model / Validation / publish 策略）。项目详情页展示 Source、Credential（只显示掩码）、默认值、Skills、MCP、Validation 与 publish 策略，并列出该项目的 Task 及其生命周期（phase / agent / validation / publish）与按失败阶段提供的 retry 操作。
+Projects 页列出项目并支持创建（名称 / Repository URL / Credential（可选）/ 默认分支 / 默认 Runtime / 默认 Model / Validation / publish 策略）。项目详情页展示 Source、Credential（只显示掩码）、默认值、Skills、MCP、Validation 与 publish 策略，并列出该项目的 Task 及其生命周期（phase / agent / validation / publish）与按失败阶段映射出的 retry 操作（与 `retryKindForFailure` 同一张表：workspace / source / runtime / finalization 失败同样走 **Retry Agent Run**，validation 走 Retry Validation，publish 走 Retry Publish；retry publish 只在存在冻结 revision 且尚未 push 时出现）。
 
 `/projects/:id/tasks/new` 是 Project-based Coding Task 的创建页：Instruction、Base ref、Working branch（留空即自动生成 `af/<task>-<slug>`）、Branch mode（new / continue）、Runtime / Model 覆盖、Validation 覆盖。**不需要也不能手工创建 Workspace**。
 

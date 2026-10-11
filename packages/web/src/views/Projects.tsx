@@ -34,6 +34,30 @@ function lifecycleChips(task: any) {
   );
 }
 
+/**
+ * The retry a failure stage permits — the client-side mirror of
+ * `retryKindForFailure` (core/errors.ts). The table must not test the raw
+ * stage: workspace/source/runtime/finalization failures all recover through
+ * the agent retry (a new run on the same workspace), so gating on
+ * `stage === "agent"` hid the retry button for every one of them.
+ */
+function retryKind(stage: string | undefined): "agent" | "validation" | "publish" | "none" {
+  switch (stage) {
+    case "workspace":
+    case "source":
+    case "runtime":
+    case "agent":
+    case "finalization":
+      return "agent";
+    case "validation":
+      return "validation";
+    case "publish":
+      return "publish";
+    default:
+      return "none";
+  }
+}
+
 function ProjectTaskTable({ tasks, onAction }: { tasks: any[]; onAction?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -73,7 +97,7 @@ function ProjectTaskTable({ tasks, onAction }: { tasks: any[]; onAction?: () => 
             {tasks.map((task) => {
               const execution = task.execution ?? {};
               const failure = execution.failure;
-              const kind = failure?.stage;
+              const kind = retryKind(failure?.stage);
               const live = ["preparing", "running", "validating", "finalizing", "publishing"].includes(execution.status);
               return (
                 <tr key={task.id}>
@@ -100,7 +124,10 @@ function ProjectTaskTable({ tasks, onAction }: { tasks: any[]; onAction?: () => 
                     {live && <button className="small danger" disabled={busy === task.id} onClick={() => act(task, "cancel")}>cancel</button>}
                     {!live && kind === "agent" && <button className="small" disabled={busy === task.id} onClick={() => act(task, "retry-run")}>retry run</button>}
                     {!live && kind === "validation" && <button className="small" disabled={busy === task.id} onClick={() => act(task, "retry-validation")}>retry validation</button>}
-                    {!live && kind === "publish" && <button className="small" disabled={busy === task.id} onClick={() => act(task, "retry-publish")}>retry publish</button>}
+                    {/* Same gate as the lifecycle page: publish is retryable only while a frozen revision exists and the task is not already pushed. */}
+                    {!live && kind === "publish" && execution.frozenRevision?.finalCommitSha && execution.publish?.status !== "pushed" && (
+                      <button className="small" disabled={busy === task.id} onClick={() => act(task, "retry-publish")}>retry publish</button>
+                    )}
                   </td>
                 </tr>
               );
