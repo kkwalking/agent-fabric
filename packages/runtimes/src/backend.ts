@@ -92,7 +92,16 @@ export const localExecutionBackend: ExecutionBackend = {
     const [bin, ...args] = command;
     const child = spawn(bin, args, {
       cwd: opts.cwd,
-      env: { ...process.env, ...(opts.env ?? {}) },
+      env: {
+        ...process.env,
+        // spawn(cwd:) changes the child's real working directory but
+        // leaves the inherited $PWD pointing at the parent's. opencode 2
+        // resolves its project root from $PWD, so without this a run's
+        // file edits land in the AgentFabric process's launch directory
+        // instead of the workspace. Keep $PWD honest about the real cwd.
+        ...(opts.cwd ? { PWD: opts.cwd } : {}),
+        ...(opts.env ?? {}),
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const exited = childExited(child);
