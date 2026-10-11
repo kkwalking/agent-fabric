@@ -1376,7 +1376,14 @@ export class ProjectService {
         credentialId,
       };
     }
-    if (patch.execution !== undefined) next.execution = patch.execution;
+    // Merge, not replace: the settings form submits partial execution
+    // patches (it only renders a few fields), and a wholesale replace would
+    // silently drop everything the patch does not mention (timeoutMs,
+    // networkPolicy, validationSecretIds, …). `undefined` fields in the
+    // patch mean "not mentioned", never "clear this field" — removing a
+    // value is done by setting it explicitly (e.g. `null`-equivalent empty
+    // string is not a concept here; the form clears by omitting).
+    if (patch.execution !== undefined) next.execution = { ...project.execution, ...patch.execution };
     if (patch.skills !== undefined) next.skills = patch.skills;
     if (patch.mcpServers !== undefined) next.mcpServers = patch.mcpServers;
     if (patch.validation !== undefined) next.validation = patch.validation;
