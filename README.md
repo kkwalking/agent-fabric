@@ -295,6 +295,8 @@ runtimeIsolation(runtime).sandboxed = true   → 允许
 
 > Repository validation command 视为不可信代码，因此在 sandbox 中执行，而不是 AgentFabric Host。
 
+> 配置与使用的操作指南见 `docs/validation.md`。
+
 `npm test` / `npm run build` / `pytest` / `cargo test` / `make test` 都会执行仓库里的代码，因此 Validation **不再**通过 `sh -c` 在宿主上运行。默认实现是 **Option B：每次尝试创建一个 disposable validation container**：
 
 ```text
@@ -1053,7 +1055,8 @@ packages/
   cli/       af 命令行（对接 REST API）
   web/       React + Vite Web UI
 docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
-docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）
+docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）、
+             validation.md（任务校验机制的使用指南）
 scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
 ```
