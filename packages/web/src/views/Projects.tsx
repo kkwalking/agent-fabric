@@ -2,6 +2,7 @@ import { useState } from "react";
 import { del, get, post, put, fmtRelative, shortId } from "../api";
 import { ErrorBox, Field, Icon, Modal, StatusBadge, useAsync } from "../components";
 import { navigate } from "../router";
+import { parseValidationSteps } from "../validation";
 
 /**
  * Projects (v11 §2/§39): a Project is the long-lived codebase AgentFabric
@@ -10,14 +11,6 @@ import { navigate } from "../router";
  * Workspace) and never holds credential material (that is a Source
  * Credential, referenced by id).
  */
-
-function parseValidationSteps(text: string): { name: string; command: string }[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((command) => ({ name: command.split(/\s+/)[0] || "step", command }));
-}
 
 function lifecycleChips(task: any) {
   const execution = task.execution ?? {};

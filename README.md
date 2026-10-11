@@ -119,7 +119,7 @@ Projects 页列出项目并支持创建（名称 / Repository URL / Credential�
 
 侧边栏的 **New task** 是同一个 composer 的两种模式，由 **Project 选择器**决定走哪一种——这正是 v11 §39 的第一步（`Select Project`）：
 
-* **Project 模式**（存在 Project 时默认）：先选 Project，再只填这个 Task 真正拥有的决定——Base ref / Working branch / Branch mode / Runtime·Model 覆盖。**没有 Workspace 选择器**：`1 Task = 1 Managed Workspace`（v11 §5.1），工作副本由平台创建，不是用户的选择项。提交走 `POST /api/projects/:id/tasks`。Runtime 列表读 `/api/runtimes/project-eligible`（enabled + usableInTask + sandboxed），与服务端 submit 时的判据一致——界面上不会出现会被拒绝的 Runtime；一个隔离 Runtime 都没有时提前报错并禁用提交，不会静默降级到 Host。
+* **Project 模式**（存在 Project 时默认）：先选 Project，再只填这个 Task 真正拥有的决定——Base ref / Working branch / Branch mode / Runtime·Model 覆盖 / Validation 覆盖（`Validation override` 折叠区，每行一条命令，**整组替换** Project 的步骤；留空即继承，输入框的 placeholder 显示当前继承的命令）。**没有 Workspace 选择器**：`1 Task = 1 Managed Workspace`（v11 §5.1），工作副本由平台创建，不是用户的选择项。提交走 `POST /api/projects/:id/tasks`。Runtime 列表读 `/api/runtimes/project-eligible`（enabled + usableInTask + sandboxed），与服务端 submit 时的判据一致——界面上不会出现会被拒绝的 Runtime；一个隔离 Runtime 都没有时提前报错并禁用提交，不会静默降级到 Host。
 * **Workspace 模式**（选 `Project: none`）：v11 §5.4 与 hardening §37 要求保留的高级路径（non-project task、Local Runtime、External Workspace）。没有 Project 就没有 codebase 定义，工作副本本身就是用户的决定，因此**这时才出现 Workspace 选择器**。提交走经典 `POST /api/runs`。
 
 两种模式都在创建后落在 **Task Thread**（`/tasks/:id`，v5 §14）：创建完就看到 Agent 在跑，而不是先看到一张状态表。Project Task 的 header 额外给一个 **Lifecycle** 入口进入 `/tasks/:id/lifecycle`（v11 §40）。
@@ -294,6 +294,8 @@ runtimeIsolation(runtime).sandboxed = true   → 允许
 ### Validation：不可信代码，必须在隔离环境执行
 
 > Repository validation command 视为不可信代码，因此在 sandbox 中执行，而不是 AgentFabric Host。
+
+> 配置与使用的操作指南见 `docs/validation.md`。
 
 `npm test` / `npm run build` / `pytest` / `cargo test` / `make test` 都会执行仓库里的代码，因此 Validation **不再**通过 `sh -c` 在宿主上运行。默认实现是 **Option B：每次尝试创建一个 disposable validation container**：
 
@@ -1077,7 +1079,8 @@ packages/
   cli/       af 命令行（对接 REST API）
   web/       React + Vite Web UI
 docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
-docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）
+docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）、
+             validation.md（任务校验机制的使用指南）
 scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
 ```

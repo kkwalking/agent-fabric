@@ -1926,43 +1926,50 @@ button.stat.clickable:hover {
 .new-task {
   max-width: 760px;
 }
-.new-task-composer textarea {
+/* The composer's prompt is the only textarea that gets the tall treatment;
+   nested ones (the validation override) size themselves. */
+.new-task-composer > textarea {
   min-height: 110px;
 }
 .new-task-composer input {
   margin: 8px 0 10px;
 }
-/* Branch decisions for a Project Task (base ref / working branch / branch
-   mode). They live inside the composer, so the inputs keep its borderless
-   treatment but need their own label rhythm and full grid width. */
-.new-task-branch {
+/* Collapsible task-owned decisions (branch; validation override). They live
+   inside the composer, so the inputs keep its borderless treatment but need
+   their own label rhythm and full grid width. */
+.new-task-details {
   border-top: 1px solid var(--border-soft);
   margin: 0 0 6px;
   padding-top: 4px;
 }
-.new-task-branch > summary {
+.new-task-details > summary {
   cursor: pointer;
   color: var(--muted);
   font-size: 12px;
   font-weight: 500;
   padding: 6px 4px 2px;
 }
-.new-task-branch > summary:hover {
+.new-task-details > summary:hover {
   color: var(--text);
 }
-.new-task-branch .form-grid-2 {
+.new-task-details .form-grid-2 {
   padding: 0 4px 4px;
 }
-.new-task-branch label {
+.new-task-details label {
   margin-top: 4px;
 }
 /* The composer's own `input` rule drops the side padding and the width these
    fields need now that they sit in a two-column grid. */
-.new-task-branch input,
-.new-task-branch select {
+.new-task-details input,
+.new-task-details select,
+.new-task-details textarea {
   width: 100%;
   padding-left: 4px;
   padding-right: 4px;
+}
+.new-task-details textarea {
+  min-height: 0;
+  resize: vertical;
 }
 
 /* ---------- Run inspector ---------- */
