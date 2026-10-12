@@ -61,7 +61,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Model | 增删改查、所属 Provider、参数、Alias、运行时自由选择 |
 | Project | 长期存在的代码库配置：Git Source（HTTPS / SSH / GitHub / GitLab / Gitee / 通用 / 公开 / 私有）、默认分支、执行默认值（Runtime/Model/Env/Secrets/超时/资源限制/网络策略）、Skills、MCP、Validation、Git publish 策略 |
 | Source Credential | 独立于 Project 的 Git 凭据（HTTPS Token / SSH Private Key），敏感值走 Secrets，仅在单次 Git 操作期间临时materialize；公开仓库无需凭据 |
-| Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ **强制隔离 Runtime** → Agent → **隔离 Validation** → Git Finalization（**冻结 final revision**）→ Publish（**只发布冻结 revision**）→ Cleanup；阶段与 agent/validation/finalization/publish 状态分别、单调地记录 |
+| Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ **强制隔离 Runtime** → Agent → **完工 pin + 隔离 Validation Agent 判定**（不通过则返工闭环）→ Git Finalization（**冻结 final revision**）→ Publish（**只发布冻结 revision**）→ Cleanup；阶段与 agent/validation/finalization/publish 状态分别、单调地记录（validation 循环是单调性的唯一显式例外，见下文） |
 | Git Publish | 平台负责 commit 策略与 push：只推本 Task 的 working branch、绝不 force、保护分支拒推、push 结果以远端实际状态为准（可重试且幂等） |
 | Runtime | OpenCode / Pi / Codex / Claude Code / DSH / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
@@ -119,7 +119,7 @@ Projects 页列出项目并支持创建（名称 / Repository URL / Credential�
 
 侧边栏的 **New task** 是同一个 composer 的两种模式，由 **Project 选择器**决定走哪一种——这正是 v11 §39 的第一步（`Select Project`）：
 
-* **Project 模式**（存在 Project 时默认）：先选 Project，再只填这个 Task 真正拥有的决定——Base ref / Working branch / Branch mode / Runtime·Model 覆盖 / Validation 覆盖（`Validation override` 折叠区，每行一条命令，**整组替换** Project 的步骤；留空即继承，输入框的 placeholder 显示当前继承的命令）。**没有 Workspace 选择器**：`1 Task = 1 Managed Workspace`（v11 §5.1），工作副本由平台创建，不是用户的选择项。提交走 `POST /api/projects/:id/tasks`。Runtime 列表读 `/api/runtimes/project-eligible`（enabled + usableInTask + sandboxed），与服务端 submit 时的判据一致——界面上不会出现会被拒绝的 Runtime；一个隔离 Runtime 都没有时提前报错并禁用提交，不会静默降级到 Host。
+* **Project 模式**（存在 Project 时默认）：先选 Project，再只填这个 Task 真正拥有的决定——Base ref / Working branch / Branch mode / Runtime·Model 覆盖 / Validation 覆盖（一段自然语言验收标准，**整体替换** Project 的；留空即继承，输入框的 placeholder 显示当前继承的标准）。**没有 Workspace 选择器**：`1 Task = 1 Managed Workspace`（v11 §5.1），工作副本由平台创建，不是用户的选择项。提交走 `POST /api/projects/:id/tasks`。Runtime 列表读 `/api/runtimes/project-eligible`（enabled + usableInTask + sandboxed），与服务端 submit 时的判据一致——界面上不会出现会被拒绝的 Runtime；一个隔离 Runtime 都没有时提前报错并禁用提交，不会静默降级到 Host。
 * **Workspace 模式**（选 `Project: none`）：v11 §5.4 与 hardening §37 要求保留的高级路径（non-project task、Local Runtime、External Workspace）。没有 Project 就没有 codebase 定义，工作副本本身就是用户的决定，因此**这时才出现 Workspace 选择器**。提交走经典 `POST /api/runs`。
 
 两种模式都在创建后落在 **Task Thread**（`/tasks/:id`，v5 §14）：创建完就看到 Agent 在跑，而不是先看到一张状态表。Project Task 的 header 额外给一个 **Lifecycle** 入口进入 `/tasks/:id/lifecycle`（v11 §40）。
@@ -128,7 +128,7 @@ Workspace 因此不是被移除，而是被降级：它只在没有 Project 时�
 
 ### Task Lifecycle（`/tasks/:id/lifecycle`）
 
-Task Detail 页面回答「Agent 现在到底在开发、测试、提交，还是 push」：Project / Source、Base Ref 与 Base Commit、Working Branch、Workspace、Current Phase、Agent / Validation / Publish 三个状态、Final Commit、Remote Branch、Validation 每个 step 的输出，以及可用的 Retry（agent / validation / publish）与 Cancel。运行中每 2 秒自动刷新。
+Task Detail 页面回答「Agent 现在到底在开发、判定、提交，还是 push」：Project / Source、Base Ref 与 Base Commit、Working Branch、Workspace、Current Phase、Agent / Validation / Publish 三个状态、Final Commit、Remote Branch、validation 的轮次视图（每轮的完工 pin、judge 与返工 run 链接、verdict 的 passed / summary / unmet / evidence、检测到漂移的轮次显著标注「judge 改动了工作区，已回放」、顶部 `attempts / maxAttempts`），以及可用的 Retry（agent / validation / publish）与 Cancel。运行中每 2 秒自动刷新。
 
 Tasks 列表中 Project-based Task 额外显示 working branch 与三个状态，行菜单提供 Lifecycle 入口。
 
@@ -289,45 +289,74 @@ runtimeIsolation(runtime).sandboxed = true   → 允许
 * 没有显式指定时，自动选择的候选只包含隔离 Runtime；一个都没有就报错，**不会静默降级**到 Host Runtime。
 * `GET /api/runtimes/:id/isolation` 返回判定结果；`GET /api/runtimes/project-eligible` 返回可用于 Project Task 的 Runtime 列表（Projects 页与 New task 的 Project 模式读它，因此界面上不会出现会被拒绝的选项）。
 * **Local Runtime 依然保留**：development、debugging、non-project task、advanced usage、internal test 都继续可用。只有 Project Coding Task 受约束。
-* 高级逃生阀：`allowHostExecution`（`SupervisorOptions` 或 `Project.execution.allowHostExecution`，默认关闭）。这是 operator 级别的显式安全策略，**Task 请求体无法自行开启**。开启后仅放宽 Agent Runtime；Validation 的隔离要求不受它影响。
+* 高级逃生阀：`allowHostExecution`（`SupervisorOptions` 或 `Project.execution.allowHostExecution`，默认关闭）。这是 operator 级别的显式安全策略，**Task 请求体无法自行开启**。开启后 Project Task 允许使用宿主 Runtime——由于 judge 是走同一 Runtime 的普通 Run，Agent 与 Validation 一起被放宽；只读工作区、verdict 目录唯一可写等 judge 自身的约束（下节）不受影响。
 
-### Validation：不可信代码，必须在隔离环境执行
+### Validation：第二个 Agent 的独立判定，代码不可信
 
-> Repository validation command 视为不可信代码，因此在 sandbox 中执行，而不是 AgentFabric Host。
+> Validation 不是「跑几条命令」，而是让一个独立的 Validation Agent 在隔离容器里读取仓库、运行命令、给出判定。
+> 仓库内容（即不可信代码）只在隔离 Runtime 中被读取与执行，从不在宿主上运行。
 
 > 配置与使用的操作指南见 `docs/validation.md`。
 
-`npm test` / `npm run build` / `pytest` / `cargo test` / `make test` 都会执行仓库里的代码，因此 Validation **不再**通过 `sh -c` 在宿主上运行。默认实现是 **Option B：每次尝试创建一个 disposable validation container**：
+Validation 是一项**配置**：Project（或 Task 覆盖）声明一段自然语言验收标准（`validation.prompt`），例如「go 编译与全量测试通过」。没有配置就**跳过**判定，Task 行为与没有这一机制时完全一致；配置了但 prompt 为空是 `config-invalid`（400）——**绝不静默跳过**。
+
+判定过程本身就是一次普通的 Run（`purpose: "validation"`），与开发 Run 共用同一套 Runtime pipeline（容器、harness、provisioning、usage、事件、取消/超时）：
 
 ```text
-Agent finished
+Agent finished（workspace 已固定为完工 pin）
     ↓
 （Agent Runtime 已销毁）
     ↓
-disposable validation container（同一个 Workspace 只读/读写挂载）
+disposable judge container（**新容器**，Workspace 只读挂载）
     ↓
-validation steps
+Validation Agent 在容器内自行运行 build/test 并提交 verdict
     ↓
-container 销毁
+container 销毁 → 判定通过则 Git Finalization；不通过则返工
 ```
 
-Validation 环境按 **allowlist** 构建，绝无 `...process.env` 兜底：
+Judge 环境按 **allowlist** 构建，绝无 `...process.env` 兜底：
 
 ```text
-Workspace（唯一挂载的宿主路径）
-必要 runtime environment（PATH / HOME / TMPDIR / LANG / CI / AGENTFABRIC_VALIDATION）
+Workspace（只读挂载，容器内 :ro）
+verdict 输出目录（唯一可写挂载）
+生成的 verdict 工具脚本（只读挂载）
 明确允许的 Task env
 明确允许的 build/test secret（Project/Task 的 validationSecretIds，scope 不得为 git）
 Task 解析出的 network policy（enabled=false → --network none）
 ```
 
-Validation **不会**获得：Git Source Credential、所有 Task Secret、Docker socket、Workspace 以外的宿主文件系统、宿主 `process.env`，也不会获得比 agent 容器更大的网络权限——两者用同一个 resolver 解析同一份 policy。
+Validation **不会**获得：Git Source Credential、Task 的 `secretIds`（Agent 的密钥与 judge 的 `validationSecretIds` 是两套 allowlist）、Docker socket、Workspace 以外的宿主文件系统、宿主 `process.env`，也不会获得比 agent 容器更大的网络权限——两者用同一个 resolver 解析同一份 policy。judge 不会继承开发 Agent 的 skills / MCP 配置，判定的模型默认跟随 Task（可用 `validation.modelId` 覆盖）。
 
-* 每个 step 仍然记录 `status / exitCode / durationMs / output`，并产出 `validation-report.txt`；
-* `validation.execution` 记录隔离证据（`backend: "isolated"`、`runtimeKind`、`image`、`disposable`）；
-* 事件新增 `validation.runtime.prepared`，`shell.command` / `validation.started` 带 `isolated: true`；
-* Validation 阶段保持独立：`validation.pending / running / completed / failed`，**Validation 失败不会覆盖 `agent.completed`**；
-* Validation Runtime 本身起不来（没有 Docker daemon、image 不存在）报 `validation-runtime-failed` / `validation-runtime-unavailable`，**绝不回退到宿主执行**。
+**判定结果的确定性契约**：judge 通过生成的工具脚本（`node validation-tool.mjs --passed|--failed --summary ... --unmet ... --evidence ...`）提交 verdict；工具会先按契约校验 payload（失败即退出码 2 并说明原因，judge 可以自我修正），写入 `verdict.json` 并追加 `verdict-calls.jsonl` 审计。verdict 结构：
+
+```jsonc
+{
+  "passed": false,
+  "summary": "1-3 句结论",
+  "unmet": ["未满足的验收项（failed 时必填）"],
+  "evidence": ["「我实际运行了什么命令 → 观察到了什么」至少一条"]
+}
+```
+
+**判定对象是固定 revision（完工 pin）**：每次开发 run（初始或返工）成功结束后、判定开始前，supervisor 把工作区固定为一个 commit（`git add -A` + commit，消息附注 `af-pin: <runId>`；工作区已 clean 则 pin = 当前 HEAD，不产生新 commit），记录到该轮 `validation.rounds[].pinnedRevision`。判定永远针对这个 commit。
+
+> 启用 validation 时，**完工 commit 在开发 run 结束时创建**（而不是等到 Finalization）；`autoCommit: false` 也照此——判定必须有一个确定的 revision 作为对象，回放必须有 commit 可回放。finalization 随后不再追加新 commit（工作区在 pin 时已干净）。
+
+**判定期间代码不可能进入最终产物（两层约束）**：
+
+1. **只读挂载**：judge 容器里 Workspace 以 `:ro` 挂载，常规写入直接被文件系统拒绝；
+2. **完工 pin + 工作区回放**：judge run 结束后 supervisor 比对工作区指纹（HEAD + branch + porcelain status）。出现任何意外 commit / 脏改动 / untracked / 换分支，都会发出**响亮的事件** `validation.workspace.replayed` 并执行 `git reset --hard <pinnedCommitSha>` + `git clean -fd`，把工作区恢复到判定对象的确切状态；本轮判定照常生效（判定对象本来就是 pin）。回放只接受本轮记录的 `pinnedCommitSha`，不允许 reset 到任意 ref。
+
+即使 judge 通过只读挂载之外的通道（原生会话状态、MCP、未来新增挂载）留下了痕迹，回放也会在下一次开发动作之前清除它——机制上不存在「judge 的提交进入最终产物」的路径。
+
+**判定循环（返工）**：判定不通过时，**打回给开发 Agent**——在同一个 Workspace 上继续修改。返工是一次真实的开发 run（`purpose: "rework"`，计为又一次 agent attempt），指令是「原任务指令 + 判定结论与未满足项」——**绝不**注入 validation prompt 本身，开发 Agent 拿到的是可执行的缺陷清单，不是可以对着作弊的验收标准。返工完成后重新 pin、重新判定。
+
+* **预算**：一轮循环最多 3 次 judge 判定（默认，`maxAttempts` 可配），即最多 2 次返工；判完仍不通过则整个 Task 以 `validation-failed` 终止（400），记录含全部 round 的完整 verdict；
+* **不消耗预算的失败**：judge 没产出合法 verdict（`validation-verdict-missing`）、judge 超时（`validation-timeout`）、沙箱起不来（`validation-runtime-failed` / `validation-runtime-unavailable`）都**不**算一次判定——它们属于「环境坏了」，报独立错误码并可自动重试；
+* **返工 run 自身失败**（agent-failed / timeout / cancelled / runtime-*）：立即终止整个 Task，不再进入下一轮判定；
+* **判定不通过 ≠ Task 失败在任何意义上**：`execution.failure.stage = "validation"`，但 `agent` 状态与 `stages.agent` 始终反映开发 run 的真实结果；判定未通过不会进入 publish。
+
+**手动 Retry Validation**（`POST /api/tasks/:id/retry-validation`）语义是「**重置预算、重跑一轮**」：不重新开发、不调用开发模型；以 `post-agent` 生命周期进入循环，attempts 归零，rounds 历史保留（追加而非重算）。人工介入 = 给新预算。
 
 ### Source Credential：Host Binding 与 Transport 兼容
 
@@ -468,7 +497,7 @@ Agent Runtime Container
 * **Execution monitoring**：process exit、heartbeat、stdout-stderr、结构化事件、cancellation、timeout；
 * **Finalization**：inspect repository state、commit、**冻结 final revision**、push 该 revision、记录 publish 结果；
 * **Runtime isolation gate**：在 Task 创建前拒绝不满足隔离要求的 Runtime；
-* **Validation lifecycle**：在隔离 Runtime 中执行 validation step，按 allowlist 构建环境；
+* **Validation lifecycle**：完工 pin → 在隔离 Runtime 中运行 Validation Agent（只读工作区 + verdict 工具），判定不通过则返工闭环（预算 3 次判定），judge 造成的工作区漂移被检测并回放到 pin；
 * **Credential broker**：只在单次 Git 操作期间 materialize 凭据，并校验 host binding 与 transport 兼容性；
 * **Stage recovery**：崩溃重启后按 crash 时的阶段恢复，不倒退已完成的阶段。
 
@@ -484,12 +513,13 @@ Project 可以配置默认 Skills（`skills: [{ name, path }]`）与 MCP Servers
 
 ### Validation
 
-Project 定义默认 Validation，Task 可以覆盖（`typecheck` / `test` / `lint` / `build` 等，就是一行行命令）。Validation 在 Agent 结束后、Git Finalization 之前执行，工作目录是同一个 durable Workspace——但**执行位置是隔离 Runtime，不是宿主**（见上文「Validation：不可信代码，必须在隔离环境执行」）：
+Project 定义默认的验收标准（`validation.prompt`，一段自然语言），Task 整体覆盖。Validation 在开发 run 结束后、Git Finalization 之前执行——执行者是**独立的 Validation Agent**，在**新的隔离容器**里读取只读挂载的、已固定为完工 pin 的 Workspace（见上文「Validation：第二个 Agent 的独立判定，代码不可信」）：
 
-* 每个 step 记录 `status / exitCode / durationMs / output`，并产出一份 `validation-report.txt` artifact 挂在该 Run 上；
-* 失败区分 `validation-failed` 与 `validation-timeout`；隔离环境本身起不来则是 `validation-runtime-failed` / `validation-runtime-unavailable`；
-* **Validation 失败不会被混进普通的 `Task Failed`**：`execution.failure.stage = "validation"`，agent 状态保持 `completed`，也不会进入 publish；
-* 可以**单独重试 validation**（`POST /api/tasks/:id/retry-validation`），不重新开发、不调用模型，同样在隔离 Runtime 内执行。
+* 每轮的 verdict（`passed / summary / unmet / evidence`）在生成时冻结到记录上，并作为 `validation-verdict.json` artifact 挂在该 Run 上；读取路径永远原样返回，不重算；
+* judge 未提交合法 verdict、超时、沙箱起不来 → `validation-verdict-missing` / `validation-timeout` / `validation-runtime-*`；**不消耗判定预算**；
+* **判定不通过不会被混进普通的 `Task Failed`**：`execution.failure.stage = "validation"`，agent 状态保持真实结果——3 次判定（含返工）仍不通过才是 `validation-failed`；
+* 判定造成的任何工作区漂移在判定结束后被检测、响亮记录（`validation.workspace.replayed`）并回放到 pin；
+* 可以**单独重试 validation**（`POST /api/tasks/:id/retry-validation`）：重置预算、保留轮次历史、重跑循环，不重新开发、不调用开发模型。
 
 ### Git Finalization
 
@@ -567,8 +597,8 @@ Publishing  = Failed      （failure.stage = "publish", publish.status = "failed
 
 | Retry | 入口 | 语义 |
 | --- | --- | --- |
-| **Retry Agent Run** | `POST /api/tasks/:id/retry-run` | 新建一个 Run，继续使用同一个 Workspace（已有改动保留） |
-| **Retry Validation** | `POST /api/tasks/:id/retry-validation` | 只重跑 validation，不重新开发、不调用模型 |
+| **Retry Agent Run** | `POST /api/tasks/:id/retry-run` | 新建一个 Run，继续使用同一个 Workspace（已有改动保留）；validation 循环随之重新开始（新循环 = 新预算） |
+| **Retry Validation** | `POST /api/tasks/:id/retry-validation` | 重置预算、重跑判定循环（judge 可能再次触发返工），不重新开发、不调用开发模型 |
 | **Retry Publish** | `POST /api/tasks/:id/retry-publish` | 只把已 commit 的 revision 重新 push，不重新执行 Agent |
 
 **幂等与崩溃恢复**：重复执行的生命周期步骤都可安全重试——workspace 目录已存在即复用；branch 只在 Task 首次启动时创建，之后是 checkout 复用；push 之前先读远端实际 revision，若远端已有我们的 commit 就直接记为成功（`push 超时但其实已成功` 的情况由此收敛）；push 报错后再问一次远端，若已落地也算成功。
@@ -578,7 +608,9 @@ Supervisor / API Server 重启后按 **crash 时的阶段**做 stage-specific re
 | crash 发生在 | agent | validation | finalization | publish | 给出的下一步 |
 | --- | --- | --- | --- | --- | --- |
 | `agent.running` | failed | — | — | — | Retry Agent |
-| `validation.running` | **completed** | interrupted | — | — | Retry Validation |
+| `validation.running`（judge 运行中） | **completed** | interrupted | — | — | Retry Validation（重判该轮，不消耗预算） |
+| `validation.reworking`（返工 run 运行中） | **completed** | interrupted | — | — | Retry Validation（对当前工作区重新判定；半成品被判负会自然再次返工——这是可接受的恢复路径） |
+| pin 已写入、judge 未开始的窗口 | **completed** | interrupted | — | — | Retry Validation：先以记录的 pin 为锚做漂移检测（重启期间可能有残留写入），需要则回放，再起 judge |
 | `git.finalizing` | **completed** | **completed** | interrupted | — | Retry Agent |
 | `git.pushing` | **completed** | **completed** | **completed** | interrupted/failed | Retry Publish |
 | `cleanup`（只丢了终态写入） | completed | completed | completed | completed | 无（Task 直接收敛为 completed） |
@@ -604,7 +636,7 @@ Final Commit / Remote Branch
 可用的 Retry（agent / validation / publish）
 ```
 
-每次 Task / Run 都能追踪：Project、Workspace、Runtime、Harness、Model、base ref、base commit、working branch、Run phase、起止时间、exit result、validation result、final commit、publish result；所有生命周期关键操作都写入现有 Event / Logging 系统（`run.phase`、`workspace.prepared`、`source.prepared`、`runtime.prepared`、`credential.resolved` / `credential.released`、`provisioning.prepared` / `provisioning.cleaned`、`validation.runtime.prepared`、`validation.started` / `validation.step` / `validation.passed` / `validation.failed`、`git.finalized`、`git.revision.frozen`、`git.pushed`、`publish.retry.started`、`publish.failed`、`task.recovered`）。
+每次 Task / Run 都能追踪：Project、Workspace、Runtime、Harness、Model、base ref、base commit、working branch、Run phase、起止时间、exit result、validation 轮次与 verdict、final commit、publish result；所有生命周期关键操作都写入现有 Event / Logging 系统（`run.phase`、`workspace.prepared`、`source.prepared`、`runtime.prepared`、`credential.resolved` / `credential.released`、`provisioning.prepared` / `provisioning.cleaned`、`validation.skipped` / `validation.round.started` / `validation.pinned` / `validation.verdict` / `validation.workspace.replayed` / `validation.rework.started` / `validation.passed` / `validation.failed`、`git.finalized`、`git.revision.frozen`、`git.pushed`、`publish.retry.started`、`publish.failed`、`task.recovered`）。
 
 **阶段可分辨（Stage observability）**：Task Detail 不只暴露一个 `Task failed`，而是分别表达每个阶段的结果——Agent / Validation / Finalization / Publish 各自的状态、错误码与时间，加上冻结的 revision：
 
@@ -617,6 +649,8 @@ Frozen        abc123 → origin/af/xxx-add-model
 ```
 
 `execution.stages` 是**单调**的：某个阶段一旦 `completed`，后续阶段的失败不会把它改写。`agent.status` 不会因为 `publish.failed` 变成 `failed`，`validation.status` 也不会因为 Retry Publish 失败而改变。
+
+**唯一的显式例外：validation 返工循环**（v12 §6.2）。返工是一次新的开发 run，所以循环允许 `stages.agent` 走 `completed → running → completed`（或 → `failed`）的**重入**——`stages.agent` 必须反映**最近一次**开发 run 的真实结果。这个重入只有循环自己能走（`stagePatchReentry`），其它调用点继续走单调的 `stagePatch`：判定期间的取消、publish 失败、崩溃恢复都不会改写已完成的阶段。
 
 ### 领域错误模型
 
@@ -632,8 +666,11 @@ Runtime       runtime-create-failed · runtime-start-failed · runtime-lost · r
               runtime-not-isolated · runtime-not-allowed-for-project-task
               secret-scope-not-allowed
 Agent         agent-start-failed · agent-failed · agent-timeout · agent-cancelled
-Validation    validation-failed · validation-timeout
-              validation-runtime-failed · validation-runtime-unavailable · validation-secret-not-allowed
+Validation    validation-failed（判定循环耗尽预算，400，不自动重试）
+              validation-verdict-missing（judge 未提交合法 verdict，502，自动重试，不消耗预算）
+              validation-timeout（judge 超时且无判定，400，不自动重试，不消耗预算）
+              validation-runtime-failed · validation-runtime-unavailable（502，自动重试，不消耗预算）
+              validation-secret-not-allowed（403）
 Finalization  git-state-invalid · git-commit-failed
 Publishing    git-push-failed · git-push-auth-failed · git-push-rejected · remote-branch-conflict
               publish-revision-missing · workspace-diverged-after-finalization
@@ -671,7 +708,7 @@ Task lifecycle
   GET    /api/tasks/:id/detail             Task Detail 读模型（§40 全部字段 + isolation + stages + frozenRevision + 可用 retry）
   POST   /api/tasks/:id/cancel             取消（终止 Runtime 与 Git 操作，Workspace 保留）
   POST   /api/tasks/:id/retry-run          新 Run 继续同一 Workspace
-  POST   /api/tasks/:id/retry-validation   只重跑 validation（同样在隔离 Runtime 内）
+  POST   /api/tasks/:id/retry-validation   重置预算、重跑判定循环（不重新开发、不调用开发模型）
   POST   /api/tasks/:id/retry-publish      只重新 push 冻结的 revision（不重新执行 Agent / Validation / Finalization）
   GET    /api/workspace-locks              当前持有的 Workspace 写锁
 ```
@@ -1030,7 +1067,7 @@ af projects start <project-id> "接着改" --working-branch af/existing --branch
 af tasks detail <task-id>        # Project / Source / base commit / branch / phase / 三个状态 / final commit / retry
 af tasks cancel <task-id>        # 终止 Runtime，Workspace 保留
 af tasks retry-run <task-id> "继续修剩下的"   # 新 Run，复用同一 Workspace
-af tasks retry-validation <task-id>          # 只重跑 validation，不重新开发
+af tasks retry-validation <task-id>          # 重置预算、重跑判定循环，不重新开发
 af tasks retry-publish <task-id>             # 只重新 push，不重新执行 Agent
 
 # 提交任务（lifecycle 在此选定，此后该 Task 全程沿用）
@@ -1140,22 +1177,25 @@ npm run build                                    # 构建全部 workspace（含 
 
 core 测试覆盖 store / secret / mock run / cost / event bus / policy / git workspace，容器生命周期策略与 keep-alive 租约，同 Harness Native Resume 与跨 Harness Handoff，Handoff 上下文选择、预算账目与渲染语义，能力声明与随执行后端收窄。
 
-`src/v11.test.ts` 覆盖 Project / Source Credential / Coding Task 生命周期：Project 与 Credential 的创建与校验、公开与私有仓库、URL 与分支名校验、凭据 materialize 与脱敏、clone/fetch/base ref/working branch、分支冲突与 continue 模式、baseCommitSha 冻结、Validation（失败/超时/重试）、Git finalization（自动 commit / Agent 已有 commit / dirty + commit / no-op / autoCommit=false）、Publish（成功 / 认证失败 / 远端拒绝 / 冲突 / 重试 / 幂等）、并发隔离、Workspace lock、取消、崩溃恢复、Skill/MCP provisioning，以及 §41.11 的 Case A–F。Git 部分使用**真实 `git` CLI 与本地 bare 仓库**作为远端，只有 Agent Harness 是脚本化的。
+`src/v11.test.ts` 覆盖 Project / Source Credential / Coding Task 生命周期：Project 与 Credential 的创建与校验、公开与私有仓库、URL 与分支名校验、凭据 materialize 与脱敏、clone/fetch/base ref/working branch、分支冲突与 continue 模式、baseCommitSha 冻结、Validation（判定通过/不通过与独立失败语义/重试）、Git finalization（自动 commit / Agent 已有 commit / dirty + commit / no-op / autoCommit=false）、Publish（成功 / 认证失败 / 远端拒绝 / 冲突 / 重试 / 幂等）、并发隔离、Workspace lock、取消、崩溃恢复、Skill/MCP provisioning，以及 §41.11 的 Case A–F。Git 部分使用**真实 `git` CLI 与本地 bare 仓库**作为远端，只有 Agent Harness 是脚本化的。
 
 v11 hardening 的专项测试：
 
 | 文件 | 覆盖 |
 | --- | --- |
-| `src/v11.isolation.test.ts` | Runtime isolation metadata 判定、Host Escape（Project Task + local runtime 在执行前被拒）、隔离 Runtime 的 Validation（Case A–E）、allowlist 环境、宿主 secret 不可见、Git Credential 不可达、Validation failure 不倒退 agent |
+| `src/v11.isolation.test.ts` | Runtime isolation metadata 判定、Host Escape（Project Task + local runtime 在执行前被拒）、judge run 走 Task 的隔离 Runtime（绝不落宿主 shell）、allowlist 环境（不继承宿主 `process.env`）、宿主 secret 不可见、Git Credential 不可达、判定不通过不倒退 agent |
 | `src/v11.secretscope.test.ts` | Secret scope 授权边界 Case A–F：git scope 可用于 clone/push，经 Task/Runtime/Project secretIds、MCP、Validation 一律拒绝；底层 resolve API 同样执行 policy |
 | `src/v11.credential.test.ts` | Remote host 解析、host binding（HTTPS/SSH match & mismatch、wildcard）、transport 兼容（HTTPS token × SSH remote 等）、Project create/update 尽早失败、`.git/config` 与全生命周期防泄漏 |
 | `src/v11.publish.test.ts` | Frozen final revision、Retry Publish 是纯发布（同 commit、不新增 commit、不跑 agent/validation/finalization、SHA 不变）、workspace 漂移检测、stage-specific crash recovery（Agent/Validation/Finalization/Publish/Cleanup）、状态单调性、取消与并发 |
-| `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、Validation 在 sandbox 内、agent 环境无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
+| `src/v11.docker.real.test.ts` | **真实 Docker** 全链路（Agent 在容器内、workspace mount、runtime 销毁、workspace 存活、judge run 在只读挂载的独立容器内执行并通过 verdict 工具提交判定、返工闭环、agent/judge 环境互不可见对方的密钥、无 Git Credential、精确 push 冻结 commit、无泄漏）。Docker daemon 不可达时 skip 并说明原因 |
 | `src/v11.inheritance.test.ts` | Project → Task 继承：`execution.profileId` 的 preset、`execution.networkPolicy`（一路断言到容器 argv 的 `--network none`）、Task 级 `skills` / `mcpServers` 的整体替换语义，以及 Task 显式值优先于 Project |
 | `src/v11.notify.test.ts` | 通知接线：终态 Task 恰好发一次 webhook（载荷含 frozen revision 与逐阶段 stages）、未配置不发、失败任务带 `failure{stage,code}`、webhook 挂掉不影响 Task 终态、URL 里的 token 不进 Run 事件 |
 | `src/v11.retry.test.ts` | 自动重试接线：瞬态失败按阶段走既有 Retry（push 网络失败重推冻结 SHA 而非重跑 agent、validation 环境失败只重跑检查）、永久失败不重试、预算与退避、退避期间取消、重启不恢复、中间失败不发 webhook |
 | `src/autoRetry.test.ts` | 自动重试纯策略：瞬态码分类、配置默认与 clamp、退避倍增封顶、`planAutoRetry` 决策映射（阶段分派 / 取消 / 关闭 / 预算耗尽） |
-| `src/validationDocker.test.ts` | disposable 容器 executor 的 `docker run` argv（allowlist 环境、唯一挂载、`--network none`）、超时/取消/daemon 不可达的分类，以及 supervisor → 真实 executor 的生产路径 |
+| `src/v12.validation.test.ts` | Validation 作为配置（未配置跳过 / 空 prompt 拒绝 / Task 整体替换）、judge run 规格（purpose、只读工作区、ephemeral、独立密钥、无 skills/MCP、verdict 冻结）、返工循环（判定结论注入、预算 3 次、返工失败立即终止）、Retry Validation（预算重置、轮次历史保留） |
+| `src/v12.validationPin.test.ts` | 完工 pin（脏工作区产生 `af-pin` commit / clean 时 pin = HEAD）、漂移检测与回放（judge commit / 脏文件 / untracked / 换分支 每种都被 `reset --hard <pin>` + `clean -fd` 恢复，argv 只接受记录的 pin）、返工后新 pin、崩溃恢复在重判前先回放残留 |
+| `src/v12.validationTool.test.ts` | 生成的 verdict 工具作为**真实进程**运行：合法 payload 落盘 + 审计 jsonl + 退出码 0，非法 payload 退出码 2 且不落盘，后者覆盖前者，`.mjs` 在任意目录（无 package.json）可解析 |
+| `src/v12.reworkinterrupt.test.ts` | 返工 run 被取消/崩溃时的记录（validation interrupted、工作区保留、Retry Validation 对半成品重判）、阶段单调性修订的边界（循环可重入 `stages.agent`，非循环路径不可改写 completed 阶段） |
 | `src/notifications.test.ts` | 载荷投影、退避与重试策略、URL 脱敏、配置错误不抛异常（`errorKind: "config"`） |
 | `src/secretsCrypto.test.ts` | AES-256-GCM 加解密、密钥文件生成与 `0600`、旧明文格式与认证失败的报错语义 |
 | `src/v4.test.ts` | 闭环 E2E（Provider→Model→Run、Profile、Policy、keep-alive 复用）：每个用户配置面真的到达 harness / 容器 argv；含 provider key 与 task secret 不进入 Run 事件日志、keep-alive 无 `containerCommand` 时 exec 的是 harness 二进制而非其 flags |
