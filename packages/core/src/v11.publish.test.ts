@@ -23,6 +23,8 @@ import { ExecutionSupervisor } from "./supervisor.js";
 import { ArtifactService, ProjectService, RuntimeService, TaskService, WorkspaceService } from "./services.js";
 import { DomainError } from "./errors.js";
 import { createGitOps, type GitOps } from "./git.js";
+import { validationJudgePaths } from "./provisioning.js";
+import type { VerdictPayload } from "./validation.js";
 import type { Project, Run, Task } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -63,11 +65,7 @@ interface Harness {
   bus: EventBus;
   runService: RunService;
   supervisor: ExecutionSupervisor;
-  /**
-   * Builds a supervisor over this harness's store with a different `GitOps` —
-   * always with the sandboxed validation executor, so a test that injects a
-   * failing git never accidentally falls through to the real Docker one.
-   */
+  /** Builds a supervisor over this harness's store with a different `GitOps`. */
   supervisedWith: (git: GitOps) => ExecutionSupervisor;
   projects: ProjectService;
   runtimes: RuntimeService;
@@ -77,6 +75,9 @@ interface Harness {
   runtimeId: string;
   agentRuns: number;
   setAgent: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
+  /** The scripted judge (v12 §4.1): a normal Run with its own handler. */
+  setJudge: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
+  judgeRuns: number;
 }
 
 /** Every git call the supervisor made, so "no new commit" is provable. */
@@ -148,12 +149,23 @@ async function makeHarness(git?: GitOps): Promise<Harness> {
   const dataDir = tempDir("af-pub-data-");
   const store = await Store.open(dataDir);
   const bus = new EventBus();
-  const state = { agentRuns: 0, handler: async () => ({ exitCode: 0 }) as RuntimeResult };
+  const state = {
+    agentRuns: 0,
+    judgeRuns: 0,
+    handler: async () => ({ exitCode: 0 }) as RuntimeResult,
+    judge: async () => ({ exitCode: 0 }) as RuntimeResult,
+  };
+  // The judge is a normal Run through the same registry (v12 §4.1), so the
+  // adapter dispatches on the run's purpose; scripts dispatch on it too.
   const adapter: AgentRuntimeAdapter = {
     kind: "custom",
     name: "Scripted harness",
     capabilities: { supportsWorkspace: true, supportsStreamingEvents: true },
     async run(ctx) {
+      if (ctx.run.purpose === "validation") {
+        state.judgeRuns += 1;
+        return state.judge(ctx);
+      }
       state.agentRuns += 1;
       return state.handler(ctx);
     },
@@ -161,32 +173,10 @@ async function makeHarness(git?: GitOps): Promise<Harness> {
   const registry = new RuntimeRegistry();
   registry.register(adapter);
   const runService = new RunService(store, bus, registry, { destroy: async () => {} }, undefined, {});
-  // The stand-in isolation carrier for validation (v11 hardening §6): the
-  // same `runSandboxedValidation` seam the production Docker executor
-  // implements, with the allowlisted environment the supervisor builds.
-  const validationExecutor = () => async (opts: {
-    step: { name: string; command: string };
-    cwd: string;
-    env: Record<string, string>;
-    timeoutMs: number;
-  }) => {
-    try {
-      const { stdout, stderr } = await execFileAsync("sh", ["-c", opts.step.command], {
-        cwd: opts.cwd,
-        env: opts.env,
-        timeout: opts.timeoutMs,
-      });
-      return { exitCode: 0, timedOut: false, output: `${stdout}${stderr}` };
-    } catch (err) {
-      const e = err as { code?: number; killed?: boolean; stdout?: string; stderr?: string };
-      return { exitCode: e.killed ? null : e.code ?? 1, timedOut: Boolean(e.killed), output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
-    }
-  };
   const supervisedWith = (gitOps: GitOps): ExecutionSupervisor =>
-    new ExecutionSupervisor(store, bus, runService, { git: gitOps, validationExecutor });
+    new ExecutionSupervisor(store, bus, runService, { git: gitOps });
   const supervisor = new ExecutionSupervisor(store, bus, runService, {
     ...(git ? { git } : {}),
-    validationExecutor,
   });
   const runtimes = new RuntimeService(store);
   const runtime = await runtimes.create({
@@ -216,6 +206,43 @@ async function makeHarness(git?: GitOps): Promise<Harness> {
     setAgent: (handler) => {
       state.handler = handler;
     },
+    get judgeRuns() {
+      return state.judgeRuns;
+    },
+    setJudge: (handler) => {
+      state.judge = handler;
+    },
+  };
+}
+
+/** Where one judge run's verdict is read from (v12 §5.1) — one derivation. */
+function judgeVerdictPath(dataDir: string, judgeRunId: string): string {
+  return join(validationJudgePaths(dataDir, judgeRunId, true).outputHostDir, "verdict.json");
+}
+
+/**
+ * A scripted Validation Agent (v12 §5.2): submits real verdicts by writing
+ * the same `verdict.json` the supervisor reads.
+ */
+function judgeScript(h: { dataDir: string }, verdicts: VerdictPayload[]): (ctx: RuntimeContext) => Promise<RuntimeResult> {
+  let index = 0;
+  return async (ctx) => {
+    const payload = verdicts[Math.min(index, verdicts.length - 1)];
+    index += 1;
+    const file = judgeVerdictPath(h.dataDir, ctx.run.id);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
+    return { exitCode: 0 };
+  };
+}
+
+/** A passing verdict payload for tests. */
+function passedVerdict(): VerdictPayload {
+  return {
+    passed: true,
+    summary: "The acceptance standard is met.",
+    unmet: [],
+    evidence: ["`git status` → clean tree at the pinned revision"],
   };
 }
 
@@ -432,8 +459,9 @@ describe("v11 hardening: retry publish never re-finalizes", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "test -f x.txt" }] },
+      validation: { prompt: "x.txt exists in the repository root" },
     });
+    h.setJudge(judgeScript(h, [passedVerdict()]));
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
 
     const result = await supervised.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
@@ -452,6 +480,7 @@ describe("v11 hardening: retry publish never re-finalizes", () => {
     assert.equal(recorder.commits, commits, "finalization count unchanged");
     assert.equal(h.runService.forTask(result.task.id).length, runsBefore, "no new run was created");
     assert.equal(h.agentRuns, 1);
+    assert.equal(h.judgeRuns, 1, "the judge did not run again");
   });
 
   test("§30 Case D: the frozen SHA survives a successful retry publish unchanged", async () => {
@@ -574,7 +603,9 @@ async function crashAt(h: Harness, taskId: string, phase: string): Promise<void>
     patch.validation = { ...execution.validation!, status: execution.validation?.status === "skipped" ? "skipped" : "passed" };
     delete stages.finalization;
   } else if (reachedValidation) {
-    patch.validation = { ...execution.validation!, status: "running", steps: [], error: undefined, errorCode: undefined };
+    // The crash landed inside the judge run: the pin was created (and, v12
+    // §6.4, persisted) but no verdict was frozen.
+    patch.validation = { ...execution.validation!, status: "running", error: undefined, errorCode: undefined };
     delete stages.validation;
   }
   if (reachedPublish) {
@@ -643,8 +674,9 @@ describe("v11 hardening: stage-specific crash recovery", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "true" }] },
+      validation: { prompt: "x.txt exists in the repository root" },
     });
+    h.setJudge(judgeScript(h, [passedVerdict()]));
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     const { task } = await startTask(h, project);
     assert.equal(task.execution!.agent!.status, "completed");
@@ -674,8 +706,9 @@ describe("v11 hardening: stage-specific crash recovery", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "true" }] },
+      validation: { prompt: "x.txt exists in the repository root" },
     });
+    h.setJudge(judgeScript(h, [passedVerdict()]));
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     const { task } = await startTask(h, project);
     await crashAt(h, task.id, "git.finalizing");
@@ -696,8 +729,9 @@ describe("v11 hardening: stage-specific crash recovery", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "true" }] },
+      validation: { prompt: "x.txt exists in the repository root" },
     });
+    h.setJudge(judgeScript(h, [passedVerdict()]));
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     const { task, run } = await startTask(h, project);
     const frozen = task.execution!.frozenRevision!;
@@ -786,8 +820,9 @@ describe("v11 hardening: stage-specific crash recovery", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "true" }] },
+      validation: { prompt: "x.txt exists in the repository root" },
     });
+    h.setJudge(judgeScript(h, [passedVerdict()]));
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     const { task } = await startTask(h, project);
     // A crash *after* publishing but before the terminal write.
@@ -818,8 +853,9 @@ describe("v11 hardening: completed stages are never walked back", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "test -f x.txt" }] },
+      validation: { prompt: "x.txt exists in the repository root" },
     });
+    h.setJudge(judgeScript(h, [passedVerdict()]));
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     const result = await supervised.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
     await supervised.whenSettled(result.task.id);
@@ -849,7 +885,7 @@ describe("v11 hardening: completed stages are never walked back", () => {
     assert.ok(task.execution!.frozenRevision!.finalCommitSha);
   });
 
-  test("a task with no validation steps records validation as skipped", async () => {
+  test("a task with no validation configured records validation as skipped", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({ name: "Demo", source: { remoteUrl: remote } });
@@ -868,8 +904,9 @@ describe("v11 hardening: completed stages are never walked back", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "test -f x.txt" }] },
+      validation: { prompt: "x.txt exists in the repository root" },
     });
+    h.setJudge(judgeScript(h, [passedVerdict()]));
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     const result = await supervised.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
     await supervised.whenSettled(result.task.id);
@@ -923,72 +960,72 @@ describe("v11 hardening: cancellation and concurrency", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "slow", command: "sleep 30", timeoutMs: 60_000 }] },
+      validation: { prompt: "the acceptance standard is met" },
     });
     h.setAgent(writeFiles({ "partial.txt": "partial\n" }));
-    const started = await h.supervisor.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
+    let judgeStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolvePromise) => (judgeStarted = resolvePromise));
+    h.setJudge(async (ctx) => {
+      judgeStarted!();
+      await new Promise<void>((resolvePromise) => {
+        ctx.signal.addEventListener("abort", () => resolvePromise(), { once: true });
+        if (ctx.signal.aborted) resolvePromise();
+      });
+      return { exitCode: 1, error: "The judge run was cancelled" };
+    });
 
-    // Wait until validation is the running phase, then cancel.
-    for (let i = 0; i < 200; i++) {
-      const phase = h.tasks.get(started.task.id)?.execution?.phase;
-      if (phase === "validation.running") break;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-    }
-    assert.equal(h.tasks.get(started.task.id)!.execution!.phase, "validation.running");
-    const cancelled = await h.supervisor.cancelTask(started.task.id);
+    const startedTask = await h.supervisor.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
+    await started;
+    assert.equal(h.tasks.get(startedTask.task.id)!.execution!.phase, "validation.running");
+    const cancelled = await h.supervisor.cancelTask(startedTask.task.id);
 
     assert.equal(cancelled!.execution!.status, "cancelled");
     assert.equal(cancelled!.execution!.agent!.status, "completed", "the agent's completed state survives the cancel");
+    assert.equal(cancelled!.execution!.validation!.status, "interrupted");
     assert.equal(cancelled!.execution!.publish!.status, "pending", "nothing was published");
+    // The pin made before judging also survives: it is a commit, not a mutation.
+    assert.ok(cancelled!.execution!.validation!.rounds!.at(-1)!.pinnedRevision!.commitSha);
     // The workspace keeps the agent's uncommitted work.
     const workspacePath = h.workspaces.get(cancelled!.workspaceId!)!.path!;
     assert.equal(existsSync(join(workspacePath, "partial.txt")), true);
     assert.equal(h.store.list("workspaceLocks").length, 0, "the lock was released");
     // No branch was published.
-    const branches = await git(remote, ["branch", "--list", started.task.workingBranch!]);
+    const branches = await git(remote, ["branch", "--list", startedTask.task.workingBranch!]);
     assert.equal(branches.trim(), "");
   });
 
-  test("§32/§33 a cancel during validation settles as a cancellation, not as the sandbox failure it caused", async () => {
-    // The real isolated executor kills the step when the lifecycle aborts and
-    // reports the sandbox failure it observed (`validation-runtime-failed`).
-    // That incidental code must not overwrite the user's cancel into a failed
-    // task — the abort signal, not the failure code, is the cancel's proof.
+  test("§32/§33 a cancel during validation settles as a cancellation, not as the runtime failure it caused", async () => {
+    // The judge run is cancelled and reports the failure it observed
+    // (`validation-runtime-failed`). That incidental code must not overwrite
+    // the user's cancel into a failed task — the abort signal, not the
+    // failure code, is the cancel's proof.
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "test", command: "sleep 60" }] },
+      validation: { prompt: "the acceptance standard is met" },
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
-    let validationStarted: (() => void) | undefined;
-    const started = new Promise<void>((resolvePromise) => (validationStarted = resolvePromise));
-    const supervised = new ExecutionSupervisor(h.store, h.bus, h.runService, {
-      validationExecutor: () => async (opts) => {
-        validationStarted!();
-        await new Promise<void>((resolvePromise) => {
-          opts.signal?.addEventListener("abort", () => resolvePromise(), { once: true });
-          if (opts.signal?.aborted) resolvePromise();
-        });
-        return {
-          exitCode: -1,
-          timedOut: false,
-          output: "killed",
-          error: "Validation was cancelled",
-          errorCode: "validation-runtime-failed",
-        };
-      },
+    let judgeStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolvePromise) => (judgeStarted = resolvePromise));
+    h.setJudge(async (ctx) => {
+      judgeStarted!();
+      await new Promise<void>((resolvePromise) => {
+        ctx.signal.addEventListener("abort", () => resolvePromise(), { once: true });
+        if (ctx.signal.aborted) resolvePromise();
+      });
+      return { exitCode: -1, error: "The judge run was cancelled" };
     });
 
-    const result = await supervised.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
+    const result = await h.supervisor.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
     await started;
-    await supervised.cancelTask(result.task.id);
-    await supervised.whenSettled(result.task.id);
+    await h.supervisor.cancelTask(result.task.id);
+    await h.supervisor.whenSettled(result.task.id);
 
     const task = h.tasks.get(result.task.id)!;
     assert.equal(task.execution!.status, "cancelled");
-    assert.equal(task.execution!.failure!.code, "agent-cancelled", "the cancel is reported as one, not as a sandbox failure");
+    assert.equal(task.execution!.failure!.code, "agent-cancelled", "the cancel is reported as one, not as a runtime failure");
     assert.equal(task.execution!.failure!.stage, "validation", "the stage the cancel landed in is kept");
     assert.equal(task.execution!.validation!.status, "interrupted");
     assert.equal(task.execution!.agent!.status, "completed", "the agent's completed state survives the cancel");

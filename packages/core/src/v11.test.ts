@@ -44,14 +44,8 @@ import {
   type GitOps,
 } from "./git.js";
 import { SecretRedactor, redactRemoteUrl, urlHasUserInfo } from "./redaction.js";
-import { buildMcpConfigDocument, provisionEnvironment } from "./provisioning.js";
-import {
-  buildValidationEnvironment,
-  createValidationRunner,
-  resolveValidationConfig,
-  runSandboxedValidation,
-  type SandboxedStepExecutor,
-} from "./validation.js";
+import { buildMcpConfigDocument, provisionEnvironment, validationJudgePaths } from "./provisioning.js";
+import { resolveValidationConfig, type VerdictPayload } from "./validation.js";
 import type { Project, Run, Task } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -113,24 +107,44 @@ async function makeRemote(): Promise<{ remote: string; seed: string; baseSha: st
 /** A scripted agent harness: the test decides what the "agent" does. */
 interface ScriptedHarness {
   adapter: AgentRuntimeAdapter;
+  /** Development runs (initial + rework) the harness executed. */
   runs: () => number;
+  /** Judge runs (`purpose: "validation"`) the harness executed. */
+  judgeRuns: () => number;
   setHandler: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
+  /** The scripted Validation Agent (v12 §4.1): a normal Run, its own handler. */
+  setJudge: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
   /** Environments the agent actually saw (credential-leak assertions). */
   envs: RuntimeContext["env"][];
   contexts: RuntimeContext[];
+  /** Environments the judge runs saw — the judge secret-isolation assertions. */
+  judgeEnvs: RuntimeContext["env"][];
+  judgeContexts: RuntimeContext[];
 }
 
 function scriptedHarness(): ScriptedHarness {
   let handler: (ctx: RuntimeContext) => Promise<RuntimeResult> = async () => ({ exitCode: 0 });
-  let runs = 0;
+  const state = { runs: 0, judgeRuns: 0 };
   const envs: RuntimeContext["env"][] = [];
   const contexts: RuntimeContext[] = [];
+  const judgeEnvs: RuntimeContext["env"][] = [];
+  const judgeContexts: RuntimeContext[] = [];
+  // The judge is a normal Run through the same registry (v12 §4.1), so the
+  // adapter dispatches on the run's purpose. A judge run that has no scripted
+  // handler exits without a verdict — a valid "judge produced nothing" case.
+  let judgeHandler: (ctx: RuntimeContext) => Promise<RuntimeResult> = async () => ({ exitCode: 0 });
   const adapter: AgentRuntimeAdapter = {
     kind: "custom",
     name: "Scripted harness",
     capabilities: { supportsWorkspace: true, supportsStreamingEvents: true },
     async run(ctx) {
-      runs += 1;
+      if (ctx.run.purpose === "validation") {
+        state.judgeRuns += 1;
+        judgeEnvs.push({ ...ctx.env });
+        judgeContexts.push(ctx);
+        return judgeHandler(ctx);
+      }
+      state.runs += 1;
       envs.push({ ...ctx.env });
       contexts.push(ctx);
       return handler(ctx);
@@ -138,12 +152,55 @@ function scriptedHarness(): ScriptedHarness {
   };
   return {
     adapter,
-    runs: () => runs,
+    runs: () => state.runs,
+    judgeRuns: () => state.judgeRuns,
     setHandler: (next) => {
       handler = next;
     },
+    setJudge: (next) => {
+      judgeHandler = next;
+    },
     envs,
     contexts,
+    judgeEnvs,
+    judgeContexts,
+  };
+}
+
+/** Where one judge run's verdict is read from (v12 §5.1) — one derivation. */
+function judgeVerdictPath(dataDir: string, judgeRunId: string): string {
+  return join(validationJudgePaths(dataDir, judgeRunId, true).outputHostDir, "verdict.json");
+}
+
+/**
+ * A scripted Validation Agent (v12 §5.2): submits real verdicts by writing
+ * the same `verdict.json` the supervisor reads. Verdicts are consumed in
+ * order; the last one repeats for any further judge runs.
+ */
+function judgeScript(
+  h: { dataDir: string },
+  verdicts: VerdictPayload[]
+): (ctx: RuntimeContext) => Promise<RuntimeResult> {
+  let index = 0;
+  return async (ctx) => {
+    const verdict = verdicts[Math.min(index, verdicts.length - 1)];
+    index += 1;
+    const file = judgeVerdictPath(h.dataDir, ctx.run.id);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(verdict, null, 2)}\n`);
+    await ctx.emit("log", { line: `verdict submitted: ${verdict.passed ? "passed" : "failed"}` });
+    return { exitCode: 0 };
+  };
+}
+
+/** A verdict payload for tests: passed with one evidence entry by default. */
+function verdict(overrides: Partial<VerdictPayload> = {}): VerdictPayload {
+  return {
+    passed: true,
+    summary: "The acceptance standard is met.",
+    unmet: [],
+    evidence: ['`ls` → the expected files are present'],
+    ...overrides,
   };
 }
 
@@ -175,54 +232,9 @@ interface Harness {
   locks: WorkspaceLockService;
   dataDir: string;
   runtimeId: string;
-  /** Every validation step the sandboxed executor was asked to run. */
-  validationCalls: ValidationCall[];
 }
 
-/** One validation step as the isolated executor received it. */
-interface ValidationCall {
-  step: { name: string; command: string };
-  cwd: string;
-  env: Record<string, string>;
-}
-
-/**
- * The isolated validation executor used by the core suites (v11 hardening
- * §6). Validation is never allowed to run as a host shell command, so the
- * harness supplies a stand-in isolation carrier that runs the step through
- * the same `runSandboxedValidation` seam the production Docker executor
- * implements — while recording exactly what environment it was handed, which
- * is what the isolation assertions read.
- */
-function sandboxedValidationExecutor(calls: ValidationCall[]): (image?: string) => SandboxedStepExecutor {
-  const executor: SandboxedStepExecutor = async (opts) => {
-    calls.push({ step: { name: opts.step.name, command: opts.step.command }, cwd: opts.cwd, env: { ...opts.env } });
-    try {
-      const { stdout, stderr } = await execFileAsync("sh", ["-c", opts.step.command], {
-        cwd: opts.cwd,
-        env: opts.env,
-        timeout: opts.timeoutMs,
-        maxBuffer: 16 * 1024 * 1024,
-      });
-      const output = `${stdout}${stderr}`;
-      await opts.onOutput?.(output, "stdout");
-      return { exitCode: 0, timedOut: false, output };
-    } catch (err) {
-      const e = err as { code?: number; killed?: boolean; stdout?: string; stderr?: string };
-      const output = `${e.stdout ?? ""}${e.stderr ?? ""}`;
-      if (output) await opts.onOutput?.(output, "stderr");
-      if (e.killed) return { exitCode: null, timedOut: true, output };
-      return { exitCode: e.code ?? 1, timedOut: false, output };
-    }
-  };
-  // The supervisor asks for an executor per toolchain image; this carrier is
-  // image-agnostic (the step runs in the test process, not in a container).
-  return () => executor;
-}
-
-async function makeHarness(
-  options: { git?: GitOps; validationRunner?: ReturnType<typeof createValidationRunner> } = {}
-): Promise<Harness> {
+async function makeHarness(options: { git?: GitOps; allowHostExecution?: boolean } = {}): Promise<Harness> {
   const dataDir = tempDir("af-v11-data-");
   const store = await Store.open(dataDir);
   const bus = new EventBus();
@@ -230,10 +242,9 @@ async function makeHarness(
   const registry = new RuntimeRegistry();
   registry.register(scripted.adapter);
   const runService = new RunService(store, bus, registry, { destroy: async () => {} }, undefined, {});
-  const validationCalls: ValidationCall[] = [];
   const supervisor = new ExecutionSupervisor(store, bus, runService, {
-    ...options,
-    validationExecutor: sandboxedValidationExecutor(validationCalls),
+    ...(options.git ? { git: options.git } : {}),
+    ...(options.allowHostExecution ? { allowHostExecution: true } : {}),
   });
   const runtimes = new RuntimeService(store);
   // Project Coding Tasks require an isolated runtime (v11 hardening §4): the
@@ -264,7 +275,6 @@ async function makeHarness(
     locks: new WorkspaceLockService(store),
     dataDir,
     runtimeId: runtime.id,
-    validationCalls,
   };
 }
 
@@ -1039,25 +1049,28 @@ describe("v11 credential security boundary", () => {
 });
 
 /* ================================================================== */
-/* 6. Validation (v11 §20/§41.8)                                       */
+/* 6. Validation (v12 §4/§5)                                           */
 /* ================================================================== */
 
 describe("v11 validation", () => {
-  test("AC-18/AC-19: validation runs after the agent and gates finalization", async () => {
+  test("AC-18/AC-19: the judge runs after the agent and gates finalization", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "test -f feature.txt" }] },
+      validation: { prompt: "the feature file exists and is non-empty" },
     });
     h.scripted.setHandler(writeFiles({ "feature.txt": "ok\n" }));
+    h.scripted.setJudge(judgeScript(h, [verdict()]));
     const { task, run } = await startTask(h, project);
+
     assert.equal(task.execution!.validation!.status, "passed");
     assert.equal(task.execution!.status, "completed");
-    // A validation report artifact is attached to the run.
+    assert.equal(h.scripted.judgeRuns(), 1);
+    // The verdict is frozen as an artifact on the development run.
     const artifacts = h.store.list<{ name: string; runId: string }>("artifacts").filter((a) => a.runId === run.id);
-    assert.ok(artifacts.some((a) => a.name === "validation-report.txt"));
+    assert.ok(artifacts.some((a) => a.name === "validation-verdict.json"));
   });
 
   test("a failing validation is its own failure, not an agent failure (v11 §20/§23)", async () => {
@@ -1066,9 +1079,14 @@ describe("v11 validation", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "typecheck", command: "echo 'type error' >&2; exit 2" }] },
+      validation: { prompt: "the full test suite passes", maxAttempts: 1 },
     });
     h.scripted.setHandler(writeFiles({ "feature.txt": "ok\n" }));
+    h.scripted.setJudge(
+      judgeScript(h, [
+        verdict({ passed: false, summary: "The tests do not pass.", unmet: ["the test suite passes"], evidence: ["`npm test` → 3 failures"] }),
+      ])
+    );
     const { task } = await startTask(h, project);
 
     assert.equal(task.execution!.agent!.status, "completed", "the agent itself succeeded");
@@ -1077,68 +1095,55 @@ describe("v11 validation", () => {
     assert.equal(task.execution!.failure!.code, "validation-failed");
     assert.equal(task.execution!.status, "failed");
     assert.equal(task.execution!.publish!.status, "pending", "nothing is published after a failed validation");
-    // The step's output is retained for the task view.
-    assert.match(task.execution!.validation!.steps![0].output!, /type error/);
+    // The judge's own findings are on the record.
+    assert.match(task.execution!.validation!.verdict!.summary, /do not pass/);
+    assert.deepEqual(task.execution!.validation!.verdict!.unmet, ["the test suite passes"]);
   });
 
-  test("validation timeout is distinguished from a plain failure", async () => {
+  test("Retry Validation re-judges without re-running the agent (v12 §6.4)", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "slow", command: "sleep 5", timeoutMs: 150 }] },
+      validation: { prompt: "the ready flag exists", maxAttempts: 1 },
     });
     h.scripted.setHandler(writeFiles({ "x.txt": "x\n" }));
-    const { task } = await startTask(h, project);
-    assert.equal(task.execution!.validation!.status, "timeout");
-    assert.equal(task.execution!.failure!.code, "validation-timeout");
-  });
-
-  test("Retry Validation re-runs validation without re-running the agent (v11 §31)", async () => {
-    const h = await makeHarness();
-    const { remote } = await makeRemote();
-    const project = await h.projects.create({
-      name: "Demo",
-      source: { remoteUrl: remote },
-      validation: { steps: [{ name: "test", command: "test -f ready.flag" }] },
-    });
-    h.scripted.setHandler(writeFiles({ "x.txt": "x\n" }));
+    h.scripted.setJudge(
+      judgeScript(h, [
+        verdict({ passed: false, summary: "The flag is missing.", unmet: ["ready.flag exists"], evidence: ["`ls` → no ready.flag"] }),
+        verdict(),
+      ])
+    );
     const { task } = await startTask(h, project);
     assert.equal(task.execution!.failure!.code, "validation-failed");
     assert.equal(h.scripted.runs(), 1);
 
-    // The environment is fixed out of band (as a human would), then validation
-    // is retried: no agent, no model call.
+    // The workspace is fixed out of band (as a human would), then validation
+    // is retried: no development agent, no development model call.
     writeFileSync(join(h.workspaces.get(task.workspaceId!)!.path!, "ready.flag"), "ok\n");
     const after = await h.supervisor.retryValidation(task.id);
     assert.equal(h.scripted.runs(), 1, "the agent must not run again");
     assert.equal(after!.execution!.validation!.status, "passed");
     assert.equal(after!.execution!.status, "completed");
     assert.equal(after!.execution!.publish!.status, "pushed");
+    // The retry is a **new cycle** (fresh budget) and the round history is
+    // kept: round 1 failed, round 2 passed.
+    assert.deepEqual(
+      after!.execution!.validation!.rounds!.map((r) => [r.round, r.status]),
+      [
+        [1, "failed"],
+        [2, "passed"],
+      ]
+    );
+    assert.equal(after!.execution!.validation!.attempts, 1, "the fresh cycle counts its own attempts");
   });
 
-  test("a task-level validation override replaces the project default", () => {
-    assert.deepEqual(resolveValidationConfig({ steps: [{ name: "t", command: "x" }] }, { steps: [{ name: "p", command: "y" }] }), [
-      { name: "t", command: "x" },
-    ]);
-    assert.deepEqual(resolveValidationConfig({ enabled: false, steps: [{ name: "t", command: "x" }] }, undefined), []);
-    assert.deepEqual(resolveValidationConfig(undefined, { steps: [{ name: "p", command: "y" }] }), [{ name: "p", command: "y" }]);
-  });
-
-  test("the validation runner reports required vs optional steps", async () => {
-    const runner = createValidationRunner();
-    const dir = tempDir("af-v11-val-");
-    const result = await runner({
-      cwd: dir,
-      steps: [
-        { name: "optional", command: "exit 1", required: false },
-        { name: "required", command: "exit 0" },
-      ],
-    });
-    assert.equal(result.status, "passed");
-    assert.equal(result.steps[0].status, "failed");
-    assert.equal(result.steps[1].status, "passed");
+  test("a task-level validation override replaces the project default (v12 §3)", () => {
+    assert.deepEqual(resolveValidationConfig({ prompt: "t" }, { prompt: "p" }), { prompt: "t" });
+    assert.deepEqual(resolveValidationConfig({ prompt: "t", modelId: "m" }, undefined), { prompt: "t", modelId: "m" });
+    assert.deepEqual(resolveValidationConfig(undefined, { prompt: "p" }), { prompt: "p" });
+    assert.equal(resolveValidationConfig(undefined, undefined), undefined);
   });
 });
 
@@ -1708,9 +1713,12 @@ describe("v11 supervisor API surface", () => {
     const project = await h.projects.create({ name: "Demo", source: { remoteUrl: remote } });
     h.scripted.setHandler(writeFiles({ "x.txt": "x\n" }));
     const { task } = await startTask(h, project);
-    // Already completed: validation retry is a no-op state, but it must not
-    // silently re-run the agent.
-    await h.supervisor.retryValidation(task.id);
+    // No validation configured: there is nothing to re-validate, and the
+    // refusal is loud (v12 §6.4) — it must never silently re-run the agent.
+    await assert.rejects(
+      () => h.supervisor.retryValidation(task.id),
+      (err: unknown) => (err as DomainError).code === "task-state-invalid"
+    );
     assert.equal(h.scripted.runs(), 1);
   });
 

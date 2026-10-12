@@ -8,9 +8,10 @@
  * A git-scoped secret is the repository write credential. It must be
  * unreachable from every path that could put material into the agent's trust
  * domain — task `secretIds`, runtime `secretIds`, agent profile, generated
- * MCP configuration, validation environment — *even when the caller
- * explicitly passes the id*. The enforcement lives at the resolution
- * boundary, so a call path that does not exist yet is covered too (§8.3).
+ * MCP configuration, the Validation Agent's environment (v12 §9.2) — *even
+ * when the caller explicitly passes the id*. The enforcement lives at the
+ * resolution boundary, so a call path that does not exist yet is covered
+ * too (§8.3).
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -35,7 +36,8 @@ import {
 import { DomainError } from "./errors.js";
 import { assertSecretAllowed, isSecretAllowedForPurpose, resolveSecretsForPurpose } from "./secrets.js";
 import { buildMcpConfigDocument } from "./provisioning.js";
-import { provisionEnvironment } from "./provisioning.js";
+import { provisionEnvironment, validationJudgePaths } from "./provisioning.js";
+import type { VerdictPayload } from "./validation.js";
 import type { Project, Run, Secret, Task } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -158,8 +160,11 @@ interface Harness {
   agentRuns: number;
   agentEnvs: Record<string, string>[];
   agentSecrets: string[][];
-  validationCalls: Array<{ env: Record<string, string> }>;
+  /** What each judge run (`purpose: "validation"`) actually saw (v12 §9.2). */
+  judgeEnvs: Record<string, string>[];
+  judgeSecrets: string[][];
   setAgent: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
+  setJudge: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -170,13 +175,24 @@ async function makeHarness(): Promise<Harness> {
     agentRuns: 0,
     agentEnvs: [] as Record<string, string>[],
     agentSecrets: [] as string[][],
+    judgeEnvs: [] as Record<string, string>[],
+    judgeSecrets: [] as string[][],
     handler: async () => ({ exitCode: 0 }) as RuntimeResult,
+    judge: async () => ({ exitCode: 0 }) as RuntimeResult,
   };
+  // The judge is a normal Run (v12 §4.1), so the adapter dispatches on the
+  // run's purpose and the judge environment is recorded exactly like the
+  // agent's.
   const adapter: AgentRuntimeAdapter = {
     kind: "custom",
     name: "Scripted harness",
     capabilities: { supportsWorkspace: true, supportsStreamingEvents: true },
     async run(ctx) {
+      if (ctx.run.purpose === "validation") {
+        state.judgeEnvs.push({ ...ctx.env });
+        state.judgeSecrets.push(ctx.secrets.map((s) => s.id));
+        return state.judge(ctx);
+      }
       state.agentRuns += 1;
       state.agentEnvs.push({ ...ctx.env });
       state.agentSecrets.push(ctx.secrets.map((s) => s.id));
@@ -186,23 +202,7 @@ async function makeHarness(): Promise<Harness> {
   const registry = new RuntimeRegistry();
   registry.register(adapter);
   const runService = new RunService(store, bus, registry, { destroy: async () => {} }, undefined, {});
-  const validationCalls: Array<{ env: Record<string, string> }> = [];
-  const supervisor = new ExecutionSupervisor(store, bus, runService, {
-    validationExecutor: () => async (opts) => {
-      validationCalls.push({ env: { ...opts.env } });
-      try {
-        const { stdout, stderr } = await execFileAsync("sh", ["-c", opts.step.command], {
-          cwd: opts.cwd,
-          env: opts.env,
-          timeout: opts.timeoutMs,
-        });
-        return { exitCode: 0, timedOut: false, output: `${stdout}${stderr}` };
-      } catch (err) {
-        const e = err as { code?: number; killed?: boolean; stdout?: string; stderr?: string };
-        return { exitCode: e.killed ? null : e.code ?? 1, timedOut: Boolean(e.killed), output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
-      }
-    },
-  });
+  const supervisor = new ExecutionSupervisor(store, bus, runService, {});
   return {
     store,
     bus,
@@ -225,10 +225,39 @@ async function makeHarness(): Promise<Harness> {
     get agentSecrets() {
       return state.agentSecrets;
     },
-    validationCalls,
+    get judgeEnvs() {
+      return state.judgeEnvs;
+    },
+    get judgeSecrets() {
+      return state.judgeSecrets;
+    },
     setAgent: (handler) => {
       state.handler = handler;
     },
+    setJudge: (handler) => {
+      state.judge = handler;
+    },
+  };
+}
+
+/** Where one judge run's verdict is read from (v12 §5.1) — one derivation. */
+function judgeVerdictPath(dataDir: string, judgeRunId: string): string {
+  return join(validationJudgePaths(dataDir, judgeRunId, true).outputHostDir, "verdict.json");
+}
+
+/** A scripted judge that submits a passing verdict, embedding its env dump. */
+function passingJudge(h: { dataDir: string }, evidence: string[] = []): (ctx: RuntimeContext) => Promise<RuntimeResult> {
+  return async (ctx) => {
+    const payload: VerdictPayload = {
+      passed: true,
+      summary: "The acceptance standard is met.",
+      unmet: [],
+      evidence: evidence.length > 0 ? evidence : ["`echo $BUILD_TOKEN` → the build secret was available"],
+    };
+    const file = judgeVerdictPath(h.dataDir, ctx.run.id);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
+    return { exitCode: 0 };
   };
 }
 
@@ -389,7 +418,7 @@ describe("v11 hardening: git secrets never enter the agent trust domain", () => 
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "t", command: "true" }] },
+      validation: { prompt: "the acceptance standard is met" },
       execution: { validationSecretIds: [credential.secretId] },
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
@@ -424,7 +453,7 @@ describe("v11 hardening: git secrets never enter the agent trust domain", () => 
     );
   });
 
-  test("a non-git validation secret IS delivered to the validation environment", async () => {
+  test("a non-git validation secret IS delivered to the judge environment — and only there", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const runtimeId = await isolatedRuntime(h);
@@ -432,15 +461,22 @@ describe("v11 hardening: git secrets never enter the agent trust domain", () => 
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "has-token", command: "test -n \"$BUILD_TOKEN\"" }] },
+      validation: { prompt: "the build passes with $BUILD_TOKEN available" },
       execution: { validationSecretIds: [buildSecret.id] },
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
+    h.setJudge(passingJudge(h));
     const result = await h.supervisor.startTask({ projectId: project.id, instruction: "work", runtimeId });
     await h.supervisor.whenSettled(result.task.id);
     const task = h.tasks.get(result.task.id)!;
     assert.equal(task.execution!.validation!.status, "passed");
-    assert.equal(h.validationCalls[0].env.BUILD_TOKEN, "build-value-1234");
+    // The judge saw it (v12 §9.2)…
+    assert.equal(h.judgeEnvs[0].BUILD_TOKEN, "build-value-1234");
+    assert.deepEqual(h.judgeSecrets[0], [buildSecret.id]);
+    // …and the development agent did not: validation secrets are the
+    // judge's allowlist, not the agent's.
+    assert.equal(h.agentEnvs[0].BUILD_TOKEN, undefined);
+    assert.deepEqual(h.agentSecrets[0], []);
   });
 
   test("a runtime's own secretIds cannot smuggle a git secret in either", async () => {

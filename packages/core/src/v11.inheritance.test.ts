@@ -149,11 +149,9 @@ async function makeHarness(): Promise<Harness> {
   registry.register(scripted.adapter);
   registry.register(dockerAdapter);
   const runService = new RunService(store, bus, registry, { destroy: async () => {} }, undefined, {});
-  const supervisor = new ExecutionSupervisor(store, bus, runService, {
-    // Validation is exercised by its own suites; these tests configure no
-    // validation steps, so this executor is never reached.
-    validationExecutor: () => async () => ({ exitCode: 0, timedOut: false, output: "" }),
-  });
+  // Validation is exercised by its own suites; these tests configure no
+  // validation, so the stage records as skipped and no judge run starts.
+  const supervisor = new ExecutionSupervisor(store, bus, runService, {});
   const runtimes = new RuntimeService(store);
   // The isolation gate (v11 hardening §4) reads capability metadata, not the
   // kind: the scripted adapter is wired to a container-backed declaration.

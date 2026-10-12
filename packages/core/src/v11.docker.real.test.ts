@@ -1,5 +1,6 @@
 /**
- * REAL Docker runtime Coding Task E2E (v11 hardening §21–§24/§40, AC-30–AC-35).
+ * REAL Docker runtime Coding Task E2E (v11 hardening §21–§24/§40, AC-30–AC-35;
+ * v12 §4/§9).
  *
  * This suite runs the **whole** Project lifecycle against a real Docker
  * daemon and a real git remote:
@@ -9,14 +10,16 @@
  *   → Create Working Branch → Start Real Docker Runtime → Mount Workspace
  *   → Run Fake Agent INSIDE Docker → Modify Workspace
  *   → Verify the Agent Cannot Read the Git Credential
- *   → Run Validation INSIDE a Disposable Sandbox
+ *   → Run the Validation Judge INSIDE its own fresh container
+ *     (read-only workspace, no host environment, verdict tool usable)
  *   → Finalize Git → Freeze the Final Commit SHA → Push the Exact Commit
  *   → Destroy the Runtime → Verify the Workspace Still Exists
  *   → Verify the Remote Branch → Verify the Secret Never Leaked
  *
- * No LLM is called: the "agent" is a deterministic shell script that runs
- * inside the container, writes into the mounted workspace and prints what it
- * sees. The point is the **runtime isolation contract**, not model ability.
+ * No LLM is called: the "agent" and the "judge" are deterministic shell
+ * scripts that run inside their containers, print what they see, and — for
+ * the judge — submit a real verdict through the provisioned tool. The point
+ * is the **runtime isolation contract**, not model ability.
  *
  * Gating: the suite runs whenever a Docker daemon is reachable; it skips (with
  * a reason) when there is none. It needs no API key and no network beyond the
@@ -37,12 +40,14 @@ import { ExecutionSupervisor } from "./supervisor.js";
 import {
   ProjectService,
   RuntimeService,
+  SecretService,
   SourceCredentialService,
   TaskService,
   WorkspaceService,
 } from "./services.js";
 import { createDockerContainerOps } from "../../runtimes/src/docker.js";
 import { dockerAdapter } from "../../runtimes/src/docker.js";
+import { VALIDATION_OUTPUT_CONTAINER_PATH, VALIDATION_TOOL_CONTAINER_PATH } from "./validation.js";
 import type { Run, Task } from "./types.js";
 
 const exec = promisify(execFile);
@@ -145,15 +150,90 @@ exit 0
 `;
 
 /**
+ * A "development agent" that does NOT satisfy the acceptance standard on its
+ * first run: it writes something else entirely, so a real judge checking real
+ * evidence reaches a failing verdict. On a rework run (recognizable because
+ * its previous partial output is still in the workspace) it completes the
+ * work — the deterministic stand-in for "the agent acted on the verdict".
+ */
+const FAKE_PARTIAL_AGENT_SCRIPT = `#!/bin/sh
+set -eu
+echo "AF_AGENT_START"
+if [ -f /workspace/partial.txt ]; then
+  echo "AF_AGENT_MODE=rework"
+  printf 'produced by the agent inside the container\\n' > /workspace/agent-output.txt
+  mkdir -p /workspace/src
+  printf 'export const feature = 1;\\n' > /workspace/src/feature.ts
+else
+  echo "AF_AGENT_MODE=initial"
+  printf 'work in progress\\n' > /workspace/partial.txt
+fi
+echo "AF_AGENT_END"
+exit 0
+`;
+
+/**
+ * The runtime's container command, shared by both roles. A judge run always
+ * carries `AGENTFABRIC_VALIDATION_OUTPUT` (provisioned in v12 §4.1); a
+ * development run never does.
+ *
+ * The judge branch is deliberately self-contained — the judge container gets
+ * no skills mount, its only platform tool is the verdict tool — and it
+ * derives its verdict from real checks against the read-only workspace,
+ * submitting through the provisioned tool exactly like a real judge would.
+ */
+const RUNTIME_DISPATCH_SCRIPT = `
+if [ -n "\${AGENTFABRIC_VALIDATION_OUTPUT:-}" ]; then
+  # ---- judge role (v12 §4.1): its own container, read-only workspace ----
+  echo "AF_JUDGE_IN_CONTAINER=yes"
+  echo "AF_JUDGE_HOSTNAME=$(hostname)"
+  if [ -e /Users ]; then echo "AF_JUDGE_NO_HOST_HOME=no"; else echo "AF_JUDGE_NO_HOST_HOME=yes"; fi
+  if [ -e /var/run/docker.sock ]; then echo "AF_JUDGE_NO_DOCKER_SOCKET=no"; else echo "AF_JUDGE_NO_DOCKER_SOCKET=yes"; fi
+  if (echo nope > /workspace/judge-should-not-write.txt) 2>/dev/null; then echo "AF_JUDGE_WRITE_READONLY=no"; else echo "AF_JUDGE_WRITE_READONLY=yes"; fi
+  echo "AF_JUDGE_ENV_START"
+  printenv | sort
+  echo "AF_JUDGE_ENV_END"
+  missing=""
+  if [ -f /workspace/agent-output.txt ]; then
+    echo "AF_JUDGE_CHECK agent-output.txt present"
+  else
+    echo "AF_JUDGE_CHECK agent-output.txt missing"
+    missing="$missing agent-output.txt"
+  fi
+  if grep -q "export const feature" /workspace/src/feature.ts 2>/dev/null; then
+    echo "AF_JUDGE_CHECK src/feature.ts matches"
+  else
+    echo "AF_JUDGE_CHECK src/feature.ts missing"
+    missing="$missing src/feature.ts"
+  fi
+  if [ -z "$missing" ]; then
+    node ${VALIDATION_TOOL_CONTAINER_PATH} --passed \\
+      --summary "The acceptance standard is met: the pinned revision contains agent-output.txt and the feature module." \\
+      --evidence "test -f /workspace/agent-output.txt -> present" \\
+      --evidence "grep feature /workspace/src/feature.ts -> matched"
+  else
+    node ${VALIDATION_TOOL_CONTAINER_PATH} --failed \\
+      --summary "The acceptance standard is not met: the pinned revision is missing required artifacts." \\
+      --unmet "missing:$missing" \\
+      --evidence "ls /workspace -> the expected files are absent"
+  fi
+  echo "AF_JUDGE_TOOL_EXIT=$?"
+  exit 0
+fi
+# ---- development role: run the provisioned skill ----
+exec sh /root/.agentfabric/skills/fake-agent/run.sh
+`;
+
+/**
  * The skill directory itself (it contains `run.sh`). Provisioning copies it to
- * `<skillsMount>/<skill.name>`, so the container command below finds the agent
+ * `<skillsMount>/<skill.name>`, so the container command above finds the agent
  * at `/root/.agentfabric/skills/fake-agent/run.sh`.
  */
-function skillDir(): string {
+function skillDir(script: string = FAKE_AGENT_SCRIPT): string {
   const dir = tempDir("af-docker-skill-");
-  const script = join(dir, "run.sh");
-  writeFileSync(script, FAKE_AGENT_SCRIPT);
-  chmodSync(script, 0o755);
+  const scriptPath = join(dir, "run.sh");
+  writeFileSync(scriptPath, script);
+  chmodSync(scriptPath, 0o755);
   return dir;
 }
 
@@ -165,7 +245,7 @@ function eventLines(events: Array<{ type: string; data: Record<string, unknown> 
 }
 
 describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, () => {
-  test("the full isolated lifecycle: agent in Docker, validation in a sandbox, exact commit pushed", async () => {
+  test("the full isolated lifecycle: agent in Docker, the judge in its own container, exact commit pushed", async () => {
     /* ---------- 0. Environment ---------- */
     const { remote, baseSha } = await makeRemote();
     const dataDir = tempDir("af-docker-data-");
@@ -174,8 +254,9 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
     const registry = new RuntimeRegistry();
     registry.register(dockerAdapter);
     const runService = new RunService(store, bus, registry, createDockerContainerOps());
-    // The production supervisor: the default validation executor is the real
-    // disposable Docker one, so validation genuinely runs in a container.
+    // The production supervisor, end to end: the judge is a real Run through
+    // the same Docker runtime (v12 §4.1), so the read-only mount, the verdict
+    // tool and the secret boundaries are the real ones.
     const supervisor = new ExecutionSupervisor(store, bus, runService);
     const projects = new ProjectService(store);
     const credentials = new SourceCredentialService(store);
@@ -199,37 +280,23 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
       name: "E2E Docker project",
       source: { remoteUrl: remote, credentialId: credential.id },
       skills: [{ name: "fake-agent", path: skillDir() }],
-      validation: {
-        steps: [
-          // Case A: the command reads the workspace the agent wrote into.
-          { name: "workspace-visible", command: "test -f /workspace/agent-output.txt" },
-          { name: "agent-work-visible", command: "grep -q 'export const feature' /workspace/src/feature.ts" },
-          // AC-33: validation itself runs inside a container.
-          { name: "in-container", command: "test -f /.dockerenv" },
-          // AC-8/§26 Case D + AC-7/§26 Case C: the sandbox's whole
-          // environment is dumped and scanned below for both canaries. The
-          // commands deliberately do not spell either value, so a match could
-          // only come from the environment itself.
-          { name: "environment-dump", command: "printenv | sort" },
-          // §6.1: no Docker socket, no host filesystem beyond the workspace.
-          { name: "no-docker-socket", command: "test ! -e /var/run/docker.sock" },
-          { name: "no-host-home", command: "test ! -e /Users" },
-          { name: "validation-marker", command: "test \"$AGENTFABRIC_VALIDATION\" = 1" },
-        ],
-      },
+      validation: { prompt: "the acceptance standard is met, proven by running commands in the container" },
       git: { autoCommit: true, push: true },
     });
 
     /* ---------- 3. Create the isolated Docker runtime ---------- */
+    // One runtime, both roles: the command dispatches on the judge-only env
+    // var the platform provisions (v12 §4.1) — the development agent runs the
+    // fake agent skill, the judge runs the in-container verification script.
     const runtime = await runtimes.create({
       name: "E2E Docker runtime",
       kind: "docker",
       containerized: true,
       executionBackend: "isolated",
       image: IMAGE,
-      // The container command runs the provisioned fake agent. The skill is
-      // mounted read-only by the platform's own provisioning path.
-      command: ["sh", "/root/.agentfabric/skills/fake-agent/run.sh"],
+      // Inline dispatch (the judge container gets no skills mount): the
+      // script branches on the judge-only env var the platform provisions.
+      command: ["sh", "-c", RUNTIME_DISPATCH_SCRIPT],
       usableInTask: true,
       enabled: true,
       ephemeral: true,
@@ -289,40 +356,62 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
     assert.equal(existsSync(workspacePath), true, "the workspace survives the container");
     assert.equal(existsSync(join(workspacePath, ".git")), true, "the workspace is still a real repository");
 
-    /* ---------- 10. Validation Isolation (AC-33/AC-5/AC-6/AC-7/AC-8) ---------- */
+    /* ---------- 10. The judge ran as its own Run, in its own container (v12 §4/§9) ---------- */
     const validation = task.execution!.validation!;
-    assert.equal(validation.execution!.backend, "isolated");
-    assert.equal(validation.execution!.containerized, true);
-    assert.equal(validation.execution!.image, IMAGE);
-    assert.equal(validation.execution!.disposable, true);
-    assert.deepEqual(
-      validation.steps!.map((s) => [s.name, s.status]),
-      [
-        ["workspace-visible", "passed"],
-        ["agent-work-visible", "passed"],
-        ["in-container", "passed"],
-        ["environment-dump", "passed"],
-        ["no-docker-socket", "passed"],
-        ["no-host-home", "passed"],
-        ["validation-marker", "passed"],
-      ],
-      JSON.stringify(validation.steps)
+    assert.equal(validation.attempts, 1);
+    assert.equal(validation.rounds!.length, 1);
+    const round = validation.rounds![0];
+    const judgeRun = runService.get(round.judgeRunId!)!;
+    assert.equal(judgeRun.purpose, "validation", "the judge is an ordinary Run with its own purpose");
+    assert.equal(judgeRun.lifecycle.mode, "ephemeral", "the judge never reuses the development container");
+    assert.equal(judgeRun.status, "completed");
+    assert.notEqual(round.judgeRunId, runId, "the judge did not run as the development run");
+    // The judge ran in its own container — the fake judge script reports it.
+    const judgeOutput = eventLines(await store.readEvents(judgeRun.id));
+    assert.match(judgeOutput, /AF_JUDGE_IN_CONTAINER=yes/);
+    assert.equal(
+      judgeOutput.includes(LEAK_CANARY),
+      false,
+      "the credential is not in the judge's stdout/stderr"
     );
-    // The sandbox's environment carries neither the Git credential nor any
-    // host-only secret (the dump is the raw evidence).
-    const validationEnv = validation.steps!.find((s) => s.name === "environment-dump")!.output!;
-    assert.ok(validationEnv.length > 0, "the sandbox environment was captured");
-    assert.equal(validationEnv.includes(LEAK_CANARY), false, "the source credential never entered the validation sandbox");
-    assert.equal(validationEnv.includes(HOST_ONLY_CANARY), false, "no host-only secret entered the validation sandbox");
-    assert.match(validationEnv, /^AGENTFABRIC_VALIDATION=1$/m, "the allowlisted marker is present");
 
-    // The validation container is gone too (--rm + explicit cleanup).
-    const { stdout: validationContainers } = await exec(
+    /* ---------- 10a. The verdict tool was usable inside the container ---------- */
+    // The fake judge invoked the provisioned tool by its container path and
+    // the verdict the supervisor froze is the one the tool wrote.
+    assert.match(judgeOutput, new RegExp(`AF_JUDGE_TOOL_EXIT=0`));
+    assert.equal(round.verdict!.passed, true);
+    assert.match(round.verdict!.summary, /acceptance standard is met/);
+    assert.ok(round.verdict!.evidence.length > 0, "the frozen verdict carries the tool's own evidence");
+    assert.equal(round.verdict!.judgeRunId, judgeRun.id, "the verdict is frozen against its judge run");
+    assert.equal(round.verdict!.round, 1);
+
+    /* ---------- 10b. Pin + read-only mount + drift containment ---------- */
+    const pinned = round.pinnedRevision!;
+    assert.ok(pinned.commitSha, "round 1 judged a pinned commit");
+    assert.equal(pinned.round, 1);
+    assert.equal(pinned.runId, runId, "round 1's pin came from the development run");
+    // The judge saw a read-only workspace (the mount refused its write), ran
+    // in a container, and could not see the host or the docker socket.
+    assert.match(judgeOutput, /AF_JUDGE_WRITE_READONLY=yes/, "the workspace mount was read-only for the judge");
+    assert.match(judgeOutput, /AF_JUDGE_NO_HOST_HOME=yes/);
+    assert.match(judgeOutput, /AF_JUDGE_NO_DOCKER_SOCKET=yes/);
+    // The judge's environment carries neither canary and no git credential.
+    const judgeEnv = /AF_JUDGE_ENV_START\n([\s\S]*?)\nAF_JUDGE_ENV_END/.exec(judgeOutput)?.[1] ?? "";
+    assert.ok(judgeEnv.length > 0, "the judge's environment was captured");
+    assert.equal(judgeEnv.includes(LEAK_CANARY), false, "the source credential never entered the judge container");
+    assert.equal(judgeEnv.includes(HOST_ONLY_CANARY), false, "no host-only secret entered the judge container");
+    assert.match(judgeEnv, new RegExp(`^AGENTFABRIC_VALIDATION_OUTPUT=${VALIDATION_OUTPUT_CONTAINER_PATH}$`, "m"));
+    // The judge container is gone (ephemeral + explicit cleanup).
+    const { stdout: judgeContainers } = await exec(
       "docker",
-      ["ps", "-a", "--filter", "label=agentfabric.validation=true", "--format", "{{.ID}}"],
+      ["ps", "-a", "--filter", `name=^/af-${judgeRun.id}$`, "--format", "{{.ID}}"],
       { timeout: 30_000 }
     );
-    assert.equal(validationContainers.trim(), "", "no disposable validation container was left behind");
+    assert.equal(judgeContainers.trim(), "", "no judge container was left behind");
+    // No drift was detected (the read-only mount held), and the workspace is
+    // exactly at the pin the judge judged.
+    assert.equal(round.drift, undefined);
+    assert.equal((await git(workspacePath, ["rev-parse", "HEAD"])).trim(), pinned.commitSha);
 
     /* ---------- 11. Git Credential Isolation (AC-34) ---------- */
     // The agent dumped its whole environment inside the container.
@@ -395,8 +484,9 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
       "credential.resolved",
       "credential.released",
       "runtime.prepared",
-      "validation.runtime.prepared",
-      "validation.started",
+      "validation.pinned",
+      "validation.round.started",
+      "validation.verdict",
       "validation.passed",
       "git.finalized",
       "git.revision.frozen",
@@ -412,10 +502,106 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
     assert.equal(detail.stages!.finalization!.status, "completed");
     assert.equal(detail.stages!.publish!.status, "completed");
     assert.equal(detail.frozenRevision!.finalCommitSha, frozen.finalCommitSha);
-    assert.equal(detail.validation.execution!.containerized, true);
+    assert.equal(detail.validation.rounds![0].verdict!.passed, true);
   });
 
-  test("a validation failure inside the sandbox keeps agent.status completed (AC-27/§26 Case E)", async () => {
+  test("a failing verdict sends the work back: the rework run fixes it and round 2 passes (v12 §4.3/§4.4)", async () => {
+    const { remote } = await makeRemote();
+    const dataDir = tempDir("af-docker-rework-data-");
+    const store = await Store.open(dataDir);
+    const bus = new EventBus();
+    const registry = new RuntimeRegistry();
+    registry.register(dockerAdapter);
+    const runService = new RunService(store, bus, registry, createDockerContainerOps());
+    const supervisor = new ExecutionSupervisor(store, bus, runService);
+    const projects = new ProjectService(store);
+    const runtimes = new RuntimeService(store);
+    const tasks = new TaskService(store);
+
+    const project = await projects.create({
+      name: "E2E rework loop",
+      source: { remoteUrl: remote },
+      skills: [{ name: "fake-agent", path: skillDir(FAKE_PARTIAL_AGENT_SCRIPT) }],
+      // The marker makes "the validation prompt is never injected into the
+      // rework instruction" a checkable claim.
+      validation: { prompt: "ACCEPTANCE-STANDARD-MARKER: agent-output.txt and src/feature.ts are present" },
+    });
+    const runtime = await runtimes.create({
+      name: "E2E Docker runtime",
+      kind: "docker",
+      containerized: true,
+      executionBackend: "isolated",
+      image: IMAGE,
+      command: ["sh", "-c", RUNTIME_DISPATCH_SCRIPT],
+      usableInTask: true,
+      enabled: true,
+      ephemeral: true,
+      config: { mountPath: "/workspace" },
+    });
+
+    const started = await supervisor.startTask({
+      projectId: project.id,
+      instruction: "Produce the feature module",
+      runtimeId: runtime.id,
+    });
+    await supervisor.whenSettled(started.task.id);
+    const task = tasks.get(started.task.id)!;
+
+    // The loop ran: round 1 failed, a rework followed, round 2 passed.
+    assert.equal(task.execution!.status, "completed", JSON.stringify(task.execution!.failure ?? {}));
+    assert.equal(task.execution!.validation!.status, "passed");
+    assert.equal(task.execution!.validation!.attempts, 2, "two verdicts were produced");
+    const [round1, round2] = task.execution!.validation!.rounds!;
+    assert.deepEqual(task.execution!.validation!.rounds!.map((r) => [r.round, r.verdict!.passed]), [
+      [1, false],
+      [2, true],
+    ]);
+
+    // Round 1's verdict is a real failing judgement with the unmet items the
+    // judge observed against the pinned revision.
+    assert.ok(round1.verdict!.unmet.length > 0);
+    assert.match(round1.verdict!.unmet.join(" "), /agent-output\.txt/);
+    assert.ok(round1.verdict!.evidence.length > 0, "the failing verdict carries evidence");
+    assert.ok(round1.reworkRunId, "the failing verdict triggered a rework run");
+    assert.ok(round1.pinnedRevision!.commitSha, "round 1 judged a pin");
+
+    // The rework run is a development run: same workspace, purpose "rework",
+    // instructed with the verdict's conclusion — never the validation prompt.
+    const reworkRun = runService.get(round1.reworkRunId!)!;
+    assert.equal(reworkRun.purpose, "rework");
+    assert.equal(reworkRun.workspaceId, task.workspaceId, "the rework continued in the same workspace");
+    assert.match(reworkRun.inputInstruction!, /did not pass validation/);
+    assert.match(reworkRun.inputInstruction!, /agent-output\.txt/, "the unmet findings were carried");
+    assert.equal(
+      reworkRun.inputInstruction!.includes("ACCEPTANCE-STANDARD-MARKER"),
+      false,
+      "the validation prompt itself is never injected into the rework instruction"
+    );
+    // The judge, by contrast, was given the acceptance standard verbatim.
+    const judgeRun = runService.get(round1.judgeRunId!)!;
+    assert.match(judgeRun.inputInstruction!, /ACCEPTANCE-STANDARD-MARKER/);
+
+    // Round 2 judged the rework's output: a NEW pin, its own judge run.
+    assert.notEqual(round2.pinnedRevision!.commitSha, round1.pinnedRevision!.commitSha);
+    assert.equal(round2.pinnedRevision!.runId, reworkRun.id, "round 2's pin came from the rework run");
+    assert.notEqual(round2.judgeRunId, round1.judgeRunId);
+    // The agent stage reflects the loop honestly and ends completed.
+    assert.equal(task.execution!.agent!.status, "completed");
+    assert.equal(task.execution!.agent!.attempts, 2, "the rework run is an agent attempt");
+    assert.equal(task.execution!.stages!.agent!.status, "completed");
+
+    // Publishing happened only after the passing verdict, and the remote has
+    // exactly the round-2 pin.
+    assert.equal(task.execution!.publish!.status, "pushed");
+    assert.equal(task.execution!.frozenRevision!.finalCommitSha, round2.pinnedRevision!.commitSha);
+    const remoteSha = (await git(remote, ["rev-parse", `refs/heads/${task.workingBranch}`])).trim();
+    assert.equal(remoteSha, round2.pinnedRevision!.commitSha);
+    const workspacePath = new WorkspaceService(store).get(task.workspaceId!)!.path!;
+    const log = await git(workspacePath, ["log", "--format=%B"]);
+    assert.match(log, /af-pin/, "the completion pins are visible in the commit log");
+  });
+
+  test("a last-round failing verdict terminates the task, keeps agent completed, publishes nothing (AC-27/§26 Case E)", async () => {
     const { remote } = await makeRemote();
     const dataDir = tempDir("af-docker-fail-data-");
     const store = await Store.open(dataDir);
@@ -431,14 +617,10 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
     const project = await projects.create({
       name: "E2E failing validation",
       source: { remoteUrl: remote },
-      skills: [{ name: "fake-agent", path: skillDir() }],
-      validation: {
-        steps: [
-          { name: "workspace-visible", command: "test -f /workspace/agent-output.txt" },
-          { name: "in-container", command: "test -f /.dockerenv" },
-          { name: "always-fails", command: "echo 'type error' >&2; exit 2" },
-        ],
-      },
+      skills: [{ name: "fake-agent", path: skillDir(FAKE_PARTIAL_AGENT_SCRIPT) }],
+      // maxAttempts 1: the first failing verdict exhausts the budget, so the
+      // terminal-failure path is what this test exercises.
+      validation: { prompt: "agent-output.txt and src/feature.ts are present", maxAttempts: 1 },
     });
     const runtime = await runtimes.create({
       name: "E2E Docker runtime",
@@ -446,7 +628,7 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
       containerized: true,
       executionBackend: "isolated",
       image: IMAGE,
-      command: ["sh", "/root/.agentfabric/skills/fake-agent/run.sh"],
+      command: ["sh", "-c", RUNTIME_DISPATCH_SCRIPT],
       usableInTask: true,
       enabled: true,
       ephemeral: true,
@@ -464,25 +646,25 @@ describe("v11 hardening: REAL Docker runtime Coding Task E2E", { skip: SKIP }, (
     // The agent completed; validation is its own, isolated failure.
     assert.equal(task.execution!.agent!.status, "completed");
     assert.equal(task.execution!.validation!.status, "failed");
+    assert.equal(task.execution!.validation!.attempts, 1);
     assert.equal(task.execution!.failure!.stage, "validation");
     assert.equal(task.execution!.failure!.code, "validation-failed");
     assert.equal(task.execution!.stages!.agent!.status, "completed");
     assert.equal(task.execution!.stages!.validation!.status, "failed");
     assert.equal(task.execution!.publish!.status, "pending", "nothing is published after a failed validation");
-    // The steps that ran before the failure really ran in a container.
-    assert.deepEqual(
-      task.execution!.validation!.steps!.map((s) => [s.name, s.status]),
-      [
-        ["workspace-visible", "passed"],
-        ["in-container", "passed"],
-        ["always-fails", "failed"],
-      ]
-    );
-    assert.match(task.execution!.validation!.steps![2].output!, /type error/);
+    // The failing verdict (a real judgement from inside the judge container)
+    // is frozen on the record with its unmet findings.
+    const round = task.execution!.validation!.rounds![0];
+    assert.equal(round.verdict!.passed, false);
+    assert.ok(round.verdict!.unmet.length > 0);
+    assert.equal(round.reworkRunId, undefined, "no rework run was started — the budget was exhausted");
     // The task offers "retry validation", not a generic retry.
     const detail = supervisor.taskDetail(task.id);
     assert.equal(detail.retry.kind, "validation");
     assert.equal(detail.retry.validation, true);
+    // No branch was published at all.
+    const branches = await git(remote, ["branch", "--list", `af/*`]);
+    assert.equal(branches.trim(), "", "no branch landed on the remote");
   });
 
   test("a Project task on a host runtime is refused before any container is created (AC-1/AC-2)", async () => {

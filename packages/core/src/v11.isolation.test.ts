@@ -1,11 +1,12 @@
 /**
- * v11 Hardening §3/§4/§5/§6/§25/§26 — runtime isolation and validation
- * isolation.
+ * v11 Hardening §3/§4/§5/§6/§25/§26 + v12 §9 — runtime isolation and the
+ * Validation Agent's trust boundary.
  *
  * The promise under test:
  *
  *   Project Coding Task  → isolated runtime, always
- *   Validation command   → isolated runtime, always (never a host shell)
+ *   Validation Agent     → the same isolated runtime path, never more
+ *                           privilege than the development agent
  *
  * Nothing here relies on a runtime's *name*: every decision is driven by the
  * declared isolation metadata (`executionBackend` / `containerized` /
@@ -33,13 +34,8 @@ import {
 } from "./services.js";
 import { DomainError } from "./errors.js";
 import { createGitOps } from "./git.js";
-import {
-  buildValidationEnvironment,
-  runHostValidation,
-  runSandboxedValidation,
-  VALIDATION_BASE_ENV,
-  type SandboxedStepExecutor,
-} from "./validation.js";
+import { validationJudgePaths } from "./provisioning.js";
+import { VALIDATION_TOOL_CONTAINER_PATH, type VerdictPayload } from "./validation.js";
 import { executionBackendOf, runtimeIsolation } from "./types.js";
 import type { Project, Run, Runtime, Task } from "./types.js";
 
@@ -91,12 +87,6 @@ async function makeRemote(): Promise<{ remote: string; seed: string; baseSha: st
   return { remote, seed, baseSha };
 }
 
-interface ValidationCall {
-  step: { name: string; command: string };
-  cwd: string;
-  env: Record<string, string>;
-}
-
 interface Harness {
   store: Store;
   bus: EventBus;
@@ -111,25 +101,44 @@ interface Harness {
   dataDir: string;
   agentRuns: number;
   agentEnvs: Record<string, string>[];
-  validationCalls: ValidationCall[];
+  /** The judge runs' environments and contexts — the trust-boundary read. */
+  judgeEnvs: Record<string, string>[];
+  judgeContexts: RuntimeContext[];
+  judgeRuns: number;
   setAgent: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
+  setJudge: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
 }
 
 /**
  * A scripted harness whose isolation is *declared* through runtime metadata,
- * not through its adapter. The adapter records the environment it was handed,
- * which is what the credential-isolation assertions read.
+ * not through its adapter. The adapter records what context it was handed —
+ * which is what the credential-isolation assertions read — and dispatches the
+ * Validation Agent (v12 §4.1) to its own scripted handler.
  */
 async function makeHarness(options: { supervisor?: ConstructorParameters<typeof ExecutionSupervisor>[3] } = {}): Promise<Harness> {
   const dataDir = tempDir("af-iso-data-");
   const store = await Store.open(dataDir);
   const bus = new EventBus();
-  const state = { agentRuns: 0, agentEnvs: [] as Record<string, string>[], handler: async () => ({ exitCode: 0 }) as RuntimeResult };
+  const state = {
+    agentRuns: 0,
+    judgeRuns: 0,
+    agentEnvs: [] as Record<string, string>[],
+    judgeEnvs: [] as Record<string, string>[],
+    judgeContexts: [] as RuntimeContext[],
+    handler: async () => ({ exitCode: 0 }) as RuntimeResult,
+    judgeHandler: async () => ({ exitCode: 0 }) as RuntimeResult,
+  };
   const adapter: AgentRuntimeAdapter = {
     kind: "custom",
     name: "Scripted harness",
     capabilities: { supportsWorkspace: true, supportsStreamingEvents: true },
     async run(ctx) {
+      if (ctx.run.purpose === "validation") {
+        state.judgeRuns += 1;
+        state.judgeEnvs.push({ ...ctx.env });
+        state.judgeContexts.push(ctx);
+        return state.judgeHandler(ctx);
+      }
       state.agentRuns += 1;
       state.agentEnvs.push({ ...ctx.env });
       return state.handler(ctx);
@@ -138,26 +147,7 @@ async function makeHarness(options: { supervisor?: ConstructorParameters<typeof 
   const registry = new RuntimeRegistry();
   registry.register(adapter);
   const runService = new RunService(store, bus, registry, { destroy: async () => {} }, undefined, {});
-  const validationCalls: ValidationCall[] = [];
-  const executor: SandboxedStepExecutor = async (opts) => {
-    validationCalls.push({ step: { name: opts.step.name, command: opts.step.command }, cwd: opts.cwd, env: { ...opts.env } });
-    try {
-      const { stdout, stderr } = await execFileAsync("sh", ["-c", opts.step.command], {
-        cwd: opts.cwd,
-        env: opts.env,
-        timeout: opts.timeoutMs,
-      });
-      return { exitCode: 0, timedOut: false, output: `${stdout}${stderr}` };
-    } catch (err) {
-      const e = err as { code?: number; killed?: boolean; stdout?: string; stderr?: string };
-      if (e.killed) return { exitCode: null, timedOut: true, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
-      return { exitCode: e.code ?? 1, timedOut: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
-    }
-  };
-  const supervisor = new ExecutionSupervisor(store, bus, runService, {
-    validationExecutor: () => executor,
-    ...(options.supervisor ?? {}),
-  });
+  const supervisor = new ExecutionSupervisor(store, bus, runService, { ...(options.supervisor ?? {}) });
   return {
     store,
     bus,
@@ -176,10 +166,52 @@ async function makeHarness(options: { supervisor?: ConstructorParameters<typeof 
     get agentEnvs() {
       return state.agentEnvs;
     },
-    validationCalls,
+    get judgeEnvs() {
+      return state.judgeEnvs;
+    },
+    get judgeContexts() {
+      return state.judgeContexts;
+    },
+    get judgeRuns() {
+      return state.judgeRuns;
+    },
     setAgent: (handler) => {
       state.handler = handler;
     },
+    setJudge: (handler) => {
+      state.judgeHandler = handler;
+    },
+  };
+}
+
+/** Where one judge run's verdict is read from — the provisioning derivation. */
+function judgeVerdictPath(dataDir: string, judgeRunId: string): string {
+  return join(validationJudgePaths(dataDir, judgeRunId, true).outputHostDir, "verdict.json");
+}
+
+/** A scripted judge that writes one payload per run, in order. */
+function judgeScript(
+  h: { dataDir: string },
+  verdicts: VerdictPayload[]
+): (ctx: RuntimeContext) => Promise<RuntimeResult> {
+  let index = 0;
+  return async (ctx) => {
+    const payload = verdicts[Math.min(index, verdicts.length - 1)];
+    index += 1;
+    const file = judgeVerdictPath(h.dataDir, ctx.run.id);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
+    return { exitCode: 0 };
+  };
+}
+
+function verdict(overrides: Partial<VerdictPayload> = {}): VerdictPayload {
+  return {
+    passed: true,
+    summary: "The acceptance standard is met.",
+    unmet: [],
+    evidence: ["`ls` → the expected files are present"],
+    ...overrides,
   };
 }
 
@@ -361,8 +393,9 @@ describe("v11 hardening: Project tasks cannot escape to a host runtime", () => {
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     const { task } = await startTask(h, project, { runtimeId: local.id });
-    // Allowed by explicit operator policy — and validation still refuses to
-    // run on the host (a separate, non-negotiable boundary).
+    // Allowed by explicit operator policy. The judge would run on the same
+    // runtime: under v12 §9.3 validation's trust level equals the agent's, so
+    // there is deliberately no separate gate left to disagree with this one.
     assert.equal(task.execution!.agent!.status, "completed");
   });
 
@@ -393,17 +426,17 @@ describe("v11 hardening: Project tasks cannot escape to a host runtime", () => {
 });
 
 /* ================================================================== */
-/* 3. Validation isolation (§5/§6/§26, AC-5–AC-8)                      */
+/* 3. The Validation Agent's trust boundary (v12 §9)                   */
 /* ================================================================== */
 
-describe("v11 hardening: validation runs in the isolated runtime", () => {
-  test("AC-5/AC-6: validation never runs through a host shell", async () => {
+describe("v11 hardening: the Validation Agent runs as a normal, no-more-privileged run", () => {
+  test("AC-5/AC-6: the judge is a Run through the task's isolated runtime, never a host shell", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "check", command: "test -f feature.txt" }] },
+      validation: { prompt: "the feature file exists" },
     });
     const isolated = await h.runtimes.create({
       name: "Isolated",
@@ -415,32 +448,49 @@ describe("v11 hardening: validation runs in the isolated runtime", () => {
       image: "af-test:latest",
     });
     h.setAgent(writeFiles({ "feature.txt": "ok\n" }));
+    h.setJudge(judgeScript(h, [verdict()]));
 
     const { task, run } = await startTask(h, project, { runtimeId: isolated.id });
     assert.equal(task.execution!.validation!.status, "passed");
 
-    // Every step went through the isolated executor — the host validation
-    // runner was never the path.
-    assert.equal(h.validationCalls.length, 1);
-    assert.equal(h.validationCalls[0].step.command, "test -f feature.txt");
-    // Case A: the command really read the workspace.
-    assert.equal(h.validationCalls[0].cwd, h.workspaces.get(task.workspaceId!)!.path);
+    // The judge ran exactly once, on the task's own runtime — the same
+    // isolation path the development agent uses (v12 §9.3).
+    assert.equal(h.judgeRuns, 1);
+    const judgeCtx = h.judgeContexts[0];
+    assert.equal(judgeCtx.runtime.id, isolated.id);
+    assert.equal(judgeCtx.run.purpose, "validation");
+    // The judge's subject is the frozen workspace, mounted read-only.
+    assert.equal(judgeCtx.workspacePath, h.workspaces.get(task.workspaceId!)!.path);
+    assert.equal(judgeCtx.policy?.filesystem?.readOnly, true, "the workspace is read-only for the judge");
+    // The judge gets a fresh, disposable container — never a kept one: under
+    // keep-alive the lease manager would hand it the development agent's
+    // read-write container and the read-only guarantee would be a fiction.
+    assert.equal(judgeCtx.lifecycle.mode, "ephemeral");
 
-    // The isolation evidence is on the record and in the events.
-    assert.equal(task.execution!.validation!.execution!.backend, "isolated");
-    assert.equal(task.execution!.validation!.execution!.containerized, true);
-    assert.equal(task.execution!.validation!.execution!.image, "af-test:latest");
+    // Its verdict output directory is the one write it may make, outside the
+    // workspace, mapped read-write (the tool itself stays read-only).
+    assert.deepEqual(judgeCtx.writableMounts, [
+      {
+        hostPath: validationJudgePaths(h.dataDir, judgeCtx.run.id, true).outputHostDir,
+        containerPath: "/root/.agentfabric/validation-output",
+      },
+    ]);
+    assert.deepEqual(judgeCtx.extraMounts, [
+      { hostPath: join(validationJudgePaths(h.dataDir, judgeCtx.run.id, true).hostDir, "validation-tool.mjs"), containerPath: VALIDATION_TOOL_CONTAINER_PATH },
+    ]);
+
     const types = (await h.store.readEvents(run.id)).map((e) => e.type);
-    assert.ok(types.includes("validation.runtime.prepared"));
+    assert.ok(types.includes("validation.round.started"));
+    assert.ok(types.includes("validation.passed"));
   });
 
-  test("AC-7/§26 Case C: validation does not inherit the host process environment", async () => {
+  test("AC-7/§26 Case C: the judge does not inherit the host process environment", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "env", command: "env" }] },
+      validation: { prompt: "anything" },
     });
     const isolated = await h.runtimes.create({
       name: "Isolated",
@@ -452,45 +502,21 @@ describe("v11 hardening: validation runs in the isolated runtime", () => {
       image: "af-test:latest",
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
+    h.setJudge(judgeScript(h, [verdict()]));
     await startTask(h, project, { runtimeId: isolated.id });
 
-    const env = h.validationCalls[0].env;
+    const env = h.judgeEnvs[0];
     // The host-only secret exists in *this* process and must not appear.
     assert.equal(process.env.AGENTFABRIC_HOST_ONLY_SECRET, "AGENTFABRIC_HOST_ONLY_DO_NOT_LEAK");
     assert.equal(JSON.stringify(env).includes("AGENTFABRIC_HOST_ONLY_DO_NOT_LEAK"), false);
-    // The allowlist is exactly the documented base set plus explicit extras.
-    assert.deepEqual(env, VALIDATION_BASE_ENV);
-    // Nothing else from the host leaked in.
-    for (const key of ["GIT_ASKPASS", "AGENTFABRIC_GIT_PASSWORD", "SSH_ASKPASS", "HOME"]) {
-      if (key === "HOME") continue; // deliberately part of the allowlist
-      assert.equal(env[key], undefined, `${key} must not reach validation`);
+    for (const key of ["GIT_ASKPASS", "AGENTFABRIC_GIT_PASSWORD", "SSH_ASKPASS"]) {
+      assert.equal(env[key], undefined, `${key} must not reach the judge`);
     }
+    // The platform hands the judge the verdict channel it must use.
+    assert.equal(env.AGENTFABRIC_VALIDATION_OUTPUT, "/root/.agentfabric/validation-output");
   });
 
-  test("§26 Case B: a host-only secret is unreadable inside the validation command", async () => {
-    const h = await makeHarness();
-    const { remote } = await makeRemote();
-    const project = await h.projects.create({
-      name: "Demo",
-      source: { remoteUrl: remote },
-      // The command succeeds only if the host secret is *absent*.
-      validation: { steps: [{ name: "no-host-secret", command: "test -z \"$AGENTFABRIC_HOST_ONLY_SECRET\"" }] },
-    });
-    const isolated = await h.runtimes.create({
-      name: "Isolated",
-      kind: "custom",
-      usableInTask: true,
-      enabled: true,
-      containerized: true,
-      executionBackend: "isolated",
-      image: "af-test:latest",
-    });
-    h.setAgent(writeFiles({ "x.txt": "x\n" }));
-    const { task } = await startTask(h, project, { runtimeId: isolated.id });
-    assert.equal(task.execution!.validation!.status, "passed");
-  });
-
-  test("§26 Case D/AC-8: validation cannot reach the Git Source Credential", async () => {
+  test("§26 Case D/AC-8: the judge cannot reach the Git Source Credential", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const token = "AGENTFABRIC_TEST_SECRET_DO_NOT_LEAK";
@@ -505,10 +531,7 @@ describe("v11 hardening: validation runs in the isolated runtime", () => {
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote, credentialId: view.id },
-      // `printenv` dumps the whole environment; the assertion below scans it
-      // for the credential value. The command deliberately does not spell the
-      // secret, so a match can only come from the environment itself.
-      validation: { steps: [{ name: "leak-check", command: "printenv" }] },
+      validation: { prompt: "anything" },
     });
     const isolated = await h.runtimes.create({
       name: "Isolated",
@@ -520,32 +543,38 @@ describe("v11 hardening: validation runs in the isolated runtime", () => {
       image: "af-test:latest",
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
+    // The judge's own report deliberately echoes its whole environment, so a
+    // match could only come from the environment itself.
+    h.setJudge(async (ctx) => {
+      const file = judgeVerdictPath(h.dataDir, ctx.run.id);
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync(
+        file,
+        `${JSON.stringify(verdict({ evidence: [`env dump → ${JSON.stringify(ctx.env)}`] }), null, 2)}\n`
+      );
+      return { exitCode: 0 };
+    });
     const { task, run } = await startTask(h, project, { runtimeId: isolated.id });
 
-    // The credential never reached the validation environment.
-    assert.equal(JSON.stringify(h.validationCalls[0].env).includes(token), false);
+    // The credential never reached the judge's environment.
+    assert.equal(JSON.stringify(h.judgeEnvs[0]).includes(token), false);
     assert.equal(JSON.stringify(h.agentEnvs[0]).includes(token), false);
-    // Nor the output the command actually produced (a full env dump).
-    const report = h.store
-      .list<{ name: string; runId: string; content?: string }>("artifacts")
-      .find((a) => a.runId === run.id && a.name === "validation-report.txt");
-    assert.ok(report, "the validation report exists");
-    assert.equal(String(report!.content).includes(token), false, "the credential must not appear in the validation output");
+    // Nor the judge's own output (a full env dump travels in its verdict).
+    assert.equal(JSON.stringify(task.execution).includes(token), false);
     // Nor the events or the records.
     const events = JSON.stringify(await h.store.readEvents(run.id));
     assert.equal(events.includes(token), false);
-    assert.equal(JSON.stringify(task.execution).includes(token), false);
     assert.equal(JSON.stringify(h.store.list("tasks")).includes(token), false);
     assert.equal(JSON.stringify(h.store.list("runs")).includes(token), false);
   });
 
-  test("§26 Case E/AC-27: a validation failure leaves agent.status completed", async () => {
+  test("§26 Case E/AC-27: a failed verdict leaves agent.status completed", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "typecheck", command: "echo 'type error' >&2; exit 2" }] },
+      validation: { prompt: "no type errors", maxAttempts: 1 },
     });
     const isolated = await h.runtimes.create({
       name: "Isolated",
@@ -557,6 +586,11 @@ describe("v11 hardening: validation runs in the isolated runtime", () => {
       image: "af-test:latest",
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
+    h.setJudge(
+      judgeScript(h, [
+        verdict({ passed: false, summary: "Type errors remain.", unmet: ["no type errors"], evidence: ["`tsc` → 2 errors"] }),
+      ])
+    );
     const { task } = await startTask(h, project, { runtimeId: isolated.id });
 
     assert.equal(task.execution!.agent!.status, "completed");
@@ -570,13 +604,13 @@ describe("v11 hardening: validation runs in the isolated runtime", () => {
     assert.equal(task.execution!.publish!.status, "pending");
   });
 
-  test("a task-level validation override still runs isolated, and retry re-enters the sandbox", async () => {
+  test("a task-level validation override still uses the isolated runtime, and retry re-judges", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "test", command: "test -f ready.flag" }] },
+      validation: { prompt: "the ready flag exists", maxAttempts: 1 },
     });
     const isolated = await h.runtimes.create({
       name: "Isolated",
@@ -588,67 +622,24 @@ describe("v11 hardening: validation runs in the isolated runtime", () => {
       image: "af-test:latest",
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
+    h.setJudge(
+      judgeScript(h, [
+        verdict({ passed: false, summary: "Flag missing.", unmet: ["ready.flag exists"], evidence: ["`ls` → nothing"] }),
+        verdict(),
+      ])
+    );
     const { task } = await startTask(h, project, { runtimeId: isolated.id });
     assert.equal(task.execution!.validation!.status, "failed");
-    assert.equal(h.validationCalls.length, 1);
+    assert.equal(h.judgeRuns, 1);
 
     writeFileSync(join(h.workspaces.get(task.workspaceId!)!.path!, "ready.flag"), "ok\n");
     const after = await h.supervisor.retryValidation(task.id);
     assert.equal(after!.execution!.validation!.status, "passed");
     assert.equal(after!.execution!.agent!.status, "completed", "the agent is not re-run");
     assert.equal(h.agentRuns, 1);
-    // The retry ran in the isolated executor again — never on the host.
-    assert.equal(h.validationCalls.length, 2);
-  });
-});
-
-/* ================================================================== */
-/* 4. The validation runner contract itself                            */
-/* ================================================================== */
-
-describe("v11 hardening: validation runner contract", () => {
-  test("the sandboxed runner reports a runtime failure as its own outcome, never a fallback", async () => {
-    const dir = tempDir("af-iso-val-");
-    const result = await runSandboxedValidation(
-      { cwd: dir, steps: [{ name: "step", command: "echo hi" }] },
-      async () => ({
-        exitCode: -1,
-        timedOut: false,
-        output: "Cannot connect to the Docker daemon",
-        error: "The isolated validation runtime could not start: Cannot connect to the Docker daemon",
-        errorCode: "validation-runtime-unavailable",
-      })
-    );
-    assert.equal(result.status, "failed");
-    // The sandbox's own code survives: a runtime that could not start is a
-    // 502 (`validation-runtime-*`), not the 400 a failing test would get.
-    assert.equal(result.errorCode, "validation-runtime-unavailable");
-    assert.match(result.error!, /isolated validation runtime/);
-    assert.equal(result.steps[0].status, "failed");
-  });
-
-  test("the host runner uses the same allowlisted environment (no process.env inheritance)", async () => {
-    const dir = tempDir("af-iso-host-");
-    writeFileSync(join(dir, "x.txt"), "x\n");
-    const result = await runHostValidation({
-      cwd: dir,
-      steps: [{ name: "print", command: "printf '%s' \"$AGENTFABRIC_HOST_ONLY_SECRET\"" }],
-    });
-    assert.equal(result.status, "passed");
-    assert.equal(result.steps[0].output, "", "the host secret must not be visible");
-    assert.equal(buildValidationEnvironment().PATH, VALIDATION_BASE_ENV.PATH);
-  });
-
-  test("validation timeout is reported as a timeout, not a plain failure", async () => {
-    const dir = tempDir("af-iso-timeout-");
-    const result = await runSandboxedValidation(
-      { cwd: dir, steps: [{ name: "slow", command: "sleep 5", timeoutMs: 120 }] },
-      async (opts) => {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, opts.timeoutMs));
-        return { exitCode: null, timedOut: true, output: "" };
-      }
-    );
-    assert.equal(result.status, "timeout");
-    assert.equal(result.errorCode, "validation-timeout");
+    // The retry ran as another judge Run — never on the host.
+    assert.equal(h.judgeRuns, 2);
+    assert.equal(h.judgeContexts[1].runtime.id, isolated.id);
+    assert.equal(h.judgeContexts[1].policy?.filesystem?.readOnly, true);
   });
 });

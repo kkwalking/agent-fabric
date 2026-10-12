@@ -78,9 +78,7 @@ async function makeHarness(): Promise<Harness> {
   const registry = new RuntimeRegistry();
   registry.register(adapter);
   const runService = new RunService(store, bus, registry, { destroy: async () => {} }, undefined, {});
-  const supervisor = new ExecutionSupervisor(store, bus, runService, {
-    validationExecutor: () => async () => ({ exitCode: 0, timedOut: false, output: "" }),
-  });
+  const supervisor = new ExecutionSupervisor(store, bus, runService, {});
   const runtimes = new RuntimeService(store);
   const runtime = await runtimes.create({
     name: "Isolated",

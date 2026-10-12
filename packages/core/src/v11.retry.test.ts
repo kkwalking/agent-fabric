@@ -22,6 +22,8 @@ import { ExecutionSupervisor } from "./supervisor.js";
 import { ProjectService, RuntimeService, TaskService, WorkspaceService } from "./services.js";
 import { DomainError } from "./errors.js";
 import { createGitOps, type GitOps } from "./git.js";
+import { validationJudgePaths } from "./provisioning.js";
+import type { VerdictPayload } from "./validation.js";
 import type { Project, Run, Task } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -72,15 +74,17 @@ interface Harness {
   setAgent: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
   /** The backoff waits the supervisor asked for, instead of waiting them out. */
   waits: number[];
-  setValidation: (executor: () => Promise<{ exitCode: number | null; timedOut: boolean; output: string; error?: string; errorCode?: "validation-failed" | "validation-timeout" | "validation-runtime-failed" | "validation-runtime-unavailable" }>) => void;
-  validationRuns: number;
+  /** The scripted judge (v12 §4.1): a normal Run with its own handler. */
+  setJudge: (handler: (ctx: RuntimeContext) => Promise<RuntimeResult>) => void;
+  judgeRuns: number;
+  dataDir: string;
 }
 
 /**
  * The publish harness (v11.publish.test.ts) with the two additions the retry
  * policy needs: a recorder `sleep` — backoff must never cost wall clock — and
- * a scriptable validation executor, so an environment failure can be injected
- * into the validation stage without docker.
+ * a scriptable judge, so a verdict-less judge failure can be injected into
+ * the validation stage without docker.
  */
 async function makeHarness(): Promise<Harness> {
   const dataDir = tempDir("af-retry-data-");
@@ -89,14 +93,18 @@ async function makeHarness(): Promise<Harness> {
   const state = {
     agentRuns: 0,
     handler: async () => ({ exitCode: 0 }) as RuntimeResult,
-    validationRuns: 0,
-    validator: async () => ({ exitCode: 0, timedOut: false, output: "" }),
+    judgeRuns: 0,
+    judgeHandler: async () => ({ exitCode: 0 }) as RuntimeResult,
   };
   const adapter: AgentRuntimeAdapter = {
     kind: "custom",
     name: "Scripted harness",
     capabilities: { supportsWorkspace: true, supportsStreamingEvents: true },
     async run(ctx) {
+      if (ctx.run.purpose === "validation") {
+        state.judgeRuns += 1;
+        return state.judgeHandler(ctx);
+      }
       state.agentRuns += 1;
       return state.handler(ctx);
     },
@@ -109,13 +117,9 @@ async function makeHarness(): Promise<Harness> {
     waits.push(ms);
     if (signal?.aborted) return;
   };
-  const validationExecutor = () => async () => {
-    state.validationRuns += 1;
-    return state.validator();
-  };
   const supervisedWith = (gitOps: GitOps, sleepImpl = sleep): ExecutionSupervisor =>
-    new ExecutionSupervisor(store, bus, runService, { git: gitOps, validationExecutor, sleep: sleepImpl });
-  const supervisor = new ExecutionSupervisor(store, bus, runService, { validationExecutor, sleep });
+    new ExecutionSupervisor(store, bus, runService, { git: gitOps, sleep: sleepImpl });
+  const supervisor = new ExecutionSupervisor(store, bus, runService, { sleep });
   const runtimes = new RuntimeService(store);
   const runtime = await runtimes.create({
     name: "Isolated",
@@ -137,6 +141,7 @@ async function makeHarness(): Promise<Harness> {
     tasks: new TaskService(store),
     workspaces: new WorkspaceService(store),
     runtimeId: runtime.id,
+    dataDir,
     get agentRuns() {
       return state.agentRuns;
     },
@@ -144,12 +149,43 @@ async function makeHarness(): Promise<Harness> {
       state.handler = handler;
     },
     waits,
-    setValidation: (executor) => {
-      state.validator = executor;
+    setJudge: (handler) => {
+      state.judgeHandler = handler;
     },
-    get validationRuns() {
-      return state.validationRuns;
+    get judgeRuns() {
+      return state.judgeRuns;
     },
+  };
+}
+
+/** Where one judge run's verdict is read from — the provisioning derivation. */
+function judgeVerdictPath(dataDir: string, judgeRunId: string): string {
+  return join(validationJudgePaths(dataDir, judgeRunId, true).outputHostDir, "verdict.json");
+}
+
+/** A scripted judge that submits one payload per run, in order. */
+function judgeScript(
+  h: { dataDir: string },
+  verdicts: VerdictPayload[]
+): (ctx: RuntimeContext) => Promise<RuntimeResult> {
+  let index = 0;
+  return async (ctx) => {
+    const payload = verdicts[Math.min(index, verdicts.length - 1)];
+    index += 1;
+    const file = judgeVerdictPath(h.dataDir, ctx.run.id);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
+    return { exitCode: 0 };
+  };
+}
+
+function verdict(overrides: Partial<VerdictPayload> = {}): VerdictPayload {
+  return {
+    passed: true,
+    summary: "The acceptance standard is met.",
+    unmet: [],
+    evidence: ["`ls` → the expected files are present"],
+    ...overrides,
   };
 }
 
@@ -295,55 +331,57 @@ describe("v11 automatic retry: transient failures retry once through their own o
     assert.ok(types.includes("task.retry.started"), "missing started");
   });
 
-  test("a validation environment failure re-runs validation only", async () => {
+  test("a verdict-less judge failure re-runs validation only", async () => {
+    // The judge run fails without submitting a verdict — an environment
+    // problem (v12 §6.5). It consumes no attempt; the automatic retry runs
+    // the validation cycle again, never the development agent.
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "test", command: "test -f x.txt" }] },
+      validation: { prompt: "the feature works" },
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
     let attempts = 0;
-    h.setValidation(async () => {
+    h.setJudge(async (ctx) => {
       attempts += 1;
-      if (attempts === 1) {
-        return {
-          exitCode: -1,
-          timedOut: false,
-          output: "Cannot connect to the Docker daemon",
-          error: "The isolated validation runtime could not start",
-          errorCode: "validation-runtime-unavailable",
-        };
-      }
-      return { exitCode: 0, timedOut: false, output: "ok" };
+      if (attempts === 1) return { exitCode: 1, error: "judge run crashed" };
+      const file = judgeVerdictPath(h.dataDir, ctx.run.id);
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync(file, `${JSON.stringify(verdict(), null, 2)}\n`);
+      return { exitCode: 0 };
     });
 
     const { task } = await startTask(h, project);
 
     assert.equal(task.execution!.status, "completed");
     assert.equal(task.execution!.validation!.status, "passed");
-    assert.equal(h.validationRuns, 2, "validation ran again");
-    assert.equal(h.agentRuns, 1, "the agent is not re-run for a validation environment failure");
-    assert.equal(task.execution!.validation!.attempts, 2);
+    assert.equal(h.judgeRuns, 2, "the judge ran again");
+    assert.equal(h.agentRuns, 1, "the agent is not re-run for a judge environment failure");
+    assert.equal(task.execution!.validation!.attempts, 1, "only the verdict-producing round consumed an attempt");
   });
 
-  test("a genuinely failing validation is not retried", async () => {
+  test("a failing verdict is not retried", async () => {
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "test", command: "exit 1" }] },
+      validation: { prompt: "the tests pass", maxAttempts: 1 },
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
-    h.setValidation(async () => ({ exitCode: 1, timedOut: false, output: "assertion failed" }));
+    h.setJudge(
+      judgeScript(h, [
+        verdict({ passed: false, summary: "The tests fail.", unmet: ["the tests pass"], evidence: ["`npm test` → 3 failures"] }),
+      ])
+    );
 
     const { task, run } = await startTask(h, project);
 
     assert.equal(task.execution!.status, "failed");
     assert.equal(task.execution!.failure!.code, "validation-failed");
-    assert.equal(h.validationRuns, 1, "a failing test is a result, not an environment glitch");
+    assert.equal(h.judgeRuns, 1, "a failed verdict is a result, not an environment glitch");
     assert.equal(task.execution!.autoRetry, undefined);
     const types = await eventTypes(h, run.id);
     assert.ok(!types.some((t) => t.startsWith("task.retry.")), `no retry events (${types.join(",")})`);
@@ -509,23 +547,26 @@ describe("v11 automatic retry: cancellation", () => {
   });
 
   test("a cancelled task is never retried, whatever the failure code says", async () => {
-    // The validation executor reports an aborted run as a runtime failure; the
-    // policy must not read that transient-looking code as an environment
-    // glitch and resurrect work the user stopped.
+    // The judge run reports an aborted run as a runtime failure; the policy
+    // must not read that transient-looking code as an environment glitch and
+    // resurrect work the user stopped.
     const h = await makeHarness();
     const { remote } = await makeRemote();
     const project = await h.projects.create({
       name: "Demo",
       source: { remoteUrl: remote },
-      validation: { steps: [{ name: "test", command: "sleep 60" }] },
+      validation: { prompt: "the tests pass" },
     });
     h.setAgent(writeFiles({ "x.txt": "x\n" }));
-    let validationStarted: (() => void) | undefined;
-    const started = new Promise<void>((resolve) => (validationStarted = resolve));
-    h.setValidation(async () => {
-      validationStarted!();
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
-      return { exitCode: -1, timedOut: false, output: "killed", error: "Validation was cancelled", errorCode: "validation-runtime-failed" };
+    let judgeStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => (judgeStarted = resolve));
+    h.setJudge(async (ctx) => {
+      judgeStarted!();
+      await new Promise<void>((resolve) => {
+        ctx.signal.addEventListener("abort", () => resolve(), { once: true });
+        if (ctx.signal.aborted) resolve();
+      });
+      return { exitCode: 1, error: "The judge run was cancelled" };
     });
 
     const result = await h.supervisor.startTask({ projectId: project.id, instruction: "work", runtimeId: h.runtimeId });
@@ -535,8 +576,8 @@ describe("v11 automatic retry: cancellation", () => {
 
     const task = h.tasks.get(result.task.id)!;
     assert.equal(task.execution!.status, "cancelled");
-    assert.equal(task.execution!.failure!.code, "agent-cancelled", "a cancel is reported as one, not as a sandbox failure");
-    assert.equal(task.execution!.validation!.attempts, 1, "the validation was never re-run");
+    assert.equal(task.execution!.failure!.code, "agent-cancelled", "a cancel is reported as one, not as a judge failure");
+    assert.equal(task.execution!.validation!.attempts, 0, "the validation was never retried");
     assert.equal(h.waits.length, 0, "no retry was ever scheduled");
     const types = await eventTypes(h, result.run.id);
     assert.ok(!types.includes("task.retry.scheduled"), `no retry (${types.join(",")})`);
