@@ -105,7 +105,7 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
               {d.retry.kind === "publish"
                 ? "retry publish re-pushes the frozen commit — the agent is not re-run, nothing is re-committed"
                 : d.retry.kind === "validation"
-                  ? "retry validation re-runs the checks only — the agent is not re-run"
+                  ? "retry validation resets the budget and judges the workspace again — the development agent is not re-run"
                   : "retry starts a new run on the same workspace"}
             </span>
           </div>
@@ -155,7 +155,11 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
           <dt>Agent</dt>
           <dd>{d.agent?.status ?? "-"}{d.agent?.attempts ? ` · ${d.agent.attempts} attempt(s)` : ""}</dd>
           <dt>Validation</dt>
-          <dd>{d.validation.status}{d.validation.steps?.length ? ` · ${d.validation.steps.length} step(s)` : ""}</dd>
+          <dd>
+            {d.validation.status}
+            {d.validation.attempts ? ` · ${d.validation.attempts} verdict(s)` : ""}
+            {d.validation.rounds?.length ? ` over ${d.validation.rounds.length} round(s)` : ""}
+          </dd>
           <dt>Publish</dt>
           <dd>
             {d.publish.status}
@@ -204,9 +208,6 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
                       ? `${d.publish.remote} / ${d.publish.remoteBranch}${d.publish.errorCode ? ` — [${d.publish.errorCode}] ${d.publish.error ?? ""}` : ""}`
                       : ""}
                     {outcome?.errorCode ? `[${outcome.errorCode}]` : ""}
-                    {stage === "validation" && d.validation.execution
-                      ? `ran in ${d.validation.execution.containerized ? "an isolated container" : "an isolated runtime"}${d.validation.execution.image ? ` (${d.validation.execution.image})` : ""}`
-                      : ""}
                   </td>
                   <td className="muted">{outcome?.at ? fmtRelative(outcome.at) : "-"}</td>
                 </tr>
@@ -224,28 +225,95 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
         </div>
       ) : null}
 
-      {d.validation.steps?.length ? (
+      {d.validation.rounds?.length ? (
         <>
-          <h2 style={{ marginTop: 20 }}>Validation steps</h2>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr><th>Step</th><th>Command</th><th>Status</th><th>Exit</th><th>Duration</th><th>Output</th></tr>
-              </thead>
-              <tbody>
-                {d.validation.steps.map((step: any, index: number) => (
-                  <tr key={`${step.name}-${index}`}>
-                    <td>{step.name}</td>
-                    <td className="muted"><code>{step.command}</code></td>
-                    <td>{step.status}</td>
-                    <td>{step.exitCode ?? "-"}</td>
-                    <td>{step.durationMs != null ? `${step.durationMs}ms` : "-"}</td>
-                    <td className="muted" style={{ maxWidth: 420, whiteSpace: "pre-wrap" }}>{step.output ?? ""}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <h2 style={{ marginTop: 20 }}>
+            Validation rounds
+            <span className="muted" style={{ marginLeft: 8, fontSize: 13, fontWeight: 400 }}>
+              {d.validation.attempts ?? 0} verdict(s) in the current cycle
+            </span>
+          </h2>
+          {d.validation.rounds.map((round: any) => (
+            <div key={round.round} className="card" style={{ marginBottom: 10 }}>
+              <div className="row" style={{ marginBottom: 6 }}>
+                <strong>Round {round.round}</strong>
+                <span className="right muted">
+                  {round.status}
+                  {round.endedAt ? ` · ${fmtRelative(round.endedAt)}` : ""}
+                </span>
+              </div>
+              <dl className="detail-list">
+                <dt>Completion pin</dt>
+                <dd>
+                  {round.pinnedRevision ? (
+                    <>
+                      <code>{shortId(round.pinnedRevision.commitSha)}</code>{" "}
+                      <CopyButton text={round.pinnedRevision.commitSha} label="copy" />
+                      <span className="muted"> · from run {shortId(round.pinnedRevision.runId)}</span>
+                    </>
+                  ) : (
+                    "-"
+                  )}
+                </dd>
+                <dt>Development run</dt>
+                <dd>
+                  {round.reworkRunId ? (
+                    <>
+                      rework run{" "}
+                      <a onClick={() => navigate(`/runs/${round.reworkRunId}`)}>{shortId(round.reworkRunId)}</a>
+                    </>
+                  ) : round.agentRunId ? (
+                    <>initial run <a onClick={() => navigate(`/runs/${round.agentRunId}`)}>{shortId(round.agentRunId)}</a></>
+                  ) : (
+                    "-"
+                  )}
+                </dd>
+                <dt>Judge run</dt>
+                <dd>
+                  {round.judgeRunId ? (
+                    <a onClick={() => navigate(`/runs/${round.judgeRunId}`)}>{shortId(round.judgeRunId)}</a>
+                  ) : (
+                    "-"
+                  )}
+                </dd>
+                <dt>Verdict</dt>
+                <dd>
+                  {round.verdict ? (
+                    <>
+                      <strong>{round.verdict.passed ? "passed" : "failed"}</strong> — {round.verdict.summary}
+                      {round.verdict.unmet?.length ? (
+                        <ul style={{ margin: "6px 0 0 16px" }}>
+                          {round.verdict.unmet.map((u: string, i: number) => (
+                            <li key={i}>{u}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      {round.verdict.evidence?.length ? (
+                        <details style={{ marginTop: 6 }}>
+                          <summary className="muted">Evidence ({round.verdict.evidence.length})</summary>
+                          <ul style={{ margin: "6px 0 0 16px" }}>
+                            {round.verdict.evidence.map((e: string, i: number) => (
+                              <li key={i} className="muted"><code>{e}</code></li>
+                            ))}
+                          </ul>
+                        </details>
+                      ) : null}
+                    </>
+                  ) : round.error ? (
+                    <span className="fail-reason">[{round.errorCode}] {round.error}</span>
+                  ) : (
+                    "pending"
+                  )}
+                </dd>
+              </dl>
+              {round.drift?.detected ? (
+                <div className="fail-reason" style={{ marginTop: 6 }}>
+                  The validation agent modified the workspace — it was replayed back to the pin
+                  {round.drift.driftedPaths?.length ? ` (${round.drift.driftedPaths.join(", ")})` : ""}.
+                </div>
+              ) : null}
+            </div>
+          ))}
         </>
       ) : null}
 
@@ -253,12 +321,19 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>Run</th><th>Status</th><th>Phase</th><th>Continuity</th><th>Runtime</th><th>Started</th><th /></tr>
+            <tr><th>Run</th><th>Purpose</th><th>Status</th><th>Phase</th><th>Continuity</th><th>Runtime</th><th>Started</th><th /></tr>
           </thead>
           <tbody>
             {(d.runs ?? []).map((run: any) => (
               <tr key={run.id}>
                 <td>{shortId(run.id)}</td>
+                <td>
+                  {run.purpose === "validation"
+                    ? `validation (round ${run.round ?? "?"})`
+                    : run.purpose === "rework"
+                      ? `rework (round ${run.round ?? "?"})`
+                      : "development"}
+                </td>
                 <td>{run.status}</td>
                 <td>{run.phase ?? "-"}</td>
                 <td>{run.continuity ?? "new"}</td>

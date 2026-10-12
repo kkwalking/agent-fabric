@@ -39,6 +39,8 @@ export interface HarnessExecutionOptions {
    * AgentFabric-generated harness config (v4 §1).
    */
   extraMounts?: Array<{ hostPath: string; containerPath: string }>;
+  /** Additional read-write bind mounts (v12 §4.1: the judge's output dir). */
+  writableMounts?: Array<{ hostPath: string; containerPath: string }>;
   /**
    * Maps one raw stdout line to standard events (null = not JSON). A line
    * may carry several logical events (e.g. a codex file_change item with
@@ -93,8 +95,10 @@ export async function runHarnessCommand(ctx: RuntimeContext, opts: HarnessExecut
       env: ctx.env,
       workspaceContainerPath: opts.workspaceContainerPath,
       // Harness-generated config first, then the platform-provisioned mounts
-      // (skills / MCP configuration, v11 §25/§26).
+      // (skills / MCP configuration, v11 §25/§26). The judge run's verdict
+      // output directory is the one platform mount that is writable (v12).
       extraMounts: [...(opts.extraMounts ?? []), ...(ctx.extraMounts ?? [])],
+      writableMounts: [...(opts.writableMounts ?? []), ...(ctx.writableMounts ?? [])],
       // Explicit in-container command prefix (e.g. ["node", "/pi.js"] for
       // images without a harness entrypoint). Default: the harness image's
       // entrypoint is the harness, so only the args run inside.

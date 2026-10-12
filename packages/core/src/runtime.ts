@@ -136,6 +136,13 @@ export interface RuntimeContext {
    */
   extraMounts?: Array<{ hostPath: string; containerPath: string }>;
   /**
+   * Read-write bind mounts (v12 §4.1). Only the validation judge run uses
+   * one: its verdict output directory. Every other platform mount is
+   * read-only on purpose — a judge that could write the workspace could
+   * smuggle edits into the final commit.
+   */
+  writableMounts?: Array<{ hostPath: string; containerPath: string }>;
+  /**
    * Provisioned execution environment for this run (v11 §25/§26): where the
    * skills live on the host and inside the runtime, and the generated MCP
    * configuration file. Host paths only — no secret values.
@@ -172,6 +179,8 @@ export interface BackendSpawnOptions {
    * config, v4 §1) for containerized backends.
    */
   extraMounts?: Array<{ hostPath: string; containerPath: string }>;
+  /** Additional read-write bind mounts (v12 §4.1: the judge's output dir). */
+  writableMounts?: Array<{ hostPath: string; containerPath: string }>;
 }
 
 /** How a backend process finished. */

@@ -30,6 +30,8 @@
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { McpServerConfig, Project, ProjectSkill, Task } from "./types.js";
+import { validationToolScript, VALIDATION_TOOL_FILE_NAME, VALIDATION_VERDICT_FILE_NAME } from "./validationTool.js";
+import { VALIDATION_TOOL_CONTAINER_PATH, VALIDATION_OUTPUT_CONTAINER_PATH } from "./validation.js";
 
 /** Canonical mount points inside a container runtime. */
 export const SKILLS_MOUNT_PATH = "/root/.agentfabric/skills";
@@ -39,6 +41,12 @@ export const MCP_CONFIG_MOUNT_PATH = "/root/.agentfabric/mcp.json";
 export const SKILLS_ENV_VAR = "AGENTFABRIC_SKILLS_DIR";
 /** Env var the runtime reads to find the generated MCP configuration. */
 export const MCP_CONFIG_ENV_VAR = "AGENTFABRIC_MCP_CONFIG";
+/**
+ * Env var pointing the Validation Agent at its verdict output directory
+ * (v12 §5.1). The judge prompt carries the absolute path too; the env var
+ * makes the channel available to any harness without prompt parsing.
+ */
+export const VALIDATION_OUTPUT_ENV_VAR = "AGENTFABRIC_VALIDATION_OUTPUT";
 
 export interface ProvisionEnvironmentOptions {
   dataDir: string;
@@ -51,6 +59,18 @@ export interface ProvisionEnvironmentOptions {
   mcpConfigMountPath?: string;
   /** Resolves a Secret id to its plaintext value (never logged). */
   resolveSecret?: (id: string) => string | undefined;
+  /**
+   * Validation judge run (v12 §4.1): generate the verdict tool script and a
+   * **read-write** output directory, and skip the Project's skills / MCP
+   * provisioning — the judge's only tool is the verdict submission.
+   *
+   * `containerized` decides which paths the judge is told about: a container
+   * sees the canonical `/root/.agentfabric/...` mount points, a host runtime
+   * sees the host paths (Project Coding Tasks require a containerized
+   * runtime, so the host case is only reachable through the explicit
+   * `allowHostExecution` operator policy).
+   */
+  validationJudge?: { containerized: boolean };
 }
 
 export interface ProvisionedEnvironment {
@@ -66,9 +86,52 @@ export interface ProvisionedEnvironment {
   mcpServers: string[];
   /** Read-only mounts the runtime backend must add. */
   extraMounts: Array<{ hostPath: string; containerPath: string }>;
+  /**
+   * Read-write mounts (v12 §4.1). Exactly one caller uses this: the judge
+   * run's verdict output directory — the judge must be able to write its
+   * verdict while the workspace stays read-only.
+   */
+  writableMounts: Array<{ hostPath: string; containerPath: string }>;
   /** Env vars exposing the provisioned paths to the harness. */
   env: Record<string, string>;
+  /** Judge runs only: host path of the verdict output directory. */
+  validationOutputDir?: string;
+  /** Judge runs only: the path the judge must invoke the verdict tool by. */
+  validationToolPath?: string;
+  /** Judge runs only: the path the judge must write the verdict to. */
+  validationVerdictPath?: string;
   cleanup(): Promise<void>;
+}
+
+/**
+ * Where one judge run's tool and verdict live (v12 §4.1).
+ *
+ * Provisioning and the judge instruction must agree on these — the tool
+ * script is baked with the verdict path, and the prompt tells the judge the
+ * same one — so both derive them from this single function. A containerized
+ * runtime sees the canonical mount points; a host runtime sees the host
+ * paths.
+ */
+export function validationJudgePaths(
+  dataDir: string,
+  runId: string,
+  containerized: boolean
+): { hostDir: string; toolPath: string; verdictPath: string; outputHostDir: string } {
+  const hostDir = join(dataDir, "provisioning", runId);
+  const outputHostDir = join(hostDir, "validation-output");
+  return containerized
+    ? {
+        hostDir,
+        outputHostDir,
+        toolPath: VALIDATION_TOOL_CONTAINER_PATH,
+        verdictPath: `${VALIDATION_OUTPUT_CONTAINER_PATH}/${VALIDATION_VERDICT_FILE_NAME}`,
+      }
+    : {
+        hostDir,
+        outputHostDir,
+        toolPath: join(hostDir, VALIDATION_TOOL_FILE_NAME),
+        verdictPath: join(outputHostDir, VALIDATION_VERDICT_FILE_NAME),
+      };
 }
 
 /**
@@ -139,7 +202,42 @@ export async function provisionEnvironment(opts: ProvisionEnvironmentOptions): P
   await mkdir(dir, { recursive: true, mode: 0o700 });
 
   const extraMounts: Array<{ hostPath: string; containerPath: string }> = [];
+  const writableMounts: Array<{ hostPath: string; containerPath: string }> = [];
   const env: Record<string, string> = {};
+
+  /* ---- Judge run (v12 §4.1): the verdict tool, nothing else ---- */
+  if (opts.validationJudge) {
+    const containerized = opts.validationJudge.containerized;
+    const paths = validationJudgePaths(opts.dataDir, opts.runId, containerized);
+    // The tool script and the output directory travel together: the script
+    // is baked with the output path, so the judge never has to guess it.
+    await mkdir(paths.outputHostDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(dir, VALIDATION_TOOL_FILE_NAME), validationToolScript(paths.verdictPath), { mode: 0o700 });
+    if (containerized) {
+      extraMounts.push({ hostPath: join(dir, VALIDATION_TOOL_FILE_NAME), containerPath: VALIDATION_TOOL_CONTAINER_PATH });
+      // Read-write: the judge's one legitimate write target. It lives under
+      // the run's provisioning dir (outside the workspace), so nothing the
+      // judge writes here can reach the repository or the final commit.
+      writableMounts.push({ hostPath: paths.outputHostDir, containerPath: VALIDATION_OUTPUT_CONTAINER_PATH });
+      env[VALIDATION_OUTPUT_ENV_VAR] = VALIDATION_OUTPUT_CONTAINER_PATH;
+    } else {
+      env[VALIDATION_OUTPUT_ENV_VAR] = paths.outputHostDir;
+    }
+    return {
+      dir,
+      skills: [],
+      mcpServers: [],
+      extraMounts,
+      writableMounts,
+      env,
+      validationOutputDir: paths.outputHostDir,
+      validationToolPath: paths.toolPath,
+      validationVerdictPath: paths.verdictPath,
+      cleanup: async () => {
+        await rm(dir, { recursive: true, force: true });
+      },
+    };
+  }
 
   const skills = resolveSkills(opts.task, opts.project);
   const skillsMountPath = opts.skillsMountPath ?? SKILLS_MOUNT_PATH;
@@ -179,6 +277,7 @@ export async function provisionEnvironment(opts: ProvisionEnvironmentOptions): P
     skills: skills.map((s) => s.name),
     mcpServers: provisionedServers,
     extraMounts,
+    writableMounts,
     env,
     cleanup: async () => {
       await rm(dir, { recursive: true, force: true });

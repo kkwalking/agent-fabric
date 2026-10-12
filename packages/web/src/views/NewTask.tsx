@@ -4,7 +4,6 @@ import { ErrorBox, Field, Icon, useAsync } from "../components";
 import { HARNESS_NATIVE_KINDS, HARNESS_THREAD_SOURCES } from "../harness";
 import { modelOptionLabel } from "../presentation";
 import { navigate } from "../router";
-import { parseValidationSteps } from "../validation";
 
 /**
  * New Task (v5 §14): the user describes a Task, not a Run. Submitting
@@ -85,9 +84,9 @@ export function NewTaskView() {
   const [baseRef, setBaseRef] = useState("");
   const [workingBranch, setWorkingBranch] = useState("");
   const [branchMode, setBranchMode] = useState("new");
-  // Task-level validation override (v11 §20), also Project mode only: a
-  // validation stage exists only on a Project Coding Task, and this text
-  // replaces the Project's steps wholesale (it never merges).
+  // Task-level validation override (v12 §3.2), also Project mode only: a
+  // validation cycle exists only on a Project Coding Task, and this prompt
+  // replaces the Project's wholesale (it never merges).
   const [validation, setValidation] = useState("");
   // Container lifecycle for the task, decided at creation and immutable
   // afterwards; `ephemeral` is what the server materializes when unset.
@@ -112,9 +111,7 @@ export function NewTaskView() {
   const projectDefaultBranch = effectiveProject?.source?.defaultBranch || "main";
   // What the task inherits when the override is left empty — shown in the
   // placeholder so "empty keeps the Project's" is concrete, not a promise.
-  const projectValidationCommands: string[] = (effectiveProject?.validation?.steps ?? []).map(
-    (s: any) => s.command
-  );
+  const projectValidationPrompt: string = effectiveProject?.validation?.prompt ?? "";
 
   // Mode-specific runtime list. `project-eligible` already means enabled +
   // usableInTask + sandboxed, so the filter below is a no-op there; it is
@@ -182,7 +179,7 @@ export function NewTaskView() {
         // Project mode (v11 §39): the platform creates the managed
         // Workspace, clones the source and publishes the working branch.
         // No workspaceId is sent — that decision is not the user's here.
-        const validationSteps = parseValidationSteps(validation);
+        const validationPrompt = validation.trim();
         const r = await post<any>(`/api/projects/${effectiveProject.id}/tasks`, {
           instruction: prompt.trim(),
           title: title.trim() || undefined,
@@ -194,10 +191,10 @@ export function NewTaskView() {
           modelId: harnessNative ? undefined : effectiveModelId || undefined,
           profileId: profileId || undefined,
           lifecycle: { mode: lifecycle },
-          // Empty text means "no override" — the Project's steps apply.
-          // Sending `validation: { steps: [] }` would replace them with
-          // nothing, which is the opposite of leaving the field untouched.
-          ...(validationSteps.length ? { validation: { steps: validationSteps } } : {}),
+          // Empty text means "no override" — the Project's validation
+          // applies. Sending an empty prompt would be a config error, which
+          // is the opposite of leaving the field untouched.
+          ...(validationPrompt ? { validation: { prompt: validationPrompt } } : {}),
         });
         // Create Task → Run #1 → Task Thread (v5 §14). The thread is where
         // the run is watched; the lifecycle view is one click away from its
@@ -290,21 +287,20 @@ export function NewTaskView() {
             </Field>
           </details>
         )}
-        {/* Task-level validation override (v11 §20): a Project Task runs the
-            Project's steps unless this text replaces them. One command per
-            line; empty means "inherit the Project's". */}
+        {/* Task-level validation override (v12 §3.2): a Project Task runs the
+            Project's validation unless this prompt replaces it. Empty means
+            "inherit the Project's". */}
         {projectMode && (
           <details className="new-task-details">
             <summary>Validation override</summary>
-            <Field label="One command per line — replaces the Project's steps; empty keeps them">
+            <Field label="Acceptance standard the validation agent checks — replaces the Project's; empty keeps it">
               <textarea
-                rows={2}
+                rows={3}
                 value={validation}
                 onChange={(e) => setValidation(e.target.value)}
                 placeholder={
-                  projectValidationCommands.length
-                    ? projectValidationCommands.join("\n")
-                    : "Project has no validation steps"
+                  projectValidationPrompt ||
+                  "e.g. the full test suite passes and `go build ./...` is clean"
                 }
               />
             </Field>

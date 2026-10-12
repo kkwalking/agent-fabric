@@ -2,7 +2,6 @@ import { useState } from "react";
 import { del, get, post, put, fmtRelative, shortId } from "../api";
 import { ErrorBox, Field, Icon, Modal, StatusBadge, useAsync } from "../components";
 import { navigate } from "../router";
-import { parseValidationSteps } from "../validation";
 
 /**
  * Projects (v11 §2/§39): a Project is the long-lived codebase AgentFabric
@@ -158,7 +157,7 @@ export function ProjectsView() {
     setBusy(true);
     setError(null);
     try {
-      const steps = parseValidationSteps(form.validation);
+      const validationPrompt = form.validation.trim();
       const project = await post<{ id: string }>("/api/projects", {
         name: form.name,
         source: {
@@ -170,7 +169,9 @@ export function ProjectsView() {
           runtimeId: form.runtimeId || undefined,
           modelId: form.modelId || undefined,
         },
-        ...(steps.length ? { validation: { steps } } : {}),
+        // Empty = no validation configured (the cycle is skipped); an empty
+        // prompt would be a config error, so it is never sent (v12 §3.1).
+        ...(validationPrompt ? { validation: { prompt: validationPrompt } } : {}),
         git: { push: form.push, autoCommit: form.autoCommit },
       });
       setCreating(false);
@@ -222,7 +223,7 @@ export function ProjectsView() {
                     <span className="muted">credential</span> {project.source?.credentialId ? "configured" : "public"}
                   </span>
                   <span className="meta-chip">
-                    <span className="muted">validation</span> {project.validation?.steps?.length ?? 0}
+                    <span className="muted">validation</span> {project.validation?.prompt ? "configured" : "none"}
                   </span>
                 </div>
               </div>
@@ -277,12 +278,12 @@ export function ProjectsView() {
               </select>
             </Field>
           </div>
-          <Field label="Validation (one command per line — typecheck / test / lint / build)">
+          <Field label="Validation (acceptance standard a separate validation agent checks; empty = no validation)">
             <textarea
               rows={3}
               value={form.validation}
               onChange={(e) => setForm({ ...form, validation: e.target.value })}
-              placeholder={"npm run typecheck\nnpm test"}
+              placeholder={"e.g. the full test suite passes and the build is clean"}
             />
           </Field>
           <label className="check">
@@ -397,7 +398,7 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
           <dt>Default model</dt>
           <dd>{p.execution?.modelId ?? "-"}</dd>
           <dt>Validation</dt>
-          <dd>{(p.validation?.steps ?? []).map((s: any) => s.command).join(" · ") || "none"}</dd>
+          <dd>{p.validation?.prompt ?? "none"}</dd>
           <dt>Publish</dt>
           <dd>
             autoCommit={String(p.git?.autoCommit ?? true)} push={String(p.git?.push ?? true)} remote={p.git?.remote ?? "origin"}
@@ -468,7 +469,7 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
     setBusy(true);
     setError(null);
     try {
-      const steps = parseValidationSteps(form.validation);
+      const validationPrompt = form.validation.trim();
       const result = await post<{ task: { id: string } }>(`/api/projects/${projectId}/tasks`, {
         instruction: form.instruction,
         title: form.title || undefined,
@@ -478,7 +479,8 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
         runtimeId: form.runtimeId || undefined,
         modelId: form.modelId || undefined,
         lifecycle: { mode: form.lifecycle },
-        ...(steps.length ? { validation: { steps } } : {}),
+        // Empty = inherit the Project's validation; never an empty prompt.
+        ...(validationPrompt ? { validation: { prompt: validationPrompt } } : {}),
       });
       navigate(`/tasks/${result.task.id}/lifecycle`);
     } catch (e) {
@@ -553,8 +555,13 @@ export function NewProjectTaskView({ projectId }: { projectId: string }) {
             </select>
           </Field>
         </div>
-        <Field label="Validation override (one command per line — replaces the project's)">
-          <textarea rows={2} value={form.validation} onChange={(e) => setForm({ ...form, validation: e.target.value })} />
+        <Field label={`Validation override (acceptance standard for the validation agent — replaces the project's${project.data?.validation?.prompt ? "; empty keeps it" : ""})`}>
+          <textarea
+            rows={3}
+            value={form.validation}
+            onChange={(e) => setForm({ ...form, validation: e.target.value })}
+            placeholder={project.data?.validation?.prompt || "e.g. the full test suite passes and the build is clean"}
+          />
         </Field>
         <div className="modal-actions">
           <button onClick={() => navigate(`/projects/${projectId}`)}>Cancel</button>

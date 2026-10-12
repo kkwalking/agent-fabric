@@ -454,9 +454,10 @@ export interface ProjectExecutionConfig {
    */
   allowHostExecution?: boolean;
   /**
-   * Secrets a validation command may receive (v11 hardening §6.2). A
-   * separate allowlist from `secretIds`: build/test credentials are not
-   * agent credentials. `scope: "git"` secrets are refused here as well.
+   * Secrets the Validation Agent (judge) may receive (v12 §4.1). A separate
+   * allowlist from `secretIds`: build/test credentials are not agent
+   * credentials, and the judge never gets the agent's secrets. `scope: "git"`
+   * secrets are refused here as well.
    */
   validationSecretIds?: ID[];
 }
@@ -484,20 +485,30 @@ export interface McpServerConfig {
   enabled?: boolean;
 }
 
-/** One validation command (v11 §20). */
-export interface ValidationStep {
-  name: string;
-  /** Shell command run in the workspace directory. */
-  command: string;
+/**
+ * Project/Task-level validation configuration (v12 §3).
+ *
+ * Validation is a **natural-language acceptance standard** judged by a
+ * separate Validation Agent in a fresh container — not a list of shell
+ * commands. Its presence *is* the enablement: a Project or Task without a
+ * `validation` record skips the stage entirely. An empty prompt is a
+ * configuration error, never a silent skip.
+ */
+export interface ValidationConfig {
+  /** Natural-language acceptance standard. Required, non-empty. */
+  prompt: string;
+  /**
+   * Judge verdicts allowed in one validation cycle (v12 §2). A verdict that
+   * was never produced (the judge runtime failed, the run timed out without
+   * a verdict, the verdict was malformed) does not consume an attempt.
+   */
+  maxAttempts?: number;
+  /** Model the judge runs on; defaults to the Task's model. */
+  modelId?: ID;
+  /** Judge run timeout; defaults to the Task/policy resolution chain. */
   timeoutMs?: number;
-  /** A failing required step fails validation (default true). */
-  required?: boolean;
 }
 
-export interface ValidationConfig {
-  enabled?: boolean;
-  steps: ValidationStep[];
-}
 
 /**
  * How the platform publishes a Task's work (v11 §17/§18).
@@ -535,7 +546,7 @@ export interface Project {
   skills?: ProjectSkill[];
   /** Default MCP servers generated into the runtime configuration (v11 §26). */
   mcpServers?: McpServerConfig[];
-  /** Default validation steps; a Task may override them (v11 §20). */
+  /** Default validation config; a Task may replace it entirely (v12 §3). */
   validation?: ValidationConfig;
   /** Default publish policy; a Task may override it. */
   git?: GitPublishPolicy;
@@ -580,6 +591,7 @@ export type RunPhase =
   | "agent.running"
   | "validation.preparing"
   | "validation.running"
+  | "validation.reworking"
   | "git.finalizing"
   | "git.pushing"
   | "cleanup"
@@ -624,43 +636,73 @@ export interface TaskAgentState {
   endedAt?: string;
 }
 
-export interface ValidationStepResult {
-  name: string;
-  command: string;
-  status: "passed" | "failed" | "timeout" | "skipped";
-  exitCode?: number | null;
-  durationMs?: number;
-  /** Tail of the step's output, kept for the Task detail view. */
-  output?: string;
+/**
+ * One Validation Agent verdict (v12 §5), frozen at generation time: the
+ * supervisor parses the judge's tool call once, records it, and every reader
+ * returns the record verbatim.
+ */
+export interface ValidationVerdict {
+  passed: boolean;
+  /** 1-3 sentence conclusion. */
+  summary: string;
+  /** Requirements the judge found unmet; non-empty when `passed` is false. */
+  unmet: string[];
+  /** Commands the judge actually ran and what it observed. */
+  evidence: string[];
+  round: number;
+  judgeRunId: ID;
+  /** When the verdict was frozen onto the record. */
+  at: string;
+}
+
+/**
+ * The completion pin (v12 §4.5): the commit a development run's output was
+ * frozen to before judging. The judge validates this revision, and any drift
+ * a judge leaves behind is replayed back to it.
+ */
+export interface PinnedRevision {
+  commitSha: string;
+  /** The development run (initial or rework) that produced this pin. */
+  runId: ID;
+  round: number;
+  at: string;
+}
+
+/** One judge round of a validation cycle (v12 §6.1). */
+export interface ValidationRound {
+  round: number;
+  /** The revision this round judged (round 1 = the initial run; ≥2 = the rework run). */
+  agentRunId?: ID;
+  /** The rework run that produced this round's subject (round ≥2). */
+  reworkRunId?: ID;
+  /** The completion pin this round judged and replays to (v12 §4.5). */
+  pinnedRevision?: PinnedRevision;
+  /** Set when the judge left the workspace drifted; the replay already happened. */
+  drift?: { detected: true; observedHead?: string; driftedPaths?: string[]; replayedAt: string };
+  judgeRunId?: ID;
+  verdict?: ValidationVerdict;
+  status: "judging" | "passed" | "failed" | "interrupted";
+  startedAt?: string;
+  endedAt?: string;
+  error?: string;
+  errorCode?: string;
 }
 
 export interface TaskValidationState {
   status: "pending" | "skipped" | "running" | "passed" | "failed" | "timeout" | "interrupted";
-  steps?: ValidationStepResult[];
+  /**
+   * Judge verdicts produced in the current cycle (v12 §2). Reset by a manual
+   * Retry Validation; a verdict-less failure never increments it.
+   */
+  attempts: number;
+  /** Full round history (v12 §6.1) — appended across retries, never recomputed. */
+  rounds?: ValidationRound[];
+  /** The last frozen verdict, for convenient reading. */
+  verdict?: ValidationVerdict;
   error?: string;
   errorCode?: string;
-  attempts: number;
   startedAt?: string;
   endedAt?: string;
-  /**
-   * Where the validation commands actually ran (v11 hardening §6). Always an
-   * isolated runtime: repository commands are untrusted code and never
-   * execute on the AgentFabric host.
-   */
-  execution?: ValidationExecutionInfo;
-}
-
-/** How validation was executed — the isolation evidence on the record. */
-export interface ValidationExecutionInfo {
-  /** Isolation boundary the commands ran behind. */
-  backend: "isolated";
-  runtimeId?: ID;
-  runtimeKind?: string;
-  containerized: boolean;
-  image?: string;
-  /** True when a disposable validation runtime was created for this attempt. */
-  disposable?: boolean;
-  containerId?: string;
 }
 
 /**
@@ -806,7 +848,7 @@ export interface Task {
   workingBranch?: string;
   /** Whether the working branch is new or continues an existing one. */
   branchMode?: BranchMode;
-  /** Task-level validation override (replaces the Project's). */
+  /** Task-level validation override — replaces the Project's entirely (v12 §3). */
   validation?: ValidationConfig;
   /** Task-level publish policy override. */
   git?: GitPublishPolicy;
@@ -857,6 +899,14 @@ export interface Run {
   taskId: ID;
   taskTitle: string;
   status: RunStatus;
+  /**
+   * What this Run is for (v12 §4.1). Absent = a development run, which is
+   * what every pre-v12 run is. `validation` = the judge run of one round;
+   * `rework` = the automatic re-development run a failed verdict triggers.
+   */
+  purpose?: "development" | "validation" | "rework";
+  /** Round this validation/rework run belongs to (1-based, v12 §4.1). */
+  round?: number;
   /**
    * Fine-grained lifecycle phase (v11 §21) for Project-based runs. Absent on
    * classic Task runs, which never go through the execution supervisor.
@@ -1328,11 +1378,14 @@ export type EventType =
   | "credential.released"
   | "provisioning.prepared"
   | "provisioning.cleaned"
-  | "validation.started"
-  | "validation.runtime.prepared"
-  | "validation.step"
+  | "validation.round.started"
+  | "validation.pinned"
+  | "validation.verdict"
+  | "validation.workspace.replayed"
+  | "validation.rework.started"
   | "validation.passed"
   | "validation.failed"
+  | "validation.skipped"
   | "git.finalized"
   | "git.revision.frozen"
   | "git.diff.captured"

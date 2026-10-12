@@ -450,6 +450,15 @@ export interface GitOps {
   status(opts: GitCommandOptions): Promise<GitStatus>;
   stageAll(opts: GitCommandOptions): Promise<void>;
   commit(opts: GitCommandOptions & { message: string; author?: { name: string; email: string } }): Promise<string>;
+  /**
+   * Hard-resets the working tree and index to `revision` (v12 §4.5). The
+   * **only** caller is the validation replay path, and the only revision it
+   * may name is the round's `pinnedRevision.commitSha` — never an arbitrary
+   * ref. `cleanUntracked` is always run alongside it.
+   */
+  resetHard(opts: GitCommandOptions & { revision: string }): Promise<void>;
+  /** Removes untracked files and directories (v12 §4.5, replay path only). */
+  cleanUntracked(opts: GitCommandOptions): Promise<void>;
   commitsBetween(opts: GitCommandOptions & { from: string; to: string }): Promise<string[]>;
   push(opts: GitCommandOptions & { remote: string; branch: string }): Promise<void>;
   /**
@@ -694,6 +703,14 @@ export function createGitOps(bin = process.env.AGENTFABRIC_GIT_BIN ?? "git"): Gi
       await exec(args, { cwd: dir, operation: "commit" });
       const { stdout } = await runGit(bin, ["rev-parse", "HEAD"], { cwd: dir });
       return stdout.trim();
+    },
+
+    async resetHard({ dir, revision }) {
+      await exec(["reset", "--hard", revision], { cwd: dir, operation: "reset" });
+    },
+
+    async cleanUntracked({ dir }) {
+      await exec(["clean", "-fd"], { cwd: dir, operation: "clean" });
     },
 
     async commitsBetween({ dir, from, to }) {

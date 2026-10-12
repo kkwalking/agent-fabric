@@ -20,6 +20,6 @@ export * from "./autoRetry.js";
 export * from "./secrets.js";
 export * from "./secretCrypto.js";
 export * from "./validation.js";
-export * from "./validationDocker.js";
+export * from "./validationTool.js";
 export * from "./provisioning.js";
 export * from "./supervisor.js";

@@ -25,6 +25,8 @@ export interface DockerRunOptions {
   nativeStateMount?: { hostPath: string; containerPath: string };
   /** Extra read-only mounts, e.g. generated harness config (v4 §1). */
   extraMounts?: Array<{ hostPath: string; containerPath: string }>;
+  /** Additional read-write bind mounts (v12 §4.1: the judge's output dir). */
+  writableMounts?: Array<{ hostPath: string; containerPath: string }>;
   resourceLimits?: ResourceLimits;
   networkPolicy?: NetworkPolicy;
   entrypoint?: string[];
@@ -113,13 +115,14 @@ export function createDockerContainerOps(): ContainerOps {
 
 export function commonRunArgs(
   ctx: RuntimeContext,
-  opts: Pick<DockerRunOptions, "workspaceMount" | "nativeStateMount" | "extraMounts" | "env" | "resourceLimits" | "networkPolicy">,
+  opts: Pick<DockerRunOptions, "workspaceMount" | "nativeStateMount" | "extraMounts" | "writableMounts" | "env" | "resourceLimits" | "networkPolicy">,
   extraLabels: Record<string, string> = {}
 ): string[] {
   const args: string[] = [];
   if (opts.workspaceMount) {
     // Read-only vs read-write comes from the resolved execution policy
-    // (v4 §17) — never from a runtime-specific bypass.
+    // (v4 §17) — never from a runtime-specific bypass. The validation judge
+    // run sets `filesystem.readOnly`, so the workspace is `:ro` there.
     const readOnly = ctx.policy?.filesystem?.readOnly ?? ctx.runtime.filesystemPolicy?.readOnly;
     const mode = readOnly ? "ro" : "rw";
     args.push("-v", `${opts.workspaceMount.hostPath}:${opts.workspaceMount.containerPath}:${mode}`);
@@ -132,6 +135,11 @@ export function commonRunArgs(
   // AgentFabric-generated harness config is mounted read-only (v4 §1).
   for (const mount of opts.extraMounts ?? []) {
     args.push("-v", `${mount.hostPath}:${mount.containerPath}:ro`);
+  }
+  // Platform mounts that must be writable (v12 §4.1: the judge's verdict
+  // output directory — the judge's only legitimate write target).
+  for (const mount of opts.writableMounts ?? []) {
+    args.push("-v", `${mount.hostPath}:${mount.containerPath}:rw`);
   }
   for (const [k, v] of Object.entries(opts.env ?? {})) {
     args.push("-e", `${k}=${v}`);
@@ -285,7 +293,7 @@ export async function runDockerWithLifecycle(
  */
 export async function ensureKeepAliveContainer(
   ctx: RuntimeContext,
-  opts: Pick<DockerRunOptions, "image" | "env" | "workspaceMount" | "nativeStateMount" | "extraMounts" | "resourceLimits" | "networkPolicy" | "name">
+  opts: Pick<DockerRunOptions, "image" | "env" | "workspaceMount" | "nativeStateMount" | "extraMounts" | "writableMounts" | "resourceLimits" | "networkPolicy" | "name">
 ): Promise<{ containerId?: string; containerName?: string; error?: string }> {
   const defaultName = `af-keep-${ctx.runtime.id}-${ctx.task.id}`;
   const reuseName = ctx.reusableContainer?.name ?? defaultName;
@@ -437,8 +445,10 @@ export const dockerAdapter: AgentRuntimeAdapter = {
         workspaceMount: ctx.workspacePath
           ? { hostPath: ctx.workspacePath, containerPath }
           : undefined,
-        // Platform-provisioned read-only mounts (skills / MCP, v11 §25/§26).
+        // Platform-provisioned mounts (skills / MCP read-only, v11 §25/§26;
+        // the judge run's verdict output directory read-write, v12 §4.1).
         extraMounts: ctx.extraMounts,
+        writableMounts: ctx.writableMounts,
         resourceLimits: mergedResourceLimits(ctx),
         networkPolicy: ctx.policy?.network ?? ctx.runtime.networkPolicy,
       });

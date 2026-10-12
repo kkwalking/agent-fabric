@@ -10,6 +10,7 @@ import { validateRemoteUrl, checkCredentialBinding, type CredentialBindingCheck,
 import { decryptSecretValue, encryptSecretValue, isEncryptedSecretValue } from "./secretCrypto.js";
 import { assertSecretAllowed, resolveSecretsForPurpose, type SecretPurpose } from "./secrets.js";
 import { taskLifecycle } from "./lifecycle.js";
+import { validationConfigProblem } from "./validation.js";
 import type {
   ID,
   Provider,
@@ -849,6 +850,7 @@ export class TaskService {
   }
 
   async create(input: NewTaskInput): Promise<Task> {
+    assertValidationConfig(input.validation);
     const task: Task = {
       id: input.id ?? newId("task"),
       title: input.title ?? input.prompt.slice(0, 80),
@@ -1293,6 +1295,17 @@ export function inferSourceProvider(remoteUrl: string): SourceProvider {
  * copy (that is the Workspace's job) and never holds credential material
  * (that is the SourceCredential's job).
  */
+/**
+ * A declared validation config must be usable — an empty prompt is a
+ * configuration error, never a silent skip (v12 §3.1). Enforced at every
+ * write boundary (project create/update, task create), so an invalid config
+ * never reaches a record.
+ */
+function assertValidationConfig(config: ValidationConfig | undefined): void {
+  const problem = validationConfigProblem(config);
+  if (problem) throw new DomainError("config-invalid", problem, "a validation prompt describes the acceptance standard the judge checks");
+}
+
 export class ProjectService {
   constructor(private store: Store) {}
 
@@ -1307,6 +1320,7 @@ export class ProjectService {
   async create(input: NewProjectInput): Promise<Project> {
     const name = input.name?.trim();
     if (!name) throw new DomainError("project-invalid", "A project needs a name");
+    assertValidationConfig(input.validation);
     const remoteUrl = input.source?.remoteUrl?.trim();
     if (!remoteUrl) throw new DomainError("project-invalid", "A project needs a repository URL");
     const urlCheck = validateRemoteUrl(remoteUrl);
@@ -1348,6 +1362,7 @@ export class ProjectService {
   async update(id: ID, patch: Partial<NewProjectInput>): Promise<Project | undefined> {
     const project = this.get(id);
     if (!project) return undefined;
+    assertValidationConfig(patch.validation);
     const next: Partial<Project> = { updatedAt: now() };
     if (patch.name !== undefined) {
       const name = patch.name.trim();

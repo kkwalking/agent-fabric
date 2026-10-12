@@ -187,6 +187,13 @@ export function RunDetailView({ runId }: { runId: string }) {
 
       <div className="grid">
         <div className="stat"><div className="num"><StatusBadge status={run.status} /></div><div className="lbl">status</div></div>
+        <div className="stat">
+          <div className="num">
+            {run.purpose === "validation" || run.purpose === "rework" ? run.purpose : "development"}
+            {run.round ? ` · r${run.round}` : ""}
+          </div>
+          <div className="lbl">purpose</div>
+        </div>
         <div className="stat"><div className="num">{run.runtimeName ?? "-"}</div><div className="lbl">runtime</div></div>
         <div className="stat"><div className="num">{run.modelName ?? "-"}</div><div className="lbl">model</div></div>
         <div className="stat"><div className="num">{CONTINUITY_LABEL[run.continuity ?? "new"] ?? run.continuity}</div><div className="lbl">continuity</div></div>

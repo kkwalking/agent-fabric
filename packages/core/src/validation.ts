@@ -1,279 +1,222 @@
 /**
- * Validation (v11 §20, hardening §5/§6).
+ * Validation (v12): a natural-language acceptance standard judged by a
+ * separate Validation Agent.
  *
- * Validation runs *after* the agent finished and *before* Git finalization:
- * it is the platform's own check that the produced code is acceptable
- * (typecheck / test / lint / build — whatever the Project or Task defines).
+ * A Project or Task may declare a `validation.prompt` — "go build and the
+ * full test suite pass", "no new TypeScript errors", whatever the user can
+ * state. The supervisor runs it as a **second agent in a fresh container**
+ * (a normal Run with `purpose: "validation"`), on a frozen commit (the
+ * round's pin). A failed verdict sends the work back to the development
+ * agent; three failed verdicts end the Task.
  *
- * A validation failure is its own outcome, never a plain "task failed": the
- * caller records it as `validation-failed` / `validation-timeout` and can
- * retry validation alone, without re-running the agent (v11 §31).
- *
- * **Validation commands are untrusted code** (v11 hardening §5). `npm test`,
- * `pytest`, `make test` all execute whatever the repository contains, so a
- * validation step is never run as a host shell command. The production path
- * is therefore `runSandboxedValidation`, which runs each step through an
- * isolated-runtime executor supplied by the supervisor (it owns runtime
- * lifecycle), with:
- *
- * - an **allowlisted** environment — no `process.env` inheritance (§6.1),
- * - no Git Source Credential (it is not a validation secret, §6.2),
- * - no Docker socket, no host filesystem beyond the workspace mount.
- *
- * `runHostValidation` remains for non-project tasks and local development;
- * it is never selected for a Project Coding Task.
+ * This module owns the pure parts: config resolution, the judge / rework
+ * instruction builders, and the verdict contract. The orchestration lives in
+ * `supervisor.ts`; the verdict tool script lives in `validationTool.ts`.
  */
-import { execFile } from "node:child_process";
-import type { NetworkPolicy, ValidationStep, ValidationStepResult } from "./types.js";
+import type { ValidationConfig, ValidationVerdict } from "./types.js";
 
-/** Default per-step budget. */
-export const DEFAULT_VALIDATION_STEP_TIMEOUT_MS = 10 * 60 * 1000;
+/** Verdicts allowed in one validation cycle when the config says nothing. */
+export const DEFAULT_VALIDATION_MAX_ATTEMPTS = 3;
 
-export interface ValidationRunResult {
-  status: "passed" | "failed" | "timeout" | "skipped";
-  steps: ValidationStepResult[];
-  error?: string;
-  /**
-   * The runner's own code, plus the executor's when the sandbox itself failed
-   * to start (`validation-runtime-*`, v11 hardening §6.3). Those two are *not*
-   * a failing test: the API maps them to 502 so a client retries the runtime
-   * rather than the code under test. Collapsing them into `validation-failed`
-   * would tell the user to go fix a test that never ran.
-   */
-  errorCode?: "validation-failed" | "validation-timeout" | "validation-runtime-failed" | "validation-runtime-unavailable";
-}
-
-export interface ValidationRunOptions {
-  /** Workspace directory the steps run in. */
-  cwd: string;
-  steps: ValidationStep[];
-  /**
-   * The complete environment the commands receive. Merged over
-   * `VALIDATION_BASE_ENV`; the host's `process.env` is never involved
-   * (v11 hardening §6.1/AC-7).
-   */
-  env?: Record<string, string>;
-  /**
-   * The resolved execution policy's network policy for this Task
-   * (`policy.network`, Task > Project > Profile — see `policy.ts`).
-   *
-   * Validation commands are untrusted code (v11 hardening §5), so they must
-   * run under the same egress policy as the agent, not docker's default
-   * bridge. Without this a Project that declared `network.enabled = false`
-   * still handed repository-controlled code full network access for the
-   * whole validation stage.
-   */
-  network?: NetworkPolicy;
-  signal?: AbortSignal;
-  /** Streamed as `shell.command` / `shell.output` events by the caller. */
-  onStepStart?: (step: ValidationStep, command: string) => void | Promise<void>;
-  onOutput?: (step: ValidationStep, chunk: string, stream: "stdout" | "stderr") => void | Promise<void>;
-  defaultTimeoutMs?: number;
-}
+/** Container-side path of the generated verdict tool script. */
+export const VALIDATION_TOOL_CONTAINER_PATH = "/root/.agentfabric/validation-tool.mjs";
+/** Container-side directory the judge writes its verdict to. */
+export const VALIDATION_OUTPUT_CONTAINER_PATH = "/root/.agentfabric/validation-output";
 
 /**
- * The outcome of running one step somewhere. `error` means the *execution
- * environment* failed (image missing, runtime unavailable) — distinct from a
- * step that ran and exited non-zero.
+ * The effective validation config: a Task's declaration replaces the
+ * Project's entirely (same rule as skills / MCP, v12 §3), and no
+ * declaration at all means the stage is skipped.
  */
-export interface StepOutcome {
-  exitCode: number | null;
-  timedOut: boolean;
-  output: string;
-  error?: string;
-  /** Error code to report when `error` is set (defaults to validation-failed). */
-  errorCode?: "validation-failed" | "validation-timeout" | "validation-runtime-failed" | "validation-runtime-unavailable";
-  /** Container the step ran in, when it ran in one (isolation evidence). */
-  containerId?: string;
-}
-
-/** Runs one validation command in the caller's isolated runtime. */
-export type SandboxedStepExecutor = (opts: {
-  step: ValidationStep;
-  /** Workspace directory on the host (the runtime mounts it). */
-  cwd: string;
-  /** Allowlisted environment the command must receive. */
-  env: Record<string, string>;
-  /** Resolved egress policy the sandbox must enforce (see `ValidationRunOptions.network`). */
-  network?: NetworkPolicy;
-  timeoutMs: number;
-  signal?: AbortSignal;
-  onOutput?: (chunk: string, stream: "stdout" | "stderr") => void | Promise<void>;
-}) => Promise<StepOutcome>;
-
-export type ValidationRunner = (opts: ValidationRunOptions) => Promise<ValidationRunResult>;
-
-/** How much step output is retained on the record (tail, for the UI). */
-const OUTPUT_TAIL_CHARS = 4000;
-
-/**
- * Environment variables every validation command may rely on regardless of
- * the host's environment. Deliberately tiny: enough for a shell to work and
- * for tools to find a writable temp directory, nothing that could carry a
- * host secret.
- */
-export const VALIDATION_BASE_ENV: Record<string, string> = {
-  PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-  HOME: "/root",
-  TMPDIR: "/tmp",
-  LANG: "C.UTF-8",
-  LC_ALL: "C.UTF-8",
-  TERM: "dumb",
-  CI: "1",
-  AGENTFABRIC_VALIDATION: "1",
-};
-
-/**
- * Builds the allowlisted environment for a validation run (v11 hardening
- * §6.1/§6.2). Anything not named here simply does not exist for the command:
- * there is no `...process.env` fallback anywhere on this path.
- */
-export function buildValidationEnvironment(extra?: Record<string, string>): Record<string, string> {
-  return { ...VALIDATION_BASE_ENV, ...(extra ?? {}) };
-}
-
-/**
- * Drives the steps through one executor, in order, and folds their outcomes.
- * The shared shape of both runners — only *where* a step runs differs.
- */
-async function runSteps(
-  opts: ValidationRunOptions,
-  runOne: (step: ValidationStep, timeoutMs: number) => Promise<StepOutcome>
-): Promise<ValidationRunResult> {
-  if (opts.steps.length === 0) return { status: "skipped", steps: [] };
-  const results: ValidationStepResult[] = [];
-  for (const step of opts.steps) {
-    if (opts.signal?.aborted) {
-      results.push({ name: step.name, command: step.command, status: "skipped" });
-      return { status: "failed", steps: results, error: "Validation was cancelled", errorCode: "validation-failed" };
-    }
-    await opts.onStepStart?.(step, step.command);
-    const startedAt = Date.now();
-    const timeoutMs = step.timeoutMs ?? opts.defaultTimeoutMs ?? DEFAULT_VALIDATION_STEP_TIMEOUT_MS;
-    const outcome = await runOne(step, timeoutMs);
-    const durationMs = Date.now() - startedAt;
-    const tail = outcome.output.length > OUTPUT_TAIL_CHARS ? outcome.output.slice(-OUTPUT_TAIL_CHARS) : outcome.output;
-    if (outcome.error) {
-      // The sandbox itself failed (image missing, runtime unavailable). That
-      // is not a failing test — it is validation that could not run, and it
-      // is reported with its own code so the user retries the right thing.
-      results.push({
-        name: step.name,
-        command: step.command,
-        status: "failed",
-        exitCode: outcome.exitCode,
-        durationMs,
-        output: tail,
-      });
-      return {
-        status: "failed",
-        steps: results,
-        error: outcome.error,
-        // Carry the executor's classification through unchanged: a sandbox
-        // that could not start is `validation-runtime-*` (502), not a test
-        // failure (400). Only an unclassified error falls back to the default.
-        errorCode: outcome.errorCode ?? "validation-failed",
-      };
-    }
-    const required = step.required ?? true;
-    const passed = !outcome.timedOut && outcome.exitCode === 0;
-    const status: ValidationStepResult["status"] = outcome.timedOut ? "timeout" : passed ? "passed" : "failed";
-    results.push({
-      name: step.name,
-      command: step.command,
-      status,
-      exitCode: outcome.exitCode,
-      durationMs,
-      output: tail,
-    });
-    if (!passed && required) {
-      return {
-        status: outcome.timedOut ? "timeout" : "failed",
-        steps: results,
-        error: outcome.timedOut
-          ? `Validation step "${step.name}" timed out`
-          : `Validation step "${step.name}" failed (exit code ${outcome.exitCode ?? "?"})`,
-        errorCode: outcome.timedOut ? "validation-timeout" : "validation-failed",
-      };
-    }
-  }
-  return { status: "passed", steps: results };
-}
-
-/**
- * The production runner for a Project Coding Task (v11 hardening §6): every
- * step executes inside an isolated runtime through `execute`.
- */
-export function runSandboxedValidation(opts: ValidationRunOptions, execute: SandboxedStepExecutor): Promise<ValidationRunResult> {
-  const env = buildValidationEnvironment(opts.env);
-  return runSteps(opts, (step, timeoutMs) =>
-    execute({
-      step,
-      cwd: opts.cwd,
-      env,
-      network: opts.network,
-      timeoutMs,
-      signal: opts.signal,
-      onOutput: (chunk, stream) => opts.onOutput?.(step, chunk, stream),
-    })
-  );
-}
-
-/**
- * Runs one step as a host shell command with an allowlisted environment.
- * Kept for non-project tasks and local development; **never** used for a
- * Project Coding Task (v11 hardening §5).
- */
-export function runHostValidation(opts: ValidationRunOptions): Promise<ValidationRunResult> {
-  const env = buildValidationEnvironment(opts.env);
-  return runSteps(opts, (step, timeoutMs) => runStepOnHost(step, { ...opts, env }, timeoutMs));
-}
-
-function runStepOnHost(step: ValidationStep, opts: ValidationRunOptions, timeoutMs: number): Promise<StepOutcome> {
-  return new Promise((resolvePromise) => {
-    const child = execFile(
-      "sh",
-      ["-c", step.command],
-      {
-        cwd: opts.cwd,
-        env: opts.env,
-        timeout: timeoutMs,
-        maxBuffer: 16 * 1024 * 1024,
-      },
-      (err, stdout, stderr) => {
-        const output = `${String(stdout)}${String(stderr)}`;
-        if (err) {
-          const killed = Boolean((err as { killed?: boolean }).killed);
-          resolvePromise({ exitCode: killed ? null : (err as { code?: number }).code ?? 1, timedOut: killed, output });
-          return;
-        }
-        resolvePromise({ exitCode: 0, timedOut: false, output });
-      }
-    );
-    const onAbort = () => child.kill("SIGKILL");
-    opts.signal?.addEventListener("abort", onAbort, { once: true });
-    child.on("close", () => opts.signal?.removeEventListener("abort", onAbort));
-    // Stream output as it arrives so the task view is live.
-    child.stdout?.on("data", (chunk: Buffer) => void opts.onOutput?.(step, chunk.toString(), "stdout"));
-    child.stderr?.on("data", (chunk: Buffer) => void opts.onOutput?.(step, chunk.toString(), "stderr"));
-  });
-}
-
-/**
- * The host runner behind the `ValidationRunner` seam (non-project tasks and
- * local development only).
- */
-export function createValidationRunner(): ValidationRunner {
-  return (opts) => runHostValidation(opts);
-}
-
-/** Resolves the effective validation config: Task override wins, else Project. */
 export function resolveValidationConfig(
-  taskConfig: { enabled?: boolean; steps: ValidationStep[] } | undefined,
-  projectConfig: { enabled?: boolean; steps: ValidationStep[] } | undefined
-): ValidationStep[] {
-  const chosen = taskConfig ?? projectConfig;
-  if (!chosen) return [];
-  if (chosen.enabled === false) return [];
-  return chosen.steps ?? [];
+  taskConfig: ValidationConfig | undefined,
+  projectConfig: ValidationConfig | undefined
+): ValidationConfig | undefined {
+  return taskConfig ?? projectConfig;
+}
+
+/**
+ * A config that exists must be usable: an empty prompt is a configuration
+ * error, never a silent skip (v12 §3.1). Returns the problem as a message
+ * (or `undefined` when the config is fine); the write boundaries (project /
+ * task creation and update) turn it into a `config-invalid` domain error,
+ * so an invalid config never reaches a record.
+ */
+export function validationConfigProblem(config: ValidationConfig | undefined): string | undefined {
+  if (config === undefined) return undefined;
+  if (typeof config.prompt !== "string" || !config.prompt.trim()) {
+    return "validation.prompt must be a non-empty string";
+  }
+  if (config.maxAttempts !== undefined && (!Number.isInteger(config.maxAttempts) || config.maxAttempts < 1)) {
+    return "validation.maxAttempts must be a positive integer";
+  }
+  return undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* Instructions                                                        */
+/* ------------------------------------------------------------------ */
+
+export interface JudgeInstructionInput {
+  /** The original task instruction — what the development agent was asked to do. */
+  taskInstruction: string;
+  /** The user's acceptance standard. */
+  validationPrompt: string;
+  /** Commit the work is frozen at (the round's pin). */
+  pinnedCommitSha: string;
+  /** Revision the task started from. */
+  baseCommitSha?: string;
+  /** Host path / container path of the verdict tool script. */
+  toolPath: string;
+  /** Host path / container path the verdict must be written to. */
+  outputPath: string;
+  /** Workspace path inside the judge's environment. */
+  workspacePath: string;
+  /** 1-based round number and the cycle budget. */
+  round: number;
+  maxAttempts: number;
+}
+
+/**
+ * The judge's instruction. It deliberately does **not** include the
+ * development agent's conversation (v12 §4.2): the judge forms its own
+ * opinion from the repository and from commands it runs itself.
+ */
+export function buildJudgeInstruction(input: JudgeInstructionInput): string {
+  const diffHint = input.baseCommitSha
+    ? `The task started from ${input.baseCommitSha}; \`git -C ${input.workspacePath} diff ${input.baseCommitSha.slice(0, 12)}..${input.pinnedCommitSha.slice(0, 12)}\` shows exactly what the development agent changed.`
+    : `\`git -C ${input.workspacePath} log -1\` shows the frozen revision.`;
+  return [
+    "You are a validation agent. A development agent has finished work on a coding task, and your job is to decide — from actual evidence — whether the work satisfies the acceptance standard below.",
+    "You are not the developer: do not fix anything, do not modify the repository.",
+    "",
+    "# The task the development agent was given",
+    input.taskInstruction,
+    "",
+    "# Acceptance standard",
+    input.validationPrompt,
+    "",
+    "# How to work",
+    `- The repository is at ${input.workspacePath} and is mounted READ-ONLY. Any write there is detected and replayed away by the platform — do not attempt it.`,
+    `- The work under review is frozen at commit ${input.pinnedCommitSha} (the workspace HEAD). ${diffHint}`,
+    `- To build, test or inspect the code, copy the tree to a writable location first, for example:`,
+    `    cp -a ${input.workspacePath} /tmp/review && cd /tmp/review`,
+    "- Run whatever commands the acceptance standard requires and observe the real results.",
+    "",
+    "# Judging discipline",
+    "- Base every conclusion on commands you actually ran and their output. Never judge from reading the code alone.",
+    "- If something the standard requires cannot be run in this environment, say so in the verdict instead of guessing.",
+    "",
+    "# Submitting your verdict",
+    "When you have decided, submit it by running:",
+    `    node ${input.toolPath} --passed --summary "..." --evidence "..."`,
+    "or, when the standard is not met:",
+    `    node ${input.toolPath} --failed --summary "..." --unmet "..." --evidence "..."`,
+    "- --summary: a 1-3 sentence conclusion.",
+    "- --unmet: one flag per acceptance requirement that is NOT satisfied (required for a failure verdict).",
+    '- --evidence: one flag per "command → observed result" pair (required; at least one).',
+    `- The tool validates the payload and writes it to ${input.outputPath}; it exits non-zero with the reason when the payload is invalid — fix the payload and call it again.`,
+    `- If the tool cannot run here, write the same JSON yourself to ${input.outputPath}:`,
+    '    { "passed": <true|false>, "summary": "...", "unmet": ["..."], "evidence": ["..."] }',
+    `This is round ${input.round} of at most ${input.maxAttempts}.`,
+  ].join("\n");
+}
+
+export interface ReworkInstructionInput {
+  /** The original task instruction. */
+  taskInstruction: string;
+  /** The failed verdict. */
+  verdict: ValidationVerdict;
+  /** 1-based round the verdict came from, and the cycle budget. */
+  round: number;
+  maxAttempts: number;
+}
+
+/**
+ * The rework instruction: the original instruction plus the judge's
+ * conclusion — **never** the validation prompt itself (v12 §4.3). The
+ * development agent gets actionable findings, not the acceptance standard
+ * to game.
+ */
+export function buildReworkInstruction(input: ReworkInstructionInput): string {
+  const { verdict } = input;
+  const lines = [
+    input.taskInstruction,
+    "",
+    "---",
+    `Your previous work did not pass validation (round ${input.round} of at most ${input.maxAttempts}). The validation agent's conclusion:`,
+    "",
+    verdict.summary,
+  ];
+  if (verdict.unmet.length > 0) {
+    lines.push("", "Unmet requirements:", ...verdict.unmet.map((u) => `- ${u}`));
+  }
+  if (verdict.evidence.length > 0) {
+    lines.push("", "Evidence the validation agent gathered (commands and observed results):", ...verdict.evidence.map((e) => `- ${e}`));
+  }
+  lines.push("", "Fix these specific problems. The workspace still contains all of your previous work — continue from it.");
+  return lines.join("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Verdict contract                                                    */
+/* ------------------------------------------------------------------ */
+
+export type VerdictParseResult = { ok: true; verdict: VerdictPayload } | { ok: false; error: string };
+
+/** The payload the judge submits — the verdict minus the platform's bookkeeping. */
+export interface VerdictPayload {
+  passed: boolean;
+  summary: string;
+  unmet: string[];
+  evidence: string[];
+}
+
+/**
+ * Validates one verdict payload against the contract (v12 §5). Used twice:
+ * by the generated tool script (so the judge gets immediate, actionable
+ * feedback) and by the supervisor when it freezes the verdict at generation
+ * time. The two must agree — this function is the contract.
+ */
+export function parseVerdictPayload(raw: unknown): VerdictParseResult {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, error: "the verdict must be a JSON object" };
+  }
+  const value = raw as Record<string, unknown>;
+  if (typeof value.passed !== "boolean") {
+    return { ok: false, error: "`passed` must be a boolean" };
+  }
+  if (typeof value.summary !== "string" || !value.summary.trim()) {
+    return { ok: false, error: "`summary` must be a non-empty string" };
+  }
+  const unmet = toStringArray(value.unmet);
+  if (unmet === undefined) {
+    return { ok: false, error: "`unmet` must be an array of strings" };
+  }
+  const evidence = toStringArray(value.evidence);
+  if (evidence === undefined) {
+    return { ok: false, error: "`evidence` must be an array of strings" };
+  }
+  if (!value.passed && unmet.length === 0) {
+    return { ok: false, error: "a failed verdict must name at least one unmet requirement" };
+  }
+  if (evidence.length === 0) {
+    return { ok: false, error: "`evidence` must contain at least one command → result entry" };
+  }
+  return {
+    ok: true,
+    verdict: { passed: value.passed, summary: value.summary.trim(), unmet, evidence },
+  };
+}
+
+function toStringArray(value: unknown): string[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return undefined;
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") return undefined;
+    const trimmed = entry.trim();
+    if (trimmed) out.push(trimmed);
+  }
+  return out;
 }

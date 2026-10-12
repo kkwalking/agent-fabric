@@ -47,6 +47,19 @@ function splitCommand(command: string): string[] {
   return words;
 }
 
+/**
+ * The `validation` field for a project create/update body (v12 §3.2). Only
+ * sent when `--validation-prompt` was given: an empty prompt is a config
+ * error, and omitting the field means "no validation" (or, on update, "leave
+ * the current config alone").
+ */
+function validationBody(opts: Record<string, unknown>): Record<string, unknown> {
+  const prompt = typeof opts.validationPrompt === "string" ? opts.validationPrompt.trim() : "";
+  if (!prompt) return {};
+  const maxAttempts = opts.validationMaxAttempts ? Number(opts.validationMaxAttempts) : undefined;
+  return { validation: { prompt, ...(maxAttempts !== undefined ? { maxAttempts } : {}) } };
+}
+
 /** Global flags, mirrored onto subcommands further down. */
 const GLOBAL_FLAGS = ["--api <url>", "--json", "--token <t>"];
 
@@ -545,6 +558,8 @@ function buildProgram(): Command {
     .option("--branch <name>", "default branch")
     .option("--runtime <id>", "default runtime for the project's tasks")
     .option("--model <id>", "default model for the project's tasks")
+    .option("--validation-prompt <text>", "natural-language acceptance standard a validation agent checks (omit = no validation)")
+    .option("--validation-max-attempts <n>", "judge verdicts allowed per validation cycle (default 3)")
     .option("--base <ref>", "base ref for a new task (for start)")
     .option("--working-branch <name>", "working branch for a new task (for start)")
     .option("--branch-mode <mode>", "new | continue (for start)")
@@ -568,12 +583,13 @@ function buildProgram(): Command {
         return;
       }
       if (action === "add") {
-        if (!name) throw new Error("usage: af projects add <name> --repo <url> [--credential <id>] [--branch main]");
+        if (!name) throw new Error("usage: af projects add <name> --repo <url> [--credential <id>] [--branch main] [--validation-prompt \"...\"]");
         if (!opts.repo) throw new Error("--repo is required");
         const p = await c.post<{ id: string }>("/api/projects", {
           name,
           source: { remoteUrl: opts.repo, credentialId: opts.credential, defaultBranch: opts.branch },
           execution: { runtimeId: opts.runtime, modelId: opts.model },
+          ...validationBody(opts),
         });
         console.log(json(cmd) ? pretty(p) : `project created: ${p.id}`);
         return;
@@ -594,6 +610,7 @@ function buildProgram(): Command {
         const body: Record<string, unknown> = {};
         if (opts.repo) body.source = { remoteUrl: opts.repo, credentialId: opts.credential, defaultBranch: opts.branch };
         if (opts.runtime || opts.model) body.execution = { runtimeId: opts.runtime, modelId: opts.model };
+        Object.assign(body, validationBody(opts));
         const p = await c.put<unknown>(`/api/projects/${name}`, body);
         console.log(json(cmd) ? pretty(p) : `project updated: ${name}`);
         return;
@@ -735,7 +752,17 @@ function buildProgram(): Command {
         console.log(`workspace  : ${(detail.workspace as { path?: string } | null)?.path ?? "-"}`);
         console.log(`phase      : ${detail.phase} (${detail.status})`);
         console.log(`agent      : ${(execution.agent as { status?: string } | undefined)?.status ?? "-"}`);
-        console.log(`validation : ${(execution.validation as { status?: string } | undefined)?.status ?? "-"}`);
+        const validation = execution.validation as
+          | { status?: string; attempts?: number; rounds?: unknown[]; verdict?: { passed?: boolean; summary?: string } }
+          | undefined;
+        console.log(
+          `validation : ${validation?.status ?? "-"}` +
+            (validation?.attempts ? ` · ${validation.attempts} verdict(s)` : "") +
+            (validation?.rounds?.length ? ` over ${validation.rounds.length} round(s)` : "")
+        );
+        if (validation?.verdict) {
+          console.log(`verdict    : ${validation.verdict.passed ? "passed" : "failed"} — ${validation.verdict.summary ?? ""}`);
+        }
         console.log(`publish    : ${(execution.publish as { status?: string } | undefined)?.status ?? "-"}`);
         console.log(`final      : ${(execution.publish as { finalCommitSha?: string } | undefined)?.finalCommitSha ?? "-"}`);
         console.log(`remote     : ${(execution.publish as { remoteBranch?: string } | undefined)?.remoteBranch ?? "-"}`);

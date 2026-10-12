@@ -48,6 +48,7 @@ export type ErrorCode =
   | "validation-timeout"
   | "validation-runtime-failed"
   | "validation-runtime-unavailable"
+  | "validation-verdict-missing"
   | "validation-secret-not-allowed"
   /* Git finalization */
   | "git-state-invalid"
@@ -119,6 +120,7 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "validation-timeout": "validation",
   "validation-runtime-failed": "validation",
   "validation-runtime-unavailable": "validation",
+  "validation-verdict-missing": "validation",
   "validation-secret-not-allowed": "validation",
   "git-state-invalid": "finalization",
   "git-commit-failed": "finalization",
@@ -205,6 +207,7 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "runtime-timeout" ||
     code === "validation-runtime-failed" ||
     code === "validation-runtime-unavailable" ||
+    code === "validation-verdict-missing" ||
     code === "source-not-found"
   ) {
     return 502;
@@ -267,6 +270,7 @@ export function isTransientErrorCode(code: string): boolean {
     case "source-network-failed":
     case "validation-runtime-failed":
     case "validation-runtime-unavailable":
+    case "validation-verdict-missing":
     case "git-push-failed":
       return true;
     default:

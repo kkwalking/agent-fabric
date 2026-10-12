@@ -157,6 +157,7 @@ export const dockerExecutionBackend: ExecutionBackend = {
       workspaceMount: dockerWorkspaceMount(ctx, opts),
       nativeStateMount: dockerNativeStateMount(ctx),
       extraMounts: opts.extraMounts,
+      writableMounts: opts.writableMounts,
       resourceLimits: mergedResourceLimits(ctx),
       // Network mode comes from the resolved execution policy (v4 §18);
       // the runtime field remains a fallback for direct invocations.

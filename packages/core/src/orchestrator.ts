@@ -216,6 +216,8 @@ export interface RunSpec {
  */
 export interface RunExecutionExtras {
   extraMounts?: Array<{ hostPath: string; containerPath: string }>;
+  /** Read-write platform mounts (v12 §4.1: the judge's verdict output dir). */
+  writableMounts?: Array<{ hostPath: string; containerPath: string }>;
   env?: Record<string, string>;
   provisioning?: RuntimeContext["provisioning"];
 }
@@ -2059,8 +2061,17 @@ export class RunService {
       ...(task.env ?? {}),
       ...(run.env ?? {}),
     };
-    const mergedSecretIds = [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
-    const secrets = this.secretService().resolve(mergedSecretIds);
+    // A validation judge run (v12 §4.1) gets **only** the secrets set on the
+    // run record (the task's validationSecretIds) — never the development
+    // agent's secrets. The task's `secretIds` stay behind this boundary.
+    const mergedSecretIds =
+      run.purpose === "validation"
+        ? [...new Set(run.secretIds ?? [])]
+        : [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
+    const secrets =
+      run.purpose === "validation"
+        ? this.secretService().resolve(mergedSecretIds, "validation")
+        : this.secretService().resolve(mergedSecretIds);
     // The Run's own snapshot, copied from the Task when it was created.
     const lifecycle = run.lifecycle;
     const continuity: RunContinuity = run.continuity ?? "new";
@@ -2535,6 +2546,7 @@ export class RunService {
       nativeState: opts.nativeState,
       workspacePath: workspace?.path,
       extraMounts: opts.extras?.extraMounts,
+      writableMounts: opts.extras?.writableMounts,
       provisioning: opts.extras?.provisioning,
       emit,
       log: async (line, level = "info") => {

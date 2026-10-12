@@ -17,7 +17,8 @@
  * a push whose result is uncertain is re-checked against the remote, and a
  * lock whose run is gone is reclaimed (v11 §36/§37).
  */
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { EventBus } from "./eventbus.js";
 import { Store, newId } from "./store.js";
 import { DomainError, asDomainError, isDomainError, retryKindForFailure, type FailureStage, type RetryKind } from "./errors.js";
@@ -37,18 +38,17 @@ import {
 import { SecretRedactor } from "./redaction.js";
 import { provisionEnvironment, MCP_CONFIG_ENV_VAR, SKILLS_ENV_VAR, type ProvisionedEnvironment } from "./provisioning.js";
 import {
-  buildValidationEnvironment,
-  createValidationRunner,
+  buildJudgeInstruction,
+  buildReworkInstruction,
+  DEFAULT_VALIDATION_MAX_ATTEMPTS,
+  parseVerdictPayload,
   resolveValidationConfig,
-  runSandboxedValidation,
-  type SandboxedStepExecutor,
-  type StepOutcome,
-  type ValidationRunner,
+  type VerdictPayload,
 } from "./validation.js";
-import { dockerValidationExecutor } from "./validationDocker.js";
 import { taskDiffArtifactDraft } from "./taskDiff.js";
 import { deliverTaskNotification } from "./notifications.js";
 import { resolveRunConfig } from "./policy.js";
+import { VALIDATION_VERDICT_FILE_NAME } from "./validationTool.js";
 import { RunService } from "./orchestrator.js";
 import {
   ArtifactService,
@@ -64,7 +64,7 @@ import {
   assertCredentialBinding,
   now,
 } from "./services.js";
-import { assertSecretAllowed, secretEnvironment } from "./secrets.js";
+import { assertSecretAllowed } from "./secrets.js";
 import type {
   AgentProfile,
   FrozenFinalRevision,
@@ -72,6 +72,7 @@ import type {
   ID,
   McpServerConfig,
   NetworkPolicy,
+  PinnedRevision,
   Project,
   ProjectSkill,
   Run,
@@ -87,8 +88,8 @@ import type {
   TaskStageStates,
   TaskValidationState,
   ValidationConfig,
-  ValidationExecutionInfo,
-  ValidationStep,
+  ValidationRound,
+  ValidationVerdict,
   Workspace,
 } from "./types.js";
 import { executionBackendOf, runtimeIsolation } from "./types.js";
@@ -117,6 +118,8 @@ const GIT_OPS_METHODS = [
   "status",
   "stageAll",
   "commit",
+  "resetHard",
+  "cleanUntracked",
   "commitsBetween",
   "push",
   "pushRevision",
@@ -142,6 +145,7 @@ const IN_FLIGHT_PHASES: RunPhase[] = [
   "agent.running",
   "validation.preparing",
   "validation.running",
+  "validation.reworking",
   "git.finalizing",
   "git.pushing",
   "cleanup",
@@ -151,6 +155,11 @@ const IN_FLIGHT_PHASES: RunPhase[] = [
  * Which stage a phase belongs to. Crash recovery reads this to decide what
  * actually completed before the process died (v11 hardening §17), instead of
  * assuming the worst about every earlier stage.
+ *
+ * A crash during `validation.reworking` (v12 §6.4) is a *validation*
+ * interruption: the rework run is part of the validation cycle, and the
+ * recovery path for it is Retry Validation — which re-judges the (possibly
+ * half-reworked) workspace without consuming an attempt.
  */
 const STAGE_BY_PHASE: Record<RunPhase, FailureStage | undefined> = {
   "task.created": undefined,
@@ -161,6 +170,7 @@ const STAGE_BY_PHASE: Record<RunPhase, FailureStage | undefined> = {
   "agent.running": "agent",
   "validation.preparing": "validation",
   "validation.running": "validation",
+  "validation.reworking": "validation",
   "git.finalizing": "finalization",
   "git.pushing": "publish",
   cleanup: undefined,
@@ -278,21 +288,8 @@ export interface TaskDetailView {
 
 export interface SupervisorOptions {
   git?: GitOps;
-  /**
-   * Host validation runner — non-project tasks and local development only.
-   * Project validation always runs through the isolated runtime executor
-   * (v11 hardening §5/§6).
-   */
-  validationRunner?: ValidationRunner;
   /** Overall git operation budget (clone/fetch/push). */
   gitTimeoutMs?: number;
-  /**
-   * Builds the executor that runs one validation step inside an isolated
-   * runtime, for a given toolchain image. Defaults to the disposable
-   * container executor (`dockerValidationExecutor`). Injected by tests and by
-   * embedders with a different isolation carrier.
-   */
-  validationExecutor?: ValidationExecutorFactory;
   /**
    * Advanced operator policy (v11 hardening §4.1). When true, a Project
    * Coding Task may run on a host runtime. Off by default, and never
@@ -305,13 +302,6 @@ export interface SupervisorOptions {
    */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
-
-/**
- * Builds a validation step executor for one toolchain image. The supervisor
- * calls it per validation attempt, so each attempt can get its own disposable
- * runtime.
- */
-export type ValidationExecutorFactory = (image?: string) => SandboxedStepExecutor;
 
 /**
  * A stable fingerprint of the working tree's git state (HEAD + porcelain
@@ -335,8 +325,6 @@ type LifecycleMode = "full" | "post-agent";
 
 export class ExecutionSupervisor {
   private readonly git: GitOps;
-  private readonly validationRunner: ValidationRunner;
-  private readonly validationExecutor: ValidationExecutorFactory;
   private readonly gitTimeoutMs: number;
   private readonly allowHostExecution: boolean;
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -379,8 +367,6 @@ export class ExecutionSupervisor {
     options: SupervisorOptions = {}
   ) {
     this.git = options.git ?? createGitOps();
-    this.validationRunner = options.validationRunner ?? createValidationRunner();
-    this.validationExecutor = options.validationExecutor ?? dockerValidationExecutor(this.store.dataDir);
     this.gitTimeoutMs = options.gitTimeoutMs ?? 10 * 60 * 1000;
     this.allowHostExecution = options.allowHostExecution ?? false;
     this.sleep =
@@ -663,7 +649,10 @@ export class ExecutionSupervisor {
       // Attempts are counted when an attempt actually starts (the lifecycle),
       // so retrying never double-counts.
       agent: { ...(task.execution?.agent ?? { attempts: 0 }), status: "pending", runId: run.id },
-      validation: { status: "pending", attempts: task.execution?.validation?.attempts ?? 0 },
+      // A new agent run starts a **new validation cycle**: the budget is
+      // granted afresh (v12 §6.4), while the round history is kept as the
+      // audit trail.
+      validation: { status: "pending", attempts: 0, rounds: task.execution?.validation?.rounds },
       // The publish record keeps what this task already published (its remote
       // branch and push time) — a new agent run must not lose the fact that
       // this branch is ours, or the next push would look like a conflict.
@@ -679,14 +668,27 @@ export class ExecutionSupervisor {
   }
 
   /**
-   * Retry Validation (v11 §31): re-runs validation only. The agent is not
-   * re-executed and no model is called.
+   * Retry Validation (v12 §6.4): re-runs the validation cycle only. The
+   * development agent is not re-executed and no development model call is
+   * made.
+   *
+   * Entering the cycle grants a **fresh budget** — a human looked at the
+   * failure and asked for another round (「人工介入 = 给新预算」). The round
+   * history is preserved.
    */
   async retryValidation(taskId: ID): Promise<Task | undefined> {
     const task = this.tasks().get(taskId);
     if (!task) throw new DomainError("task-not-found", `Task not found: ${taskId}`);
     this.assertNotRunning(task);
     this.assertWorkspacePresent(task);
+    const project = task.projectId ? this.projects().get(task.projectId) : undefined;
+    if (!resolveValidationConfig(task.validation, project?.validation)) {
+      throw new DomainError(
+        "task-state-invalid",
+        "This task has no validation configured — there is nothing to re-validate",
+        "declare a validation prompt on the task or its project, or retry the agent run instead"
+      );
+    }
     const runId = this.eventRunId(task);
     if (!runId) throw new DomainError("task-state-invalid", "This task has no run to validate");
     void this.startLifecycle(taskId, runId, "post-agent");
@@ -1217,52 +1219,7 @@ export class ExecutionSupervisor {
       if (runtime.secretIds?.length) {
         this.secrets().resolve(runtime.secretIds, "agent-runtime");
       }
-      provisioned = await provisionEnvironment({
-        dataDir: this.store.dataDir,
-        runId,
-        project,
-        task,
-        skillsMountPath: typeof runtime.config?.skillsMountPath === "string" ? runtime.config.skillsMountPath : undefined,
-        mcpConfigMountPath: typeof runtime.config?.mcpConfigMountPath === "string" ? runtime.config.mcpConfigMountPath : undefined,
-        // MCP secrets go through the scope-authorized resolver: a
-        // git-scoped secret referenced by an MCP server is refused here
-        // (v11 hardening §8.1/AC-10).
-        resolveSecret: (id) => this.resolveAgentSecret(id),
-      });
-      // Local runtimes read the provisioned paths directly from the host;
-      // containerized runtimes read them at the mount points.
-      const provisioningEnv: Record<string, string> = { ...provisioned.env };
-      if (!runtime.containerized) {
-        if (provisioned.skillsHostDir) provisioningEnv[SKILLS_ENV_VAR] = provisioned.skillsHostDir;
-        if (provisioned.mcpConfigHostPath) provisioningEnv[MCP_CONFIG_ENV_VAR] = provisioned.mcpConfigHostPath;
-      }
-      await this.runService.setExecutionExtras(runId, {
-        extraMounts: provisioned.extraMounts,
-        env: provisioningEnv,
-        provisioning: {
-          skillsHostDir: provisioned.skillsHostDir,
-          skillsMountPath: provisioned.skillsMountPath,
-          mcpConfigHostPath: provisioned.mcpConfigHostPath,
-          mcpConfigMountPath: provisioned.mcpConfigMountPath,
-        },
-      });
-      await this.emit(runId, "runtime.prepared", {
-        runtimeId: runtime.id,
-        runtimeName: runtime.name,
-        runtimeKind: runtime.kind,
-        containerized: Boolean(runtime.containerized),
-        modelId: task.modelId,
-        skills: provisioned.skills,
-        mcpServers: provisioned.mcpServers,
-      });
-      if (provisioned.skills.length > 0 || provisioned.mcpServers.length > 0) {
-        await this.emit(runId, "provisioning.prepared", {
-          skills: provisioned.skills,
-          mcpServers: provisioned.mcpServers,
-          skillsMountPath: provisioned.skillsMountPath,
-          mcpConfigMountPath: provisioned.mcpConfigMountPath,
-        });
-      }
+      provisioned = await this.provisionDevelopmentRun({ task, project, runtime, runId });
 
       /* ---- 4. Agent running (v11 §13/§15/§16) ---- */
       if (mode === "full") {
@@ -1326,8 +1283,10 @@ export class ExecutionSupervisor {
         });
       }
 
-      /* ---- 5. Validation (v11 §20, hardening §5/§6) ---- */
-      await this.runValidationStage({ task, runId, project, workspace, redactor, abort: abort.signal });
+      /* ---- 5. Validation cycle (v12 §4.4) ---- */
+      // Retry Validation (`post-agent`) skips the agent run but enters the
+      // same cycle; the judge's subject is the workspace as it stands.
+      await this.runValidationCycle({ task, runId, project, workspace, redactor, abort: abort.signal, agentRunId: runId });
 
       /* ---- 6. Git finalization (v11 §17, hardening §13) ---- */
       await this.setPhase(taskId, runId, "git.finalizing", "finalizing");
@@ -1446,8 +1405,15 @@ export class ExecutionSupervisor {
       // user stopped to the automatic retry. The stage where the cancel
       // landed is kept, matching what `cancelTask` writes directly.
       const cancelledByUser = abort.signal.aborted;
+      // The stage a cancel landed in is where the lifecycle *was* — the
+      // phase's stage — not what the incidental error says: an aborted
+      // rework run reports `agent-cancelled` (a rework is a development
+      // run), but the cancel landed inside the validation cycle, and the
+      // cycle must record the interruption (v12 §6.6). `cancelTask` derives
+      // the same stage from the same phase.
+      const cancelStage = this.stageForPhase(this.tasks().get(taskId)?.execution?.phase ?? "agent.running");
       failure = {
-        stage: domain.stage,
+        stage: cancelledByUser ? cancelStage : domain.stage,
         code: cancelledByUser ? "agent-cancelled" : domain.code,
         message: cancelledByUser ? "Cancelled by user" : redactor.redact(domain.message),
         at: now(),
@@ -1468,10 +1434,11 @@ export class ExecutionSupervisor {
             stages: this.stagePatch(taskId, "agent", { status: "cancelled", at: now(), errorCode: failure.code }),
           });
         }
-        // A cancel that landed during validation left the stage record saying
-        // the sandbox failed — the same shape `cancelTask` writes directly,
-        // kept consistent however the cancel was noticed.
-        if (domain.stage === "validation") {
+        // A cancel that landed during validation — judging, or a rework run
+        // inside the cycle — left the stage record saying the sandbox/agent
+        // failed. The same shape `cancelTask` writes directly, whichever
+        // phase noticed the cancel (v12 §6.6).
+        if (failure.stage === "validation") {
           const currentValidation = this.tasks().get(taskId)?.execution?.validation;
           await this.patchExecution(taskId, {
             validation: {
@@ -2065,222 +2032,675 @@ export class ExecutionSupervisor {
   }
 
   /**
-   * Validation stage (v11 §20, hardening §5/§6): its own outcome, its own
-   * retry, and — non-negotiably — its own **isolated** execution.
+   * The validation cycle (v12 §4.4): a Validation Agent judges the work in a
+   * fresh container, a failed verdict sends the development agent back to
+   * rework the same workspace, and at most `maxAttempts` verdicts are
+   * allowed before the Task fails.
    *
-   * The steps are repository-driven commands, i.e. untrusted code. They are
-   * handed to a disposable isolated runtime (never a host shell), receive an
-   * allowlisted environment built from scratch (never `process.env`), and
-   * get no Git Source Credential: the credential broker is not reachable
-   * from this path at all.
+   * Each round:
+   *   1. **pin** the development output into a commit (v12 §4.5) — the
+   *      judge's subject and the replay anchor;
+   *   2. run the judge (a normal Run with `purpose: "validation"`, the
+   *      workspace mounted read-only);
+   *   3. detect any drift the judge left behind and **replay to the pin**;
+   *   4. on a passing verdict, return; on a failing verdict with budget
+   *      left, run a **rework** run carrying the verdict's conclusion and
+   *      judge again; on the last failed verdict, throw
+   *      `validation-failed`.
+   *
+   * A verdict that was never produced (the judge run failed, timed out, or
+   * wrote nothing parseable) does **not** consume an attempt: it is an
+   * environment problem, reported as its own code so the caller retries the
+   * right thing.
    */
-  private async runValidationStage(opts: {
+  private async runValidationCycle(opts: {
     task: Task;
     runId: ID;
     project: Project;
     workspace: Workspace;
     redactor: SecretRedactor;
     abort: AbortSignal;
+    /** The development run whose output round 1 judges. */
+    agentRunId: ID;
   }): Promise<void> {
     const { task, runId, project, workspace, redactor, abort } = opts;
-    const steps: ValidationStep[] = resolveValidationConfig(task.validation, project.validation);
-    if (steps.length === 0) {
+    const config = resolveValidationConfig(task.validation, project.validation);
+    if (!config) {
       await this.patchExecution(task.id, {
         validation: {
           ...(this.tasks().get(task.id)?.execution?.validation ?? { attempts: 0 }),
           status: "skipped",
-          steps: [],
           endedAt: now(),
         },
         stages: this.stagePatch(task.id, "validation", { status: "skipped", at: now() }),
       });
+      await this.emit(runId, "validation.skipped", {});
       return;
     }
 
+    const maxAttempts = config.maxAttempts ?? DEFAULT_VALIDATION_MAX_ATTEMPTS;
     const runtime = task.runtimeId ? this.runtimes().get(task.runtimeId) : undefined;
     if (!runtime) throw new DomainError("validation-runtime-unavailable", "This task has no runtime to validate in");
-    const isolation = runtimeIsolation(runtime);
-    if (!isolation.sandboxed && !(this.allowHostExecution || project.execution?.allowHostExecution === true)) {
-      throw new DomainError(
-        "validation-runtime-unavailable",
-        `Validation cannot run for runtime "${runtime.name}": ${isolation.reason}`,
-        "validation commands are untrusted code and must run in an isolated runtime"
-      );
-    }
 
-    // The validation environment is built by allowlist, never inherited:
-    // the task's explicit env plus explicitly allowed build/test secrets.
+    // The task's validation secrets are the judge's allowlist (v12 §4.1).
+    // Resolved here so a forbidden scope fails before any judge container
+    // starts; the values are registered with the lifecycle redactor.
     const validationSecrets = this.secrets().resolve(task.validationSecretIds, "validation");
     for (const secret of validationSecrets) redactor.add(secret.value);
-    const env: Record<string, string> = { ...(task.env ?? {}), ...secretEnvironment(validationSecrets) };
 
-    // The egress policy the agent ran under, resolved by the *same* resolver
-    // with the same inputs (policy.ts). Validation commands are untrusted
-    // repository code (§5), so they must never get more network than the
-    // agent had: a Task that ran `--network none` validates `--network none`
-    // too. `undefined` means nothing configured a policy anywhere, and
-    // docker's default applies — exactly as it did for the agent.
-    const validationNetwork = this.resolvedNetworkPolicy(task, runId, runtime);
+    const current = this.tasks().get(task.id)?.execution?.validation ?? { status: "pending" as const, attempts: 0 };
+    // Every entry into the cycle is a **new cycle** with a full budget (v12
+    // §6.4): Retry Validation is the operation that grants it, and a
+    // verdict-less failure never consumed an attempt anyway. The round
+    // history is kept — it is the audit trail, not the budget.
+    const rounds: ValidationRound[] = [...(current.rounds ?? [])];
+    let attempts = 0;
+    let agentRunId = opts.agentRunId;
+    const git = this.gitFor(abort);
 
-    const execution: ValidationExecutionInfo = {
-      backend: "isolated",
-      runtimeId: runtime.id,
-      runtimeKind: runtime.kind,
-      containerized: isolation.containerized,
-      image: isolation.image,
-      disposable: true,
-    };
-
-    await this.setPhase(task.id, runId, "validation.preparing", "validating");
-    await this.emit(runId, "validation.runtime.prepared", {
-      runtimeId: runtime.id,
-      runtimeKind: runtime.kind,
-      containerized: isolation.containerized,
-      image: isolation.image,
-      isolated: isolation.sandboxed,
-      disposable: true,
-      steps: steps.length,
-    });
-    await this.setPhase(task.id, runId, "validation.running", "validating");
-    const attempts = (this.tasks().get(task.id)?.execution?.validation?.attempts ?? 0) + 1;
     await this.patchExecution(task.id, {
-      validation: { status: "running", attempts, startedAt: now(), steps: [], execution },
-    });
-    await this.emit(runId, "validation.started", {
-      steps: steps.map((s) => ({ name: s.name, command: s.command })),
-      isolated: true,
-      runtimeKind: runtime.kind,
+      validation: { ...current, status: "running", attempts, rounds, error: undefined, errorCode: undefined, startedAt: current.startedAt ?? now() },
     });
 
-    let result;
-    try {
-      if (isolation.sandboxed) {
-        // Option B (v11 hardening §6): a fresh disposable container per
-        // attempt, mounting only the task workspace.
-        result = await runSandboxedValidation(
-          {
-            cwd: workspace.path!,
-            steps,
-            env,
-            network: validationNetwork,
-            signal: abort,
-            onStepStart: async (step) => {
-              await this.emit(runId, "shell.command", {
-                command: step.command,
-                cwd: workspace.path,
-                validation: step.name,
-                isolated: true,
-                runtime: runtime.kind,
-              });
-              await this.emit(runId, "validation.step", { name: step.name, status: "running", command: step.command });
-            },
-            onOutput: async (step, chunk, stream) => {
-              for (const line of chunk.split("\n")) {
-                if (!line.trim()) continue;
-                await this.emit(runId, "shell.output", { line: redactor.redact(line), stream, validation: step.name });
-              }
-            },
-          },
-          this.validationExecutorFor(runtime)
-        );
-      } else {
-        // Only reachable with the explicit advanced policy: the operator
-        // chose to allow host execution for this project.
-        result = await this.validationRunner({
-          cwd: workspace.path!,
-          steps,
-          env,
-          signal: abort,
-          onStepStart: async (step) => {
-            await this.emit(runId, "shell.command", { command: step.command, cwd: workspace.path, validation: step.name });
-            await this.emit(runId, "validation.step", { name: step.name, status: "running", command: step.command });
-          },
-          onOutput: async (step, chunk, stream) => {
-            for (const line of chunk.split("\n")) {
-              if (!line.trim()) continue;
-              await this.emit(runId, "shell.output", { line: redactor.redact(line), stream, validation: step.name });
-            }
+    // Crash recovery inside the cycle (v12 §6.4): if the previous round died
+    // after its pin but before its verdict was frozen, the recorded pin is
+    // the anchor. Anything the dead process (or the judge that never
+    // finished) left in the workspace is detected and replayed away *before*
+    // the tree is re-pinned, so the replay cannot be laundered into a new
+    // commit.
+    await this.replayInterruptedRound({ task, runId, workspace, git, rounds });
+
+    for (;;) {
+      const round = (rounds[rounds.length - 1]?.round ?? 0) + 1;
+      this.assertNotCancelled(task.id);
+
+      /* ---- 1. Pin the development output (v12 §4.5) ---- */
+      // The phase is set *before* the pin: a crash between pin and judge
+      // must recover as a validation interruption, never as an agent one.
+      await this.setPhase(task.id, runId, "validation.preparing", "validating");
+      // The pin names the **development run whose output it freezes** — the
+      // initial run in round 1, the rework run from round 2 on (v12 §4.5).
+      const pinned = await this.pinWorkspace({ task, project, workspace, git, round, runId: agentRunId });
+      rounds.push({ round, agentRunId, pinnedRevision: pinned, status: "judging", startedAt: now() });
+      // The open round is persisted **before** the judge starts (v12 §6.4):
+      // if the process dies while judging, the recorded pin is the anchor
+      // recovery replays to — and residue left in the workspace can never be
+      // laundered into the next round's pin.
+      await this.patchExecution(task.id, {
+        validation: { ...this.validationState(task.id), status: "running", attempts, rounds },
+      });
+
+      /* ---- 2. Judge run (fresh container, workspace read-only) ---- */
+      const judge = await this.runJudge({
+        task,
+        runId,
+        project,
+        workspace,
+        runtime,
+        redactor,
+        round,
+        maxAttempts,
+        pinned,
+        config,
+      });
+      const judgeRunId = judge.runId;
+
+      /* ---- 3. Replay any drift the judge left behind (v12 §4.5) ---- */
+      const drift = await this.replayWorkspaceToPin({ task, runId, workspace, git, pinned, judgeRunId });
+
+      const roundRecord = rounds[rounds.length - 1];
+      roundRecord.judgeRunId = judgeRunId;
+      roundRecord.drift = drift;
+      roundRecord.endedAt = now();
+
+      /* ---- 4. Verdict ---- */
+      if ("error" in judge) {
+        // No verdict was produced: an environment problem, not a failed
+        // test. It consumes no attempt; the caller (and auto-retry) acts on
+        // the code.
+        roundRecord.status = "interrupted";
+        roundRecord.error = judge.error.message;
+        roundRecord.errorCode = judge.error.code;
+        await this.patchExecution(task.id, {
+          validation: {
+            ...this.validationState(task.id),
+            status: "interrupted",
+            attempts,
+            rounds,
+            error: judge.error.message,
+            errorCode: judge.error.code,
+            endedAt: now(),
           },
         });
+        throw new DomainError(judge.error.code, judge.error.message);
       }
-    } catch (err) {
-      // The sandbox itself could not run. That is a validation-runtime
-      // failure, never a silent fallback to the host (v11 hardening §6.1).
-      const message = err instanceof Error ? err.message : String(err);
-      await this.patchExecution(task.id, {
-        validation: {
-          status: "failed",
-          attempts,
-          steps: [],
-          error: redactor.redact(`The isolated validation runtime failed: ${message}`),
-          errorCode: "validation-runtime-failed",
-          endedAt: now(),
-          execution,
-        },
-        stages: this.stagePatch(task.id, "validation", { status: "failed", at: now(), errorCode: "validation-runtime-failed" }),
-      });
-      throw new DomainError("validation-runtime-failed", `The isolated validation runtime failed: ${redactor.redact(message)}`);
-    }
 
-    const stepsOutcome = result.steps.map((s) => ({ ...s, output: s.output ? redactor.redact(s.output) : s.output }));
-    await this.patchExecution(task.id, {
-      validation: {
-        status: result.status,
-        attempts,
-        steps: stepsOutcome,
-        error: result.error ? redactor.redact(result.error) : undefined,
-        errorCode: result.errorCode,
-        endedAt: now(),
-        execution,
-      },
-    });
-    // A validation report is an artifact of the run, so the Task view and the
-    // Run Inspector show the same evidence.
-    await this.artifacts().create({
-      runId,
-      name: "validation-report.txt",
-      kind: "test",
-      content: stepsOutcome
-        .map((s) => `# ${s.name} (${s.status}${s.exitCode != null ? `, exit ${s.exitCode}` : ""})\n$ ${s.command}\n${s.output ?? ""}`)
-        .join("\n\n"),
-      meta: {
-        status: result.status,
-        isolated: true,
-        runtimeKind: runtime.kind,
-        steps: stepsOutcome.map((s) => ({ name: s.name, status: s.status })),
-      },
-    });
-    if (result.status !== "passed") {
+      const verdict: ValidationVerdict = { ...judge.verdict, round, judgeRunId, at: now() };
+      roundRecord.verdict = verdict;
+      roundRecord.status = verdict.passed ? "passed" : "failed";
+      attempts += 1;
       await this.patchExecution(task.id, {
-        stages: this.stagePatch(task.id, "validation", {
-          status: "failed",
-          at: now(),
-          errorCode: result.errorCode ?? "validation-failed",
-        }),
+        validation: { ...this.validationState(task.id), status: "running", attempts, rounds, verdict },
       });
-      throw new DomainError(
-        result.errorCode ?? "validation-failed",
-        result.error ? redactor.redact(result.error) : "Validation failed"
-      );
+      await this.emit(runId, "validation.verdict", {
+        round,
+        judgeRunId,
+        passed: verdict.passed,
+        summary: verdict.summary,
+        unmet: verdict.unmet,
+      });
+
+      if (verdict.passed) {
+        await this.artifacts().create({
+          runId,
+          name: "validation-verdict.json",
+          kind: "test",
+          content: `${JSON.stringify(verdict, null, 2)}\n`,
+          meta: { round, judgeRunId, passed: true },
+        });
+        await this.patchExecution(task.id, {
+          validation: { ...this.validationState(task.id), status: "passed", attempts, rounds, verdict, endedAt: now() },
+          stages: this.stagePatch(task.id, "validation", { status: "completed", at: now() }),
+        });
+        await this.emit(runId, "validation.passed", { attempts, rounds: rounds.length });
+        return;
+      }
+
+      if (attempts >= maxAttempts) {
+        await this.artifacts().create({
+          runId,
+          name: "validation-verdict.json",
+          kind: "test",
+          content: `${JSON.stringify(verdict, null, 2)}\n`,
+          meta: { round, judgeRunId, passed: false, exhausted: true },
+        });
+        await this.patchExecution(task.id, {
+          validation: {
+            ...this.validationState(task.id),
+            status: "failed",
+            attempts,
+            rounds,
+            verdict,
+            error: verdict.summary,
+            errorCode: "validation-failed",
+            endedAt: now(),
+          },
+          stages: this.stagePatch(task.id, "validation", { status: "failed", at: now(), errorCode: "validation-failed" }),
+        });
+        throw new DomainError(
+          "validation-failed",
+          `Validation failed after ${attempts} attempt(s): ${verdict.summary}`,
+          "the validation agent's findings are on the task record; retry validation to run another cycle, or fix the code manually"
+        );
+      }
+
+      /* ---- 5. Rework run: the development agent continues (v12 §4.3) ---- */
+      const reworkRunId = await this.startReworkRun({ task, project, workspace, verdict, round, maxAttempts, runtime, runId });
+      roundRecord.reworkRunId = reworkRunId;
+      agentRunId = reworkRunId;
+      // The next round's pin/judge happen on the reworked workspace.
+      await this.patchExecution(task.id, {
+        validation: { ...this.validationState(task.id), status: "running", attempts, rounds },
+      });
     }
-    await this.patchExecution(task.id, {
-      stages: this.stagePatch(task.id, "validation", { status: "completed", at: now() }),
-    });
-    await this.emit(runId, "validation.passed", {
-      steps: stepsOutcome.map((s) => ({ name: s.name, status: s.status, durationMs: s.durationMs })),
-      isolated: true,
-      runtimeKind: runtime.kind,
-    });
+  }
+
+  /** The current validation record, or a fresh pending one. */
+  private validationState(taskId: ID): TaskValidationState {
+    return this.tasks().get(taskId)?.execution?.validation ?? { status: "pending", attempts: 0 };
   }
 
   /**
-   * The isolated step executor for a task's validation. A containerized
-   * runtime's image is the toolchain the repository expects, so it is reused
-   * as the disposable validation image; otherwise the configured default
-   * applies. The executor itself never sees a credential.
+   * The loop-only stage re-entry (v12 §6.2).
+   *
+   * `stagePatch` is monotonic: a completed stage is never rewritten. The
+   * validation cycle is the **one deliberate exception** — a rework run is a
+   * new development run, so `stages.agent` must reflect the *latest* one
+   * (completed again on success, failed when the rework run failed). Every
+   * other caller keeps going through `stagePatch`.
    */
-  private validationExecutorFor(runtime: Runtime): SandboxedStepExecutor {
-    return this.validationExecutor(runtime.image);
+  private stagePatchReentry(taskId: ID, outcome: StageOutcome): TaskStageStates {
+    const current = this.tasks().get(taskId)?.execution?.stages ?? {};
+    return { ...current, agent: outcome };
+  }
+
+  /**
+   * Provisions one development run's environment (v11 §25/§26): skills, MCP
+   * configuration and the platform env, plus the `runtime.prepared` events.
+   *
+   * Shared by the initial run in `lifecycle()` and every rework run
+   * (v12 §4.3: a rework run goes through the same "runtime preparing +
+   * provisioning + agent execution" path as the initial one).
+   */
+  private async provisionDevelopmentRun(opts: {
+    task: Task;
+    project: Project;
+    runtime: Runtime;
+    runId: ID;
+  }): Promise<ProvisionedEnvironment> {
+    const { task, project, runtime, runId } = opts;
+    const provisioned = await provisionEnvironment({
+      dataDir: this.store.dataDir,
+      runId,
+      project,
+      task,
+      skillsMountPath: typeof runtime.config?.skillsMountPath === "string" ? runtime.config.skillsMountPath : undefined,
+      mcpConfigMountPath: typeof runtime.config?.mcpConfigMountPath === "string" ? runtime.config.mcpConfigMountPath : undefined,
+      // MCP secrets go through the scope-authorized resolver: a
+      // git-scoped secret referenced by an MCP server is refused here
+      // (v11 hardening §8.1/AC-10).
+      resolveSecret: (id) => this.resolveAgentSecret(id),
+    });
+    // Local runtimes read the provisioned paths directly from the host;
+    // containerized runtimes read them at the mount points.
+    const provisioningEnv: Record<string, string> = { ...provisioned.env };
+    if (!runtime.containerized) {
+      if (provisioned.skillsHostDir) provisioningEnv[SKILLS_ENV_VAR] = provisioned.skillsHostDir;
+      if (provisioned.mcpConfigHostPath) provisioningEnv[MCP_CONFIG_ENV_VAR] = provisioned.mcpConfigHostPath;
+    }
+    await this.runService.setExecutionExtras(runId, {
+      extraMounts: provisioned.extraMounts,
+      env: provisioningEnv,
+      provisioning: {
+        skillsHostDir: provisioned.skillsHostDir,
+        skillsMountPath: provisioned.skillsMountPath,
+        mcpConfigHostPath: provisioned.mcpConfigHostPath,
+        mcpConfigMountPath: provisioned.mcpConfigMountPath,
+      },
+    });
+    await this.emit(runId, "runtime.prepared", {
+      runtimeId: runtime.id,
+      runtimeName: runtime.name,
+      runtimeKind: runtime.kind,
+      containerized: Boolean(runtime.containerized),
+      modelId: task.modelId,
+      skills: provisioned.skills,
+      mcpServers: provisioned.mcpServers,
+    });
+    if (provisioned.skills.length > 0 || provisioned.mcpServers.length > 0) {
+      await this.emit(runId, "provisioning.prepared", {
+        skills: provisioned.skills,
+        mcpServers: provisioned.mcpServers,
+        skillsMountPath: provisioned.skillsMountPath,
+        mcpConfigMountPath: provisioned.mcpConfigMountPath,
+      });
+    }
+    return provisioned;
+  }
+
+  /**
+   * The completion pin (v12 §4.5): commit whatever the development run left
+   * in the workspace, so the judge has one exact revision to judge — and the
+   * replay has one exact revision to return to. A workspace that is already
+   * clean pins its current HEAD without creating a commit.
+   */
+  private async pinWorkspace(opts: {
+    task: Task;
+    project: Project;
+    runId: ID;
+    workspace: Workspace;
+    git: GitOps;
+    round: number;
+  }): Promise<PinnedRevision> {
+    const { task, project, workspace, git, round } = opts;
+    const dir = workspace.path!;
+    const policy = this.effectiveGitPolicy(project, task.git);
+    const status = await git.status({ dir });
+    let commitSha = (await git.head({ dir })) ?? task.baseCommitSha;
+    if (!commitSha) throw new DomainError("git-state-invalid", "The workspace has no commit to pin for validation");
+    if (!status.clean) {
+      await git.stageAll({ dir });
+      const message = `${this.commitMessage(policy, task)}\n\naf-pin: ${opts.runId} (round ${round})`;
+      commitSha = await git.commit({
+        dir,
+        message,
+        author:
+          policy.commitAuthorName && policy.commitAuthorEmail
+            ? { name: policy.commitAuthorName, email: policy.commitAuthorEmail }
+            : undefined,
+      });
+    }
+    const pinned: PinnedRevision = { commitSha, runId: opts.runId, round, at: now() };
+    await this.emit(opts.runId, "validation.pinned", { round, commitSha, runId: opts.runId });
+    return pinned;
+  }
+
+  /**
+   * The crash-recovery re-entry of the cycle (v12 §6.4): when the previous
+   * attempt died after a pin but before a verdict, the recorded pin is the
+   * anchor. The workspace is compared against it and replayed if anything
+   * moved while no one was watching — *before* a new pin is created, so
+   * residue can never be laundered into the next round's commit.
+   */
+  private async replayInterruptedRound(opts: {
+    task: Task;
+    runId: ID;
+    workspace: Workspace;
+    git: GitOps;
+    rounds: ValidationRound[];
+  }): Promise<void> {
+    const { task, runId, workspace, git, rounds } = opts;
+    const stale = [...rounds].reverse().find((r) => r.status === "judging" && r.pinnedRevision);
+    if (!stale?.pinnedRevision) return;
+    const drift = await this.replayWorkspaceToPin({
+      task,
+      runId,
+      workspace,
+      git,
+      pinned: stale.pinnedRevision,
+      judgeRunId: stale.judgeRunId,
+    });
+    if (drift) stale.drift = drift;
+    stale.status = "interrupted";
+    stale.error = "The previous attempt was interrupted before a verdict";
+    stale.errorCode = "supervisor-restarted";
+    stale.endedAt = now();
+    await this.patchExecution(task.id, { validation: { ...this.validationState(task.id), rounds } });
+  }
+
+  /**
+   * Runs the Validation Agent for one round (v12 §4.2/§4.4): a normal Run
+   * with `purpose: "validation"`, the workspace mounted read-only, its own
+   * secrets, its own model (config or the task's), and the verdict tool
+   * provisioned into it.
+   *
+   * Never throws for an environment failure: the caller always needs the
+   * judge run's id to run drift detection afterwards, so every failure is
+   * returned as a classified value.
+   */
+  private async runJudge(opts: {
+    task: Task;
+    runId: ID;
+    project: Project;
+    workspace: Workspace;
+    runtime: Runtime;
+    redactor: SecretRedactor;
+    round: number;
+    maxAttempts: number;
+    pinned: PinnedRevision;
+    config: ValidationConfig;
+  }): Promise<
+    | { runId: ID; verdict: VerdictPayload }
+    | { runId: ID; error: { code: "validation-verdict-missing" | "validation-timeout" | "validation-runtime-failed"; message: string } }
+  > {
+    const { task, runId, project, workspace, runtime, redactor, round, maxAttempts, pinned, config } = opts;
+
+    const judgeModelId = config.modelId ?? task.modelId;
+    // The judge run is a real Run: it gets the runtime lifecycle, harness
+    // and provisioning machinery, so its container, events and usage are
+    // recorded exactly like the development agent's.
+    const judgeRun = await this.runService.createRunForTask(task, {
+      runtimeId: runtime.id,
+      modelId: judgeModelId,
+      workspaceId: workspace.id,
+      projectId: project.id,
+      workingBranch: task.workingBranch,
+      baseCommitSha: task.baseCommitSha,
+      continuity: "new",
+      phase: "validation.preparing",
+    });
+
+    // Provision the judge environment: the verdict tool script and the
+    // read-write output directory (the only writable platform mount). The
+    // instruction names exactly the paths this created — one derivation.
+    const provisioned = await provisionEnvironment({
+      dataDir: this.store.dataDir,
+      runId: judgeRun.id,
+      validationJudge: { containerized: Boolean(runtime.containerized) },
+    });
+    const instruction = buildJudgeInstruction({
+      taskInstruction: task.prompt,
+      validationPrompt: config.prompt,
+      pinnedCommitSha: pinned.commitSha,
+      baseCommitSha: task.baseCommitSha,
+      toolPath: provisioned.validationToolPath!,
+      outputPath: provisioned.validationVerdictPath!,
+      workspacePath: runtime.containerized ? workspace.mountPath ?? "/workspace" : workspace.path!,
+      round,
+      maxAttempts,
+    });
+    await this.store.update<Run>("runs", judgeRun.id, {
+      purpose: "validation",
+      round,
+      inputInstruction: instruction,
+      // The judge's "user message" is a machine instruction; leaving
+      // `userPrompt` unset keeps the Task Thread from rendering it as
+      // something the user typed.
+      userPrompt: undefined,
+      // Judge secrets are the task's validationSecretIds — never the agent's.
+      secretIds: task.validationSecretIds ? [...task.validationSecretIds] : undefined,
+      // Read-only workspace (v12 §9.1) plus the resolved egress policy, so
+      // the judge can never write the workspace nor reach more network than
+      // the development agent had.
+      policy: { ...(task.policy ?? {}), filesystem: { ...(task.policy?.filesystem ?? {}), readOnly: true } },
+      timeoutMs: config.timeoutMs ?? task.timeoutMs,
+      // **Always a fresh, disposable container** (v12 §4.1): under a
+      // keep-alive Task the lease manager would otherwise hand the judge the
+      // development agent's container — whose workspace is mounted
+      // read-write — and the read-only guarantee would be a fiction.
+      lifecycle: { mode: "ephemeral" },
+      updatedAt: now(),
+    });
+    await this.runService.setExecutionExtras(judgeRun.id, {
+      extraMounts: provisioned.extraMounts,
+      writableMounts: provisioned.writableMounts,
+      env: provisioned.env,
+    });
+    await this.emit(runId, "validation.round.started", { round, maxAttempts, judgeRunId: judgeRun.id });
+
+    try {
+      await this.setPhase(task.id, runId, "validation.running", "validating");
+      try {
+        await this.runService.executeRun(judgeRun.id);
+      } catch (err) {
+        // A preamble throw (a refused secret scope, a vanished record): the
+        // judge never ran, so there is nothing to read — but the run record
+        // exists and the caller still needs its id for drift detection.
+        const domain = isDomainError(err) ? err : undefined;
+        return {
+          runId: judgeRun.id,
+          error: {
+            code: "validation-runtime-failed",
+            message: redactor.redact(domain?.message ?? (err instanceof Error ? err.message : String(err))),
+          },
+        };
+      }
+      const finished = this.runService.get(judgeRun.id);
+      // The verdict is the judge's product, so it is read **first**: a run
+      // that died after submitting still produced a valid judgement (v12
+      // §5.2 — "判定" is defined by the verdict, not by the exit code).
+      const verdict = await this.readVerdict(provisioned.validationOutputDir!, redactor);
+      if (verdict) return { runId: judgeRun.id, verdict };
+      const status = finished?.status ?? "failed";
+      if (status === "completed") {
+        return {
+          runId: judgeRun.id,
+          error: { code: "validation-verdict-missing", message: "The validation agent finished without submitting a verdict" },
+        };
+      }
+      const code = status === "timeout" ? "validation-timeout" : "validation-runtime-failed";
+      return {
+        runId: judgeRun.id,
+        error: {
+          code,
+          message: redactor.redact(`The validation agent's run ${status} without a verdict: ${finished?.error ?? "unknown error"}`),
+        },
+      };
+    } finally {
+      await this.runService.clearExecutionExtras(judgeRun.id);
+      await provisioned.cleanup();
+    }
+  }
+
+  /** Reads and validates the judge's verdict file (v12 §5.2/§5.3). */
+  private async readVerdict(outputDir: string, redactor: SecretRedactor): Promise<VerdictPayload | undefined> {
+    const file = join(outputDir, VALIDATION_VERDICT_FILE_NAME);
+    let raw: string;
+    try {
+      raw = await readFile(file, "utf8");
+    } catch {
+      return undefined;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    const result = parseVerdictPayload(parsed);
+    if (!result.ok) return undefined;
+    return {
+      passed: result.verdict.passed,
+      summary: redactor.redact(result.verdict.summary),
+      unmet: result.verdict.unmet.map((u) => redactor.redact(u)),
+      evidence: result.verdict.evidence.map((e) => redactor.redact(e)),
+    };
+  }
+
+  /**
+   * Replays the workspace back to the round's pin when it drifted (v12
+   * §4.5). The comparison is the same fingerprint Retry Publish uses; the
+   * replay resets to **the pin recorded for this round** — never an
+   * arbitrary ref. Returns the drift record when a replay happened.
+   */
+  private async replayWorkspaceToPin(opts: {
+    task: Task;
+    runId: ID;
+    workspace: Workspace;
+    git: GitOps;
+    pinned: PinnedRevision;
+    judgeRunId?: ID;
+  }): Promise<ValidationRound["drift"]> {
+    const { task, runId, workspace, git, pinned, judgeRunId } = opts;
+    const dir = workspace.path!;
+    const branch = await git.currentBranch({ dir });
+    const head = await git.head({ dir });
+    const status = await git.status({ dir });
+    const drifted = head !== pinned.commitSha || branch !== task.workingBranch || !status.clean;
+    if (!drifted) return undefined;
+    const driftedPaths = [...status.staged, ...status.unstaged, ...status.untracked].slice(0, 20);
+    await this.emit(runId, "validation.workspace.replayed", {
+      round: pinned.round,
+      judgeRunId,
+      pinnedCommitSha: pinned.commitSha,
+      observedHead: head,
+      driftedPaths,
+    });
+    // Reset to the pin and clear everything that appeared on top of it. This
+    // is the only caller of these two primitives, and the revision is always
+    // the recorded pin — never a ref from anywhere else.
+    await git.resetHard({ dir, revision: pinned.commitSha });
+    await git.cleanUntracked({ dir });
+    // `reset --hard` moves the branch HEAD is on; it does not switch back. A
+    // judge that left HEAD on a branch of its own (or detached) would
+    // otherwise strand the workspace there, so switch back onto the task
+    // branch — whose own tip may have been moved by the same judge — and
+    // pin it to the same revision. The tree is clean at this point, so the
+    // checkout cannot conflict.
+    if (task.workingBranch && branch !== task.workingBranch) {
+      await git.checkout({ dir, ref: task.workingBranch });
+      await git.resetHard({ dir, revision: pinned.commitSha });
+    }
+    return { detected: true, observedHead: head, driftedPaths, replayedAt: now() };
+  }
+
+  /**
+   * Runs the automatic rework run (v12 §4.3): the development agent
+   * continues on the same workspace, with the failed verdict's conclusion
+   * appended to the original instruction — never the validation prompt.
+   *
+   * A rework run that fails ends the Task immediately (已定决策 4): the work
+   * is half-done and there is nothing honest to judge.
+   */
+  private async startReworkRun(opts: {
+    task: Task;
+    project: Project;
+    workspace: Workspace;
+    verdict: ValidationVerdict;
+    round: number;
+    maxAttempts: number;
+    runtime: Runtime;
+    runId: ID;
+  }): Promise<ID> {
+    const { task, project, workspace, verdict, round, maxAttempts, runtime, runId } = opts;
+    const instruction = buildReworkInstruction({
+      taskInstruction: task.prompt,
+      verdict,
+      round,
+      maxAttempts,
+    });
+    const rework = await this.runService.createRunForTask(task, {
+      runtimeId: runtime.id,
+      modelId: task.modelId,
+      workspaceId: workspace.id,
+      projectId: project.id,
+      workingBranch: task.workingBranch,
+      baseCommitSha: task.baseCommitSha,
+      continuity: "new",
+      inputInstruction: instruction,
+      userPrompt: instruction,
+      systemInstructions: this.resolveProfile(task.profileId, project.execution?.profileId)?.systemInstructions,
+      profileId: task.profileId,
+      phase: "validation.reworking",
+    });
+    await this.store.update<Run>("runs", rework.id, { purpose: "rework", round: round + 1, updatedAt: now() });
+
+    // A rework run is a development run: `execution.agent` follows it, and
+    // the agent stage is re-entered for the loop (v12 §6.2).
+    const attempt = (this.tasks().get(task.id)?.execution?.agent?.attempts ?? 0) + 1;
+    await this.setPhase(task.id, rework.id, "validation.reworking", "running");
+    await this.patchExecution(task.id, {
+      agent: {
+        ...(this.tasks().get(task.id)?.execution?.agent ?? { attempts: 0 }),
+        status: "running",
+        runId: rework.id,
+        attempts: attempt,
+        startedAt: now(),
+        error: undefined,
+        errorCode: undefined,
+      },
+    });
+    await this.emit(runId, "validation.rework.started", { round, reworkRunId: rework.id, attempt });
+
+    // A rework run goes through the same provisioning path as the initial
+    // development run (v12 §4.3): its project skills, MCP servers and env.
+    const provisioned = await this.provisionDevelopmentRun({ task: this.tasks().get(task.id)!, project, runtime, runId: rework.id });
+    try {
+      await this.runService.executeRun(rework.id);
+    } finally {
+      await provisioned.cleanup();
+    }
+    const finished = this.runService.get(rework.id);
+    if (!finished || finished.status !== "completed") {
+      const status = finished?.status ?? "failed";
+      const code = status === "timeout" ? "agent-timeout" : status === "cancelled" ? "agent-cancelled" : "agent-failed";
+      await this.patchExecution(task.id, {
+        agent: {
+          ...(this.tasks().get(task.id)?.execution?.agent ?? { attempts: 0 }),
+          status: status === "timeout" ? "timeout" : status === "cancelled" ? "cancelled" : "failed",
+          runId: rework.id,
+          endedAt: now(),
+          error: finished?.error ?? `Rework run ${status}`,
+          errorCode: code,
+        },
+        stages: this.stagePatchReentry(task.id, {
+          status: status === "cancelled" ? "cancelled" : "failed",
+          at: now(),
+          errorCode: code,
+        }),
+      });
+      throw new DomainError(code, `The rework run ${status}: ${finished?.error ?? "unknown error"}`);
+    }
+    await this.patchExecution(task.id, {
+      agent: {
+        ...(this.tasks().get(task.id)?.execution?.agent ?? { attempts: 0 }),
+        status: "completed",
+        runId: rework.id,
+        endedAt: now(),
+      },
+      stages: this.stagePatchReentry(task.id, { status: "completed", at: now() }),
+    });
+    return rework.id;
   }
 
   /**
@@ -2589,25 +3009,6 @@ export class ExecutionSupervisor {
     const network = policy?.network ?? project.execution?.networkPolicy;
     if (network === undefined) return policy;
     return { ...(policy ?? {}), network };
-  }
-
-  /**
-   * The egress policy a Task's validation stage must enforce.
-   *
-   * Resolved through `resolveRunConfig` — the same resolver, with the same
-   * inputs (the run record's policy snapshot, the task, the profile, the
-   * runtime default) that produced the *agent* container's `--network none`.
-   * Re-deriving it any other way would let the two drift, and validation runs
-   * untrusted repository code: it must never have more network than the agent.
-   */
-  private resolvedNetworkPolicy(task: Task, runId: ID, runtime: Runtime): NetworkPolicy | undefined {
-    const run = this.runService.get(runId);
-    return resolveRunConfig({
-      task,
-      run: run ?? {},
-      profile: run?.profileId ? this.profiles().get(run.profileId) : undefined,
-      runtime: { networkPolicy: runtime.networkPolicy },
-    }).policy.network;
   }
 
   /**
