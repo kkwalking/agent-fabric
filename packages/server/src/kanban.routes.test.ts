@@ -643,3 +643,41 @@ test("a worktree card checks out its base ref, and an unknown ref fails loudly",
     await h.cleanup();
   }
 });
+
+test("clearing Done deletes only trashed card records", async () => {
+  const h = await makeHarness();
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card: kept } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "keep me",
+      agentId: "claude",
+    });
+    const { card: trashed } = await api<{ card: { id: string } }>(
+      h,
+      "POST",
+      `/api/kanban/projects/${project.id}/cards`,
+      { prompt: "clear me", agentId: "claude" }
+    );
+    await api(h, "POST", `/api/kanban/cards/${trashed.id}/move`, { column: "trash" });
+
+    const cleared = await api<{ deleted: number }>(h, "POST", `/api/kanban/projects/${project.id}/trash/clear`, {});
+    assert.equal(cleared.deleted, 1);
+
+    const { cards } = await api<{ cards: Array<{ id: string; column: string }> }>(
+      h,
+      "GET",
+      `/api/kanban/projects/${project.id}/cards`
+    );
+    assert.deepEqual(cards.map((card) => card.id), [kept.id]);
+    // The folder itself is untouched: clearing Done is a record operation.
+    assert.ok(existsSync(join(h.dir, "project")));
+
+    const again = await api<{ deleted: number }>(h, "POST", `/api/kanban/projects/${project.id}/trash/clear`, {});
+    assert.equal(again.deleted, 0);
+  } finally {
+    await h.cleanup();
+  }
+});

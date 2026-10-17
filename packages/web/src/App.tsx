@@ -20,7 +20,7 @@ import { navigate, parsePath, usePath, type Route } from "./router";
 
 // The Board pulls in xterm; keep it in its own chunk so every other page stays
 // small (v13 §七 asks for a dedicated terminal chunk).
-const BoardView = lazy(() =>
+const KanbanView = lazy(() =>
   import("./views/Board").then((module) => ({ default: module.BoardView }))
 );
 
@@ -44,7 +44,7 @@ const primaryNav: NavEntry[] = [
 ];
 
 const resourceNav: NavEntry[] = [
-  { path: "/board", label: "Board", icon: "grid", match: "/board" },
+  { path: "/kanban", label: "Kanban", icon: "grid", match: "/kanban" },
   { path: "/llm", label: "LLM", icon: "cloud", match: "/llm" },
   { path: "/projects", label: "Projects", icon: "folder", match: "/projects" },
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
@@ -90,8 +90,8 @@ export function App() {
     ));
 
   // The Task Thread is a full-height, composer-anchored layout (v5 §3); the
-  // Board owns its own full-height scroll regions (v13 §七).
-  const fullBleed = route.view === "task" || route.view === "board";
+  // Kanban owns its own full-height scroll regions (v13 §七).
+  const fullBleed = route.view === "task" || route.view === "kanban";
 
   return (
     <div className="app">
@@ -153,9 +153,9 @@ export function App() {
         {/* {route.view === "agents" && <ResourceView kind="agents" />} */}
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
         {route.view === "projects" && <ProjectsView />}
-        {route.view === "board" && (
-          <Suspense fallback={<div className="board-loading muted">Loading board…</div>}>
-            <BoardView />
+        {route.view === "kanban" && (
+          <Suspense fallback={<div className="board-loading muted">Loading Kanban…</div>}>
+            <KanbanView />
           </Suspense>
         )}
         {route.view === "project" && route.id && <ProjectDetailView projectId={route.id} />}

@@ -30,7 +30,8 @@ export type IconName =
   | "refresh"
   | "stop"
   | "branch"
-  | "folderOpen";
+  | "folderOpen"
+  | "restore";
 
 const iconPaths: Record<IconName, ReactNode> = {
   grid: (
@@ -189,6 +190,12 @@ const iconPaths: Record<IconName, ReactNode> = {
       <circle cx="18" cy="9" r="2.4" />
       <path d="M6 8.4v7.2" />
       <path d="M18 11.4c0 3.4-2.6 4.9-9.4 5.9" />
+    </>
+  ),
+  restore: (
+    <>
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
     </>
   ),
   folderOpen: (

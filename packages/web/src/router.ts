@@ -38,7 +38,7 @@ export interface Route {
     | "agents"
     | "workspaces"
     | "projects"
-    | "board"
+    | "kanban"
     | "project"
     | "project-new-task"
     | "source-credentials"
@@ -64,7 +64,10 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   // "/agents": "agents",
   "/workspaces": "workspaces",
   "/projects": "projects",
-  "/board": "board",
+  "/kanban": "kanban",
+  // `/board` was the pre-rename URL; keep it landing on the same page instead of
+  // dropping an open tab on the dashboard after the rename.
+  "/board": "kanban",
   "/source-credentials": "source-credentials",
   "/handoffs": "handoffs",
   "/usage": "usage",

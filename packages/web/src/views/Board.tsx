@@ -84,6 +84,13 @@ function errText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** `/Users/you/x` → `~/x` for display; the absolute path is the fallback. */
+function shortenHomePath(path: string, homePath: string | null): string {
+  if (!homePath) return path;
+  if (path === homePath) return "~";
+  return path.startsWith(`${homePath}/`) ? `~${path.slice(homePath.length)}` : path;
+}
+
 function cardTitle(card: KanbanCard): string {
   const title = card.title?.trim();
   if (title) return title;
@@ -176,6 +183,9 @@ export function BoardView() {
   const [deletingProject, setDeletingProject] = useState<KanbanProject | null>(null);
   const [deletingProjectBusy, setDeletingProjectBusy] = useState(false);
 
+  const [clearTrashOpen, setClearTrashOpen] = useState(false);
+  const [clearTrashBusy, setClearTrashBusy] = useState(false);
+  const [homePath, setHomePath] = useState<string | null>(null);
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [taskFormKey, setTaskFormKey] = useState(0);
   const [taskBusy, setTaskBusy] = useState(false);
@@ -226,6 +236,23 @@ export function BoardView() {
     if (projectId) window.localStorage.setItem(PROJECT_STORAGE_KEY, projectId);
     else window.localStorage.removeItem(PROJECT_STORAGE_KEY);
   }, [projectId]);
+
+  // Home directory, used only to shorten a Done card's working-directory path
+  // to `~/…` the way the fork shows it. Best effort: without it the absolute
+  // path is shown instead.
+  useEffect(() => {
+    let alive = true;
+    get<{ listing: { currentPath: string } }>("/api/kanban/fs")
+      .then((response) => {
+        if (alive) setHomePath(response.listing.currentPath);
+      })
+      .catch(() => {
+        /* display-only */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -467,6 +494,23 @@ export function BoardView() {
     }
   };
 
+  /** Empties Done. Records only — the project folder and worktrees are kept. */
+  const clearTrash = async () => {
+    if (!projectId) return;
+    setClearTrashBusy(true);
+    setActionError(null);
+    try {
+      await post(`/api/kanban/projects/${encodeURIComponent(projectId)}/trash/clear`);
+      setClearTrashOpen(false);
+      await refreshNow();
+    } catch (error) {
+      setActionError(`Clear Done failed: ${errText(error)}`);
+      setClearTrashOpen(false);
+    } finally {
+      setClearTrashBusy(false);
+    }
+  };
+
   /**
    * Creates the cards the form asked for, then optionally starts them.
    *
@@ -629,7 +673,7 @@ export function BoardView() {
     <div className="board">
       <aside className="board-projects">
         <div className="board-projects-head">
-          <span className="board-projects-title">Board projects</span>
+          <span className="board-projects-title">Kanban projects</span>
           <button className="icon-btn" title="Add project" onClick={() => setAddProjectOpen(true)}>
             <Icon name="plus" />
           </button>
@@ -638,7 +682,7 @@ export function BoardView() {
           {projects === null && <div className="muted board-projects-empty">Loading…</div>}
           {projects?.length === 0 && (
             <div className="muted board-projects-empty">
-              No board projects yet. A board project is any local folder — Git is optional.
+              No Kanban projects yet. A Kanban project is any local folder — Git is optional.
             </div>
           )}
           {(projects ?? []).map((project) => {
@@ -683,7 +727,7 @@ export function BoardView() {
                   )}
                   <button
                     className="board-project-del"
-                    title="Delete board project (the folder itself is not touched)"
+                    title="Delete Kanban project (the folder itself is not touched)"
                     onClick={(event) => {
                       event.stopPropagation();
                       setDeletingProject(project);
@@ -705,7 +749,7 @@ export function BoardView() {
         <header className="board-head">
           <div className="board-head-main">
             <div className="board-head-title">
-              <h1>{selectedProject?.name ?? "Board"}</h1>
+              <h1>{selectedProject?.name ?? "Kanban"}</h1>
               {selectedProject && (
                 <span className="board-workspace-chip">
                   {WORKSPACE_LABEL[selectedProject.workspaceType]}
@@ -713,7 +757,7 @@ export function BoardView() {
               )}
             </div>
             <div className="board-head-path mono">
-              {selectedProject?.rootPath ?? "Select or create a board project to load a board"}
+              {selectedProject?.rootPath ?? "Select or create a Kanban project to load the board"}
             </div>
             {selectedProject?.discoveryWarning && (
               <div className="board-hint warn">{selectedProject.discoveryWarning}</div>
@@ -740,7 +784,7 @@ export function BoardView() {
 
         {!selectedProject ? (
           <div className="board-empty muted">
-            <p>No board project selected.</p>
+            <p>No Kanban project selected.</p>
             <button className="small primary" onClick={() => setAddProjectOpen(true)}>
               <Icon name="plus" size={12} /> Add project
             </button>
@@ -753,8 +797,24 @@ export function BoardView() {
               return (
                 <div className="board-column" key={column.id}>
                   <div className="board-column-head">
+                    {column.id === "trash" && <span className="board-column-dot" aria-hidden />}
                     <span className="board-column-label">{column.label}</span>
                     <span className="board-column-count">{columnCards.length}</span>
+                    {column.id === "trash" && (
+                      <button
+                        className="board-column-clear"
+                        title={
+                          columnCards.length > 0
+                            ? "Clear Done permanently (records only)"
+                            : "Done is empty"
+                        }
+                        aria-label="Clear Done"
+                        disabled={columnCards.length === 0}
+                        onClick={() => setClearTrashOpen(true)}
+                      >
+                        <Icon name="trash" size={13} />
+                      </button>
+                    )}
                   </div>
                   <div
                     className={`board-column-body ${dropTarget === column.id ? "drop-ok" : ""} ${
@@ -781,7 +841,7 @@ export function BoardView() {
                       <button
                         className="board-create-task-btn"
                         onClick={openTaskDialog}
-                        title="Create a task from this board"
+                        title="Create a task on this Kanban board"
                       >
                         <Icon name="plus" size={13} /> Create task
                         <span className="board-create-task-key">c</span>
@@ -797,6 +857,10 @@ export function BoardView() {
                         session={sessions[card.id] ?? null}
                         dragging={drag?.cardId === card.id}
                         onOpen={() => openCard(card)}
+                        onRestore={
+                          card.column === "trash" ? () => void moveCard(card, "review") : undefined
+                        }
+                        homePath={homePath}
                         onDragStart={(event) => beginDrag(event, card)}
                         onDragEnd={endDrag}
                       />
@@ -840,9 +904,9 @@ export function BoardView() {
       )}
 
       {deletingProject && (
-        <Modal title="Delete board project" onClose={() => setDeletingProject(null)}>
+        <Modal title="Delete Kanban project" onClose={() => setDeletingProject(null)}>
           <p>
-            Delete board project <strong>{deletingProject.name}</strong>?
+            Delete Kanban project <strong>{deletingProject.name}</strong>?
           </p>
           <p className="muted">
             Only the AgentFabric record is removed. The folder{" "}
@@ -852,6 +916,29 @@ export function BoardView() {
             <button onClick={() => setDeletingProject(null)}>Cancel</button>
             <button className="danger" disabled={deletingProjectBusy} onClick={() => void deleteProject()}>
               {deletingProjectBusy ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {clearTrashOpen && (
+        <Modal title="Clear Done" onClose={() => setClearTrashOpen(false)}>
+          <p>
+            Permanently delete{" "}
+            <strong>
+              {cards.filter((card) => card.column === "trash").length} Done card
+              {cards.filter((card) => card.column === "trash").length === 1 ? "" : "s"}
+            </strong>
+            ?
+          </p>
+          <p className="muted">
+            Only the AgentFabric records (cards and their sessions) are removed. The project folder,
+            worktrees and your files stay untouched.
+          </p>
+          <div className="modal-actions">
+            <button onClick={() => setClearTrashOpen(false)}>Cancel</button>
+            <button className="danger" disabled={clearTrashBusy} onClick={() => void clearTrash()}>
+              {clearTrashBusy ? "Clearing…" : "Clear Done"}
             </button>
           </div>
         </Modal>
@@ -910,7 +997,9 @@ function CardTile({
   agentLabel,
   session,
   dragging,
+  homePath,
   onOpen,
+  onRestore,
   onDragStart,
   onDragEnd,
 }: {
@@ -918,10 +1007,13 @@ function CardTile({
   agentLabel: string;
   session: KanbanSession | null;
   dragging: boolean;
+  homePath: string | null;
   onOpen: () => void;
+  onRestore?: () => void;
   onDragStart: (event: DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
 }) {
+  const isTrash = card.column === "trash";
   return (
     <div
       className={`board-card ${dragging ? "dragging" : ""} ${card.column === "trash" ? "trashed" : ""}`}
@@ -939,6 +1031,19 @@ function CardTile({
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
     >
+      {isTrash && onRestore && (
+        <button
+          className="board-card-restore"
+          title="Restore to Review"
+          aria-label="Restore card to Review"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRestore();
+          }}
+        >
+          <Icon name="restore" size={13} />
+        </button>
+      )}
       <div className="board-card-title">{cardTitle(card)}</div>
       <div className="board-card-meta">
         <span className="board-chip">{agentLabel}</span>
@@ -952,7 +1057,12 @@ function CardTile({
         )}
         {card.model && <span className="board-chip mono">{card.model}</span>}
       </div>
-      {(session || card.sessionId) && (
+      {isTrash && session?.cwd && (
+        <div className="board-card-workdir mono" title={session.cwd}>
+          {shortenHomePath(session.cwd, homePath)}
+        </div>
+      )}
+      {!isTrash && (session || card.sessionId) && (
         <div className="board-card-foot">
           {session ? (
             <StatusBadge status={session.status} />

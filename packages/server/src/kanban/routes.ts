@@ -192,6 +192,24 @@ export function registerKanbanRoutes(
     })
   );
 
+  /**
+   * Empties the Done column: the cards and their session records are deleted,
+   * never the working directories. Live sessions are stopped first so clearing
+   * Done cannot leave an agent writing with no record pointing at it.
+   */
+  app.post(
+    "/api/kanban/projects/:id/trash/clear",
+    ah(async (req, res) => {
+      const cards = kanban.listCards(projectParams(req)).filter((card) => card.column === "trash");
+      for (const card of cards) {
+        const latest = kanban.latestSessionForCard(card.id);
+        if (latest && runtime.isLive(latest.id)) await runtime.stop(latest.id);
+        await kanban.deleteCard(card.id);
+      }
+      res.json({ deleted: cards.length });
+    })
+  );
+
   app.post(
     "/api/kanban/cards/:id/move",
     ah(async (req, res) => {

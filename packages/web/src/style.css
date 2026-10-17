@@ -2852,6 +2852,30 @@ button.stat.clickable:hover {
   font-size: 10.5px;
   font-weight: 600;
 }
+/* Done gets the fork's red indicator, and a button that empties it. */
+.board-column-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  flex-shrink: 0;
+}
+.board-column-clear {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+}
+.board-column-clear:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--red);
+}
 .board-column-body {
   flex: 1;
   min-height: 0;
@@ -2875,6 +2899,7 @@ button.stat.clickable:hover {
 /* ---------- Cards ---------- */
 
 .board-card {
+  position: relative;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -2897,6 +2922,45 @@ button.stat.clickable:hover {
 }
 .board-card.trashed {
   background: var(--panel-2);
+}
+/* Done cards mirror the fork: struck-through title/path, restore in the
+   corner, and a de-emphasised mode chip. The session badge is dropped —
+   every Done card is stopped by definition. */
+.board-card.trashed .board-card-title {
+  text-decoration: line-through;
+  color: var(--dim);
+  padding-right: 22px;
+}
+.board-card.trashed .board-chip {
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+.board-card-restore {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+}
+.board-card-restore:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+.board-card-workdir {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--dim);
+  text-decoration: line-through;
+  word-break: break-all;
 }
 .board-card-title {
   font-size: 12.8px;

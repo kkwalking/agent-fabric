@@ -63,7 +63,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Source Credential | 独立于 Project 的 Git 凭据（HTTPS Token / SSH Private Key），敏感值走 Secrets，仅在单次 Git 操作期间临时materialize；公开仓库无需凭据 |
 | Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ **强制隔离 Runtime** → Agent → **完工 pin + 隔离 Validation Agent 判定**（不通过则返工闭环）→ Git Finalization（**冻结 final revision**）→ Publish（**只发布冻结 revision**）→ Cleanup；阶段与 agent/validation/finalization/publish 状态分别、单调地记录（validation 循环是单调性的唯一显式例外，见下文） |
 | Git Publish | 平台负责 commit 策略与 push：只推本 Task 的 working branch、绝不 force、保护分支拒推、push 结果以远端实际状态为准（可重试且幂等） |
-| Board（v13） | 四列看板（Backlog / In Progress / Review / Done）管理本地 Coding Agent CLI：BoardProject = 任意本地目录（folder-first、Git optional）、Card、PTY 终端会话、Direct / Worktree 执行、hooks 自动 Review、重启恢复；支持 Claude Code / Pi / OpenCode / DSH（headless） |
+| Kanban（v13） | 四列看板（Backlog / In Progress / Review / Done）管理本地 Coding Agent CLI：BoardProject = 任意本地目录（folder-first、Git optional）、Card、PTY 终端会话、Direct / Worktree 执行、hooks 自动 Review、重启恢复；支持 Claude Code / Pi / OpenCode / DSH（headless） |
 | Runtime | OpenCode / Pi / Codex / Claude Code / DSH / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
 | Workspace | Managed Workspace（由 Project+Task 自动创建、Task 独占、durable）与 External Workspace（本地目录 / Git / Volume / 导入），持久化，与 Run 关联 |
@@ -105,16 +105,17 @@ npm run dev:web
 侧边栏按用途分组：
 
 * **Tasks / Dashboard** — 主要工作入口。Dashboard 汇总各资源数量、总成本，并提供 Deleted tasks 入口。
-* **Resources** — `Board`（v13：四列看板 + 本地 Agent 终端）、`Projects`（项目与 Coding Task 生命周期）、`LLM`（Provider 与 Model 列表及编辑）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
+* **Resources** — `Kanban`（v13：四列看板 + 本地 Agent 终端）、`Projects`（项目与 Coding Task 生命周期）、`LLM`（Provider 与 Model 列表及编辑）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
 * **System** — `Runs`、`Usage`、`Proxy`、`Settings`。
 
 Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
 
-### Board（`/board`，v13）
+### Kanban（`/kanban`，v13）
 
 Board 是独立于 Project Coding Task 的产品面：一个 **BoardProject** = 用户选定的任意本地目录（folder-first，不要求 Git；自动识别 `none` / `git` / `multi-git` / `google-repo`），一张 **Card** = 一段 prompt + 一个 agent + 执行模式。页面左侧是 BoardProject 列表，右侧是固定四列：
 
 * **列与拖拽**：`Backlog` / `In Progress` / `Review` / `Done`（内部 id `trash`）。`Backlog → In Progress` = 启动；任意列 → `Done` = 停止并归入 Done；`Done → Review` = 恢复；`In Progress ↔ Review` 由 session 状态自动驱动，用户拖拽会被拒绝。
+* **Done 列**：与 Cline kanban 一致——列头带红点、计数与垃圾桶按钮（清空 Done：只删卡片/session 记录，不动项目目录与 worktree）；Done 卡片标题与工作目录划线置灰，右上角 `↺` 一键恢复回 Review，不显示会话状态徽章。
 * **新建项目**：`Add project` 打开对话框，两种入口——**Server path**（服务端目录自动补全：逐级浏览本机目录，条目标注是否为 Git 仓库，支持 `~` 与直接输入绝对路径）或 **Git clone**（Git URL + Clone into + Folder name，目录名默认取仓库名，clone 到非空目录会明确报错）。选中的目录不是 Git 仓库时会先询问：**Add without Git**（纯目录也是合法 BoardProject）或 **Initialize Git repository**（`git init` + 初始 commit，让 Worktree 立即可用）。项目名默认取目录名；同一个目录不能重复添加。
 * **新建 Card**：Backlog 列顶部 **Create task**（快捷键 `c`）或页面右上 **New task** 打开创建对话框：prompt、可选标题（留空时从 prompt 首句自动生成）、Agent（Claude Code / Pi / OpenCode / DSH）、Model、Permission mode、Workspace（Direct / Worktree）与 Worktree base ref（列出项目的本地分支，默认当前分支）。`⌘/Ctrl+Enter` 创建，`⇧⌘/Ctrl+Enter` 创建并立即启动；勾选 **Create more** 时创建后对话框保留以便连续录入。一段编号或项目符号列表可 **Split into N tasks** 批量创建 / 批量启动。对话框用该项目上次的选择（agent / model / permission / workspace / base ref）预填；项目侧栏显示每个项目在四列的卡片数。
 * **卡片详情布局**：任务信息（Prompt + 元信息）默认折叠成左侧一条竖向细栏（`DETAILS`），点击展开；展开后与右侧终端之间的分隔条可拖动调整宽度比例（宽度记在浏览器本地），终端卡片上下不留空白、占满整个高度；左上角 ← 返回看板。
@@ -1170,7 +1171,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * Workspace 的 Snapshot / Fork / Diff 等高级能力未提供（Managed Workspace 的 Lock 已提供；Task 的最终 diff 以 artifact 形式提供）。
 * **Secret 加密不做数据迁移**：升级前写入的明文 Secret 在读取时按 `secret-legacy-format` 明确报错，需要重新录入一次（值本身无法从旧记录恢复）。`secret.key` 必须随数据目录一起备份，丢失后已加密的值不可恢复。
 * 通知只在**终态**触发一次，没有「开始 / 进度 / 卡住」类事件，也没有按事件类型分别配置订阅。
-* **Board（v13）本期边界**：
+* **Kanban（v13）本期边界**：
   * Agent 在宿主 PTY 中直接运行（Direct）或在本机 git worktree 中运行，不经过 Project Coding Task 的隔离 Runtime；**不做** isolated 目录拷贝 / Docker 隔离。
   * Worktree 只支持项目根自身是 Git 仓库；worktree 不自动删除、不自动 commit；multi-git / google-repo / 普通目录只能用 Direct。
   * 同一 BoardProject 允许多个 Direct 会话并行，没有单写者锁；并发改动由 agent 自行处理。
