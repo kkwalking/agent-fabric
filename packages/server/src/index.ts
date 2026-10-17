@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,8 +31,20 @@ async function main(): Promise<void> {
   ];
   const staticDir = distCandidates.find((d) => existsSync(resolve(d, "index.html")));
 
-  const { app, shutdown } = await createServer({ dataDir, staticDir });
-  const server = app.listen(port, host, () => {
+  // Harness hooks call back over loopback; a wildcard bind still reaches
+  // 127.0.0.1, and an explicit IPv6 host needs brackets in a URL.
+  const hookHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  const hookAuthority = hookHost.includes(":") ? `[${hookHost}]` : hookHost;
+  const { app, shutdown, upgrade } = await createServer({
+    dataDir,
+    staticDir,
+    hookBaseUrl: `http://${hookAuthority}:${port}/kanban-hooks/ingest`,
+  });
+  // An explicit HTTP server (rather than `app.listen`) is what lets the
+  // kanban terminal websocket share the same port and auth token (v13 §5.1).
+  const server = createHttpServer(app);
+  server.on("upgrade", upgrade);
+  server.listen(port, host, () => {
     console.log(`[agent-fabric] API server listening on http://${host}:${port}`);
     console.log(`[agent-fabric] Data directory: ${dataDir}`);
     console.log(`[agent-fabric] Web UI: ${staticDir ? `http://localhost:${port}` : "(not built; run npm run build -w @agentfabric/web)"}`);

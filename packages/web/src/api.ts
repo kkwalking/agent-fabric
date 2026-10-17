@@ -8,7 +8,10 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
-    readonly allowDegraded?: boolean
+    readonly allowDegraded?: boolean,
+    /** Full response body, for errors that carry actionable detail (e.g. the
+     *  board's `requiresGitInitialization` + resolved `path`). */
+    readonly details?: Record<string, unknown>
   ) {
     super(message);
     this.name = "ApiError";
@@ -34,7 +37,8 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
       body.error ?? `${res.status} ${res.statusText}`,
       res.status,
       body.code,
-      body.allowDegraded
+      body.allowDegraded,
+      body as Record<string, unknown>
     );
   }
   return data as T;

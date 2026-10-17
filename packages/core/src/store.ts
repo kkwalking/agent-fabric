@@ -20,6 +20,9 @@ import type {
   Project,
   SourceCredential,
   WorkspaceLock,
+  KanbanProject,
+  KanbanCard,
+  KanbanSession,
 } from "./types.js";
 
 export type CollectionName =
@@ -39,6 +42,9 @@ export type CollectionName =
   | "projects"
   | "sourceCredentials"
   | "workspaceLocks"
+  | "kanbanProjects"
+  | "kanbanCards"
+  | "kanbanSessions"
   | "config";
 
 /**
@@ -75,6 +81,9 @@ export interface Database {
   projects: Project[];
   sourceCredentials: SourceCredential[];
   workspaceLocks: WorkspaceLock[];
+  kanbanProjects: KanbanProject[];
+  kanbanCards: KanbanCard[];
+  kanbanSessions: KanbanSession[];
   config: AppConfig;
 }
 
@@ -101,6 +110,9 @@ export function emptyDatabase(): Database {
     projects: [],
     sourceCredentials: [],
     workspaceLocks: [],
+    kanbanProjects: [],
+    kanbanCards: [],
+    kanbanSessions: [],
     config: {},
   };
 }
@@ -164,6 +176,9 @@ export class Store {
       if (!Array.isArray(this.db.projects)) this.db.projects = [];
       if (!Array.isArray(this.db.sourceCredentials)) this.db.sourceCredentials = [];
       if (!Array.isArray(this.db.workspaceLocks)) this.db.workspaceLocks = [];
+      if (!Array.isArray(this.db.kanbanProjects)) this.db.kanbanProjects = [];
+      if (!Array.isArray(this.db.kanbanCards)) this.db.kanbanCards = [];
+      if (!Array.isArray(this.db.kanbanSessions)) this.db.kanbanSessions = [];
       if (!this.db.config) this.db.config = {};
       // v2 §3: strip legacy unified-session fields so old databases stop
       // referencing the removed AgentFabric Session abstraction.

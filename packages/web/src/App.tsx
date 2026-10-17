@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { Dashboard } from "./views/Dashboard";
 import { ResourceView } from "./views/ResourceView";
 import { LlmView } from "./views/Llm";
@@ -17,6 +17,12 @@ import { SourceCredentialsView } from "./views/SourceCredentials";
 import { TaskLifecycleView } from "./views/TaskLifecycle";
 import { Icon, IconName } from "./components";
 import { navigate, parsePath, usePath, type Route } from "./router";
+
+// The Board pulls in xterm; keep it in its own chunk so every other page stays
+// small (v13 §七 asks for a dedicated terminal chunk).
+const BoardView = lazy(() =>
+  import("./views/Board").then((module) => ({ default: module.BoardView }))
+);
 
 /**
  * Navigation (v5 §15/§33): users operate Tasks; Runs are execution
@@ -38,6 +44,7 @@ const primaryNav: NavEntry[] = [
 ];
 
 const resourceNav: NavEntry[] = [
+  { path: "/board", label: "Board", icon: "grid", match: "/board" },
   { path: "/llm", label: "LLM", icon: "cloud", match: "/llm" },
   { path: "/projects", label: "Projects", icon: "folder", match: "/projects" },
   { path: "/runtimes", label: "Runtimes", icon: "box", match: "/runtimes" },
@@ -82,8 +89,9 @@ export function App() {
       </button>
     ));
 
-  // The Task Thread is a full-height, composer-anchored layout (v5 §3).
-  const fullBleed = route.view === "task";
+  // The Task Thread is a full-height, composer-anchored layout (v5 §3); the
+  // Board owns its own full-height scroll regions (v13 §七).
+  const fullBleed = route.view === "task" || route.view === "board";
 
   return (
     <div className="app">
@@ -145,6 +153,11 @@ export function App() {
         {/* {route.view === "agents" && <ResourceView kind="agents" />} */}
         {route.view === "workspaces" && <ResourceView kind="workspaces" />}
         {route.view === "projects" && <ProjectsView />}
+        {route.view === "board" && (
+          <Suspense fallback={<div className="board-loading muted">Loading board…</div>}>
+            <BoardView />
+          </Suspense>
+        )}
         {route.view === "project" && route.id && <ProjectDetailView projectId={route.id} />}
         {route.view === "project-new-task" && route.id && <NewProjectTaskView projectId={route.id} />}
         {route.view === "source-credentials" && <SourceCredentialsView />}

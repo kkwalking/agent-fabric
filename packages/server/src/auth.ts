@@ -20,6 +20,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { IncomingHttpHeaders } from "node:http";
 import type { Request, RequestHandler } from "express";
 
 /** Cookie the browser carries after loading the page (set by `app.ts`). */
@@ -60,13 +61,26 @@ export async function loadOrCreateToken(dataDir: string): Promise<string> {
 }
 
 /** The token a request presents, or undefined. Never reads a query string. */
-function presentedToken(req: Request): string | undefined {
-  const header = req.headers.authorization;
+function presentedTokenFromHeaders(headers: IncomingHttpHeaders): string | undefined {
+  const header = headers.authorization;
   if (typeof header === "string") {
     const match = /^Bearer[ \t]+(.+)$/i.exec(header.trim());
     if (match) return match[1].trim();
   }
-  return cookieValue(req.headers.cookie, TOKEN_COOKIE);
+  return cookieValue(headers.cookie, TOKEN_COOKIE);
+}
+
+/** Express flavour of the same rule. */
+function presentedToken(req: Request): string | undefined {
+  return presentedTokenFromHeaders(req.headers);
+}
+
+/**
+ * WebSocket upgrades cannot use Express middleware: the `ws` library needs the
+ * decision on the raw `IncomingMessage`. Same token sources, same rule.
+ */
+export function headersCarryToken(headers: IncomingHttpHeaders, token: string): boolean {
+  return tokenMatches(presentedTokenFromHeaders(headers), token);
 }
 
 /** One cookie out of a raw `Cookie:` header (no cookie-parser dependency). */

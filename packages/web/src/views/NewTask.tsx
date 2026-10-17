@@ -17,10 +17,11 @@ import { navigate } from "../router";
  *   defines the codebase, so the user chooses it first and then only the
  *   decisions a Task actually owns: base ref, working branch, branch mode,
  *   optional runtime/model overrides, and an optional validation override
- *   (one command per line; replaces the Project's steps, empty inherits
- *   them — v11 §20). There is deliberately **no
- *   Workspace selector**: `1 Task = 1 Managed Workspace` (v11 §5.1) and the
- *   platform creates it, so the working copy is not the user's to pick.
+ *   (a natural-language acceptance standard the validation agent judges;
+ *   replaces the Project's wholesale, empty inherits it — v12 §3.2). There
+ *   is deliberately **no Workspace selector**: `1 Task = 1 Managed
+ *   Workspace` (v11 §5.1) and the platform creates it, so the working copy
+ *   is not the user's to pick.
  *   Submission goes to `POST /api/projects/:id/tasks` and lands on the Task
  *   Lifecycle page, where phase / agent / validation / publish are visible.
  *

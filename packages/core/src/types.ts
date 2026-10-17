@@ -1617,3 +1617,88 @@ export interface NotificationConfig {
   /** Total attempts including the first. */
   maxAttempts?: number;
 }
+
+/* ------------------------------------------------------------------ */
+/* Kanban (v13)                                                       */
+/* ------------------------------------------------------------------ */
+
+/** Fixed board columns. `trash` is the Done column's internal id. */
+export type KanbanColumn = "backlog" | "in_progress" | "review" | "trash";
+
+/** Local CLI agents the board can launch in a PTY (v13 §4). */
+export type KanbanAgentKind = "claude" | "pi" | "opencode" | "dsh";
+
+/** Where a card's agent works: the project root or a private copy. */
+export type KanbanExecutionMode = "direct" | "worktree";
+
+/** Repository shape discovered for a board project. Discovery never blocks. */
+export type KanbanWorkspaceType = "none" | "git" | "multi-git" | "google-repo";
+
+/** A local directory the user opened as a board (folder-first, Git optional). */
+export interface KanbanProject {
+  id: ID;
+  name: string;
+  /** The directory the user picked; never walked up to a containing Git root. */
+  rootPath: string;
+  workspaceType: KanbanWorkspaceType;
+  /** Present when discovery failed; discovery is advisory only. */
+  discoveryWarning?: string;
+  defaultAgentId?: KanbanAgentKind;
+  defaultExecutionMode?: KanbanExecutionMode;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One board card. The card is the unit of work; sessions are its attempts. */
+export interface KanbanCard {
+  id: ID;
+  projectId: ID;
+  title: string;
+  prompt: string;
+  column: KanbanColumn;
+  agentId: KanbanAgentKind;
+  model?: string;
+  /** Permission mode id from the agent catalog; absent = agent default. */
+  permissionModeId?: string;
+  executionMode: KanbanExecutionMode;
+  /**
+   * Git ref the card's `worktree` checkout is created from (v13 §3.3). Absent
+   * means the project's current HEAD. Ignored in `direct` mode.
+   */
+  baseRef?: string;
+  /** Most recent session, if the card has ever been started. */
+  sessionId?: ID;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type KanbanSessionStatus =
+  | "starting"
+  | "running"
+  | "awaiting_review"
+  | "needs_attention"
+  | "failed"
+  | "interrupted"
+  | "stopped";
+
+/** One PTY-backed attempt to run a card. The process itself is server memory. */
+export interface KanbanSession {
+  id: ID;
+  cardId: ID;
+  agentId: KanbanAgentKind;
+  /** Actual working directory (project root for direct mode). */
+  cwd: string;
+  executionMode: KanbanExecutionMode;
+  status: KanbanSessionStatus;
+  /** Harness-native session id when the CLI reported one (resume later). */
+  nativeSessionId?: string;
+  /** Whether the CLI runs an interactive TUI or one-shot output (DSH). */
+  interactiveTui: boolean;
+  /** Last harness hook event applied to this session, for debugging (v13 M3). */
+  lastHookEvent?: string;
+  lastHookAt?: string;
+  startedAt: string;
+  endedAt?: string;
+  exitCode?: number;
+  error?: string;
+}

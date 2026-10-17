@@ -2165,3 +2165,1180 @@ button.stat.clickable:hover {
   margin: 8px 0 0;
   font-size: 13px;
 }
+
+/* ================================================================== */
+/* v13: Board (kanban + local agent sessions)                         */
+/* ================================================================== */
+
+.board {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.board-loading {
+  padding: 30px 40px;
+}
+
+/* ---------- Left: board projects ---------- */
+
+.board-projects {
+  width: 232px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border-soft);
+  background: var(--panel);
+}
+
+.board-projects-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 14px 10px 8px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.board-projects-title {
+  padding-left: 2px;
+}
+.board-projects-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 8px;
+}
+.board-projects-empty {
+  padding: 8px 6px;
+  font-size: 12px;
+}
+
+.board-project {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 10px;
+  margin-bottom: 2px;
+  border-radius: 9px;
+  cursor: pointer;
+  outline: none;
+}
+.board-project:hover {
+  background: var(--sidebar-hover);
+}
+.board-project:focus-visible {
+  box-shadow: 0 0 0 2px rgba(32, 31, 28, 0.12);
+}
+.board-project.active {
+  background: var(--sidebar-active);
+}
+.board-project-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 18px;
+}
+.board-project-path {
+  font-size: 10.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-project-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.board-project-del {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+}
+.board-project:hover .board-project-del,
+.board-project:focus-within .board-project-del {
+  opacity: 1;
+}
+.board-project-del:hover {
+  background: var(--panel-2);
+  color: var(--red);
+}
+
+.board-add-project {
+  margin: 8px 12px 12px;
+  padding: 7px;
+  border-style: dashed;
+  color: var(--muted);
+  background: transparent;
+}
+
+/* ---------- Project / task dialogs ---------- */
+
+.board-dialog {
+  width: min(560px, calc(100vw - 48px));
+  padding: 0;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+}
+.board-dialog.task-create-dialog {
+  width: min(620px, calc(100vw - 48px));
+}
+.board-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 16px 10px;
+}
+.board-dialog-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14.5px;
+  font-weight: 650;
+  letter-spacing: -0.1px;
+}
+.board-dialog-title .icon {
+  color: var(--muted);
+}
+.board-dialog-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font-size: 13px;
+  border-radius: 6px;
+}
+.board-dialog-close:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.board-dialog-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin: 0 16px 4px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+.board-dialog-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 550;
+}
+.board-dialog-tab:hover {
+  background: rgba(32, 31, 28, 0.04);
+  border-color: transparent;
+}
+.board-dialog-tab.active {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+}
+.board-dialog-body {
+  padding: 10px 16px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.board-dialog-field {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 6px;
+}
+.board-dialog-label {
+  display: block;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  margin: 4px 0 3px;
+}
+.board-dialog .board-dialog-field input,
+.board-dialog .board-dialog-field select {
+  margin: 0;
+}
+.board-dialog-error {
+  margin-top: 4px;
+}
+.board-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 12px 16px 14px;
+}
+.board-clone-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* "This folder is not a Git repository" decision panel. */
+.board-git-ask {
+  margin: 6px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-bright, #dcdcd8);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+.board-git-ask-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+.board-git-ask-copy {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.board-git-ask-path {
+  margin: 0;
+  font-size: 11px;
+  color: var(--dim);
+  word-break: break-all;
+}
+
+/* ---------- Directory autocomplete ---------- */
+
+.dir-input {
+  position: relative;
+}
+.dir-input-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.dir-input-field:focus-within {
+  border-color: #cbcbca;
+  box-shadow: 0 0 0 3px rgba(32, 31, 28, 0.06);
+}
+.dir-input-field .icon {
+  color: var(--dim);
+  flex-shrink: 0;
+}
+.dir-input-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  font-size: 12.5px;
+}
+.dir-input-text:focus {
+  outline: none;
+  box-shadow: none;
+  border: 0;
+}
+.dir-input-busy {
+  color: var(--dim);
+  font-size: 11px;
+}
+.dir-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(32, 31, 28, 0.14);
+}
+.dir-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.dir-item:hover,
+.dir-item.active {
+  background: var(--sidebar-hover);
+  border-color: transparent;
+}
+.dir-item-name {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dir-item-path {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-chip.git {
+  color: var(--green);
+  background: rgba(26, 127, 55, 0.09);
+}
+
+/* ---------- Task creation form ---------- */
+
+.task-create {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.task-create textarea.task-create-prompt {
+  margin: 0;
+  min-height: 74px;
+  font-size: 12.5px;
+  resize: vertical;
+}
+.task-create-prompt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: -3px;
+}
+.task-create-prompt-foot .board-hint {
+  margin-top: 0;
+}
+.task-create-split {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.task-create-split:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+.task-create-multi {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.task-create-multi-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.task-create-multi-row input {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 12.5px;
+}
+.task-create-multi-index {
+  width: 18px;
+  text-align: right;
+  color: var(--dim);
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+.task-create-multi-remove {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  flex-shrink: 0;
+}
+.task-create-multi-remove:hover {
+  background: var(--panel-2);
+  color: var(--red);
+}
+.task-create-multi-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+}
+.task-create-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: #fafaf9;
+}
+.task-create-options .board-dialog-field input,
+.task-create-options .board-dialog-field select {
+  margin: 0;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.task-create-optional {
+  color: var(--dim);
+  font-weight: 400;
+}
+.task-create-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.task-agent-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.task-agent-chip {
+  padding: 3px 9px;
+  font-size: 11.5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+}
+.task-agent-chip.active {
+  background: var(--dark);
+  border-color: var(--dark);
+  color: #fff;
+}
+.task-agent-chip.missing {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.task-create-base-ref {
+  margin-top: 6px;
+}
+.task-create-error {
+  margin: 0;
+}
+.task-create-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.task-create-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.task-create-more input {
+  width: auto;
+  margin: 0;
+}
+.task-create-buttons {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.task-create-shortcut {
+  margin-left: 6px;
+  opacity: 0.55;
+  font-size: 10px;
+}
+.board-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.board-project-counts {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: auto;
+}
+.board-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.board-count.in_progress {
+  color: var(--blue);
+  background: rgba(37, 99, 235, 0.09);
+}
+.board-count.review {
+  color: var(--green);
+  background: rgba(26, 127, 55, 0.09);
+}
+.board-count.trash {
+  color: var(--dim);
+}
+
+/* ---------- Column headers / chips / hints ---------- */
+
+.board-workspace-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.board-hint {
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+.board-hint.warn {
+  color: var(--yellow);
+}
+.board-field {
+  margin-top: 8px;
+}
+.board-field-label {
+  display: block;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  margin: 4px 0 2px;
+}
+
+/* ---------- Main area ---------- */
+
+.board-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.board-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.board-head-main {
+  min-width: 0;
+}
+.board-head-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.board-head-title h1 {
+  margin: 0;
+}
+.board-head-path {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60vw;
+}
+.board-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.board-banners {
+  padding: 10px 20px 0;
+}
+.board-empty {
+  padding: 40px;
+}
+
+/* ---------- Columns ---------- */
+
+.board-columns {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 14px;
+  padding: 14px 20px 20px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.board-column {
+  flex: 1 1 0;
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.board-column-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px 8px;
+}
+.board-column-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+.board-column-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.board-column-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  background: #fafaf9;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+.board-column-body.drop-ok {
+  background: rgba(226, 98, 14, 0.05);
+  box-shadow: inset 0 0 0 2px rgba(226, 98, 14, 0.35);
+}
+.board-column-empty {
+  padding: 14px 6px;
+  font-size: 11.5px;
+  text-align: center;
+}
+
+/* ---------- Cards ---------- */
+
+.board-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 11px;
+  margin-bottom: 8px;
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  outline: none;
+}
+.board-card:hover {
+  border-color: #d8d8d5;
+  box-shadow: var(--shadow-pop);
+}
+.board-card:focus-visible {
+  box-shadow: 0 0 0 2px rgba(32, 31, 28, 0.12);
+}
+.board-card.dragging {
+  opacity: 0.45;
+}
+.board-card.trashed {
+  background: var(--panel-2);
+}
+.board-card-title {
+  font-size: 12.8px;
+  font-weight: 500;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.board-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+.board-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+.board-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-chip.direct {
+  color: var(--cyan);
+  background: rgba(9, 105, 218, 0.08);
+}
+.board-chip.worktree {
+  color: var(--yellow);
+  background: rgba(154, 103, 0, 0.09);
+}
+
+/* Session badges the shared StatusBadge has no color for (v13 statuses). */
+.board .badge.awaiting_review {
+  color: var(--green);
+  background: rgba(26, 127, 55, 0.09);
+}
+.board .badge.needs_attention {
+  color: var(--yellow);
+  background: rgba(154, 103, 0, 0.09);
+}
+.board .badge.interrupted {
+  color: var(--yellow);
+  background: rgba(154, 103, 0, 0.09);
+}
+.board .badge.stopped {
+  color: var(--dim);
+}
+
+/* ---------- Inline new card ---------- */
+
+.board-create-task-btn {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 7px;
+  border-style: dashed;
+  color: var(--muted);
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.board-create-task-btn:hover {
+  color: var(--text);
+}
+.board-create-task-key {
+  display: inline-grid;
+  place-items: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--dim);
+  font-size: 9.5px;
+  line-height: 1;
+}
+.board-mode-row {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 2px;
+}
+.board-mode-option {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 11.5px;
+}
+.board-mode-option.active {
+  background: var(--sidebar-active);
+  border-color: #d7d7d5;
+  font-weight: 600;
+}
+
+/* ---------- Card detail overlay ---------- */
+
+.board-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  animation: af-fade 0.12s ease;
+}
+.board-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.board-detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 22px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+.board-detail-back {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+.board-detail-back:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+.board-detail-head-main {
+  min-width: 0;
+}
+.board-detail-title {
+  font-size: 15.5px;
+  font-weight: 650;
+  letter-spacing: -0.1px;
+  word-break: break-word;
+}
+.board-detail-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.board-close {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 8px;
+}
+.board-close:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.board-detail .board-banners {
+  padding: 10px 22px 0;
+}
+.board-detail-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.board-detail-side {
+  flex-shrink: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 20px;
+}
+.board-detail-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+.board-detail-side-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.board-detail-side-collapse,
+.board-detail-rail-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.board-detail-side-collapse:hover,
+.board-detail-rail-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+/* The chevron glyph points right; collapsing points back into the rail. */
+.board-detail-side-collapse .icon {
+  transform: rotate(180deg);
+}
+
+/* Divider between task details and the live terminal; drag to re-proportion. */
+.board-detail-resizer {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  border-right: 1px solid var(--border-soft);
+  transition: background 0.12s ease;
+}
+.board-detail-resizer:hover,
+.board-detail-resizer:active {
+  background: rgba(32, 31, 28, 0.07);
+}
+
+/* Collapsed details: a slim rail is the click target to expand. */
+.board-detail-rail {
+  width: 38px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-right: 1px solid var(--border-soft);
+  background: var(--panel);
+}
+.board-detail-rail-label {
+  writing-mode: vertical-rl;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--dim);
+  user-select: none;
+}
+.board-prompt {
+  margin: 6px 0 18px;
+  padding: 12px;
+  max-height: 260px;
+  overflow: auto;
+  background: #f7f7f8;
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.board-meta {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+.board-meta-row {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.board-meta-row dt {
+  color: var(--dim);
+}
+.board-meta-row dd {
+  margin: 0;
+  word-break: break-all;
+}
+.board-session-error {
+  margin-top: 12px;
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.board-detail-term {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* The live terminal card fills the pane vertically: no dead space above or
+     below it. Side padding keeps the card's rounded border readable. */
+  padding: 0 12px;
+}
+.board-detail-term > .board-term-empty {
+  margin: 12px 0;
+}
+.board-term-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+}
+.board-term-empty-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ---------- xterm panel ---------- */
+
+.board-term {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fbfbfa;
+}
+.board-term-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--panel);
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.board-term-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.board-term-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+.board-term-state.connecting::before {
+  background: var(--yellow);
+}
+.board-term-state.live::before {
+  background: var(--green);
+}
+.board-term-state.error::before {
+  background: var(--red);
+}
+.board-term-note {
+  color: var(--dim);
+}
+.board-term-err {
+  margin-left: auto;
+  color: var(--red);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-term-host {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
+  overflow: hidden;
+}
+.board-term-host .xterm {
+  height: 100%;
+}
+
+/* ---------- Narrow layouts ---------- */
+
+@media (max-width: 1100px) {
+  .board-projects {
+    width: 190px;
+  }
+  .board-columns {
+    gap: 10px;
+    padding: 12px 12px 14px;
+  }
+}
+
+@media (max-width: 900px) {
+  .board-detail-body {
+    flex-direction: column;
+  }
+  .board-detail-side {
+    width: auto !important;
+    max-height: 42%;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  /* A vertical drag handle makes no sense when the panes stack. */
+  .board-detail-resizer {
+    display: none;
+  }
+  .board-detail-rail {
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 5px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .board-detail-rail-label {
+    writing-mode: horizontal-tb;
+    letter-spacing: 0.6px;
+  }
+  .board-detail-term {
+    padding: 0;
+  }
+}
+
+.board-column-body.drop-candidate {
+  box-shadow: inset 0 0 0 1px rgba(226, 98, 14, 0.18);
+}

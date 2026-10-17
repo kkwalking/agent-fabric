@@ -59,10 +59,22 @@ export default defineConfig({
       "/api": {
         target: "http://localhost:7377",
         changeOrigin: true,
+        // Board terminal sessions (v13) are websockets on the same /api
+        // prefix; without `ws: true` the dev page cannot open a terminal even
+        // though production serves REST, SSE and WS from one port.
+        ws: true,
         configure(proxy) {
           authToken(); // surface the missing-token warning at startup, not only on the first request
           proxy.on("proxyReq", (proxyReq, req) => {
             if (req.headers.authorization) return; // the caller authenticated explicitly
+            const token = authToken();
+            if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
+          });
+          // A browser cannot set headers on a websocket, and the dev origin
+          // has no `af_token` cookie for the API server, so the proxy must
+          // present the bearer token on the upgrade itself.
+          proxy.on("proxyReqWs", (proxyReq) => {
+            if (proxyReq.getHeader("authorization")) return;
             const token = authToken();
             if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
           });

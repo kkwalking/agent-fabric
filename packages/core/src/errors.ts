@@ -74,6 +74,22 @@ export type ErrorCode =
   | "secret-legacy-format"
   | "secret-key-invalid"
   | "secret-decrypt-failed"
+  /* Kanban (v13) */
+  | "kanban-project-not-found"
+  | "kanban-card-not-found"
+  | "kanban-session-not-found"
+  | "kanban-project-path-invalid"
+  | "kanban-project-duplicate"
+  | "kanban-path-invalid"
+  | "kanban-git-command-failed"
+  | "kanban-agent-unknown"
+  | "kanban-agent-not-installed"
+  | "kanban-agent-profile-missing"
+  | "kanban-session-not-startable"
+  | "kanban-execution-mode-unavailable"
+  | "kanban-worktree-unavailable"
+  | "kanban-worktree-failed"
+  | "kanban-terminal-unauthorized"
   /* Platform */
   | "config-invalid"
   | "supervisor-restarted"
@@ -180,7 +196,9 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "task-busy" ||
     code === "task-state-invalid" ||
     code === "workspace-diverged-after-finalization" ||
-    code === "publish-revision-missing"
+    code === "publish-revision-missing" ||
+    code === "kanban-session-not-startable" ||
+    code === "kanban-project-duplicate"
   ) {
     return 409;
   }
@@ -193,7 +211,8 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "credential-host-mismatch" ||
     code === "credential-transport-mismatch" ||
     code === "secret-scope-not-allowed" ||
-    code === "validation-secret-not-allowed"
+    code === "validation-secret-not-allowed" ||
+    code === "kanban-terminal-unauthorized"
   ) {
     return 403;
   }
@@ -212,6 +231,9 @@ export function httpStatusForCode(code: ErrorCode): number {
   ) {
     return 502;
   }
+  // A `git`/`gh` invocation the platform ran and that failed on its own terms
+  // (clone, init) is a server-side failure, not bad client input.
+  if (code === "kanban-git-command-failed") return 500;
   return 400;
 }
 

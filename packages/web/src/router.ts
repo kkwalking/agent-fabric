@@ -38,6 +38,7 @@ export interface Route {
     | "agents"
     | "workspaces"
     | "projects"
+    | "board"
     | "project"
     | "project-new-task"
     | "source-credentials"
@@ -63,6 +64,7 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   // "/agents": "agents",
   "/workspaces": "workspaces",
   "/projects": "projects",
+  "/board": "board",
   "/source-credentials": "source-credentials",
   "/handoffs": "handoffs",
   "/usage": "usage",

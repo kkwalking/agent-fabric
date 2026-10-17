@@ -1,6 +1,8 @@
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import cors from "cors";
 import { execFile } from "node:child_process";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import {
   Store,
   EventBus,
@@ -38,9 +40,14 @@ import {
   type StartProjectTaskInput,
   type Run,
   type Task,
+  KanbanService,
 } from "@agentfabric/core";
 import { loadOrCreateToken, requireToken, TOKEN_COOKIE } from "./auth.js";
 import { teardownWork } from "./shutdown.js";
+import { KanbanSessionRuntime } from "./kanban/sessions.js";
+import { registerKanbanRoutes } from "./kanban/routes.js";
+import { createKanbanUpgradeHandler } from "./kanban/ws.js";
+import { pruneKanbanHooks } from "./kanban/hooks.js";
 import {
   buildRegistry,
   codexThreadSource,
@@ -54,6 +61,11 @@ import {
 export interface ServerOptions {
   dataDir: string;
   staticDir?: string;
+  /**
+   * Absolute callback URL harness hooks POST to (v13 M3). The process entry
+   * point passes the real listening port; tests pass their ephemeral one.
+   */
+  hookBaseUrl?: string;
 }
 
 /** What `createServer` hands back: the Express app plus its teardown. */
@@ -66,6 +78,8 @@ export interface ServerHandle {
    * the event loop.
    */
   shutdown(): void;
+  /** Raw HTTP upgrade handler for terminal websockets (v13 §5.1). */
+  upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void;
 }
 
 /**
@@ -247,6 +261,15 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   const projects = new ProjectService(store);
   const sourceCredentials = new SourceCredentialService(store);
   const workspaceLocks = new WorkspaceLockService(store);
+  // The board is a separate product surface from Project Coding Tasks: it
+  // launches local CLIs in PTYs, so it has its own runtime and records.
+  const kanban = new KanbanService(store);
+  const kanbanRuntime = new KanbanSessionRuntime(kanban, {
+    dataDir: store.dataDir,
+    hookBaseUrl:
+      options.hookBaseUrl ??
+      `http://127.0.0.1:${process.env.AGENTFABRIC_PORT ?? 7377}/kanban-hooks/ingest`,
+  });
   const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
     codex: codexThreadSource,
     "claude-code": claudeCodeThreadSource,
@@ -264,6 +287,15 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   if (recovered.tasks.length > 0) {
     console.log(`[agent-fabric] marked ${recovered.tasks.length} interrupted project task(s) after restart: ${recovered.tasks.join(", ")}`);
   }
+  // Board PTYs do not survive a restart either; the records must say so
+  // instead of pretending a dead agent is still running (v13 §3.4).
+  const interruptedSessions = await kanban.recoverInterrupted();
+  if (interruptedSessions.length > 0) {
+    console.log(`[agent-fabric] marked ${interruptedSessions.length} interrupted board session(s) after restart`);
+  }
+  // Per-session hook configs carry capability tokens; no session is live at
+  // boot, so last run's leftovers are pruned. Worktrees are left alone.
+  await pruneKanbanHooks(store.dataDir);
 
   // Background purge (失败要响): soft-deleted tasks older than the
   // retention window are physically removed with their runs, events,
@@ -310,6 +342,11 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     if (req.method === "GET" && req.path.toLowerCase() === "/api/health") return next();
     auth(req, res, next);
   });
+
+  /* ---------------- board (v13) ---------------- */
+  // Registered inside the authenticated /api region: the terminal data itself
+  // travels over the websocket upgrade handler returned below.
+  registerKanbanRoutes(app, { kanban, runtime: kanbanRuntime });
 
   /* ---------------- health ---------------- */
 
@@ -1399,6 +1436,10 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     if (stopped) return;
     stopped = true;
     clearInterval(purgeTimer);
+    // Board PTYs are host processes too; kill them before anything else can
+    // return early. Their records stay non-terminal and the next boot marks
+    // them interrupted (recoverInterrupted).
+    kanbanRuntime.stopAll();
     const taskIds = inFlightTaskIds();
     const runIds = inFlightRunIds();
     if (taskIds.length === 0 && runIds.length === 0) return;
@@ -1406,7 +1447,7 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     teardownWork({ taskIds, runIds, log: (message) => console.log(`[agent-fabric] ${message}`) });
   };
 
-  return { app, shutdown };
+  return { app, shutdown, upgrade: createKanbanUpgradeHandler({ token, runtime: kanbanRuntime }) };
 }
 
 /** The app alone (tests, callers that never stop the server). */

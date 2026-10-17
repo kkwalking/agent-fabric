@@ -14,7 +14,8 @@
     "dev:web": "npm run dev -w @agentfabric/web",
     "start": "npm run start -w @agentfabric/server",
     "cli": "npm run cli -w @agentfabric/cli --",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "postinstall": "node scripts/fix-node-pty.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
