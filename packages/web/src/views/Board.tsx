@@ -58,6 +58,14 @@ const COLUMN_LABEL: Record<BoardColumnId, string> = {
   trash: "Done",
 };
 
+/** Letters used by the project-list count badges (fork uses B / IP / R / D). */
+const COUNT_KEY: Record<BoardColumnId, string> = {
+  backlog: "B",
+  in_progress: "IP",
+  review: "R",
+  trash: "D",
+};
+
 const WORKSPACE_LABEL: Record<WorkspaceType, string> = {
   none: "plain folder",
   git: "git",
@@ -340,8 +348,9 @@ export function BoardView() {
 
   // Board poll: every 2s (§七). Cards are the expensive part; project metadata
   // is refreshed on explicit actions and initial load.
+  const projectsLoaded = projects !== null;
   useEffect(() => {
-    if (!projectId || projects === null) {
+    if (!projectId || !projectsLoaded) {
       setCards([]);
       setSessions({});
       return;
@@ -366,7 +375,35 @@ export function BoardView() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [projectId, projects, refreshCards]);
+  }, [projectId, projectsLoaded, refreshCards]);
+
+  // Project list poll (counts, projects added or removed elsewhere). Slower
+  // than the card poll because it changes far less often, but it still means
+  // the sidebar never waits for a manual refresh.
+  useEffect(() => {
+    if (!projectId) return;
+    const timer = window.setInterval(() => {
+      void loadProjects();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [projectId, loadProjects]);
+
+  // Returning to the tab refreshes immediately: a background tab throttles
+  // timers, so the first paint after focus must not show stale sessions.
+  useEffect(() => {
+    if (!projectId) return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void refreshNow();
+      void loadGit(projectId);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [projectId, refreshNow, loadGit]);
 
   // Card detail session poll: every 1.5s while the overlay is open (§七).
   useEffect(() => {
@@ -704,38 +741,42 @@ export function BoardView() {
                   }
                 }}
               >
-                <span className="board-project-name">{project.name}</span>
+                <span className="board-project-top">
+                  {project.workspaceType === "git" && (
+                    <span className="board-project-git" title="Git repository at the project root">
+                      git
+                    </span>
+                  )}
+                  <span className="board-project-name">{project.name}</span>
+                </span>
                 <span className="board-project-path mono" title={project.rootPath}>
                   {project.rootPath}
                 </span>
-                <span className="board-project-foot">
-                  <span className="board-workspace-chip">
-                    {WORKSPACE_LABEL[project.workspaceType]}
+                {total > 0 && counts && (
+                  <span className="board-project-counts">
+                    {COLUMNS.filter((column) => counts[column.id] > 0).map((column) => (
+                      <span
+                        key={column.id}
+                        className={`board-count ${column.id}`}
+                        title={`${COLUMN_LABEL[column.id]}: ${counts[column.id]}`}
+                      >
+                        <span className="board-count-key">{COUNT_KEY[column.id]}</span>
+                        <span className="board-count-sep">|</span>
+                        <span className="board-count-value">{counts[column.id]}</span>
+                      </span>
+                    ))}
                   </span>
-                  {total > 0 && counts && (
-                    <span className="board-project-counts">
-                      {COLUMNS.filter((column) => counts[column.id] > 0).map((column) => (
-                        <span
-                          key={column.id}
-                          className={`board-count ${column.id}`}
-                          title={`${COLUMN_LABEL[column.id]}: ${counts[column.id]}`}
-                        >
-                          {counts[column.id]}
-                        </span>
-                      ))}
-                    </span>
-                  )}
-                  <button
-                    className="board-project-del"
-                    title="Delete Kanban project (the folder itself is not touched)"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setDeletingProject(project);
-                    }}
-                  >
-                    ×
-                  </button>
-                </span>
+                )}
+                <button
+                  className="board-project-del"
+                  title="Delete Kanban project (the folder itself is not touched)"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setDeletingProject(project);
+                  }}
+                >
+                  ×
+                </button>
               </div>
             );
           })}
@@ -768,9 +809,6 @@ export function BoardView() {
             <button className="small primary" disabled={!selectedProject} onClick={openTaskDialog}>
               <Icon name="plus" size={12} /> New task
             </button>
-            <button className="small" onClick={() => void refreshNow()}>
-              refresh
-            </button>
           </div>
         </header>
 
@@ -797,7 +835,7 @@ export function BoardView() {
               return (
                 <div className="board-column" key={column.id}>
                   <div className="board-column-head">
-                    {column.id === "trash" && <span className="board-column-dot" aria-hidden />}
+                    <ColumnIndicator columnId={column.id} />
                     <span className="board-column-label">{column.label}</span>
                     <span className="board-column-count">{columnCards.length}</span>
                     {column.id === "trash" && (
@@ -991,6 +1029,54 @@ export function BoardView() {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
+
+/**
+ * Column progress glyph, matching the fork: an empty ring for Backlog, a
+ * half-filled disc while a session runs, a three-quarter disc for Review, and a
+ * solid dot for Done. Shape carries the state; color only reinforces it.
+ */
+function ColumnIndicator({ columnId, size = 14 }: { columnId: BoardColumnId; size?: number }) {
+  const color =
+    columnId === "backlog"
+      ? "var(--dim)"
+      : columnId === "in_progress"
+        ? "var(--blue)"
+        : columnId === "review"
+          ? "var(--purple)"
+          : "var(--red)";
+  const r = size * 0.4;
+  const cx = size / 2;
+  const cy = size / 2;
+  const strokeWidth = Math.max(1.5, size * 0.15);
+  return (
+    <svg
+      className="board-column-indicator"
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      aria-hidden
+    >
+      {columnId === "trash" ? (
+        <circle cx={cx} cy={cy} r={r + strokeWidth / 2} fill={color} />
+      ) : (
+        <>
+          <circle cx={cx} cy={cy} r={r} fill="none" stroke={color} strokeWidth={strokeWidth} />
+          {columnId === "in_progress" && (
+            // Left half filled: a session is running.
+            <path d={`M${cx} ${cy - r} A${r} ${r} 0 0 0 ${cx} ${cy + r} Z`} fill={color} />
+          )}
+          {columnId === "review" && (
+            // Three quarters filled: the agent finished a round, awaiting review.
+            <path
+              d={`M${cx} ${cy - r} A${r} ${r} 0 1 0 ${cx + r} ${cy} L${cx} ${cy} Z`}
+              fill={color}
+            />
+          )}
+        </>
+      )}
+    </svg>
+  );
+}
 
 function CardTile({
   card,

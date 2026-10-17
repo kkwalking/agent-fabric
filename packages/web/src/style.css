@@ -18,6 +18,8 @@
   --green: #1a7f37;
   --red: #d1242f;
   --yellow: #9a6700;
+  /* Review column indicator (v13 board); not otherwise used in the palette. */
+  --purple: #8250df;
   --cyan: #0969da;
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif;
   --font-serif: Georgia, "Times New Roman", "Songti SC", STSong, SimSun, serif;
@@ -63,6 +65,72 @@ body {
   position: sticky;
   top: 0;
   height: 100vh;
+  transition: width 0.16s ease;
+}
+
+/* Collapsed rail: icons only, section titles become dividers. */
+.sidebar.collapsed {
+  width: 60px;
+  padding: 12px 8px 10px;
+}
+.sidebar.collapsed .brand {
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+.sidebar.collapsed .brand-btn {
+  padding: 3px;
+}
+.sidebar.collapsed .brand-actions {
+  margin-left: 0;
+  gap: 0;
+}
+.brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--dark);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.sidebar-toggle .icon {
+  transition: transform 0.16s ease;
+}
+.sidebar-toggle.expanded .icon {
+  transform: rotate(180deg);
+}
+.sidebar.collapsed .nav {
+  align-items: stretch;
+}
+.sidebar.collapsed .nav-section {
+  height: 1px;
+  margin: 9px 6px;
+  padding: 0;
+  font-size: 0;
+  line-height: 0;
+  background: var(--border-soft);
+  color: transparent;
+  overflow: hidden;
+}
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  gap: 0;
+  padding: 8px 0;
+}
+.sidebar.collapsed .nav-item > span {
+  display: none;
+}
+.sidebar.collapsed .foot {
+  justify-content: center;
+  padding: 10px 0 2px;
+}
+.sidebar.collapsed .foot-text {
+  display: none;
 }
 
 .brand {
@@ -2241,13 +2309,33 @@ button.stat.clickable:hover {
 .board-project.active {
   background: var(--sidebar-active);
 }
+/* First row: optional "git" marker, then the project name. */
+.board-project-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-right: 18px;
+}
+.board-project-git {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgba(26, 127, 55, 0.1);
+  color: var(--green);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  line-height: 15px;
+}
 .board-project-name {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding-right: 18px;
 }
 .board-project-path {
   font-size: 10.5px;
@@ -2255,12 +2343,6 @@ button.stat.clickable:hover {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.board-project-foot {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
 }
 .board-project-del {
   position: absolute;
@@ -2693,33 +2775,44 @@ button.stat.clickable:hover {
   align-items: flex-start;
   gap: 10px;
 }
+/* Per-column counts under the path, in the fork's "R | 1" shape. */
 .board-project-counts {
-  display: inline-flex;
-  gap: 3px;
-  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+  padding-right: 18px;
 }
 .board-count {
-  display: inline-grid;
-  place-items: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
   border-radius: 999px;
   background: var(--panel-2);
   color: var(--muted);
   font-size: 10px;
   font-weight: 600;
+  line-height: 1.4;
+}
+.board-count-sep {
+  opacity: 0.4;
+}
+.board-count.backlog {
+  background: rgba(32, 31, 28, 0.07);
+  color: var(--muted);
 }
 .board-count.in_progress {
   color: var(--blue);
-  background: rgba(37, 99, 235, 0.09);
+  background: rgba(37, 99, 235, 0.1);
 }
 .board-count.review {
-  color: var(--green);
-  background: rgba(26, 127, 55, 0.09);
+  color: var(--purple);
+  background: rgba(130, 80, 223, 0.12);
 }
 .board-count.trash {
-  color: var(--dim);
+  color: var(--red);
+  background: rgba(209, 36, 47, 0.1);
 }
 
 /* ---------- Column headers / chips / hints ---------- */
@@ -2828,7 +2921,7 @@ button.stat.clickable:hover {
 }
 .board-column-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   padding: 2px 4px 8px;
 }
@@ -2852,13 +2945,9 @@ button.stat.clickable:hover {
   font-size: 10.5px;
   font-weight: 600;
 }
-/* Done gets the fork's red indicator, and a button that empties it. */
-.board-column-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--red);
+.board-column-indicator {
   flex-shrink: 0;
+  display: block;
 }
 .board-column-clear {
   margin-left: auto;

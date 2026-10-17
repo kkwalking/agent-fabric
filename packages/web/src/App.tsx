@@ -30,6 +30,9 @@ const KanbanView = lazy(() =>
  * reachable as the operations/run-history view under System.
  */
 
+/** Remembers whether the user collapsed the rail to icons only. */
+const SIDEBAR_COLLAPSED_KEY = "agentfabric.sidebarCollapsed";
+
 interface NavEntry {
   path: string;
   label: string;
@@ -69,6 +72,21 @@ export function App() {
   const path = usePath();
   const route: Route = parsePath(path);
   const [health, setHealth] = useState<string>("connecting…");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
+    } catch {
+      /* A layout preference that cannot be stored must not break the app. */
+    }
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     fetch("/api/health")
@@ -83,6 +101,7 @@ export function App() {
         key={p}
         className={`nav-item ${isActive(path, route, match) ? "active" : ""}`}
         onClick={() => navigate(p)}
+        title={label}
       >
         <Icon name={icon} />
         <span>{label}</span>
@@ -95,17 +114,31 @@ export function App() {
 
   return (
     <div className="app">
-      <aside className="sidebar">
+      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
         <div className="brand">
           <button className="brand-btn" onClick={() => navigate("/")} title="Dashboard">
-            <span className="brand-name">AgentFabric</span>
+            {sidebarCollapsed && <span className="brand-mark">AF</span>}
+            {!sidebarCollapsed && <span className="brand-name">AgentFabric</span>}
           </button>
           <span className="brand-actions">
-            <button className="icon-btn" title="Search">
-              <Icon name="search" />
-            </button>
-            <button className="icon-btn" title="Notifications">
-              <Icon name="bell" />
+            {!sidebarCollapsed && (
+              <>
+                <button className="icon-btn" title="Search">
+                  <Icon name="search" />
+                </button>
+                <button className="icon-btn" title="Notifications">
+                  <Icon name="bell" />
+                </button>
+              </>
+            )}
+            <button
+              className={`icon-btn sidebar-toggle ${sidebarCollapsed ? "" : "expanded"}`}
+              title={sidebarCollapsed ? "Expand menu" : "Collapse menu"}
+              aria-label={sidebarCollapsed ? "Expand menu" : "Collapse menu"}
+              aria-expanded={!sidebarCollapsed}
+              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            >
+              <Icon name="chevron" size={15} />
             </button>
           </span>
         </div>
@@ -113,6 +146,7 @@ export function App() {
         <button
           className={`nav-item ${route.view === "new-task" ? "active" : ""}`}
           onClick={() => navigate("/new")}
+          title="New task"
         >
           <Icon name="compose" size={15} />
           <span>New task</span>
@@ -126,7 +160,7 @@ export function App() {
           {renderNav(systemNav)}
         </nav>
 
-        <div className="foot">
+        <div className="foot" title={`local server — api: ${health}`}>
           <span className="avatar">AF</span>
           <span className="foot-text">
             <span className="foot-title">local server</span>
