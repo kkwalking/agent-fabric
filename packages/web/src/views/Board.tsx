@@ -1273,6 +1273,11 @@ function CardDetail({
                 Start new session
               </button>
             )}
+            {card.column === "in_progress" && !sessionLive && (
+              <button className="primary" disabled={busy} onClick={onRestart}>
+                Start new session
+              </button>
+            )}
             {card.column === "in_progress" && (
               <button disabled={busy} onClick={onMarkReview} title="Has the agent finished this round?">
                 Mark for review

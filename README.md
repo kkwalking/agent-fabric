@@ -120,7 +120,7 @@ Board 是独立于 Project Coding Task 的产品面：一个 **BoardProject** = 
 * **新建 Card**：Backlog 列顶部 **Create task**（快捷键 `c`）或页面右上 **New task** 打开创建对话框：prompt、可选标题（留空时从 prompt 首句自动生成）、Agent（Claude Code / Pi / OpenCode / DSH）、Model、Permission mode、Workspace（Direct / Worktree）与 Worktree base ref（列出项目的本地分支，默认当前分支）。`⌘/Ctrl+Enter` 创建，`⇧⌘/Ctrl+Enter` 创建并立即启动；勾选 **Create more** 时创建后对话框保留以便连续录入。一段编号或项目符号列表可 **Split into N tasks** 批量创建 / 批量启动。对话框用该项目上次的选择（agent / model / permission / workspace / base ref）预填；项目侧栏第一行用 `git` 标记 Git 项目（非 Git 项目不显示），路径下方用 `B | 1` / `IP | 1` / `R | 1` / `D | 1` 徽章显示四列卡片数（对齐 Cline kanban）。
 * **实时性**：看板自行保持近实时——卡片与各会话状态每 2s 轮询，项目列表与四列计数每 5s 刷新，切回标签页时立即补拉一次；因此页面上没有手动 refresh 按钮。
 * **卡片详情布局**：任务信息（Prompt + 元信息）默认折叠成左侧一条竖向细栏（`DETAILS`），点击展开；展开后与右侧终端之间的分隔条可拖动调整宽度比例（宽度记在浏览器本地），终端卡片上下不留空白、占满整个高度；左上角 ← 返回看板。
-* **本地 PTY**：用 `node-pty` 直接启动本机 Claude Code / Pi / OpenCode；DSH 走 `dsh --profile headless --json`，终端只展示 JSONL（官方没有交互 TUI）。卡片详情内嵌 xterm 终端，可输入、resize、stop / restart；关闭详情只是 detach，重新打开时服务端 replay 最近的 PTY 输出（不自动重连）。
+* **本地 PTY**：用 `node-pty` 直接启动本机 Claude Code / Pi / OpenCode；DSH 走 `dsh --profile headless -- <prompt>`，终端展示 headless runner 的文本输出（官方没有交互 TUI）。卡片详情内嵌 xterm 终端，可输入、resize、stop / restart；关闭详情只是 detach，重新打开时服务端 replay 最近的 PTY 输出（不自动重连）。
 * **执行模式**：Direct（直接在项目目录运行）或 Worktree（`git worktree add --detach <baseRef>` 切出独立工作树，源工作树不受影响）。每张 Worktree 卡片可指定 **base ref**（本地分支 / tag / commit，缺省 `HEAD`），仓库里不存在的 ref 会以 `base-ref-not-found` 明确失败。Worktree 只对「项目根自己就是 Git 仓库」的 BoardProject 开放；非 Git / multi-git / google-repo 只能用 Direct。**不实现** isolated 目录拷贝或 Docker 隔离，worktree 就是第一期的隔离手段。
 * **并发**：同一 BoardProject 允许多个 Direct 会话并行，平台不加写者锁；并发写冲突由 agent 自己处理（用户明确接受这一点）。
 * **状态流转**：Claude / OpenCode 通过 harness hooks 自动流转——`Stop` / `session.idle` → 卡片进 Review（PTY 保持可交互），`UserPromptSubmit` / `busy` → 回 In Progress，权限请求 → Needs Attention；用户往 Review 卡片的终端里输入也会自动回 In Progress。DSH 退出码 0 自动进 Review；Pi 没有 hooks，用卡片详情的 **Mark for review** 手动兜底（所有 agent 都保留该按钮）。
@@ -1179,7 +1179,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
   * 第一期没有 diff / review / commit / PR、依赖链与 auto-review；Review 列只表示「agent 完成一轮」，不是代码审查。
   * 第一期只做「创建」：不能在看板里编辑已有卡片的 prompt / 标题 / agent / 执行模式（改需求请在详情里 restart 或新建卡片），也不支持粘贴 / 拖拽图片。
   * 没有单独的「Start in plan mode」开关（用 agent 的 **Plan** 权限模式表达同一意图），也没有 forge 的 auto-review（commit / PR）选项——Review 列由 hooks 自动推进且不产生提交。Worktree 卡片在新目录里首次启动时，Claude Code 可能弹一次工作区信任确认，属于 CLI 自身行为。
-  * DSH 没有官方交互 TUI，只展示 `dsh --profile headless --json` 的 JSONL；Claude Code / Pi / OpenCode 是否可用取决于本机 PATH，缺失时启动报 `kanban-agent-not-installed`。Pi 没有 hooks，进 Review 需要 Mark for review。
+  * DSH 没有官方交互 TUI，只展示 `dsh --profile headless -- <prompt>` 的文本输出；Claude Code / Pi / OpenCode 是否可用取决于本机 PATH，缺失时启动报 `kanban-agent-not-installed`。Pi 没有 hooks，进 Review 需要 Mark for review。
   * 终端输出不落盘：服务重启后不能回放上一次会话；终端 WS 不自动重连。
 * **Project Coding Task 本期边界**：
   * 一个 Project 只支持一个 primary source（单 Repository）；monorepo 多 Source、mirror、submodule 独立管理未实现。

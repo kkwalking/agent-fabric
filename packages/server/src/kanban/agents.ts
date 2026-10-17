@@ -30,6 +30,12 @@ export interface KanbanAgentEntry {
   id: KanbanAgentKind;
   label: string;
   binary: string;
+  /**
+   * argv emitted before the permission/model flags. Some CLIs are launchers
+   * whose first positional selects the profile/entry point (DSH:
+   * `dsh --profile headless …`), so the launch is not just "binary + prompt".
+   */
+  baseArgs?: string[];
   /** Prompt delivery: a positional argv element or a flag + value. */
   prompt: { kind: "positional" } | { kind: "flag"; flag: string } | { kind: "afterDoubleDash" };
   permissionModes: KanbanPermissionMode[];
@@ -117,6 +123,9 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     id: "dsh",
     label: "DSH",
     binary: "dsh",
+    // DSH is a profile launcher: the profile name is the subcommand, so it is
+    // an argv element rather than a flag of the agent prompt.
+    baseArgs: ["--profile", "headless"],
     prompt: { kind: "afterDoubleDash" },
     defaultPermissionModeId: "default",
     modelFlag: null,
@@ -191,7 +200,7 @@ export function buildKanbanLaunch(card: KanbanCard, project: KanbanProject): Kan
     modes.find((mode) => mode.id === entry.defaultPermissionModeId) ??
     PERMISSION_DEFAULT;
 
-  const args: string[] = [...selected.args];
+  const args: string[] = [...(entry.baseArgs ?? []), ...selected.args];
   if (entry.modelFlag && card.model) args.push(entry.modelFlag, card.model);
 
   switch (entry.prompt.kind) {
