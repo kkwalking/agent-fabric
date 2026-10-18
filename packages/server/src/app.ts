@@ -1,6 +1,8 @@
 import express, { type Express, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import cors from "cors";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import {
@@ -98,6 +100,25 @@ export const ah = <T extends RequestHandler>(fn: T): RequestHandler => (req, res
  * a page on another origin cannot read a response even if it reaches the
  * port — and it cannot get a preflight approved for the custom headers below.
  */
+/**
+ * The built web UI, re-checked on each request.
+ *
+ * The dev loop starts the API server and the web build together, and the
+ * build wins or loses that race depending on the machine. Looking the
+ * directory up at boot would leave a server that started first serving 404s
+ * until it was restarted, which is exactly the "I changed the UI and saw
+ * nothing" trap. A missing build is reported as such (503), not as a blank
+ * page.
+ */
+function staticDirCandidate(configured: string): string | undefined {
+  if (existsSync(resolve(configured, "index.html"))) return configured;
+  // The configured path is the first candidate the launcher found (or the
+  // env override); re-probe the conventional locations so a later build lands.
+  const enabled = process.env.AGENTFABRIC_WEB_DIR;
+  if (enabled && existsSync(resolve(enabled, "index.html"))) return enabled;
+  return undefined;
+}
+
 const LOOPBACK_ORIGIN = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/;
 
 function isLoopbackOrigin(origin: string | undefined): boolean {
@@ -1414,10 +1435,29 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
 
   /* ---------------- static web UI ---------------- */
 
-  if (options.staticDir) {
-    app.use(express.static(options.staticDir));
+  const configuredStaticDir = options.staticDir;
+  if (configuredStaticDir) {
+    // Resolved per request rather than only at boot: the dev loop starts the
+    // API server before (or while) the first web build finishes, and a build
+    // that lands later must be served without restarting the server.
+    app.use((req, res, next) => {
+      const dir = staticDirCandidate(configuredStaticDir);
+      if (!dir) {
+        next();
+        return;
+      }
+      express.static(dir)(req, res, next);
+    });
     app.get(/^\/(?!api\/).*/, (_req, res) => {
-      res.sendFile("index.html", { root: options.staticDir });
+      const dir = staticDirCandidate(configuredStaticDir);
+      if (!dir) {
+        res
+          .status(503)
+          .type("text/plain")
+          .send("The web UI is not built yet. Run `npm run build:web` (or `npm run dev`, which watches it).");
+        return;
+      }
+      res.sendFile("index.html", { root: dir });
     });
   }
 

@@ -450,7 +450,11 @@ export function BoardView() {
     setTaskDialogOpen(false);
   };
 
-  const startCard = async (card: KanbanCard, restart = false): Promise<boolean> => {
+  const startCard = async (
+    card: KanbanCard,
+    restart = false,
+    options: { idleOk?: boolean } = {}
+  ): Promise<boolean> => {
     setActionError(null);
     try {
       const response = await post<{ session: KanbanSession }>(
@@ -461,6 +465,12 @@ export function BoardView() {
       await refreshNow();
       return true;
     } catch (error) {
+      // A restore that finds the session already live is a success, not a
+      // failure: the card ended up where the user wanted it.
+      if (options.idleOk && errText(error).includes("already has a running session")) {
+        await refreshNow();
+        return true;
+      }
       setActionError(`${restart ? "Restart" : "Start"} failed: ${errText(error)}`);
       return false;
     }
@@ -1016,8 +1026,16 @@ export function BoardView() {
             });
           }}
           onRestore={() => {
+            // Restoring a Done card brings its session back with it: it was
+            // released when archived (Done frees the process), so leaving the
+            // user to press Start afterwards would be a second, redundant step.
+            // A session that is somehow still live makes the start a no-op
+            // rather than an error — the card is already in the state the user
+            // asked for.
             setDetailBusy(true);
-            void moveCard(selectedCard, "review").finally(() => setDetailBusy(false));
+            void moveCard(selectedCard, "review")
+              .then((ok) => (ok ? startCard(selectedCard, false, { idleOk: true }) : false))
+              .finally(() => setDetailBusy(false));
           }}
           onDelete={() => {
             setDetailBusy(true);
@@ -1197,6 +1215,9 @@ function CardDetail({
   onRestore: () => void;
   onDelete: () => void;
 }) {
+  // A recorded harness session id means "start" continues that conversation
+  // instead of opening a blank one; the button says so.
+  const canResume = Boolean(session?.nativeSessionId) && !sessionLive;
   const [confirmDelete, setConfirmDelete] = useState(false);
   // Task details start collapsed: the terminal is the reason to open a card, and
   // the prompt/metadata are contextual. The rail is the affordance to expand.
@@ -1277,12 +1298,12 @@ function CardDetail({
             )}
             {card.column === "review" && !sessionLive && (
               <button className="primary" disabled={busy} onClick={onRestart}>
-                Start new session
+                {canResume ? "Resume session" : "Start new session"}
               </button>
             )}
             {card.column === "in_progress" && !sessionLive && (
               <button className="primary" disabled={busy} onClick={onRestart}>
-                Start new session
+                {canResume ? "Resume session" : "Start new session"}
               </button>
             )}
             {card.column === "in_progress" && (
@@ -1461,6 +1482,16 @@ function CardDetail({
           )}
 
           <section className="board-detail-term">
+            {card.column === "trash" && (
+              // Done frees the process. Say what happened and what Restore does,
+              // so a stopped terminal does not read as "this card is broken".
+              <div className="board-detail-notice">
+                Moved to Done: this session was closed to free the process.
+                {canResume
+                  ? " Restore to Review continues the same conversation where it stopped."
+                  : " Restore to Review starts a fresh session."}
+              </div>
+            )}
             {session ? (
               acpSession ? (
                 <AcpChat key={session.id} sessionId={session.id} />

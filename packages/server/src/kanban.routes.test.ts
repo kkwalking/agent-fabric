@@ -355,6 +355,58 @@ test("Claude Stop hook moves the card to Review; typing moves it back to In Prog
   }
 });
 
+test("a Claude permission/AskUserQuestion dialog parks the card in Review", async () => {
+  // Verified against Claude Code 2.1.302: a pending dialog emits
+  // PreToolUse → PermissionRequest → (human answers) → PostToolUse → Stop.
+  // Stop does not fire while the dialog waits, and AskUserQuestion sends no
+  // Notification at all — PermissionRequest is the only hook that sees it.
+  const hookScript = [
+    "#!/bin/sh",
+    "printf 'HOOK_AGENT\\n'",
+    'curl -sS -m 3 -X POST "$AGENTFABRIC_KANBAN_HOOK_URL" -H \'content-type: application/json\' -H "x-kanban-hook-token: $AGENTFABRIC_KANBAN_HOOK_TOKEN" -d "{\\"sessionId\\":\\"$AGENTFABRIC_KANBAN_SESSION_ID\\",\\"event\\":\\"needs_attention\\"}" >/dev/null 2>&1',
+    "sleep 30",
+    "",
+  ].join("\n");
+  const h = await makeHarness(hookScript);
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string; column: string } }>(
+      h,
+      "POST",
+      `/api/kanban/projects/${project.id}/cards`,
+      { prompt: "ask me a question", agentId: "claude" }
+    );
+    const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+
+    // The generated settings watch the dialog hook itself, not just the
+    // permission_prompt notification.
+    const settings = JSON.parse(
+      readFileSync(join(h.dir, "kanban", "provisioning", session.id, "claude-settings.json"), "utf8")
+    ) as { hooks: Record<string, unknown> };
+    assert.ok(settings.hooks.PermissionRequest, "AskUserQuestion is only visible through PermissionRequest");
+    assert.match(JSON.stringify(settings.hooks.PermissionRequest), /needs_attention/);
+    assert.match(JSON.stringify(settings.hooks.Notification), /permission_prompt/);
+
+    const waiting = await pollSession(h, card.id, (s) => s.status === "needs_attention");
+    assert.equal(waiting.status, "needs_attention");
+    const cards = await api<{ cards: Array<{ id: string; column: string }> }>(
+      h,
+      "GET",
+      `/api/kanban/projects/${project.id}/cards`
+    );
+    assert.equal(
+      cards.cards.find((c) => c.id === card.id)?.column,
+      "review",
+      "a pending question parks the card in Review: the next move is the user's"
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("two Direct cards can run in one project at the same time", async () => {
   const h = await makeHarness();
   try {
@@ -639,6 +691,134 @@ test("a worktree card checks out its base ref, and an unknown ref fails loudly",
     );
     assert.equal(latest.session.status, "failed");
     assert.match(latest.session.error, /does-not-exist/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("moving a card to Done keeps the process when there is nothing to resume from", async () => {
+  // Releasing is only safe when the conversation can be resumed. An agent that
+  // never reported a harness session id (no hooks, e.g. Pi) would lose its only
+  // copy of the conversation, so its process stays.
+  const h = await makeHarness("#!/bin/sh\nprintf AGENT_UP\nsleep 60\n");
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "archive me",
+      agentId: "claude",
+    });
+    await api(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    await api(h, "POST", `/api/kanban/cards/${card.id}/move`, { column: "trash" });
+    const parked = await api<{ session: { status: string; nativeSessionId?: string } }>(
+      h,
+      "GET",
+      `/api/kanban/cards/${card.id}/session`
+    );
+    assert.equal(parked.session.status, "running", "no resume id → keep the process rather than lose the conversation");
+    assert.equal(parked.session.nativeSessionId, undefined);
+
+    // Restoring the card still works, and the session is still the same one.
+    await api(h, "POST", `/api/kanban/cards/${card.id}/move`, { column: "review" });
+    const { session } = await api<{ session: { status: string } }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
+    assert.equal(session.status, "running");
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Done releases the process and restoring relaunches with --resume", async () => {
+  // The whole point of recording the harness session id: archive the card, give
+  // the process back, and bring the conversation back on restore.
+  const h = await makeHarness("#!/bin/sh\nprintf AGENT_UP\nsleep 60\n");
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "archive me",
+      agentId: "claude",
+    });
+    const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+
+    // A Claude hook records the harness session id.
+    const settings = readFileSync(join(h.dir, "kanban", "provisioning", session.id, "claude-settings.json"), "utf8");
+    const hookToken = (settings.match(/x-kanban-hook-token: ([a-f0-9]+)/) ?? [])[1];
+    await fetch(`${h.baseUrl}/kanban-hooks/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-kanban-hook-token": hookToken! },
+      body: JSON.stringify({ sessionId: session.id, event: "to_review", nativeSessionId: "claude-session-abc" }),
+    });
+
+    // Archiving releases the process: nothing left running, id retained.
+    await api(h, "POST", `/api/kanban/cards/${card.id}/move`, { column: "trash" });
+    const parked = await api<{ session: { status: string; nativeSessionId?: string } }>(
+      h,
+      "GET",
+      `/api/kanban/cards/${card.id}/session`
+    );
+    assert.equal(parked.session.status, "stopped");
+    assert.equal(parked.session.nativeSessionId, "claude-session-abc");
+
+    // Restoring and starting relaunches Claude with `--resume <id>`, and the
+    // fake CLI records the argv it was given.
+    await api(h, "POST", `/api/kanban/cards/${card.id}/move`, { column: "review" });
+    const argvFile = join(h.dir, "argv.txt");
+    writeFileSync(
+      join(h.dir, "bin", "claude"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > ${argvFile}\nprintf RESUMED\\n\nsleep 60\n`
+    );
+    chmodSync(join(h.dir, "bin", "claude"), 0o755);
+    await api(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !existsSync(argvFile)) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const argv = readFileSync(argvFile, "utf8");
+    assert.match(argv, /--resume/);
+    assert.match(argv, /claude-session-abc/);
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a hook-reported harness session id is recorded on the session", async () => {
+  const h = await makeHarness();
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "record my id",
+      agentId: "claude",
+    });
+    const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+
+    // The generated Claude hook reads the harness payload off stdin; assert the
+    // command carries the plumbing that forwards its session id.
+    const settings = readFileSync(join(h.dir, "kanban", "provisioning", session.id, "claude-settings.json"), "utf8");
+    assert.match(settings, /nativeSessionId/, "the hook must forward the harness session id");
+
+    // The endpoint stores it when a hook supplies one.
+    const token = readFileSync(join(h.dir, "token"), "utf8").trim();
+    void token;
+    const hookToken = (settings.match(/x-kanban-hook-token: ([a-f0-9]+)/) ?? [])[1];
+    assert.ok(hookToken, "hook token must be embedded in the settings");
+    const res = await fetch(`${h.baseUrl}/kanban-hooks/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-kanban-hook-token": hookToken },
+      body: JSON.stringify({ sessionId: session.id, event: "to_review", nativeSessionId: "claude-session-123" }),
+    });
+    assert.equal(res.status, 200);
+    const stored = await api<{ session: { nativeSessionId?: string } }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
+    assert.equal(stored.session.nativeSessionId, "claude-session-123");
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
   } finally {
     await h.cleanup();
   }

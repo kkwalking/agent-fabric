@@ -232,10 +232,12 @@ export function registerKanbanRoutes(
       const cardId = cardParams(req);
       const target = asColumn(req.body?.column);
       const card = kanban.getCard(cardId);
-      if (target === "trash") {
-        const latest = kanban.latestSessionForCard(cardId);
-        if (latest && runtime.isLive(latest.id)) await runtime.stop(latest.id);
-      }
+      // Done is an archive: moving a card there releases its process instead of
+      // leaving a live agent on an archived card. The harness's own session id
+      // is recorded, so restoring the card resumes that conversation rather
+      // than starting over. Agents with no resume surface keep their process,
+      // because releasing would destroy the only copy of the conversation.
+      if (target === "trash") await runtime.releaseSession(cardId);
       res.json({ card: await kanban.moveCard(card.id, target) });
     })
   );
@@ -296,6 +298,7 @@ export function registerKanbanRoutes(
           sessionId: req.body?.sessionId,
           token,
           event: req.body?.event,
+          nativeSessionId: req.body?.nativeSessionId,
         })
       );
     })

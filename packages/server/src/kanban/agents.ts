@@ -52,6 +52,12 @@ export interface KanbanAgentEntry {
   modelFlag: string | null;
   interactiveTui: boolean;
   installHint: string;
+  /**
+   * argv that continues the harness's own previous session. Omitted when the
+   * CLI has no resume surface (Pi) — such a card cannot be released and
+   * reattached, so the runtime keeps its process alive instead.
+   */
+  resumeArgs?: (nativeSessionId: string) => string[];
   /** Extra check besides the binary (e.g. a DSH profile). May probe the CLI. */
   availability?: () => { available: boolean; hint?: string } | Promise<{ available: boolean; hint?: string }>;
 }
@@ -101,6 +107,7 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     modelFlag: "--model",
     interactiveTui: true,
     installHint: "Install Claude Code: https://docs.anthropic.com/en/docs/claude-code/quickstart",
+    resumeArgs: (sessionId) => ["--resume", sessionId],
     permissionModes: [
       PERMISSION_DEFAULT,
       { id: "plan", label: "Plan", description: "Investigate and propose changes without editing files.", args: ["--permission-mode", "plan"], risky: false },
@@ -243,7 +250,11 @@ export interface KanbanLaunch {
  * never interpolated into a shell string — except for the ACP transport,
  * where the session runtime sends it over the protocol after the handshake.
  */
-export function buildKanbanLaunch(card: KanbanCard, project: KanbanProject): KanbanLaunch {
+export function buildKanbanLaunch(
+  card: KanbanCard,
+  project: KanbanProject,
+  options: { resumeSessionId?: string } = {}
+): KanbanLaunch {
   const entry = getKanbanAgent(card.agentId);
   const modes = entry.permissionModes;
   const selected =
@@ -253,6 +264,24 @@ export function buildKanbanLaunch(card: KanbanCard, project: KanbanProject): Kan
 
   const args: string[] = [...(entry.baseArgs ?? []), ...selected.args];
   if (entry.modelFlag && card.model) args.push(entry.modelFlag, card.model);
+
+  // Continue the harness's own session instead of starting a new one. The
+  // prompt is not re-sent: the resumed session already holds it, and handing
+  // it over again would replay the same instruction as a second turn.
+  if (options.resumeSessionId && entry.resumeArgs) {
+    args.push(...entry.resumeArgs(options.resumeSessionId));
+    return {
+      file: entry.binary,
+      args,
+      env: {
+        ...(selected.env ?? {}),
+        AGENTFABRIC_KANBAN_CARD_ID: card.id,
+        AGENTFABRIC_KANBAN_PROJECT_ID: project.id,
+      },
+      interactiveTui: entry.interactiveTui,
+      transport: entry.transport,
+    };
+  }
 
   switch (entry.prompt.kind) {
     case "positional":

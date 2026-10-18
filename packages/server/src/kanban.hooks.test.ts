@@ -10,7 +10,7 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "af-kanban-hooks-"));
 }
 
-test("Claude hook settings carry the three transition hooks", async () => {
+test("Claude hook settings carry the four transition hooks", async () => {
   const dir = tempDir();
   try {
     const setup = await prepareKanbanHooks({
@@ -29,6 +29,16 @@ test("Claude hook settings carry the three transition hooks", async () => {
     const stop = JSON.stringify(settings.hooks.Stop);
     assert.match(stop, /to_review/);
     assert.match(stop, /x-kanban-hook-token: test-token/);
+    // A pending dialog must read as "waiting on a human", not as a finished
+    // turn. PermissionRequest is the only hook that sees AskUserQuestion
+    // (verified on Claude Code 2.1.302: no Notification, no Stop until the
+    // answer); Notification with a permission_prompt matcher covers tool
+    // approvals.
+    const permission = JSON.stringify(settings.hooks.PermissionRequest);
+    assert.match(permission, /needs_attention/);
+    const notification = JSON.stringify(settings.hooks.Notification);
+    assert.match(notification, /needs_attention/);
+    assert.match(notification, /permission_prompt/);
     assert.deepEqual(setup.extraArgs.slice(0, 1), ["--settings"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -18,6 +18,8 @@
   "dependencies": {
     "@agentfabric/core": "0.1.0",
     "@agentfabric/runtimes": "0.1.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "node-pty": "^1.1.0",

@@ -10,8 +10,10 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev": "sh -c 'trap \"kill 0\" INT TERM EXIT; npm run build:watch -w @agentfabric/web & npm run dev -w @agentfabric/server; wait'",
     "dev:server": "npm run dev -w @agentfabric/server",
     "dev:web": "npm run dev -w @agentfabric/web",
+    "build:web": "npm run build -w @agentfabric/web",
     "start": "npm run start -w @agentfabric/server",
     "cli": "npm run cli -w @agentfabric/cli --",
     "test": "npm run test --workspaces --if-present",

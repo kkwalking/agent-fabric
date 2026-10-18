@@ -111,7 +111,7 @@ POST /api/kanban/cards/:id/start
 `session/request_permission` 是 server → client 请求，`AcpSession` 把它变成事件，`onAcpPermission` 决定：
 
 - 卡片权限模式 `auto`：直接选 ACP 给出的 `allow_always` 或 `allow_once`，不打断对话。
-- 否则：请求广播到聊天，会话标 `needs_attention`，**卡片留在 In Progress**（等待人工不是「完成」）。
+- 否则：请求广播到聊天，会话标 `needs_attention`，**卡片移到 Review**（等待人工不是「完成」，但下一步动作在用户手里）。回答后卡片回到 In Progress。
 
 答案通过 `respondPermission(requestId, optionId|null)` 回写；`null` 是 ACP 的 cancelled outcome，turn 会以 `stopReason: "cancelled"` 结束。同一个请求被任一标签页回答后广播 `agent_permission_answered`，其他副本禁用按钮。
 
@@ -204,7 +204,7 @@ WS attach（会话没有进程）
 ```text
 starting ──session/new 返回──→ running
 running  ──end_turn/cancelled──→ awaiting_review   （进程不退，卡片进 Review）
-running  ──request_permission──→ needs_attention   （卡片留在 In Progress）
+running  ──request_permission──→ needs_attention   （卡片移到 Review）
 running  ──stopReason 其他────→ failed
 running  ──用户 stop──────────→ stopped
 running  ──服务端重启─────────→ interrupted        （下次启动统一写）

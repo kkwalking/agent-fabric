@@ -28,6 +28,7 @@
  * kills the child processes, and reconnecting is an explicit card action.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
 import type { WebSocket } from "ws";
 import { DomainError } from "@agentfabric/core";
 import type {
@@ -40,6 +41,7 @@ import type {
 } from "@agentfabric/core";
 import type { KanbanService } from "@agentfabric/core";
 import { assertKanbanAgentAvailable, buildKanbanLaunch, type KanbanLaunch } from "./agents.js";
+import { preTrustClaudeWorkspace } from "./claudeTrust.js";
 import { cleanupKanbanHooks, prepareKanbanHooks } from "./hooks.js";
 import { TerminalSession, type TerminalSnapshot } from "./terminal.js";
 import { createKanbanWorktree, kanbanWorktreePath, removeKanbanWorktree } from "./worktree.js";
@@ -162,20 +164,51 @@ export class KanbanSessionRuntime {
 
     await assertKanbanAgentAvailable(card);
 
-    const launch = buildKanbanLaunch(card, project);
+    // A card whose last session recorded a harness session id (and whose
+    // process is gone) continues that conversation instead of starting over:
+    // an archived card comes back with its context, not with a blank agent.
+    const resumeId =
+      previous && previous.agentId === card.agentId && previous.nativeSessionId ? previous.nativeSessionId : undefined;
+
+    const launch = buildKanbanLaunch(card, project, resumeId ? { resumeSessionId: resumeId } : {});
     const pendingWorktree = card.executionMode === "worktree";
     let cwd = project.rootPath;
     let worktreeCreated = false;
 
-    // Create the record first so every subsequent failure has somewhere to be
-    // recorded; the worktree path is keyed by the persistent session id.
-    const session = await this.kanban.createSession(card, {
-      cwd,
-      interactiveTui: launch.interactiveTui,
-      transport: launch.transport,
-    });
+    // A resumed session reuses the previous record and its directory: a fresh
+    // worktree would hide the files the agent already worked on, and a new
+    // record would detach the resumed conversation from its history.
+    // A worktree session resumes in the worktree the board already created for
+    // it; re-creating that path fails, and a new one would hide the files the
+    // agent worked on. Direct sessions resume in the project directory.
+    const canReuse =
+      resumeId !== undefined &&
+      previous !== undefined &&
+      previous.executionMode === card.executionMode &&
+      (card.executionMode === "direct" || existsSync(previous.cwd));
+    const session = canReuse
+      ? await this.kanban.updateSession(previous.id, {
+          status: "starting",
+          endedAt: undefined,
+          exitCode: undefined,
+          error: undefined,
+          lastHookEvent: "resume",
+          lastHookAt: new Date().toISOString(),
+        })
+      : await this.kanban.createSession(card, {
+          cwd,
+          interactiveTui: launch.interactiveTui,
+          transport: launch.transport,
+        });
+    if (canReuse) {
+      // The launch already carries the harness resume flag; point the card at
+      // the reopened record and run in its directory. The worktree (if any)
+      // already exists, so the creation step below must not run again.
+      cwd = previous.cwd;
+      await this.kanban.setColumn(card.id, "in_progress");
+    }
 
-    if (pendingWorktree) {
+    if (pendingWorktree && !canReuse) {
       cwd = kanbanWorktreePath(this.options.dataDir, session.id);
       await this.kanban.updateSession(session.id, { cwd });
       try {
@@ -196,6 +229,14 @@ export class KanbanSessionRuntime {
 
     if (launch.transport === "acp") {
       return this.startAcp({ card, project, launch, session, cwd, worktreeCreated });
+    }
+
+    // Claude blocks on a "trust this folder?" dialog in an unknown directory,
+    // and through a PTY that dialog eats the prompt: no turn, no hooks, a card
+    // that looks dead. Only workspaces the board created are trusted here; a
+    // user's own project directory keeps its dialog.
+    if (card.agentId === "claude") {
+      await preTrustClaudeWorkspace({ cwd, dataDir: this.options.dataDir });
     }
 
     const hookToken = randomBytes(24).toString("hex");
@@ -408,8 +449,9 @@ export class KanbanSessionRuntime {
 
   /**
    * ACP asks before a sensitive tool runs. "Auto-approve" answers immediately;
-   * otherwise the request is exposed to the card and the session is marked
-   * `needs_attention` (the spec's "waiting on a human" state, not a finish).
+   * otherwise the request is exposed to the card, the card moves to Review and
+   * the session is marked `needs_attention` (the spec's "waiting on a human"
+   * state, not a finish).
    */
   private async onAcpPermission(state: AcpState, request: AcpPermissionRequest): Promise<void> {
     if (state.stopping || state.exited || !state.acp) return;
@@ -429,6 +471,8 @@ export class KanbanSessionRuntime {
       lastHookEvent: "permission_request",
       lastHookAt: new Date().toISOString(),
     });
+    // The pending question is the user's move, same as a finished turn.
+    await this.kanban.setColumn(state.card.id, "review");
     this.broadcastStatus(state);
     this.broadcast(state, { type: "agent_permission", request });
     // The pending prompt is part of the conversation a restart must show.
@@ -482,6 +526,37 @@ export class KanbanSessionRuntime {
     await this.flushTranscript(state);
     this.broadcastStatus(state);
     this.releaseIdleState(state);
+  }
+
+  /**
+   * Releases a card's live process while keeping the conversation resumable.
+   *
+   * Archiving a card to Done must not leave an agent burning a process, but it
+   * also must not destroy the conversation the card represents. Both transports
+   * already persist what a resume needs (a PTY records the harness's own
+   * session id from its hooks; ACP records `nativeSessionId`), so the process
+   * goes away and the record stays resumable.
+   *
+   * An agent with no resume surface cannot be released this way: stopping it
+   * would throw away the only copy of the conversation, so its process stays
+   * (Pi). Returns whether a release happened.
+   */
+  async releaseSession(cardId: ID): Promise<boolean> {
+    const latest = this.kanban.latestSessionForCard(cardId);
+    if (!latest || !this.isLive(latest.id)) return false;
+    if (latest.transport === "pty" && !latest.nativeSessionId) {
+      // Nothing to resume from: keep the process rather than lose the session.
+      return false;
+    }
+    await this.stop(latest.id);
+    // `stop` settles the record as `stopped`; a released card is not a user
+    // stop — it is waiting to be resumed — so mark it resumable explicitly.
+    await this.kanban.updateSession(latest.id, {
+      status: "stopped",
+      lastHookEvent: "released_to_done",
+      lastHookAt: new Date().toISOString(),
+    });
+    return true;
   }
 
   async stop(sessionId: ID): Promise<KanbanSession> {
@@ -563,10 +638,15 @@ export class KanbanSessionRuntime {
     sessionId: unknown;
     token: unknown;
     event: unknown;
+    nativeSessionId?: unknown;
   }): Promise<{ ok: true; applied: boolean; status: KanbanSessionStatus }> {
     const sessionId = typeof input.sessionId === "string" ? input.sessionId : "";
     const token = typeof input.token === "string" ? input.token : "";
     const event = input.event;
+    const nativeSessionId =
+      typeof input.nativeSessionId === "string" && input.nativeSessionId.length > 0
+        ? input.nativeSessionId
+        : undefined;
     const entry = this.hookTokens.get(sessionId);
     if (!entry || !tokenMatches(token, entry.token)) {
       throw new DomainError("kanban-terminal-unauthorized", "Invalid kanban hook token");
@@ -592,7 +672,12 @@ export class KanbanSessionRuntime {
         applied = true;
       }
     } else if (status === "starting" || status === "running") {
+      // A dialog waiting on a human (tool permission, AskUserQuestion) parks the
+      // card in Review just like a finished turn: either way the next move is
+      // the user's. The session status stays `needs_attention` so the card says
+      // "waiting on you" rather than "done".
       nextStatus = "needs_attention";
+      await this.kanban.setColumn(session.cardId, "review");
       applied = true;
     }
 
@@ -602,6 +687,12 @@ export class KanbanSessionRuntime {
         lastHookEvent: event,
         lastHookAt: new Date().toISOString(),
       });
+    }
+    // The harness's own session id: recorded whenever a hook reports it, so a
+    // released PTY can be resumed with `claude --resume <id>`. Independent of
+    // whether the status changed (an idempotent hook still carries it).
+    if (nativeSessionId && session.nativeSessionId !== nativeSessionId) {
+      await this.kanban.updateSession(sessionId, { nativeSessionId });
     }
     return { ok: true, applied, status: nextStatus };
   }
@@ -634,20 +725,18 @@ export class KanbanSessionRuntime {
       return;
     }
 
-    const replay: TerminalSnapshot = terminal.snapshot();
-    this.sendJson(socket, {
-      type: "restore",
-      data: Buffer.from(replay.data).toString("base64"),
-      cols: replay.cols,
-      rows: replay.rows,
-      running: replay.running,
-      status: this.kanban.getSession(sessionId).status,
-    });
-
+    // Serializing waits for the bytes already handed to the mirror's parser, so
+    // the restore frame is async. Live output that arrives in the meantime is
+    // buffered and flushed after it: the client must write the snapshot first,
+    // and a `send` on a not-yet-open socket is silently dropped.
     let closed = false;
+    let restored = false;
+    const buffered: Buffer[] = [];
     const onData = (chunk: string): void => {
       if (closed) return;
-      socket.send(Buffer.from(chunk, "utf8"));
+      const bytes = Buffer.from(chunk, "utf8");
+      if (restored) socket.send(bytes);
+      else buffered.push(bytes);
     };
     const onExit = (event: { exitCode: number; signal?: number }): void => {
       if (closed) return;
@@ -659,6 +748,39 @@ export class KanbanSessionRuntime {
     };
     terminal.on("data", onData);
     terminal.on("exit", onExit);
+
+    void terminal
+      .snapshot()
+      .then((restore: TerminalSnapshot) => {
+        if (closed) return;
+        this.sendJson(socket, {
+          type: "restore",
+          data: restore.data,
+          serialized: restore.serialized,
+          cols: restore.cols,
+          rows: restore.rows,
+          running: restore.running,
+          status: this.kanban.getSession(sessionId).status,
+        });
+      })
+      .catch(() => {
+        if (closed) return;
+        this.sendJson(socket, {
+          type: "restore",
+          data: "",
+          serialized: true,
+          cols: terminal.cols,
+          rows: terminal.rows,
+          running: terminal.running,
+          status: this.kanban.getSession(sessionId).status,
+        });
+      })
+      .finally(() => {
+        restored = true;
+        for (const chunk of buffered.splice(0)) {
+          if (!closed) socket.send(chunk);
+        }
+      });
 
     socket.on("message", (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
       try {
@@ -816,6 +938,8 @@ export class KanbanSessionRuntime {
     this.shuttingDown = true;
     for (const terminal of this.terminals.values()) {
       terminal.stop("SIGTERM");
+      // Drop the headless xterm with the process; nothing can attach after.
+      terminal.dispose();
     }
     for (const state of this.acpStates.values()) {
       state.stopping = true;
@@ -1418,10 +1542,16 @@ export class KanbanSessionRuntime {
   private async answerAcpPermission(state: AcpState, requestId: string, optionId: string | null): Promise<void> {
     if (!state.permissions.delete(requestId)) return;
     state.acp?.respondPermission(requestId, optionId);
-    // Other tabs (or the same tab after a reattach) still hold the card; tell
-    // them it was answered so its buttons don't stay enabled.
-    this.broadcast(state, { type: "agent_permission_answered", requestId });
-    if (state.exited || state.stopping) return;
+    // Tabs hold the pending question on the card; tell them the answer is
+    // recorded. Sent after the state write below so a client that reacts by
+    // re-reading the board cannot observe the pre-answer column.
+    const announce = (): void => {
+      this.broadcast(state, { type: "agent_permission_answered", requestId });
+    };
+    if (state.exited || state.stopping) {
+      announce();
+      return;
+    }
     try {
       // The answer may resolve after the turn already ended (the agent can
       // finish on its own). Only a turn still waiting on this permission goes
@@ -1429,6 +1559,7 @@ export class KanbanSessionRuntime {
       // "running"/"awaiting_review" transition out of order.
       if (this.kanban.getSession(state.session.id).status !== "needs_attention") {
         state.session = this.kanban.getSession(state.session.id);
+        announce();
         return;
       }
       const updated = await this.kanban.updateSession(state.session.id, {
@@ -1437,12 +1568,17 @@ export class KanbanSessionRuntime {
         lastHookAt: new Date().toISOString(),
       });
       state.session = updated;
+      // Answering the question puts the card back to work: the pending dialog
+      // had moved it to Review.
+      await this.kanban.setColumn(state.card.id, "in_progress");
       // The turn can finish between the answer and this write (the agent is
       // free to complete on its own). Broadcasting then would announce a
       // status the column move has not caught up with yet.
       if (updated.status === "running") this.broadcastStatus(state);
+      announce();
     } catch {
       // The session may have been deleted while the user was answering.
+      announce();
     }
   }
 

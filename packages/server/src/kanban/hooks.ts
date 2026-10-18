@@ -40,26 +40,31 @@ export function buildHookCommand(options: {
   sessionId: string;
   event: string;
 }): string {
-  const body = JSON.stringify({ sessionId: options.sessionId, event: options.event });
-  return [
-    "curl",
-    "-sS",
-    "-m",
-    "3",
-    "-X",
-    "POST",
-    shellQuote(options.baseUrl),
-    "-H",
-    "'content-type: application/json'",
-    "-H",
-    shellQuote(`x-kanban-hook-token: ${options.token}`),
-    "-d",
-    shellQuote(body),
-    ">/dev/null",
-    "2>&1",
-    "||",
-    "true",
-  ].join(" ");
+  // Claude delivers the hook payload on stdin. Forward its `session_id` so the
+  // board records which harness session a card is running: that id is what
+  // `claude --resume <id>` needs once the card's process has been released.
+  // The payload is parsed with node (always present — the harness runs on it)
+  // rather than shell string surgery. Agents without a stdin payload just
+  // report the event.
+  const base = JSON.stringify({ sessionId: options.sessionId, event: options.event });
+  const reader = [
+    "let p={}",
+    `try{p=JSON.parse(process.argv[1]||"{}")}catch{}`,
+    `const b=${base}`,
+    `if(typeof p.session_id==="string"&&p.session_id)b.nativeSessionId=p.session_id`,
+    "process.stdout.write(JSON.stringify(b))",
+  ].join(";");
+  // One shell command: parse stdin with node, POST the JSON. A hook must never
+  // break the agent, so every failure is swallowed.
+  return (
+    `payload=$(cat); ` +
+    `body=$(printf '%s' "$payload" | ${shellQuote(process.execPath)} -e ${shellQuote(reader)} "$payload" 2>/dev/null); ` +
+    `[ -n "$body" ] || body=${shellQuote(base)}; ` +
+    `curl -sS -m 3 -X POST ${shellQuote(options.baseUrl)} ` +
+    `-H 'content-type: application/json' ` +
+    `-H ${shellQuote(`x-kanban-hook-token: ${options.token}`)} ` +
+    `--data-binary "$body" >/dev/null 2>&1 || true`
+  );
 }
 
 function claudeSettings(baseUrl: string, token: string, sessionId: string): string {
@@ -71,7 +76,16 @@ function claudeSettings(baseUrl: string, token: string, sessionId: string): stri
         Stop: [{ hooks: [{ type: "command", command: command("to_review") }] }],
         // A new user turn means the card is working again.
         UserPromptSubmit: [{ hooks: [{ type: "command", command: command("to_in_progress") }] }],
-        // Permission prompts need a human; do not show the card as finished.
+        // Claude is blocked on a human. Two dialogs park the turn mid-flight:
+        // a tool-permission approval and an AskUserQuestion card. Neither one
+        // fires Stop — verified against Claude Code 2.1.302, which emits
+        // PreToolUse → PermissionRequest → (human answers) → PostToolUse →
+        // Stop, and sends no Notification at all for AskUserQuestion. The card
+        // is still In Progress while the dialog waits; needs_attention makes
+        // "waiting on you" visible without pretending the turn finished.
+        PermissionRequest: [{ hooks: [{ type: "command", command: command("needs_attention") }] }],
+        // A tool permission dialog Claude is showing but cannot resolve itself.
+        // The matcher field for this event is the notification type.
         Notification: [
           { matcher: "permission_prompt", hooks: [{ type: "command", command: command("needs_attention") }] },
         ],
@@ -109,6 +123,9 @@ const OPENCODE_PLUGIN = `export const KanbanPlugin = async () => {
     event: async ({ event }) => {
       const type = event?.type;
       const status = event?.properties?.status?.type;
+      // A question/permission dialog parks the session without going idle; it
+      // needs a human, so it must not read as a finished turn.
+      if (type === "session.waiting" || type === "permission.asked") return notify("needs_attention");
       if (type === "session.idle" || status === "idle") return notify("to_review");
       if (type === "session.busy" || status === "busy" || type === "session.error") {
         return notify("to_in_progress");

@@ -242,6 +242,10 @@ async function makeHarness(options: { simple?: boolean } = {}): Promise<Harness>
       },
       cleanup: async () => {
         await closeServer(bound);
+        // Closing sockets is asynchronous: let the server observe the closes
+        // before the data dir goes away, or a late write surfaces as EPIPE
+        // after the test has already finished.
+        await new Promise((resolve) => setTimeout(resolve, 50));
         process.env.PATH = previousPath;
         if (previousSimple === undefined) delete process.env.FAKE_DSH_SIMPLE;
         else process.env.FAKE_DSH_SIMPLE = previousSimple;
@@ -269,6 +273,29 @@ async function api<T>(h: Harness, method: string, path: string, body?: unknown):
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) throw new Error(`${res.status} ${data?.code ?? ""} ${data?.error ?? text}`);
   return data as T;
+}
+
+/** The column a card sits in, polled until it matches or time runs out. */
+async function pollColumn(
+  h: Harness,
+  projectId: string,
+  cardId: string,
+  expected: string,
+  timeoutMs = 2_000
+): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  let column: string | undefined;
+  while (Date.now() < deadline) {
+    const cards = await api<{ cards: Array<{ id: string; column: string }> }>(
+      h,
+      "GET",
+      `/api/kanban/projects/${projectId}/cards`
+    );
+    column = cards.cards.find((card) => card.id === cardId)?.column;
+    if (column === expected) return column;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return column;
 }
 
 interface AgentSocket {
@@ -400,10 +427,15 @@ test("a DSH card runs an interactive ACP turn, answers permission, continues, an
     const request = permission.request as { requestId: string; options: Array<{ optionId: string; kind: string }> };
     assert.equal(request.options[0]?.kind, "allow_once");
     await socket.waitFor((frame) => frame.type === "agent_status" && frame.status === "needs_attention");
+    // A dialog waiting on the user parks the card in Review.
+    assert.equal(await pollColumn(h, project.id, card.id, "review"), "review");
     socket.send({ type: "permission", requestId: request.requestId, optionId: "allow" });
 
     const answered = await socket.waitFor((frame) => frame.type === "agent_permission_answered");
     assert.equal(answered.requestId, request.requestId);
+    // The answer resumes the turn, which finishes into Review. The interim
+    // in_progress move is deliberately not asserted: the fake agent can finish
+    // the turn before a poll observes it, and the durable outcome is Review.
     await socket.waitFor((frame) => frame.type === "agent_status" && frame.status === "awaiting_review");
     // The transcript carries the prompt, the streamed answer, and the tool.
     let items = itemsOf(socket);

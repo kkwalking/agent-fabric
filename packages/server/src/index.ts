@@ -23,13 +23,15 @@ async function main(): Promise<void> {
   const host = process.env.AGENTFABRIC_HOST ?? "127.0.0.1";
   const port = Number(process.env.AGENTFABRIC_PORT ?? 7377);
 
-  // Serve the built web UI if it exists (packages/web/dist).
+  // Serve the built web UI (packages/web/dist). The directory is re-checked
+  // per request, so `npm run dev` may build the UI after the server started.
   const distCandidates = [
+    process.env.AGENTFABRIC_WEB_DIR,
     resolve(__dirname, "../../web/dist"),
     resolve(process.cwd(), "web/dist"),
     resolve(process.cwd(), "dist/web"),
-  ];
-  const staticDir = distCandidates.find((d) => existsSync(resolve(d, "index.html")));
+  ].filter((d): d is string => typeof d === "string" && d.length > 0);
+  const staticDir = distCandidates.find((d) => existsSync(resolve(d, "index.html"))) ?? distCandidates[0];
 
   // Harness hooks call back over loopback; a wildcard bind still reaches
   // 127.0.0.1, and an explicit IPv6 host needs brackets in a URL.
@@ -47,7 +49,12 @@ async function main(): Promise<void> {
   server.listen(port, host, () => {
     console.log(`[agent-fabric] API server listening on http://${host}:${port}`);
     console.log(`[agent-fabric] Data directory: ${dataDir}`);
-    console.log(`[agent-fabric] Web UI: ${staticDir ? `http://localhost:${port}` : "(not built; run npm run build -w @agentfabric/web)"}`);
+    // The UI is served on demand; say whether it resolves right now, since a
+    // build may still be running (npm run dev builds it alongside).
+    const webReady = distCandidates.some((d) => existsSync(resolve(d, "index.html")));
+    console.log(
+      `[agent-fabric] Web UI: ${webReady ? `http://localhost:${port}` : "build not found yet — `npm run build:web` (or keep `npm run dev` running to build it)"}`
+    );
     if (!LOOPBACK_HOSTS.has(host)) {
       console.warn(
         `[agent-fabric] WARNING: bound to ${host}, not loopback — this server is reachable from the network, ` +

@@ -46,8 +46,14 @@ npm run typecheck                                # 全仓库类型检查
 npm run test --workspaces --if-present           # 全仓库测试（node:test）
 npm run test -w @agentfabric/core                # 只跑 core
 npm run build                                    # 构建全部 workspace（含 Web 产物）
-npm run dev:server                               # 起服务（用户实例默认 :7377）
-npm run dev:web                                  # 只重建 Web 时需要
+npm run dev                                      # 日常开发：起服务(:7377) + 持续重建 Web 产物
+npm run dev:server                               # 只起服务（用户实例默认 :7377）
+npm run build:web                                # 手动重建 Web 产物一次
+npm run dev:web                                  # Vite dev server (:5173)，不是重建 dist
 ```
 
 Web 产物在 `packages/web/dist`，**不在 git 里**；只改 `packages/web/src` 后需要重新构建并刷新页面才能看到效果。
+
+**日常开发用 `npm run dev`**：它在同一个终端里起服务端（tsx watch）并用 `vite build --watch`
+持续重建 `dist`，`:7377` 刷新即是最新前后端。注意 `npm run dev:server` **不会**重建 Web，
+单用它改前端看不到变化；`npm run dev:web` 是 Vite dev server（`:5173`），也不写入 `dist`。

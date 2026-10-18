@@ -44,9 +44,9 @@ test("PTY streams output, keeps the exit code, and snapshots bytes", async () =>
     assert.equal(exit.exitCode, 0);
     assert.equal(session.running, false);
 
-    const snapshot = session.snapshot();
-    const replayed = Buffer.from(snapshot.data).toString("utf8");
-    assert.match(replayed, /hello-pty/);
+    const snapshot = await session.snapshot();
+    assert.match(snapshot.data, /hello-pty/);
+    assert.equal(snapshot.serialized, true);
     assert.equal(snapshot.cols, 100);
     assert.equal(snapshot.rows, 30);
     assert.equal(snapshot.running, false);
@@ -78,7 +78,7 @@ test("resize is forwarded to the PTY and reflected in the snapshot", async () =>
     session.resize(132, 43);
     assert.equal(session.cols, 132);
     assert.equal(session.rows, 43);
-    const snapshot = session.snapshot();
+    const snapshot = await session.snapshot();
     assert.equal(snapshot.cols, 132);
     // While the process is still alive the snapshot says so.
     assert.equal(snapshot.running, true);
@@ -105,16 +105,24 @@ test("stop terminates the whole process group instead of leaving orphans", async
   assert.equal(session.running, false);
 });
 
-test("scrollback is bounded and keeps the newest bytes", async () => {
+test("the snapshot carries lines the TUI scrolled off, not just the last screen", async () => {
+  // A TUI appends lines and lets the terminal scroll them away. A byte ring
+  // buffer would truncate from the head (and cut escape sequences); the mirror
+  // keeps them as scrollback, so the oldest line must survive.
   const session = new TerminalSession({
-    id: "test-ring",
+    id: "test-scrollback",
     file: "/bin/sh",
-    args: ["-c", "printf 'AAAA'; printf 'BBBB'; printf 'CCCC'"],
+    args: ["-c", "for i in $(seq 1 200); do printf 'LINE-%03d\\n' $i; done"],
     cwd: process.cwd(),
-    scrollbackBytes: 4,
+    cols: 40,
+    rows: 10,
   });
-  await waitForExit(session);
-  const replayed = Buffer.from(session.snapshot().data).toString("utf8");
-  assert.equal(replayed.length, 4);
-  assert.equal(replayed, "CCCC");
+  try {
+    await waitForExit(session);
+    const snapshot = await session.snapshot();
+    assert.match(snapshot.data, /LINE-001/, "the first line must survive in scrollback");
+    assert.match(snapshot.data, /LINE-200/, "the last line must be present too");
+  } finally {
+    session.dispose();
+  }
 });

@@ -54,12 +54,12 @@ const STATE_LABEL: Record<TermState, string> = {
   error: "error",
 };
 
-function base64ToBytes(data: string): Uint8Array {
-  const binary = atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
+/**
+ * Must match the server's TERMINAL_SCROLLBACK_LINES: the restore payload is
+ * the server's scrollback, and a smaller client buffer would silently drop the
+ * oldest part of the history the user is trying to scroll to.
+ */
+const SCROLLBACK_LINES = 10_000;
 
 export interface BoardTerminalProps {
   sessionId: string;
@@ -89,7 +89,7 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
         'ui-monospace, "SF Mono", "Geist Mono", "Cascadia Mono", Menlo, Consolas, monospace',
       fontSize: 12.5,
       lineHeight: 1.25,
-      scrollback: 5000,
+      scrollback: SCROLLBACK_LINES,
       theme: TERM_THEME,
       // Non-interactive agents get a read-only terminal: typing into a
       // headless JSONL stream would go nowhere and mislead the user.
@@ -193,12 +193,10 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
         }
         if (message.type === "restore") {
           if (typeof message.data === "string" && message.data.length > 0) {
-            try {
-              term.write(base64ToBytes(message.data));
-            } catch (e) {
-              setError(`could not decode terminal restore: ${e instanceof Error ? e.message : String(e)}`);
-              setState("error");
-            }
+            // The server serializes a headless xterm (screen + scrollback), so
+            // the payload is terminal text already — not base64 PTY bytes.
+            // Writing it restores the whole history the user can scroll.
+            term.write(message.data);
           }
           if (message.running === false) {
             markExited();

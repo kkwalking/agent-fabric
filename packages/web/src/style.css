@@ -3362,7 +3362,20 @@ button.stat.clickable:hover {
      below it. Side padding keeps the card's rounded border readable. */
   padding: 0 12px;
 }
-.board-detail-term > .board-term-empty {
+.board-detail-term > /* Archived card notice: Done frees the process, so explain the stopped pane. */
+.board-detail-notice {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.board-term-empty {
   margin: 12px 0;
 }
 .board-term-empty {
