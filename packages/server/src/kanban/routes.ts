@@ -185,14 +185,31 @@ export function registerKanbanRoutes(
     })
   );
 
+  /**
+   * Edits a card (v13 §七). Clicking a Backlog card opens this form, and it is
+   * the only card that may be edited: once a card leaves Backlog its prompt and
+   * agent are what a session ran on, so the board shows that history instead of
+   * letting it be rewritten. Live sessions are refused for the same reason —
+   * the running agent already read the old values.
+   */
   app.patch(
     "/api/kanban/cards/:id",
     ah(async (req, res) => {
       const cardId = cardParams(req);
+      const current = kanban.getCard(cardId);
+      if (current.column !== "backlog") {
+        throw new DomainError(
+          "kanban-card-not-editable",
+          `Only a Backlog card can be edited; this card is in ${current.column}`
+        );
+      }
       const latest = kanban.latestSessionForCard(cardId);
       const running = latest ? runtime.isLive(latest.id) : false;
-      if (running && (req.body?.agentId !== undefined || req.body?.executionMode !== undefined || req.body?.model !== undefined || req.body?.reasoningEffort !== undefined || req.body?.permissionModeId !== undefined || req.body?.baseRef !== undefined)) {
-        throw new DomainError("kanban-session-not-startable", "Stop the session before changing its agent, model, permission, base ref or execution mode");
+      if (running) {
+        throw new DomainError(
+          "kanban-session-not-startable",
+          "Stop the session before editing this card"
+        );
       }
       const card = await kanban.updateCard(cardId, {
         title: req.body?.title,

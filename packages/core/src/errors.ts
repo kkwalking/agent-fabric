@@ -77,6 +77,7 @@ export type ErrorCode =
   /* Kanban (v13) */
   | "kanban-project-not-found"
   | "kanban-card-not-found"
+  | "kanban-card-not-editable"
   | "kanban-session-not-found"
   | "kanban-project-path-invalid"
   | "kanban-project-duplicate"
@@ -200,6 +201,7 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "workspace-diverged-after-finalization" ||
     code === "publish-revision-missing" ||
     code === "kanban-session-not-startable" ||
+    code === "kanban-card-not-editable" ||
     code === "kanban-project-duplicate"
   ) {
     return 409;
