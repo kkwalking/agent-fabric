@@ -50,6 +50,8 @@ export const post = <T>(p: string, body?: unknown, signal?: AbortSignal, headers
   api<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined, signal, headers });
 export const put = <T>(p: string, body?: unknown, headers?: HeadersInit) =>
   api<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined, headers });
+export const patch = <T>(p: string, body?: unknown, headers?: HeadersInit) =>
+  api<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined, headers });
 export const del = <T>(p: string, headers?: HeadersInit) => api<T>(p, { method: "DELETE", headers });
 
 /** Subscribe to an SSE endpoint. Returns an unsubscribe function. */

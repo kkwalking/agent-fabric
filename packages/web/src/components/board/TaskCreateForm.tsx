@@ -3,6 +3,7 @@ import { Icon } from "../../components";
 import type {
   ExecutionMode,
   KanbanAgent,
+  KanbanCard,
   KanbanGitInfo,
   TaskDraft,
   TaskFormDefaults,
@@ -18,11 +19,62 @@ import type {
  * workspace mode and worktree base ref. Cmd/Ctrl+Enter creates, Shift+Cmd/Ctrl+
  * Enter creates and starts the agent. The dialog variant can split a numbered
  * list into several cards and can stay open for more ("Create more").
+ *
+ * The same form edits a Backlog card (`initial` set by the caller): the fields
+ * are the same, nothing is created or started, and Cmd/Ctrl+Enter saves.
+ * Creating, splitting and "Create more" are gone in that mode — one card is
+ * being changed, not a new one described.
  */
 
 export interface TaskCreateSubmissionOptions {
   start: boolean;
   keepOpen: boolean;
+}
+
+/** The values the form starts from: the project's last choices when creating,
+ *  or the card itself when editing. */
+export interface TaskFormInitial {
+  prompt?: string;
+  /** The card's title verbatim; `""` when the user left it to be derived. */
+  title?: string;
+  agentId?: string;
+  model?: string;
+  /** ACP only: preferred `reasoning_effort` value. */
+  reasoningEffort?: string;
+  permissionModeId?: string;
+  executionMode?: ExecutionMode;
+  baseRef?: string;
+}
+
+export function initialFromCard(card: KanbanCard): TaskFormInitial {
+  return {
+    prompt: card.prompt,
+    title: card.title,
+    agentId: card.agentId,
+    ...(card.model ? { model: card.model } : {}),
+    ...(card.reasoningEffort ? { reasoningEffort: card.reasoningEffort } : {}),
+    ...(card.permissionModeId ? { permissionModeId: card.permissionModeId } : {}),
+    executionMode: card.executionMode,
+    ...(card.baseRef ? { baseRef: card.baseRef } : {}),
+  };
+}
+
+/**
+ * The values a card form starts from. Seeds depend on what the user is doing:
+ * a new card starts from the project's last choices, an edited card from the
+ * card itself.
+ */
+export function initialFromDefaults(
+  defaults: TaskFormDefaults,
+  fallbackExecutionMode: ExecutionMode = "direct"
+): TaskFormInitial {
+  return {
+    ...(defaults.agentId ? { agentId: defaults.agentId } : {}),
+    ...(defaults.model ? { model: defaults.model } : {}),
+    ...(defaults.permissionModeId ? { permissionModeId: defaults.permissionModeId } : {}),
+    executionMode: defaults.executionMode ?? fallbackExecutionMode,
+    ...(defaults.baseRef ? { baseRef: defaults.baseRef } : {}),
+  };
 }
 
 export function deriveCardTitle(prompt: string, maxChars = 80): string {
@@ -62,7 +114,8 @@ export function TaskCreateForm({
   workspaceType,
   agents,
   git,
-  defaults,
+  initial,
+  editing = false,
   allowSplit = false,
   allowCreateMore = false,
   createMore: controlledCreateMore,
@@ -75,7 +128,13 @@ export function TaskCreateForm({
   workspaceType: WorkspaceType;
   agents: KanbanAgent[];
   git: KanbanGitInfo | null;
-  defaults: TaskFormDefaults;
+  /** Seed values: project defaults when creating, the card when editing. */
+  initial: TaskFormInitial;
+  /**
+   * Editing an existing Backlog card: the fields are the same, but nothing is
+   * created, nothing is started, and the only action is saving.
+   */
+  editing?: boolean;
   /** The dialog can split a numbered prompt into several cards. */
   allowSplit?: boolean;
   /** The dialog can stay open after creating ("Create more"). */
@@ -91,15 +150,15 @@ export function TaskCreateForm({
   onSubmit: (draft: TaskDraft, options: TaskCreateSubmissionOptions) => void;
   onCancel?: () => void;
 }) {
-  const [prompt, setPrompt] = useState("");
-  const [title, setTitle] = useState("");
-  const [agentId, setAgentId] = useState(defaults.agentId ?? "");
-  const [model, setModel] = useState(defaults.model ?? "");
+  const [prompt, setPrompt] = useState(initial.prompt ?? "");
+  const [title, setTitle] = useState(initial.title ?? "");
+  const [agentId, setAgentId] = useState(initial.agentId ?? "");
+  const [model, setModel] = useState(initial.model ?? "");
   /** ACP agents (DSH): reasoning effort, applied before the first turn. */
-  const [reasoningEffort, setReasoningEffort] = useState("");
-  const [permissionModeId, setPermissionModeId] = useState(defaults.permissionModeId ?? "");
-  const [executionMode, setExecutionMode] = useState<ExecutionMode>(defaults.executionMode ?? "direct");
-  const [baseRef, setBaseRef] = useState(defaults.baseRef ?? "");
+  const [reasoningEffort, setReasoningEffort] = useState(initial.reasoningEffort ?? "");
+  const [permissionModeId, setPermissionModeId] = useState(initial.permissionModeId ?? "");
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>(initial.executionMode ?? "direct");
+  const [baseRef, setBaseRef] = useState(initial.baseRef ?? "");
   const [localCreateMore, setLocalCreateMore] = useState(false);
   const [mode, setMode] = useState<"single" | "multi">("single");
   const [taskPrompts, setTaskPrompts] = useState<string[]>([]);
@@ -112,10 +171,10 @@ export function TaskCreateForm({
   useEffect(() => {
     if (agentId && agents.some((agent) => agent.id === agentId)) return;
     const preferred =
-      agents.find((agent) => agent.id === defaults.agentId && agent.available) ??
+      agents.find((agent) => agent.id === initial.agentId && agent.available) ??
       agents.find((agent) => agent.available);
     if (preferred) setAgentId(preferred.id);
-  }, [agents, agentId, defaults.agentId]);
+  }, [agents, agentId, initial.agentId]);
 
   // Worktree mode is only meaningful when the project root is a Git repository.
   useEffect(() => {
@@ -136,7 +195,10 @@ export function TaskCreateForm({
     requestAnimationFrame(() => target?.focus());
   });
 
-  const detectedItems = useMemo(() => (allowSplit ? parseListItems(prompt) : []), [allowSplit, prompt]);
+  const detectedItems = useMemo(
+    () => (allowSplit && !editing ? parseListItems(prompt) : []),
+    [allowSplit, editing, prompt]
+  );
   const createMore = controlledCreateMore ?? localCreateMore;
   const setCreateMore = onCreateMoreChange ?? setLocalCreateMore;
 
@@ -238,7 +300,7 @@ export function TaskCreateForm({
 
   return (
     <div
-      className="task-create"
+      className={`task-create ${editing ? "editing" : ""}`}
       onKeyDown={(event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
           event.preventDefault();
@@ -259,7 +321,9 @@ export function TaskCreateForm({
           />
           <div className="task-create-prompt-foot">
             <span className="board-hint">
-              {MODIFIER}+↵ to create · ⇧{MODIFIER}+↵ to create &amp; start
+              {editing
+                ? `${MODIFIER}+↵ to save`
+                : `${MODIFIER}+↵ to create · ⇧${MODIFIER}+↵ to create & start`}
             </span>
             {detectedItems.length >= 2 && (
               <button type="button" className="task-create-split" onClick={splitIntoTasks}>
@@ -503,14 +567,25 @@ export function TaskCreateForm({
           </label>
         )}
         <div className="task-create-buttons">
-          <button type="button" className="small" onClick={() => submit(false)} disabled={!canSubmit}>
-            {busy ? "Creating…" : createLabel}
-            <span className="task-create-shortcut">{MODIFIER}+↵</span>
-          </button>
-          <button type="button" className="small primary" onClick={() => submit(true)} disabled={!canSubmit}>
-            {busy ? "Starting…" : startLabel}
-            <span className="task-create-shortcut">⇧{MODIFIER}+↵</span>
-          </button>
+          {editing ? (
+            // One card in, one card out: there is nothing to create and
+            // nothing to start, so saving is the only action.
+            <button type="button" className="small primary" onClick={() => submit(false)} disabled={!canSubmit}>
+              {busy ? "Saving…" : "Save changes"}
+              <span className="task-create-shortcut">{MODIFIER}+↵</span>
+            </button>
+          ) : (
+            <>
+              <button type="button" className="small" onClick={() => submit(false)} disabled={!canSubmit}>
+                {busy ? "Creating…" : createLabel}
+                <span className="task-create-shortcut">{MODIFIER}+↵</span>
+              </button>
+              <button type="button" className="small primary" onClick={() => submit(true)} disabled={!canSubmit}>
+                {busy ? "Starting…" : startLabel}
+                <span className="task-create-shortcut">⇧{MODIFIER}+↵</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
