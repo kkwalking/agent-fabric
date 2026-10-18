@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AcpSession, type AcpPermissionRequest, type AcpUpdate } from "./kanban/acp.js";
-import { AcpChatProjector } from "./kanban/acpChat.js";
+import { AcpChatProjector, type ChatItem } from "./kanban/acpChat.js";
 
 const FAKE_ACP = String.raw`
 import readline from "node:readline";
@@ -27,11 +27,35 @@ rl.on("line", (line) => {
   let message;
   try { message = JSON.parse(line); } catch { return; }
   if (message.method === "initialize") {
-    send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentInfo: { name: "fake", version: "0" } } });
+    send({ jsonrpc: "2.0", id: message.id, result: {
+      protocolVersion: 1,
+      agentInfo: { name: "fake", version: "0" },
+      agentCapabilities: process.env.FAKE_ACP_NO_RESUME === "1"
+        ? { sessionCapabilities: { close: {} } }
+        : { sessionCapabilities: { close: {}, list: {}, resume: {} } },
+    } });
     return;
   }
   if (message.method === "session/new") {
-    send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "fake-session" } });
+    send({ jsonrpc: "2.0", id: message.id, result: {
+      sessionId: "fake-session",
+      configOptions: [{
+        id: "model", name: "Model", type: "select", currentValue: "a",
+        options: [{ value: "a", name: "A" }, { value: "b", name: "B" }],
+      }],
+    } });
+    return;
+  }
+  if (message.method === "session/set_config_option") {
+    const value = message.params.value;
+    send({ jsonrpc: "2.0", id: message.id, result: { configOptions: [{
+      id: "model", name: "Model", type: "select", currentValue: value,
+      options: [{ value: "a", name: "A" }, { value: "b", name: "B" }],
+    }] } });
+    return;
+  }
+  if (message.method === "session/resume") {
+    send({ jsonrpc: "2.0", id: message.id, result: { configOptions: [] } });
     return;
   }
   if (message.method === "session/close") {
@@ -46,6 +70,10 @@ rl.on("line", (line) => {
     return;
   }
   if (message.method === "session/prompt") {
+    if (process.env.FAKE_ACP_SIMPLE === "1") {
+      send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+      return;
+    }
     pendingPrompt = message.id;
     const sessionId = message.params.sessionId;
     const update = (value) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: value } });
@@ -97,17 +125,24 @@ interface FakeHarness {
   dispose: () => Promise<void>;
 }
 
-async function startFake(): Promise<FakeHarness> {
+async function startFake(
+  options: { env?: Record<string, string>; newSession?: boolean } = {}
+): Promise<FakeHarness> {
   const dir = mkdtempSync(join(tmpdir(), "kanban-acp-test-"));
   const entry = join(dir, "fake-acp.mjs");
   writeFileSync(entry, FAKE_ACP);
-  const session = new AcpSession({ file: process.execPath, args: [entry], cwd: dir });
+  const session = new AcpSession({
+    file: process.execPath,
+    args: [entry],
+    cwd: dir,
+    env: options.env,
+  });
   const updates: AcpUpdate[] = [];
   const permissions: AcpPermissionRequest[] = [];
   session.on("update", (update: AcpUpdate) => updates.push(update));
   session.on("permission", (request: AcpPermissionRequest) => permissions.push(request));
   await session.initialize();
-  await session.newSession(dir);
+  if (options.newSession !== false) await session.newSession(dir);
   return {
     session,
     dir,
@@ -168,6 +203,48 @@ test("ACP cancel settles the prompt as cancelled", { timeout: 20_000 }, async ()
   await harness.dispose();
 });
 
+test("ACP resume attaches to a saved session and keeps prompting", { timeout: 20_000 }, async () => {
+  const first = await startFake();
+  assert.equal(first.session.sessionId, "fake-session");
+  assert.equal(first.session.supportsResume, true);
+  await first.dispose();
+
+  // A new process, as after a server restart: no session/new, only resume.
+  const second = await startFake({ env: { FAKE_ACP_SIMPLE: "1" }, newSession: false });
+  assert.equal(second.session.supportsResume, true);
+  const resumed = await second.session.resumeSession("fake-session", second.dir);
+  assert.deepEqual(resumed.configOptions, []);
+  assert.equal(second.session.sessionId, "fake-session");
+  const result = await second.session.prompt("continue");
+  assert.equal(result.stopReason, "end_turn");
+  await second.dispose();
+});
+
+test("ACP resume is refused up front when the app does not advertise it", { timeout: 20_000 }, async () => {
+  const harness = await startFake({ env: { FAKE_ACP_NO_RESUME: "1" }, newSession: false });
+  assert.equal(harness.session.supportsResume, false);
+  await assert.rejects(
+    () => harness.session.resumeSession("fake-session", harness.dir),
+    /does not advertise session\/resume/
+  );
+  await harness.dispose();
+});
+
+test("ACP projector restores a saved transcript without reusing ids", () => {
+  const saved: ChatItem[] = [
+    { id: "user:7", kind: "user", text: "earlier prompt", at: "t0" },
+    { id: "error:9", kind: "error", message: "earlier error", at: "t1" },
+  ];
+  const projector = new AcpChatProjector(
+    () => "2026-01-01T00:00:00.000Z",
+    saved
+  );
+  assert.deepEqual(projector.snapshot, saved);
+  const user = projector.addUser("continue");
+  assert.equal(user.id, "user:10");
+  assert.equal(projector.snapshot.length, 3);
+});
+
 test("ACP projector merges chunks and tool updates by id", () => {
   const projector = new AcpChatProjector(() => "t");
   projector.addUser("do it");
@@ -193,4 +270,16 @@ test("ACP initialize rejects loudly when the app cannot start", { timeout: 20_00
   const session = new AcpSession({ file: join(tmpdir(), "does-not-exist-acp"), args: [], cwd: tmpdir() });
   await assert.rejects(() => session.initialize());
   session.stop("SIGKILL");
+});
+
+test("ACP keeps the advertised config options and applies changes", { timeout: 20_000 }, async () => {
+  const harness = await startFake();
+  assert.deepEqual(
+    harness.session.configOptions.map((option) => [option.id, option.currentValue]),
+    [["model", "a"]]
+  );
+  const next = await harness.session.setConfigOption("model", "b");
+  assert.equal(next.find((option) => option.id === "model")?.currentValue, "b");
+  assert.equal(harness.session.configOptions[0]?.currentValue, "b");
+  await harness.dispose();
 });

@@ -163,6 +163,7 @@ function writeTaskDefaults(projectId: string, draft: TaskDraft): void {
       JSON.stringify({
         agentId: draft.agentId,
         ...(draft.model ? { model: draft.model } : {}),
+        ...(draft.reasoningEffort ? { reasoningEffort: draft.reasoningEffort } : {}),
         ...(draft.permissionModeId ? { permissionModeId: draft.permissionModeId } : {}),
         executionMode: draft.executionMode,
         ...(draft.baseRef ? { baseRef: draft.baseRef } : {}),
@@ -570,6 +571,7 @@ export function BoardView() {
             ...(draft.prompts.length === 1 && draft.title ? { title: draft.title } : {}),
             agentId: draft.agentId,
             ...(draft.model ? { model: draft.model } : {}),
+            ...(draft.reasoningEffort ? { reasoningEffort: draft.reasoningEffort } : {}),
             ...(draft.permissionModeId ? { permissionModeId: draft.permissionModeId } : {}),
             executionMode: draft.executionMode,
             ...(draft.baseRef ? { baseRef: draft.baseRef } : {}),
@@ -1204,6 +1206,8 @@ function CardDetail({
   const agentLabel = agents.find((agent) => agent.id === card.agentId)?.label ?? card.agentId;
   // DSH sessions speak the structured ACP chat; every other agent keeps xterm.
   const acpSession = session?.transport === "acp";
+  // What the session is actually running on, mirrored from ACP's model option.
+  const sessionModelLabel = session?.modelRoute?.label ?? session?.modelRoute?.model;
 
   useEffect(() => {
     try {
@@ -1348,8 +1352,14 @@ function CardDetail({
                 </div>
                 <div className="board-meta-row">
                   <dt>Model</dt>
-                  <dd className="mono">{card.model ?? "—"}</dd>
+                  <dd className="mono">{sessionModelLabel ?? card.model ?? "agent default"}</dd>
                 </div>
+                {session?.reasoningEffort && (
+                  <div className="board-meta-row">
+                    <dt>Reasoning</dt>
+                    <dd className="mono">{session.reasoningEffort}</dd>
+                  </div>
+                )}
                 <div className="board-meta-row">
                   <dt>Permission</dt>
                   <dd>{permissionLabel}</dd>
@@ -1422,7 +1432,9 @@ function CardDetail({
                     ? acpSession
                       ? "This card is in Review. Continue the agent in the chat — a new turn moves it back to In Progress automatically."
                       : "This card is in Review. Continue the agent in the terminal — a new turn moves it back to In Progress automatically."
-                    : "This card is in Review. Start a new session to keep working on it; the card moves back to In Progress."}
+                    : acpSession
+                      ? "This card is in Review. Resume the saved session in the chat to keep the agent's context, or start a new session; the card moves back to In Progress."
+                      : "This card is in Review. Start a new session to keep working on it; the card moves back to In Progress."}
                 </div>
               )}
               </aside>

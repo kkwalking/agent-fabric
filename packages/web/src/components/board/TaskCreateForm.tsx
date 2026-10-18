@@ -95,6 +95,8 @@ export function TaskCreateForm({
   const [title, setTitle] = useState("");
   const [agentId, setAgentId] = useState(defaults.agentId ?? "");
   const [model, setModel] = useState(defaults.model ?? "");
+  /** ACP agents (DSH): reasoning effort, applied before the first turn. */
+  const [reasoningEffort, setReasoningEffort] = useState("");
   const [permissionModeId, setPermissionModeId] = useState(defaults.permissionModeId ?? "");
   const [executionMode, setExecutionMode] = useState<ExecutionMode>(defaults.executionMode ?? "direct");
   const [baseRef, setBaseRef] = useState(defaults.baseRef ?? "");
@@ -199,6 +201,9 @@ export function TaskCreateForm({
         ...(mode === "single" && title.trim() ? { title: title.trim() } : {}),
         agentId,
         ...(model.trim() ? { model: model.trim() } : {}),
+        ...(selectedAgent?.transport === "acp" && reasoningEffort
+          ? { reasoningEffort }
+          : {}),
         ...(permissionModeId ? { permissionModeId } : {}),
         executionMode,
         ...(executionMode === "worktree" && baseRef ? { baseRef } : {}),
@@ -351,7 +356,7 @@ export function TaskCreateForm({
         </div>
 
         <div className="task-create-grid">
-          {selectedAgent?.modelFlag && (
+          {(selectedAgent?.modelFlag || selectedAgent?.transport === "acp") && (
             <div className="board-dialog-field">
               <label className="board-dialog-label" htmlFor="task-create-model">
                 Model <span className="task-create-optional">(optional)</span>
@@ -361,9 +366,33 @@ export function TaskCreateForm({
                 className="mono"
                 value={model}
                 onChange={(event) => setModel(event.target.value)}
-                placeholder="agent default"
+                placeholder={
+                  selectedAgent?.transport === "acp"
+                    ? "agent default — e.g. deepseek-v4-pro or DeepSeek-V4-Pro"
+                    : "agent default"
+                }
                 disabled={busy}
               />
+            </div>
+          )}
+          {selectedAgent?.transport === "acp" && (
+            <div className="board-dialog-field">
+              <label className="board-dialog-label" htmlFor="task-create-effort">
+                Reasoning effort <span className="task-create-optional">(optional)</span>
+              </label>
+              <select
+                id="task-create-effort"
+                value={reasoningEffort}
+                onChange={(event) => setReasoningEffort(event.target.value)}
+                disabled={busy}
+              >
+                <option value="">agent default</option>
+                {["off", "low", "high", "max"].map((effort) => (
+                  <option key={effort} value={effort}>
+                    {effort}
+                  </option>
+                ))}
+              </select>
             </div>
           )}
           {/* One non-default mode is still a real choice (DSH Ask/Auto,

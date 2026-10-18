@@ -82,8 +82,26 @@ export function createKanbanUpgradeHandler(options: {
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
-      if (terminalMatch) options.runtime.attach(sessionId, ws);
-      else options.runtime.attachAgent(sessionId, ws);
+      if (terminalMatch) {
+        options.runtime.attach(sessionId, ws);
+      } else {
+        // The chat attach may replay a saved transcript from disk; a failure
+        // here must close only this socket, never the upgrade listener.
+        void options.runtime.attachAgent(sessionId, ws).catch((err: unknown) => {
+          try {
+            ws.send(
+              JSON.stringify({
+                type: "agent_error",
+                code: "kanban-chat-attach-failed",
+                message: `Could not open the session chat: ${err instanceof Error ? err.message : String(err)}`,
+              })
+            );
+          } catch {
+            // The socket is already gone.
+          }
+          ws.close(1011, "chat attach failed");
+        });
+      }
     });
   };
 }

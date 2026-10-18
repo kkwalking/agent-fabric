@@ -165,13 +165,18 @@ export interface NewKanbanCardInput {
   prompt: string;
   agentId: KanbanAgentKind;
   model?: string;
+  /** ACP only: `reasoning_effort` value to select before the first turn. */
+  reasoningEffort?: string;
   permissionModeId?: string;
   executionMode?: KanbanExecutionMode;
   baseRef?: string;
 }
 
 export type KanbanCardPatch = Partial<
-  Pick<KanbanCard, "title" | "prompt" | "agentId" | "model" | "permissionModeId" | "executionMode" | "baseRef">
+  Pick<
+    KanbanCard,
+    "title" | "prompt" | "agentId" | "model" | "reasoningEffort" | "permissionModeId" | "executionMode" | "baseRef"
+  >
 >;
 
 /**
@@ -306,6 +311,7 @@ export class KanbanService {
       column: "backlog",
       agentId,
       ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.permissionModeId ? { permissionModeId: input.permissionModeId } : {}),
       executionMode,
       ...(input.baseRef ? { baseRef: input.baseRef } : {}),
@@ -325,6 +331,7 @@ export class KanbanService {
     }
     if (patch.agentId !== undefined) next.agentId = assertAgentKind(patch.agentId);
     if (patch.model !== undefined) next.model = patch.model || undefined;
+    if (patch.reasoningEffort !== undefined) next.reasoningEffort = patch.reasoningEffort || undefined;
     if (patch.permissionModeId !== undefined) next.permissionModeId = patch.permissionModeId || undefined;
     if (patch.executionMode !== undefined) {
       next.executionMode = assertExecutionModeForProject(patch.executionMode, this.getProject(card.projectId));

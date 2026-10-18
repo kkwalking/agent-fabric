@@ -17,6 +17,40 @@ export type SessionStatus =
   | "interrupted"
   | "stopped";
 
+/**
+ * One ACP configuration option as the agent advertises it (model, reasoning
+ * effort, …). `value` is opaque — it goes back verbatim in `set_config`.
+ */
+export interface AcpConfigOptionValue {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+export interface AcpConfigOptionGroup {
+  group: string;
+  name?: string;
+  options: AcpConfigOptionValue[];
+}
+
+export interface AcpConfigOption {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  type: string;
+  currentValue: string;
+  options?: Array<AcpConfigOptionValue | AcpConfigOptionGroup>;
+}
+
+/** The model route a session is on, as the server mirrors it from ACP. */
+export interface KanbanSessionModelRoute {
+  value: string;
+  provider?: string;
+  model?: string;
+  label?: string;
+}
+
 export interface KanbanAgentPermissionMode {
   id: string;
   label: string;
@@ -58,6 +92,8 @@ export interface KanbanCard {
   column: BoardColumnId;
   agentId: string;
   model?: string;
+  /** ACP only: preferred `reasoning_effort` value. */
+  reasoningEffort?: string;
   permissionModeId?: string;
   executionMode: ExecutionMode;
   /** Git ref a worktree checkout starts from; absent = project HEAD. */
@@ -75,6 +111,10 @@ export interface KanbanSession {
   executionMode: ExecutionMode;
   status: SessionStatus;
   nativeSessionId?: string;
+  /** ACP only: the model route the session currently runs on. */
+  modelRoute?: KanbanSessionModelRoute;
+  /** ACP only: the current `reasoning_effort` value. */
+  reasoningEffort?: string;
   startedAt: string;
   endedAt?: string;
   exitCode?: number;
@@ -141,6 +181,8 @@ export interface TaskDraft {
   title?: string;
   agentId: string;
   model?: string;
+  /** ACP only: preferred `reasoning_effort` value. */
+  reasoningEffort?: string;
   permissionModeId?: string;
   executionMode: ExecutionMode;
   baseRef?: string;

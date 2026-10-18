@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../components";
 import { Markdown } from "../markdown";
-import type { ChatItem, PermissionRequest } from "./board/types";
+import type { AcpConfigOption, ChatItem, PermissionRequest } from "./board/types";
 
 /**
  * Interactive chat for one DSH kanban session, spoken over ACP.
@@ -10,8 +10,9 @@ import type { ChatItem, PermissionRequest } from "./board/types";
  * `/api/kanban/sessions/:id/agent` as JSON text frames: a replay snapshot on
  * attach, then item/status/permission/error frames. One socket per open card
  * detail — closing the detail detaches, the server keeps the session. No
- * auto-reconnect: same rule as BoardTerminal, and a session that died with
- * the server process must read as an error rather than a silent empty chat.
+ * auto-reconnect: same rule as BoardTerminal. A session whose process died
+ * (server restart, agent exit) still attaches: the server replays the saved
+ * transcript and the chat offers to resume the agent's own session.
  */
 
 /** Socket lifecycle, distinct from the agent's own session status. */
@@ -24,6 +25,7 @@ type PillState =
   | "working"
   | "idle"
   | "attention"
+  | "paused"
   | "exited"
   | "disconnected"
   | "error";
@@ -34,6 +36,7 @@ const PILL_LABEL: Record<PillState, string> = {
   working: "working",
   idle: "idle",
   attention: "needs attention",
+  paused: "paused",
   exited: "exited",
   disconnected: "disconnected",
   error: "error",
@@ -42,6 +45,8 @@ const PILL_LABEL: Record<PillState, string> = {
 type ClientFrame =
   | { type: "prompt"; text: string }
   | { type: "cancel" }
+  | { type: "resume" }
+  | { type: "set_config"; configId: string; value: string }
   | { type: "permission"; requestId: string; optionId: string | null }
   | { type: "stop" };
 
@@ -51,11 +56,32 @@ type ServerFrame =
       items: ChatItem[];
       status: string;
       running: boolean;
+      live: boolean;
+      canResume: boolean;
+      resuming?: boolean;
+      hasTranscript: boolean;
       nativeSessionId?: string;
       permissions: PermissionRequest[];
+      configOptions?: AcpConfigOption[];
+      usage?: { used: number; size: number };
     }
   | { type: "agent_item"; item: ChatItem }
-  | { type: "agent_status"; status: string; running: boolean }
+  | {
+      type: "agent_status";
+      status: string;
+      running: boolean;
+      live: boolean;
+      canResume: boolean;
+      resuming?: boolean;
+    }
+  | {
+      type: "agent_composer";
+      live: boolean;
+      canResume: boolean;
+      resuming?: boolean;
+      configOptions: AcpConfigOption[];
+      usage?: { used: number; size: number };
+    }
   | { type: "agent_permission"; request: PermissionRequest }
   | { type: "agent_permission_answered"; requestId: string }
   | { type: "agent_error"; code?: string; message: string };
@@ -74,6 +100,7 @@ function parseFrame(raw: string): ServerFrame | null {
     case "agent_snapshot":
     case "agent_item":
     case "agent_status":
+    case "agent_composer":
     case "agent_permission":
     case "agent_permission_answered":
     case "agent_error":
@@ -89,12 +116,23 @@ function atMs(iso: string): number {
   return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
 }
 
-function pillState(link: LinkState, running: boolean, status: string | null): PillState {
+function pillState(
+  link: LinkState,
+  running: boolean,
+  status: string | null,
+  live: boolean | null
+): PillState {
   if (link === "error") return "error";
   if (link === "closed") return "disconnected";
   if (link === "connecting") return "connecting";
   // The snapshot is the attach confirmation; don't claim "live" before it.
   if (status === null) return "connecting";
+  if (live === false) {
+    // The conversation is readable but no agent process backs it any more.
+    return status === "interrupted" || status === "failed" || status === "stopped"
+      ? "paused"
+      : "exited";
+  }
   // A turn blocked on a permission answer is waiting on the human, not busy.
   if (status === "needs_attention") return "attention";
   if (running) return "working";
@@ -143,6 +181,88 @@ function buildTimeline(items: ChatItem[], permissions: PermissionRequest[]): Tim
   return entries;
 }
 
+/** Flat value list of a config option (grouped options preserve their group). */
+function optionEntries(option: AcpConfigOption): Array<{ value: string; name: string; group?: string }> {
+  const entries: Array<{ value: string; name: string; group?: string }> = [];
+  for (const entry of option.options ?? []) {
+    if ("group" in entry) {
+      for (const nested of entry.options) {
+        entries.push({ value: nested.value, name: nested.name, group: entry.name ?? entry.group });
+      }
+    } else {
+      entries.push({ value: entry.value, name: entry.name });
+    }
+  }
+  return entries;
+}
+
+/** Short token count for the status bar: 9.1k / 1.0M. */
+function formatUsage(usage: { used: number; size: number }): string {
+  const short = (value: number): string => {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+    return String(value);
+  };
+  return `${short(usage.used)} / ${short(usage.size)}`;
+}
+
+/**
+ * One ACP configuration option as a select (model, reasoning effort, …).
+ * The option's values are opaque; the label comes from the agent's catalog,
+ * grouped when the agent groups them (DSH groups models by provider).
+ */
+function ConfigPicker({
+  option,
+  disabled,
+  onChange,
+}: {
+  option: AcpConfigOption;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const entries = optionEntries(option);
+  if (entries.length === 0) {
+    // A free-form option we cannot render as a list still shows its value.
+    return (
+      <span className="acp-config-static mono" title={option.name}>
+        {option.currentValue}
+      </span>
+    );
+  }
+  const grouped = entries.some((entry) => entry.group !== undefined);
+  return (
+    <label className="acp-config" title={option.description ?? option.name}>
+      <select
+        className="acp-config-select"
+        value={option.currentValue}
+        disabled={disabled}
+        aria-label={option.name}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {grouped ? (
+          Array.from(new Set(entries.map((entry) => entry.group ?? "Other"))).map((group) => (
+            <optgroup key={group} label={group}>
+              {entries
+                .filter((entry) => (entry.group ?? "Other") === group)
+                .map((entry) => (
+                  <option key={entry.value} value={entry.value}>
+                    {entry.name}
+                  </option>
+                ))}
+            </optgroup>
+          ))
+        ) : (
+          entries.map((entry) => (
+            <option key={entry.value} value={entry.value}>
+              {entry.name}
+            </option>
+          ))
+        )}
+      </select>
+    </label>
+  );
+}
+
 function jsonText(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2) ?? "";
@@ -161,6 +281,18 @@ export function AcpChat({ sessionId }: AcpChatProps) {
   const [status, setStatus] = useState<string | null>(null);
   /** Whether a turn is in flight — the composer is locked while it is. */
   const [running, setRunning] = useState(false);
+  /** Whether the server currently owns an agent process for this session. */
+  const [live, setLive] = useState<boolean | null>(null);
+  /** A saved agent session exists; the chat can ask the server to resume it. */
+  const [canResume, setCanResume] = useState(false);
+  /** False when the transcript predates persistence (or was never written). */
+  const [hasTranscript, setHasTranscript] = useState(false);
+  /** A resume handshake is in flight. */
+  const [resuming, setResuming] = useState(false);
+  /** ACP-advertised configuration (model, reasoning effort, …). */
+  const [configOptions, setConfigOptions] = useState<AcpConfigOption[]>([]);
+  /** Last reported context usage, for the status line. */
+  const [usage, setUsage] = useState<{ used: number; size: number } | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
   /** Requests already answered locally: buttons stay disabled until replay. */
@@ -199,6 +331,12 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           setAnswered({});
           setStatus(frame.status);
           setRunning(frame.running);
+          setLive(frame.live !== false);
+          setCanResume(frame.canResume === true);
+          setHasTranscript(frame.hasTranscript === true);
+          setResuming(frame.resuming === true);
+          if (Array.isArray(frame.configOptions)) setConfigOptions(frame.configOptions);
+          setUsage(frame.usage ?? null);
           break;
         case "agent_item":
           clearError();
@@ -215,6 +353,18 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           clearError();
           setStatus(frame.status);
           setRunning(frame.running);
+          setLive(frame.live !== false);
+          setCanResume(frame.canResume === true);
+          // Another tab may be the one resuming; reflect the server's flag.
+          if (typeof frame.resuming === "boolean") setResuming(frame.resuming);
+          else if (frame.live !== false) setResuming(false);
+          break;
+        case "agent_composer":
+          setLive(frame.live !== false);
+          setCanResume(frame.canResume === true);
+          if (typeof frame.resuming === "boolean") setResuming(frame.resuming);
+          if (Array.isArray(frame.configOptions)) setConfigOptions(frame.configOptions);
+          setUsage(frame.usage ?? null);
           break;
         case "agent_permission":
           clearError();
@@ -233,6 +383,7 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           showError(frame.code ? `${frame.message} (${frame.code})` : frame.message);
           // "busy" only rejects a prompt while a turn is still running.
           if (frame.code !== "kanban-agent-busy") setRunning(false);
+          setResuming(false);
           break;
       }
     };
@@ -265,6 +416,7 @@ export function AcpChat({ sessionId }: AcpChatProps) {
     socket.onclose = () => {
       if (disposed) return;
       setRunning(false);
+      setResuming(false);
       // A close after an error frame is that error; a plain close is a detach.
       setLink(errorRef.current === null ? "closed" : "error");
     };
@@ -299,16 +451,40 @@ export function AcpChat({ sessionId }: AcpChatProps) {
     stickRef.current = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
   };
 
-  const pill = pillState(link, running, status);
-  const dead = link === "error" || link === "closed" || pill === "exited";
-  const live = link === "open" && !dead;
-  const canPrompt = live && !running && draft.trim().length > 0;
+  const pill = pillState(link, running, status, live);
+  const attached = link === "open";
+  const liveNow = attached && live === true;
+  const paused = attached && live === false;
+  const resumable = paused && canResume;
+  const dead = link === "error" || link === "closed";
+  /**
+   * A paused chat still takes input: the server attaches the agent on the
+   * first prompt (resume, or a fresh session when nothing is saved), which is
+   * what a TUI or DSH Desktop does when you keep typing after it stopped.
+   * Only a disconnected socket or a running turn blocks the composer.
+   */
+  const canType = attached && !resuming && !running;
+  const canPrompt = canType && draft.trim().length > 0;
 
   const submit = () => {
     const text = draft.trim();
-    if (!text || !live || running) return;
+    if (!text || !canType) return;
     send({ type: "prompt", text });
     setDraft("");
+    if (paused) setResuming(true);
+  };
+
+  const requestResume = () => {
+    if (!paused || resuming) return;
+    setResuming(true);
+    send({ type: "resume" });
+  };
+
+  const changeConfig = (configId: string, value: string) => {
+    setConfigOptions((current) =>
+      current.map((option) => (option.id === configId ? { ...option, currentValue: value } : option))
+    );
+    send({ type: "set_config", configId, value });
   };
 
   const onDraftKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -334,9 +510,26 @@ export function AcpChat({ sessionId }: AcpChatProps) {
         <span className={`acp-state ${pill}`}>{PILL_LABEL[pill]}</span>
         {running && <span className="spinner" aria-hidden />}
         <span className="acp-note">DSH · interactive session</span>
-        {live && (
+        {configOptions.map((option) => (
+          <ConfigPicker
+            key={option.id}
+            option={option}
+            disabled={!liveNow || running}
+            onChange={(value) => changeConfig(option.id, value)}
+          />
+        ))}
+        {usage && (
+          <span
+            className="acp-usage mono"
+            title={`${usage.used.toLocaleString()} of ${usage.size.toLocaleString()} tokens in context`}
+          >
+            {formatUsage(usage)}
+          </span>
+        )}
+        <span className="acp-bar-spacer" />
+        {liveNow && (
           <button
-            className="small acp-bar-stop"
+            className="small"
             title="Stop the agent process for this card"
             onClick={() => send({ type: "stop" })}
           >
@@ -350,7 +543,9 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           <div className="acp-empty muted">Connecting to the session…</div>
         )}
         {timeline.length === 0 && link === "open" && (
-          <div className="acp-empty muted">No messages yet.</div>
+          <div className="acp-empty muted">
+            {paused ? "No saved messages for this session." : "No messages yet."}
+          </div>
         )}
         {timeline.map((entry) =>
           entry.kind === "item" ? (
@@ -360,7 +555,7 @@ export function AcpChat({ sessionId }: AcpChatProps) {
               key={entry.key}
               request={entry.request}
               answered={entry.request.requestId in answered}
-              disabled={dead}
+              disabled={!liveNow}
               onAnswer={(optionId) => answerPermission(entry.request, optionId)}
             />
           )
@@ -375,8 +570,24 @@ export function AcpChat({ sessionId }: AcpChatProps) {
         )}
         {dead && (
           <div className="acp-dead">
-            This session is not live in this server process — start a new session from the card
-            actions.
+            The chat connection closed — reopen the card to see this session again.
+          </div>
+        )}
+        {paused && (
+          <div className="acp-paused">
+            <span>
+              {resuming
+                ? "Attaching the agent… your message will be sent when it is ready."
+                : resumable
+                  ? "This session is paused (the server restarted, or the agent exited). Just type: sending resumes the same conversation and keeps the agent's context."
+                  : "This session is not live and has no saved agent session — sending starts a fresh one."}
+              {!hasTranscript && !resuming && " No conversation was saved for it."}
+            </span>
+            {resumable && (
+              <button className="small primary" disabled={resuming} onClick={requestResume}>
+                {resuming ? "Resuming…" : "Resume now"}
+              </button>
+            )}
           </div>
         )}
         <textarea
@@ -384,9 +595,15 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           value={draft}
           rows={3}
           placeholder={
-            live ? "Reply to the agent…" : dead ? "Session is not live" : "Waiting for the session…"
+            liveNow
+              ? "Reply to the agent…"
+              : paused
+                ? "Type a message — sending resumes this session"
+                : dead
+                  ? "Chat is disconnected"
+                  : "Waiting for the session…"
           }
-          disabled={!live || running}
+          disabled={!canType}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onDraftKeyDown}
         />
@@ -394,9 +611,13 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           <span className="acp-hint">
             {running
               ? "The agent is working…"
-              : dead
-                ? ""
-                : "Enter to send · Shift+Enter for a new line"}
+              : paused
+                ? resuming
+                  ? "Attaching the agent…"
+                  : "Enter to send · resumes the saved session first"
+                : dead
+                  ? ""
+                  : "Enter to send · Shift+Enter for a new line"}
           </span>
           {running ? (
             <button

@@ -1657,7 +1657,17 @@ export interface KanbanCard {
   prompt: string;
   column: KanbanColumn;
   agentId: KanbanAgentKind;
+  /**
+   * Preferred model. PTY agents receive it as `--model <value>`; ACP agents
+   * map it onto their advertised `model` option (exact value, model id or
+   * display name). Absent = the agent's own default.
+   */
   model?: string;
+  /**
+   * ACP only: preferred `reasoning_effort` value. Applied before the session's
+   * first turn; a value the agent does not offer fails loudly.
+   */
+  reasoningEffort?: string;
   /** Permission mode id from the agent catalog; absent = agent default. */
   permissionModeId?: string;
   executionMode: KanbanExecutionMode;
@@ -1689,6 +1699,23 @@ export type KanbanSessionStatus =
  */
 export type KanbanSessionTransport = "pty" | "acp";
 
+/**
+ * The model route an ACP session actually runs on (v13). ACP advertises the
+ * choice as a `model` config option whose value is opaque to the protocol
+ * (DSH encodes `[provider, model]`); the board keeps both the opaque value it
+ * must send back and the two readable parts for display.
+ */
+export interface KanbanSessionModelRoute {
+  /** The `model` config option's value, verbatim (what set_config_option takes). */
+  value: string;
+  /** Provider id, when the agent's catalog exposes one. */
+  provider?: string;
+  /** Model id, when the agent's catalog exposes one. */
+  model?: string;
+  /** Display name from the catalog, e.g. "DeepSeek-V4-Pro". */
+  label?: string;
+}
+
 /** One attempt to run a card. The process itself is server memory. */
 export interface KanbanSession {
   id: ID;
@@ -1700,6 +1727,16 @@ export interface KanbanSession {
   status: KanbanSessionStatus;
   /** Harness-native session id when the CLI reported one (resume later). */
   nativeSessionId?: string;
+  /**
+   * ACP only: the model route the session is currently on, mirrored from the
+   * `model` config option. Absent until the handshake advertises one.
+   */
+  modelRoute?: KanbanSessionModelRoute;
+  /**
+   * ACP only: the requested `reasoning_effort` value, when the agent offers
+   * that option. Absent means the agent's default, never a guessed value.
+   */
+  reasoningEffort?: string;
   /** Whether the CLI runs an interactive TUI or one-shot output (DSH). */
   interactiveTui: boolean;
   /** How this session's bytes travel; see KanbanSessionTransport. */

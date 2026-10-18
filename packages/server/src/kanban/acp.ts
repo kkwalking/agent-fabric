@@ -33,6 +33,34 @@ export interface AcpPermissionRequest {
   at: string;
 }
 
+/**
+ * One `SessionConfigOption` as ACP advertises it: a `select` whose values are
+ * either a flat list or one level of groups (DSH groups models by provider).
+ * The board renders these as pickers and sends the chosen `value` back
+ * verbatim — the wire format is the agent's, not ours.
+ */
+export interface AcpConfigOptionValue {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+export interface AcpConfigOptionGroup {
+  group: string;
+  name?: string;
+  options: AcpConfigOptionValue[];
+}
+
+export interface AcpConfigOption {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  type: string;
+  currentValue: string;
+  options?: Array<AcpConfigOptionValue | AcpConfigOptionGroup>;
+}
+
 /** The subset of `session/update` the board renders; unknown fields pass through. */
 export interface AcpUpdate {
   sessionUpdate: string;
@@ -89,6 +117,10 @@ export class AcpSession extends EventEmitter {
   private nextId = 1;
   private closed = false;
   private sessionIdValue: string | undefined;
+  /** The agent advertised `session/resume` in its initialize response. */
+  private resumeCapable = false;
+  /** Latest configuration the agent advertised (model, reasoning effort, …). */
+  private configOptionList: AcpConfigOption[] = [];
   private readonly stderrTail: string[] = [];
 
   constructor(options: AcpSessionOptions) {
@@ -121,13 +153,23 @@ export class AcpSession extends EventEmitter {
     return this.sessionIdValue;
   }
 
+  /** Whether this ACP app can attach to a persisted session (`session/resume`). */
+  get supportsResume(): boolean {
+    return this.resumeCapable;
+  }
+
+  /** The configuration options as of the last advertised/updated state. */
+  get configOptions(): readonly AcpConfigOption[] {
+    return this.configOptionList;
+  }
+
   /** Last few stderr lines, for failure messages. */
   get stderr(): string {
     return this.stderrTail.join("\n");
   }
 
   async initialize(): Promise<void> {
-    await this.request(
+    const result = (await this.request(
       "initialize",
       {
         protocolVersion: 1,
@@ -140,11 +182,38 @@ export class AcpSession extends EventEmitter {
         clientInfo: { name: "agent-fabric", title: "AgentFabric", version: "0.1.0" },
       },
       INITIALIZE_TIMEOUT_MS
-    );
+    )) as
+      | { agentCapabilities?: { sessionCapabilities?: { resume?: unknown } } }
+      | undefined;
+    // Capability presence is the protocol's signal; an app that omits it must
+    // not be offered as resumable (the attempt would fail with a JSON-RPC
+    // "method not found" instead of a clear board message).
+    const resume = result?.agentCapabilities?.sessionCapabilities?.resume;
+    this.resumeCapable = resume !== undefined && resume !== null;
+  }
+
+  /**
+   * Attach to a session persisted by an earlier process. The agent restores
+   * the conversation log but does not replay it (that is `session/load`, which
+   * DSH does not implement); the board shows its own saved transcript and
+   * continues the same model context.
+   */
+  async resumeSession(sessionId: string, cwd: string): Promise<{ configOptions: AcpConfigOption[] }> {
+    if (!this.resumeCapable) {
+      throw new Error("This ACP app does not advertise session/resume");
+    }
+    const result = (await this.request(
+      "session/resume",
+      { sessionId, cwd, mcpServers: [] },
+      SESSION_TIMEOUT_MS
+    )) as { configOptions?: unknown } | undefined;
+    this.sessionIdValue = sessionId;
+    this.setConfigOptions(result?.configOptions);
+    return { configOptions: this.configOptionList };
   }
 
   /** Create a session for an absolute workspace and remember its id. */
-  async newSession(cwd: string): Promise<{ sessionId: string; configOptions?: unknown }> {
+  async newSession(cwd: string): Promise<{ sessionId: string; configOptions: AcpConfigOption[] }> {
     const result = (await this.request("session/new", { cwd, mcpServers: [] }, SESSION_TIMEOUT_MS)) as {
       sessionId?: unknown;
       configOptions?: unknown;
@@ -153,7 +222,8 @@ export class AcpSession extends EventEmitter {
       throw new Error("ACP session/new returned no sessionId");
     }
     this.sessionIdValue = result.sessionId;
-    return { sessionId: result.sessionId, configOptions: result.configOptions };
+    this.setConfigOptions(result.configOptions);
+    return { sessionId: result.sessionId, configOptions: this.configOptionList };
   }
 
   /**
@@ -177,10 +247,20 @@ export class AcpSession extends EventEmitter {
     this.notify("session/cancel", { sessionId });
   }
 
-  /** Change a model / reasoning effort selection advertised by the session. */
-  async setConfigOption(configId: string, value: string): Promise<void> {
+  /**
+   * Change a model / reasoning effort selection advertised by the session.
+   * ACP answers with the complete resulting option state, which is what the
+   * board keeps (a concurrent update from the agent wins by arriving last).
+   */
+  async setConfigOption(configId: string, value: string): Promise<AcpConfigOption[]> {
     const sessionId = this.requireSession();
-    await this.request("session/set_config_option", { sessionId, configId, value }, SESSION_TIMEOUT_MS);
+    const result = (await this.request(
+      "session/set_config_option",
+      { sessionId, configId, value },
+      SESSION_TIMEOUT_MS
+    )) as { configOptions?: unknown } | undefined;
+    this.setConfigOptions(result?.configOptions);
+    return this.configOptionList;
   }
 
   /**
@@ -230,6 +310,21 @@ export class AcpSession extends EventEmitter {
       }
     }, KILL_GRACE_MS);
     timer.unref();
+  }
+
+  /** Replaces the advertised state; malformed entries are dropped, not guessed. */
+  private setConfigOptions(value: unknown): void {
+    if (!Array.isArray(value)) return;
+    this.configOptionList = value.filter((option): option is AcpConfigOption => {
+      if (!option || typeof option !== "object") return false;
+      const entry = option as { id?: unknown; currentValue?: unknown; type?: unknown };
+      return (
+        typeof entry.id === "string" &&
+        entry.id !== "" &&
+        typeof entry.currentValue === "string" &&
+        typeof entry.type === "string"
+      );
+    });
   }
 
   private requireSession(): string {
@@ -305,6 +400,11 @@ export class AcpSession extends EventEmitter {
       if (message.method === "session/update") {
         const params = message.params as { update?: AcpUpdate } | undefined;
         if (params?.update && typeof params.update.sessionUpdate === "string") {
+          // A config change can be announced by the agent itself (a preset
+          // switch, a route fallback); keep our copy current before emitting.
+          if (params.update.sessionUpdate === "config_option_update") {
+            this.setConfigOptions(params.update.configOptions);
+          }
           this.emit("update", params.update);
         }
       }

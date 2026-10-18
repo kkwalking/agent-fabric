@@ -50,6 +50,17 @@ export function registerKanbanRoutes(
   const projectParams = (req: Request): ID => req.params.id as ID;
   const cardParams = (req: Request): ID => req.params.id as ID;
 
+  /**
+   * Deletes a card's records and the saved transcripts of its sessions
+   * together. The transcripts live beside the store, so nothing else would
+   * clean them up.
+   */
+  const deleteCardWithChats = async (cardId: ID): Promise<void> => {
+    const sessionIds = kanban.listSessions(cardId).map((session) => session.id);
+    await kanban.deleteCard(cardId);
+    await runtime.discardSessionChats(sessionIds);
+  };
+
   app.get(
     "/api/kanban/agents",
     ah(async (_req, res) => {
@@ -134,13 +145,16 @@ export function registerKanbanRoutes(
     "/api/kanban/projects/:id",
     ah(async (req, res) => {
       const projectId = projectParams(req);
+      const cards = kanban.listCards(projectId);
+      const sessionIds = cards.flatMap((card) => kanban.listSessions(card.id).map((session) => session.id));
       // Kill this project's live PTYs first: deleting records must not leave
       // orphaned agents writing into the user's directory.
-      for (const card of kanban.listCards(projectId)) {
+      for (const card of cards) {
         const session = kanban.latestSessionForCard(card.id);
         if (session && runtime.isLive(session.id)) await runtime.stop(session.id);
       }
       await kanban.deleteProject(projectId);
+      await runtime.discardSessionChats(sessionIds);
       res.json({ ok: true });
     })
   );
@@ -162,6 +176,7 @@ export function registerKanbanRoutes(
         prompt: req.body?.prompt,
         agentId: req.body?.agentId,
         model: req.body?.model,
+        reasoningEffort: req.body?.reasoningEffort,
         permissionModeId: req.body?.permissionModeId,
         executionMode: req.body?.executionMode,
         baseRef: req.body?.baseRef,
@@ -176,7 +191,7 @@ export function registerKanbanRoutes(
       const cardId = cardParams(req);
       const latest = kanban.latestSessionForCard(cardId);
       const running = latest ? runtime.isLive(latest.id) : false;
-      if (running && (req.body?.agentId !== undefined || req.body?.executionMode !== undefined || req.body?.model !== undefined || req.body?.permissionModeId !== undefined || req.body?.baseRef !== undefined)) {
+      if (running && (req.body?.agentId !== undefined || req.body?.executionMode !== undefined || req.body?.model !== undefined || req.body?.reasoningEffort !== undefined || req.body?.permissionModeId !== undefined || req.body?.baseRef !== undefined)) {
         throw new DomainError("kanban-session-not-startable", "Stop the session before changing its agent, model, permission, base ref or execution mode");
       }
       const card = await kanban.updateCard(cardId, {
@@ -184,6 +199,7 @@ export function registerKanbanRoutes(
         prompt: req.body?.prompt,
         agentId: req.body?.agentId,
         model: req.body?.model,
+        reasoningEffort: req.body?.reasoningEffort,
         permissionModeId: req.body?.permissionModeId,
         executionMode: req.body?.executionMode,
         baseRef: req.body?.baseRef,
@@ -204,7 +220,7 @@ export function registerKanbanRoutes(
       for (const card of cards) {
         const latest = kanban.latestSessionForCard(card.id);
         if (latest && runtime.isLive(latest.id)) await runtime.stop(latest.id);
-        await kanban.deleteCard(card.id);
+        await deleteCardWithChats(card.id);
       }
       res.json({ deleted: cards.length });
     })
@@ -230,7 +246,7 @@ export function registerKanbanRoutes(
       const cardId = cardParams(req);
       const latest = kanban.latestSessionForCard(cardId);
       if (latest && runtime.isLive(latest.id)) await runtime.stop(latest.id);
-      await kanban.deleteCard(cardId);
+      await deleteCardWithChats(cardId);
       res.json({ ok: true });
     })
   );

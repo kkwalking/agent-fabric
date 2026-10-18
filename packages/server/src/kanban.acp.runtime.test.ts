@@ -9,7 +9,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import { createServer } from "./app.js";
 
 const FAKE_DSH = String.raw`#!/usr/bin/env node
 import readline from "node:readline";
+import { appendFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
@@ -29,7 +30,35 @@ if (args.includes("--help")) {
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
 let promptId;
 let promptCount = 0;
+let resumed = false;
 const permissionId = 9001;
+// Mirrors DSH: models grouped by provider, effort as a flat select.
+const CATALOG = [
+  { value: '["deepseek-official","deepseek-v4-flash"]', name: "deepseek-v4-flash" },
+  { value: '["deepseek-official","deepseek-v4-pro"]', name: "DeepSeek-V4-Pro" },
+];
+const EFFORTS = ["off", "low", "high", "max"];
+let modelValue = CATALOG[0].value;
+let effortValue = "high";
+const configOptions = () => [
+  {
+    id: "model",
+    name: "Model",
+    type: "select",
+    currentValue: modelValue,
+    options: [{ group: "deepseek-official", name: "DeepSeek", options: CATALOG }],
+  },
+  {
+    id: "reasoning_effort",
+    name: "Reasoning effort",
+    type: "select",
+    currentValue: effortValue,
+    options: EFFORTS.map((effort) => ({ value: effort, name: effort })),
+  },
+];
+const simple = process.env.FAKE_DSH_SIMPLE === "1";
+const logFile = process.env.FAKE_DSH_LOG;
+const log = (line) => { if (logFile) appendFileSync(logFile, line + "\n"); };
 
 const update = (sessionId, value) =>
   send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: value } });
@@ -50,7 +79,21 @@ rl.on("line", (line) => {
     return;
   }
   if (message.method === "session/new") {
-    send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "fake-dsh-session" } });
+    log("new");
+    send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "fake-dsh-session", configOptions: configOptions() } });
+    return;
+  }
+  if (message.method === "session/resume") {
+    log("resume");
+    resumed = true;
+    send({ jsonrpc: "2.0", id: message.id, result: { configOptions: configOptions() } });
+    return;
+  }
+  if (message.method === "session/set_config_option") {
+    log("config " + message.params.configId + "=" + message.params.value);
+    if (message.params.configId === "model") modelValue = message.params.value;
+    if (message.params.configId === "reasoning_effort") effortValue = message.params.value;
+    send({ jsonrpc: "2.0", id: message.id, result: { configOptions: configOptions() } });
     return;
   }
   if (message.method === "session/close") {
@@ -68,6 +111,13 @@ rl.on("line", (line) => {
     promptId = message.id;
     promptCount += 1;
     const sessionId = message.params.sessionId;
+    update(sessionId, { sessionUpdate: "usage_update", used: 1200, size: 1000000 });
+    if (resumed || simple) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", messageId: "s" + promptCount, content: { type: "text", text: (resumed ? "resumed reply" : "first reply") + " on " + modelValue + " @" + effortValue } });
+      send({ jsonrpc: "2.0", id: promptId, result: { stopReason: "end_turn" } });
+      promptId = undefined;
+      return;
+    }
     if (promptCount === 1) {
       update(sessionId, { sessionUpdate: "agent_message_chunk", messageId: "m1", content: { type: "text", text: "working on it" } });
       send({
@@ -108,7 +158,15 @@ interface Harness {
   token: string;
   server: Server;
   shutdown: () => void;
+  /** Simulates a server restart on the same data directory and port. */
+  restart: () => Promise<void>;
   cleanup: () => Promise<void>;
+}
+
+interface BoundServer {
+  server: Server;
+  shutdown: () => void;
+  sockets: Set<Socket>;
 }
 
 async function getFreePort(): Promise<number> {
@@ -122,7 +180,30 @@ async function getFreePort(): Promise<number> {
   });
 }
 
-async function makeHarness(): Promise<Harness> {
+async function bindServer(dir: string, port: number): Promise<BoundServer> {
+  const { app, shutdown, upgrade } = await createServer({
+    dataDir: dir,
+    hookBaseUrl: `http://127.0.0.1:${port}/kanban-hooks/ingest`,
+  });
+  const server = createHttpServer(app);
+  const sockets = new Set<Socket>();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  server.on("upgrade", upgrade);
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  return { server, shutdown, sockets };
+}
+
+async function closeServer(bound: BoundServer): Promise<void> {
+  bound.shutdown();
+  for (const socket of bound.sockets) socket.destroy();
+  bound.server.closeAllConnections();
+  await new Promise<void>((resolve) => bound.server.close(() => resolve()));
+}
+
+async function makeHarness(options: { simple?: boolean } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "af-kanban-acp-runtime-"));
   const bin = join(dir, "bin");
   const project = join(dir, "project");
@@ -133,34 +214,39 @@ async function makeHarness(): Promise<Harness> {
   chmodSync(fakeDsh, 0o755);
 
   const previousPath = process.env.PATH;
+  const previousSimple = process.env.FAKE_DSH_SIMPLE;
+  const previousLog = process.env.FAKE_DSH_LOG;
   process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  process.env.FAKE_DSH_LOG = join(dir, "dsh.log");
+  if (options.simple) process.env.FAKE_DSH_SIMPLE = "1";
+  else delete process.env.FAKE_DSH_SIMPLE;
   try {
     const port = await getFreePort();
-    const { app, shutdown, upgrade } = await createServer({
-      dataDir: dir,
-      hookBaseUrl: `http://127.0.0.1:${port}/kanban-hooks/ingest`,
-    });
-    const server = createHttpServer(app);
-    const sockets = new Set<Socket>();
-    server.on("connection", (socket) => {
-      sockets.add(socket);
-      socket.on("close", () => sockets.delete(socket));
-    });
-    server.on("upgrade", upgrade);
-    await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+    let bound = await bindServer(dir, port);
     const token = readFileSync(join(dir, "token"), "utf8").trim();
     return {
       dir,
-      baseUrl: `http://127.0.0.1:${port}`,
       token,
-      server,
-      shutdown,
+      get baseUrl() {
+        return `http://127.0.0.1:${port}`;
+      },
+      get server() {
+        return bound.server;
+      },
+      get shutdown() {
+        return bound.shutdown;
+      },
+      restart: async () => {
+        await closeServer(bound);
+        bound = await bindServer(dir, port);
+      },
       cleanup: async () => {
-        shutdown();
-        for (const socket of sockets) socket.destroy();
-        server.closeAllConnections();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await closeServer(bound);
         process.env.PATH = previousPath;
+        if (previousSimple === undefined) delete process.env.FAKE_DSH_SIMPLE;
+        else process.env.FAKE_DSH_SIMPLE = previousSimple;
+        if (previousLog === undefined) delete process.env.FAKE_DSH_LOG;
+        else process.env.FAKE_DSH_LOG = previousLog;
         rmSync(dir, { recursive: true, force: true });
       },
     };
@@ -277,8 +363,10 @@ test("a DSH card runs an interactive ACP turn, answers permission, continues, an
       `/api/kanban/cards/${card.id}/start`,
       {}
     );
-    // The record exists before the handshake; a card opened that early gets a
-    // snapshot and a refusal for prompts instead of a phantom user turn.
+    // The record exists before the handshake. A card opened that early gets a
+    // snapshot; a prompt then waits for the attach instead of inventing a
+    // second turn (the old "still starting" rejection would now be a lie: the
+    // composer accepts input while the agent attaches).
     let earlyId: string | undefined;
     for (let i = 0; i < 100 && !earlyId; i += 1) {
       const current = await api<{ session: { id: string } | null }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
@@ -288,9 +376,6 @@ test("a DSH card runs an interactive ACP turn, answers permission, continues, an
     assert.ok(earlyId);
     const earlySocket = await openAgentSocket(h, earlyId!);
     await earlySocket.waitFor((frame) => frame.type === "agent_snapshot");
-    earlySocket.send({ type: "prompt", text: "too early" });
-    const earlyError = await earlySocket.waitFor((frame) => frame.type === "agent_error");
-    assert.equal(earlyError.code, "kanban-agent-starting");
     earlySocket.close();
 
     const { session } = await startPromise;
@@ -356,18 +441,221 @@ test("a DSH card runs an interactive ACP turn, answers permission, continues, an
     assert.equal(stopped.session.status, "stopped");
     await socket.closed;
 
-    const dead = new WebSocket(
-      `ws://127.0.0.1:${new URL(h.baseUrl).port}/api/kanban/sessions/${encodeURIComponent(session.id)}/agent`,
-      { headers: { authorization: `Bearer ${h.token}` } }
-    );
-    const frames: Array<Record<string, unknown>> = [];
-    dead.on("message", (raw) => frames.push(JSON.parse(raw.toString()) as Record<string, unknown>));
-    await new Promise<void>((resolve) => {
-      dead.once("close", () => resolve());
-      dead.once("error", () => resolve());
+    // Reopening the stopped card replays the saved transcript from disk and
+    // offers to resume the agent's own session instead of failing to attach.
+    const replay = await openAgentSocket(h, session.id);
+    const stoppedSnapshot = await replay.waitFor((frame) => frame.type === "agent_snapshot");
+    assert.equal(stoppedSnapshot.status, "stopped");
+    assert.equal(stoppedSnapshot.live, false);
+    assert.equal(stoppedSnapshot.canResume, true);
+    assert.equal(stoppedSnapshot.hasTranscript, true);
+    const replayed = itemsOf(replay);
+    assert.equal(replayed.filter((item) => item.kind === "user").length, 2);
+    assert.match(replayed.filter((item) => item.kind === "agent").map((item) => item.text).join(""), /second reply/);
+    replay.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a restarted server replays the saved transcript and resumes the ACP session", { timeout: 60_000 }, async () => {
+  const h = await makeHarness({ simple: true });
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
     });
-    const error = frames.find((frame) => frame.type === "agent_error");
-    assert.equal(error?.code, "kanban-session-not-live");
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "first turn",
+      agentId: "dsh",
+    });
+    const { session } = await api<{ session: { id: string; status: string } }>(
+      h,
+      "POST",
+      `/api/kanban/cards/${card.id}/start`,
+      {}
+    );
+
+    // Attach while the first turn runs: the status frame is emitted after the
+    // turn-end transcript flush, so it also tells us the file is on disk.
+    const first = await openAgentSocket(h, session.id);
+    const firstSnapshot = await first.waitFor((frame) => frame.type === "agent_snapshot");
+    assert.equal(firstSnapshot.live, true);
+    await first.waitFor(
+      (frame) => frame.type === "agent_status" && frame.status === "awaiting_review",
+      20_000
+    );
+    const before = itemsOf(first);
+    assert.match(before.filter((item) => item.kind === "agent").map((item) => item.text).join(""), /first reply/);
+    const running = await api<{ session: { nativeSessionId?: string } }>(
+      h,
+      "GET",
+      `/api/kanban/cards/${card.id}/session`
+    );
+    assert.equal(running.session.nativeSessionId, "fake-dsh-session");
+    first.close();
+
+    // The turn end flushed the transcript to disk.
+    const chatFile = join(h.dir, "kanban-chats", `${session.id}.json`);
+    assert.equal(existsSync(chatFile), true);
+
+    // Restart: processes die, records become interrupted, the file stays.
+    await h.restart();
+    const interrupted = await api<{ session: { status: string } }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
+    assert.equal(interrupted.session.status, "interrupted");
+
+    const replay = await openAgentSocket(h, session.id);
+    const replaySnapshot = await replay.waitFor((frame) => frame.type === "agent_snapshot");
+    assert.equal(replaySnapshot.live, false);
+    assert.equal(replaySnapshot.canResume, true);
+    assert.equal(replaySnapshot.hasTranscript, true);
+    assert.equal(replaySnapshot.status, "interrupted");
+    assert.deepEqual(
+      itemsOf(replay).map((item) => item.kind),
+      before.map((item) => item.kind)
+    );
+
+    // A prompt on the paused chat attaches first (resume), then runs as a
+    // normal turn — the TUI/Desktop behaviour, not a dead-ended composer.
+    // "second turn" must be answered by the resumed agent, i.e. wait for the
+    // resumed reply itself rather than any status frame that happens to match.
+    const typedSent = replay.frames.length;
+    replay.send({ type: "prompt", text: "second turn" });
+    await replay.waitFor(
+      (frame) =>
+        frame.type === "agent_item" &&
+        String((frame.item as { text?: string }).text ?? "").includes("resumed reply"),
+      20_000,
+      typedSent
+    );
+    await replay.waitFor(
+      (frame) => frame.type === "agent_status" && frame.status === "awaiting_review",
+      20_000,
+      typedSent
+    );
+    assert.match(readFileSync(join(h.dir, "dsh.log"), "utf8"), /resume/);
+    const afterTyped = itemsOf(replay);
+    assert.equal(afterTyped.filter((item) => item.kind === "user").length, 2);
+    assert.match(afterTyped.filter((item) => item.kind === "agent").map((item) => item.text).join(""), /resumed reply/);
+    const afterResume = await api<{ session: { status: string } }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
+    assert.equal(afterResume.session.status, "awaiting_review");
+    replay.close();
+
+    // A second restart still finds both turns in the saved transcript.
+    await h.restart();
+    const again = await openAgentSocket(h, session.id);
+    const againSnapshot = await again.waitFor((frame) => frame.type === "agent_snapshot");
+    assert.equal(againSnapshot.hasTranscript, true);
+    assert.equal(againSnapshot.canResume, true);
+    const finalItems = itemsOf(again);
+    assert.equal(finalItems.filter((item) => item.kind === "user").length, 2);
+    assert.match(finalItems.filter((item) => item.kind === "agent").map((item) => item.text).join(""), /resumed reply/);
+    again.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a card's model and reasoning effort are applied before the first turn", { timeout: 40_000 }, async () => {
+  const h = await makeHarness({ simple: true });
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    // The model is given as a display name; the board maps it onto the value
+    // the agent advertises and applies it before the prompt.
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "first turn",
+      agentId: "dsh",
+      model: "DeepSeek-V4-Pro",
+      reasoningEffort: "max",
+    });
+    const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+
+    const chat = await openAgentSocket(h, session.id);
+    await chat.waitFor((frame) => frame.type === "agent_snapshot");
+    // Wait for the first turn to settle before reading the record.
+    await chat.waitFor(
+      (frame) => frame.type === "agent_status" && frame.status === "awaiting_review",
+      20_000
+    );
+    // The turn answered on the selected route, and the record mirrors it.
+    const record = await api<{
+      session: { modelRoute?: { value: string; provider?: string; model?: string; label?: string }; reasoningEffort?: string };
+    }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
+    assert.equal(record.session.modelRoute?.model, "deepseek-v4-pro");
+    assert.equal(record.session.modelRoute?.provider, "deepseek-official");
+    assert.equal(record.session.modelRoute?.label, "DeepSeek-V4-Pro");
+    assert.equal(record.session.reasoningEffort, "max");
+    assert.match(readFileSync(join(h.dir, "dsh.log"), "utf8"), /config model=\["deepseek-official","deepseek-v4-pro"\]/);
+    assert.match(readFileSync(join(h.dir, "dsh.log"), "utf8"), /config reasoning_effort=max/);
+    chat.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("the chat can switch model and effort on a live session", { timeout: 40_000 }, async () => {
+  const h = await makeHarness({ simple: true });
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "first turn",
+      agentId: "dsh",
+    });
+    const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    const chat = await openAgentSocket(h, session.id);
+    const snapshot = await chat.waitFor((frame) => frame.type === "agent_snapshot");
+    const options = snapshot.configOptions as Array<{ id: string; currentValue: string }>;
+    assert.deepEqual(options.map((option) => option.id), ["model", "reasoning_effort"]);
+    assert.equal(options[0]?.currentValue, '["deepseek-official","deepseek-v4-flash"]');
+
+    const since = chat.frames.length;
+    chat.send({ type: "set_config", configId: "model", value: '["deepseek-official","deepseek-v4-pro"]' });
+    const composer = await chat.waitFor((frame) => frame.type === "agent_composer", 10_000, since);
+    const changed = (composer.configOptions as Array<{ id: string; currentValue: string }>).find(
+      (option) => option.id === "model"
+    );
+    assert.equal(changed?.currentValue, '["deepseek-official","deepseek-v4-pro"]');
+    const record = await api<{ session: { modelRoute?: { model?: string } } }>(
+      h,
+      "GET",
+      `/api/kanban/cards/${card.id}/session`
+    );
+    assert.equal(record.session.modelRoute?.model, "deepseek-v4-pro");
+    chat.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a model the agent does not offer fails the start loudly", { timeout: 40_000 }, async () => {
+  const h = await makeHarness({ simple: true });
+  try {
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "first turn",
+      agentId: "dsh",
+      model: "no-such-model",
+    });
+    await assert.rejects(
+      () => api(h, "POST", `/api/kanban/cards/${card.id}/start`, {}),
+      /does not offer it/
+    );
+    const record = await api<{ session: { status: string; error?: string } }>(
+      h,
+      "GET",
+      `/api/kanban/cards/${card.id}/session`
+    );
+    assert.equal(record.session.status, "failed");
+    assert.match(record.session.error ?? "", /no-such-model/);
   } finally {
     await h.cleanup();
   }

@@ -106,7 +106,22 @@ export class AcpChatProjector {
   private currentAgentId: string | undefined;
   private currentThoughtId: string | undefined;
 
-  constructor(private readonly now: () => string = () => new Date().toISOString()) {}
+  /**
+   * `initialItems` restores a transcript persisted by an earlier server
+   * process. Item order is kept, and the counter restarts above every numeric
+   * id so a continued conversation cannot reuse one.
+   */
+  constructor(
+    private readonly now: () => string = () => new Date().toISOString(),
+    initialItems: readonly ChatItem[] = []
+  ) {
+    for (const item of initialItems) {
+      this.items.push(item);
+      this.byId.set(item.id, item);
+      const match = /:(\d+)$/.exec(item.id);
+      if (match) this.seq = Math.max(this.seq, Number(match[1]));
+    }
+  }
 
   get snapshot(): readonly ChatItem[] {
     return this.items;

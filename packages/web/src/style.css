@@ -3554,6 +3554,9 @@ button.stat.clickable:hover {
 .acp-state.disconnected::before {
   background: var(--dim);
 }
+.acp-state.paused::before {
+  background: var(--yellow);
+}
 .acp-state.error::before {
   background: var(--red);
 }
@@ -3563,9 +3566,40 @@ button.stat.clickable:hover {
 .acp-bar .spinner {
   margin-left: -2px;
 }
-/* The stop affordance sits at the far end of the status bar. */
-.acp-bar-stop {
-  margin-left: auto;
+/* Pushes the right-hand controls (usage, stop) to the far end. */
+.acp-bar-spacer {
+  flex: 1;
+}
+/* ACP config (model / reasoning effort) reads as a compact inline select. */
+.acp-config {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.acp-config-select {
+  max-width: 220px;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+}
+.acp-config-select:disabled {
+  opacity: 0.6;
+}
+.acp-config-static {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+}
+.acp-usage {
+  color: var(--dim);
+  font-size: 10.5px;
+  white-space: nowrap;
 }
 
 .acp-log {
@@ -3814,4 +3848,26 @@ button.stat.clickable:hover {
   color: var(--red);
   font-size: 11.5px;
   line-height: 1.45;
+}
+
+.acp-paused {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(154, 103, 0, 0.32);
+  border-radius: 8px;
+  background: rgba(154, 103, 0, 0.06);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.acp-paused > span {
+  flex: 1;
+  min-width: 0;
+}
+.acp-paused > button {
+  flex: none;
+  margin-top: 1px;
 }
