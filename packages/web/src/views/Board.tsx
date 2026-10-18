@@ -6,13 +6,13 @@ import {
   type DragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { ApiError, del, fmtTime, get, post, shortId } from "../api";
+import { ApiError, del, fmtTime, get, patch, post, shortId } from "../api";
 import { ErrorBox, Icon, Modal, StatusBadge } from "../components";
 import { AcpChat } from "../components/AcpChat";
 import { BoardTerminal } from "../components/BoardTerminal";
 import { AddProjectDialog } from "../components/board/AddProjectDialog";
-import { TaskCreateDialog } from "../components/board/TaskCreateDialog";
-import type { TaskCreateSubmissionOptions } from "../components/board/TaskCreateForm";
+import { TaskCreateDialog, TaskEditDialog } from "../components/board/TaskCreateDialog";
+import { initialFromDefaults, type TaskCreateSubmissionOptions } from "../components/board/TaskCreateForm";
 import type {
   BoardColumnId,
   ExecutionMode,
@@ -202,6 +202,12 @@ export function BoardView() {
   const [taskError, setTaskError] = useState<string | null>(null);
   const [createMore, setCreateMore] = useState(false);
 
+  // Clicking a Backlog card opens it as a form (the fork's behaviour); every
+  // other card opens its detail view. `editingCardId` is the card being edited.
+  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [detailSession, setDetailSession] = useState<KanbanSession | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -214,6 +220,7 @@ export function BoardView() {
 
   const selectedProject = projects?.find((project) => project.id === projectId) ?? null;
   const selectedCard = cards.find((card) => card.id === selectedCardId) ?? null;
+  const editingCard = cards.find((card) => card.id === editingCardId) ?? null;
   const taskDefaults = readTaskDefaults(selectedProject);
 
   // ---------- loading ----------
@@ -445,6 +452,7 @@ export function BoardView() {
     setCards([]);
     setSessions({});
     setSelectedCardId(null);
+    setEditingCardId(null);
     setActionError(null);
     setBoardError(null);
     setTaskDialogOpen(false);
@@ -610,6 +618,41 @@ export function BoardView() {
     }
   };
 
+  /**
+   * Saves the edit form back onto its Backlog card.
+   *
+   * The PATCH body is sent in full, including empty strings, so that clearing a
+   * field in the form really clears it on the card (an absent key means "leave
+   * alone", an empty one means "no longer set").
+   */
+  const saveCardEdit = async (card: KanbanCard, draft: TaskDraft) => {
+    const prompt = draft.prompts[0]?.trim();
+    if (!prompt) {
+      setEditError("A card needs a prompt.");
+      return;
+    }
+    setEditBusy(true);
+    setEditError(null);
+    try {
+      await patch<{ card: KanbanCard }>(`/api/kanban/cards/${encodeURIComponent(card.id)}`, {
+        prompt,
+        title: draft.title?.trim() ?? "",
+        agentId: draft.agentId,
+        model: draft.model ?? "",
+        reasoningEffort: draft.reasoningEffort ?? "",
+        permissionModeId: draft.permissionModeId ?? "",
+        executionMode: draft.executionMode,
+        baseRef: draft.executionMode === "worktree" ? (draft.baseRef ?? "") : "",
+      });
+      setEditingCardId(null);
+      await refreshNow();
+    } catch (error) {
+      setEditError(`Save failed: ${errText(error)}`);
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
   const openTaskDialog = useCallback(() => {
     setTaskError(null);
     setCreateMore(false);
@@ -629,7 +672,7 @@ export function BoardView() {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "c" && event.key !== "C") return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (taskDialogOpen || addProjectOpen || deletingProject || selectedCardId) return;
+      if (taskDialogOpen || addProjectOpen || deletingProject || selectedCardId || editingCardId) return;
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
@@ -639,7 +682,15 @@ export function BoardView() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [addProjectOpen, deletingProject, openTaskDialog, projectId, selectedCardId, taskDialogOpen]);
+  }, [
+    addProjectOpen,
+    deletingProject,
+    editingCardId,
+    openTaskDialog,
+    projectId,
+    selectedCardId,
+    taskDialogOpen,
+  ]);
 
   // ---------- drag & drop ----------
 
@@ -681,17 +732,37 @@ export function BoardView() {
 
   // ---------- new card ----------
 
+  /**
+   * A Backlog card is still being described, so clicking it edits it — the
+   * form it was created with, seeded from the card. Every other column opens
+   * the detail view (session, terminal/chat, metadata): once a session has
+   * been started the prompt is what the agent ran on, and the board does not
+   * rewrite that history.
+   */
   const openCard = (card: KanbanCard) => {
+    setActionError(null);
+    if (card.column === "backlog") {
+      setEditingCardId(card.id);
+      setEditError(null);
+      return;
+    }
     setSelectedCardId(card.id);
     setDetailSession(card.sessionId ? (sessions[card.id] ?? null) : null);
     setDetailError(null);
-    setActionError(null);
   };
 
   // A deleted card must not leave a dead overlay behind.
   useEffect(() => {
     if (selectedCardId && !selectedCard && cards.length > 0) setSelectedCardId(null);
   }, [cards, selectedCardId, selectedCard]);
+
+  // Same for the editor: a card that left Backlog (started or dragged away) or
+  // was deleted must close its form instead of writing to a stale record.
+  useEffect(() => {
+    if (editingCardId && cards.length > 0 && (!editingCard || editingCard.column !== "backlog")) {
+      setEditingCardId(null);
+    }
+  }, [cards, editingCard, editingCardId]);
 
   if (loading) {
     return (
@@ -934,13 +1005,30 @@ export function BoardView() {
           workspaceType={selectedProject.workspaceType}
           agents={agents ?? []}
           git={git}
-          defaults={taskDefaults}
+          initial={initialFromDefaults(taskDefaults, selectedProject.defaultExecutionMode ?? "direct")}
           busy={taskBusy}
           error={taskError}
           createMore={createMore}
           onCreateMoreChange={setCreateMore}
           onSubmit={(draft, options) => void createTasks(draft, options)}
           onClose={cancelTaskForm}
+        />
+      )}
+
+      {editingCard && selectedProject && (
+        <TaskEditDialog
+          key={editingCard.id}
+          card={editingCard}
+          workspaceType={selectedProject.workspaceType}
+          agents={agents ?? []}
+          git={git}
+          busy={editBusy}
+          error={editError}
+          onSubmit={(draft) => void saveCardEdit(editingCard, draft)}
+          onClose={() => {
+            setEditingCardId(null);
+            setEditError(null);
+          }}
         />
       )}
 

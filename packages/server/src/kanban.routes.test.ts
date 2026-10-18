@@ -575,6 +575,116 @@ test("cloning a Git URL adds the clone as a board project", async () => {
   }
 });
 
+/**
+ * Clicking a Backlog card edits it (v13 §七). The edit form sends the whole
+ * card back, including empty strings for fields the user cleared, so the PATCH
+ * contract below is what the board's Save button relies on: an absent key
+ * leaves a field alone, an empty one clears it, and an unknown agent or a
+ * prompt cleared to nothing fails loudly instead of being stored.
+ *
+ * A card that has left Backlog is not editable: once a session has run, its
+ * prompt and agent are the history the agent worked from, so the board opens
+ * it read-only and the server refuses the write.
+ */
+test("a Backlog card's edit form round-trips through PATCH, and only while it is editable", async () => {
+  const h = await makeHarness();
+  try {
+    const repo = join(h.dir, "edit-repo");
+    mkdirSync(repo);
+    initGitRepo(repo);
+    const branch = execFileSync("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: repo,
+    });
+    const { card } = await api<{ card: { id: string; title: string; column: string } }>(
+      h,
+      "POST",
+      `/api/kanban/projects/${project.id}/cards`,
+      { prompt: "first draft of the task", agentId: "claude" }
+    );
+    assert.equal(card.column, "backlog");
+
+    // The edit form seeds itself from the card, so every field it can change
+    // must be on the card the list endpoint returns.
+    const listed = await api<{ cards: Array<Record<string, unknown>> }>(
+      h,
+      "GET",
+      `/api/kanban/projects/${project.id}/cards`
+    );
+    for (const key of ["prompt", "title", "agentId", "executionMode", "column"]) {
+      assert.ok(key in listed.cards[0]!, `card JSON is missing ${key}`);
+    }
+
+    // A full save: prompt, title, agent, execution mode and base ref.
+    const { card: edited } = await api<{ card: Record<string, any> }>(
+      h,
+      "PATCH",
+      `/api/kanban/cards/${card.id}`,
+      {
+        prompt: "  the task, rewritten  ",
+        title: "A clearer title",
+        agentId: "claude",
+        model: "",
+        reasoningEffort: "",
+        permissionModeId: "",
+        executionMode: "worktree",
+        baseRef: branch,
+      }
+    );
+    assert.equal(edited.prompt, "  the task, rewritten  ");
+    assert.equal(edited.title, "A clearer title");
+    assert.equal(edited.executionMode, "worktree");
+    assert.equal(edited.baseRef, branch);
+    assert.equal(edited.model, undefined, "an empty model clears it");
+    assert.equal(edited.column, "backlog");
+
+    // Empty strings clear optional fields instead of storing "".
+    const { card: cleared } = await api<{ card: Record<string, any> }>(
+      h,
+      "PATCH",
+      `/api/kanban/cards/${card.id}`,
+      { executionMode: "direct", baseRef: "" }
+    );
+    assert.equal(cleared.baseRef, undefined);
+    assert.equal(cleared.executionMode, "direct");
+
+    // An empty title is allowed: the board derives the display title again.
+    const { card: untitled } = await api<{ card: Record<string, any> }>(
+      h,
+      "PATCH",
+      `/api/kanban/cards/${card.id}`,
+      { title: "" }
+    );
+    assert.equal(untitled.title, "");
+
+    // Failures are loud, not silently ignored.
+    const emptyPrompt = await rawApi(h, "PATCH", `/api/kanban/cards/${card.id}`, { prompt: "   " });
+    assert.equal(emptyPrompt.status, 409);
+    assert.equal(emptyPrompt.data.code, "kanban-session-not-startable");
+    const unknownAgent = await rawApi(h, "PATCH", `/api/kanban/cards/${card.id}`, { agentId: "nope" });
+    assert.equal(unknownAgent.status, 400);
+    assert.equal(unknownAgent.data.code, "kanban-agent-unknown");
+
+    // A started card is no longer editable: the session owns what it ran on.
+    await api(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+    const afterStart = await rawApi(h, "PATCH", `/api/kanban/cards/${card.id}`, {
+      prompt: "rewrite after the agent ran",
+    });
+    assert.equal(afterStart.status, 409);
+    const unchanged = await api<{ cards: Array<{ id: string; prompt: string }> }>(
+      h,
+      "GET",
+      `/api/kanban/projects/${project.id}/cards`
+    );
+    assert.equal(unchanged.cards[0]?.prompt, "  the task, rewritten  ");
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("a worktree card checks out its base ref, and an unknown ref fails loudly", async () => {
   const h = await makeHarness();
   try {
