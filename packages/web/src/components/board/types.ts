@@ -29,6 +29,8 @@ export interface KanbanAgent {
   available: boolean;
   installHint: string;
   interactiveTui: boolean;
+  /** `pty` = raw terminal (Claude/Pi/OpenCode); `acp` = structured chat (DSH). */
+  transport: "pty" | "acp";
   permissionModes: KanbanAgentPermissionMode[];
   modelFlag: string | null;
 }
@@ -78,6 +80,39 @@ export interface KanbanSession {
   exitCode?: number;
   error?: string;
   interactiveTui: boolean;
+  /** Drives which detail panel the card gets: xterm for `pty`, AcpChat for `acp`. */
+  transport: "pty" | "acp";
+}
+
+/* ---------- DSH chat (protocol: /api/kanban/sessions/:id/agent WS) ---------- */
+
+/** One entry of the replayed/streamed conversation; server upserts by `id`. */
+export type ChatItem =
+  | { id: string; kind: "user"; text: string; at: string }
+  | { id: string; kind: "agent"; text: string; at: string }
+  | { id: string; kind: "reasoning"; text: string; at: string }
+  | {
+      id: string;
+      kind: "tool";
+      toolCallId: string;
+      title: string;
+      toolKind?: string;
+      status: "running" | "done" | "error";
+      input?: unknown;
+      output?: string;
+      error?: string;
+      at: string;
+    }
+  | { id: string; kind: "error"; message: string; at: string };
+
+/** A tool call the agent wants the user to approve over the ACP socket. */
+export interface PermissionRequest {
+  requestId: string;
+  title: string;
+  toolCallId?: string;
+  /** `kind` ≈ allow_once / allow_always / reject_once / reject_always. */
+  options: Array<{ optionId: string; name: string; kind: string }>;
+  at: string;
 }
 
 export interface KanbanDirectoryEntry {

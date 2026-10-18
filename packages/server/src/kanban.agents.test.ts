@@ -27,23 +27,29 @@ function card(agentId: KanbanAgentKind, extra: Partial<KanbanCard> = {}): Kanban
   };
 }
 
-test("DSH launches its headless profile, not a bare binary", () => {
+test("DSH launches the ACP app and carries the prompt over the protocol", () => {
   const launch = buildKanbanLaunch(card("dsh"), project);
   assert.equal(launch.file, "dsh");
-  // The CLI treats the first positional as the profile: `dsh <profile>`. A bare
-  // `dsh -- <prompt>` exits with "--profile <name> is required" (the bug this
-  // test pins down).
-  assert.deepEqual(launch.args, ["--profile", "headless", "--", "fix the failing test"]);
+  // DSH has no TUI; the board drives its ACP stdio app. The prompt is a
+  // protocol request after the handshake, never an argv element.
+  assert.deepEqual(launch.args, ["--profile", "acp"]);
+  assert.equal(launch.transport, "acp");
   assert.equal(launch.interactiveTui, false);
   assert.equal(launch.env.AGENTFABRIC_KANBAN_CARD_ID, "kbcard_test");
 });
 
-test("DSH ignores the card's permission choice and model", () => {
+test("DSH ignores the card's model; its permission choice is runtime policy, not argv", () => {
   const launch = buildKanbanLaunch(
     card("dsh", { permissionModeId: "auto", model: "group/flash" }),
     project
   );
-  assert.deepEqual(launch.args, ["--profile", "headless", "--", "fix the failing test"]);
+  assert.deepEqual(launch.args, ["--profile", "acp"]);
+  const dsh = getKanbanAgent("dsh");
+  assert.equal(dsh.transport, "acp");
+  assert.deepEqual(
+    dsh.permissionModes.map((mode) => mode.id),
+    ["default", "auto"]
+  );
 });
 
 test("Claude Code takes a positional prompt and its model flag", () => {

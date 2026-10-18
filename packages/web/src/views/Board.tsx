@@ -8,6 +8,7 @@ import {
 } from "react";
 import { ApiError, del, fmtTime, get, post, shortId } from "../api";
 import { ErrorBox, Icon, Modal, StatusBadge } from "../components";
+import { AcpChat } from "../components/AcpChat";
 import { BoardTerminal } from "../components/BoardTerminal";
 import { AddProjectDialog } from "../components/board/AddProjectDialog";
 import { TaskCreateDialog } from "../components/board/TaskCreateDialog";
@@ -1201,6 +1202,8 @@ function CardDetail({
   const [sideWidth, setSideWidth] = useState(() => readStoredSideWidth());
   const bodyRef = useRef<HTMLDivElement>(null);
   const agentLabel = agents.find((agent) => agent.id === card.agentId)?.label ?? card.agentId;
+  // DSH sessions speak the structured ACP chat; every other agent keeps xterm.
+  const acpSession = session?.transport === "acp";
 
   useEffect(() => {
     try {
@@ -1416,7 +1419,9 @@ function CardDetail({
               {card.column === "review" && (
                 <div className="board-hint">
                   {sessionLive
-                    ? "This card is in Review. Continue the agent in the terminal — a new turn moves it back to In Progress automatically."
+                    ? acpSession
+                      ? "This card is in Review. Continue the agent in the chat — a new turn moves it back to In Progress automatically."
+                      : "This card is in Review. Continue the agent in the terminal — a new turn moves it back to In Progress automatically."
                     : "This card is in Review. Start a new session to keep working on it; the card moves back to In Progress."}
                 </div>
               )}
@@ -1445,11 +1450,15 @@ function CardDetail({
 
           <section className="board-detail-term">
             {session ? (
-              <BoardTerminal
-                key={session.id}
-                sessionId={session.id}
-                interactive={session.interactiveTui}
-              />
+              acpSession ? (
+                <AcpChat key={session.id} sessionId={session.id} />
+              ) : (
+                <BoardTerminal
+                  key={session.id}
+                  sessionId={session.id}
+                  interactive={session.interactiveTui}
+                />
+              )
             ) : (
               <div className="board-term-empty">
                 <div className="board-term-empty-title">No session for this card yet.</div>

@@ -134,7 +134,7 @@ test("a session moves its card to in_progress; a clean finish moves it to review
   try {
     const project = await service.createProject({ rootPath: projectDir });
     const card = await service.createCard(project.id, { prompt: "p", agentId: "claude" });
-    const session = await service.createSession(card, { cwd: projectDir, interactiveTui: true });
+    const session = await service.createSession(card, { cwd: projectDir, interactiveTui: true, transport: "pty" });
     assert.equal(service.getCard(card.id).column, "in_progress");
     assert.equal(service.getCard(card.id).sessionId, session.id);
 
@@ -153,7 +153,7 @@ test("restart recovery marks live sessions interrupted instead of pretending the
   try {
     const project = await service.createProject({ rootPath: projectDir });
     const card = await service.createCard(project.id, { prompt: "p", agentId: "claude" });
-    const session = await service.createSession(card, { cwd: projectDir, interactiveTui: true });
+    const session = await service.createSession(card, { cwd: projectDir, interactiveTui: true, transport: "pty" });
 
     const interrupted = await service.recoverInterrupted();
     assert.deepEqual(interrupted, [session.id]);
@@ -171,7 +171,7 @@ test("deleting a project removes its cards and sessions", async () => {
   try {
     const project = await service.createProject({ rootPath: projectDir });
     const card = await service.createCard(project.id, { prompt: "p", agentId: "claude" });
-    const session = await service.createSession(card, { cwd: projectDir, interactiveTui: true });
+    const session = await service.createSession(card, { cwd: projectDir, interactiveTui: true, transport: "pty" });
     await service.deleteProject(project.id);
     assert.equal(service.listProjects().length, 0);
     assert.equal(service.listCards(project.id).length, 0);
@@ -189,7 +189,7 @@ test("without hooks, an explicit in_progress → review move is the manual way t
   try {
     const project = await service.createProject({ rootPath: projectDir });
     const card = await service.createCard(project.id, { prompt: "p", agentId: "claude" });
-    await service.createSession(card, { cwd: projectDir, interactiveTui: true });
+    await service.createSession(card, { cwd: projectDir, interactiveTui: true, transport: "pty" });
     assert.equal(service.getCard(card.id).column, "in_progress");
 
     // Mark for review (v13 §六): allowed as an explicit action before hooks land.
@@ -212,8 +212,8 @@ test("multiple direct sessions can run in one project (no platform-wide writer l
     const project = await service.createProject({ rootPath: projectDir });
     const a = await service.createCard(project.id, { prompt: "a", agentId: "claude" });
     const b = await service.createCard(project.id, { prompt: "b", agentId: "claude" });
-    const sessionA = await service.createSession(a, { cwd: projectDir, interactiveTui: true });
-    const sessionB = await service.createSession(b, { cwd: projectDir, interactiveTui: true });
+    const sessionA = await service.createSession(a, { cwd: projectDir, interactiveTui: true, transport: "pty" });
+    const sessionB = await service.createSession(b, { cwd: projectDir, interactiveTui: true, transport: "pty" });
     assert.equal(service.getCard(a.id).column, "in_progress");
     assert.equal(service.getCard(b.id).column, "in_progress");
     assert.notEqual(sessionA.id, sessionB.id);

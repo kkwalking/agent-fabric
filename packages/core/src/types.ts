@@ -1681,7 +1681,15 @@ export type KanbanSessionStatus =
   | "interrupted"
   | "stopped";
 
-/** One PTY-backed attempt to run a card. The process itself is server memory. */
+/**
+ * How a board session talks to its agent (v13):
+ * - `pty`: the CLI owns an interactive TUI and its bytes go to xterm.
+ * - `acp`: AgentFabric drives the harness over Agent Client Protocol and
+ *   renders the conversation itself (DSH has no TUI to host).
+ */
+export type KanbanSessionTransport = "pty" | "acp";
+
+/** One attempt to run a card. The process itself is server memory. */
 export interface KanbanSession {
   id: ID;
   cardId: ID;
@@ -1694,6 +1702,8 @@ export interface KanbanSession {
   nativeSessionId?: string;
   /** Whether the CLI runs an interactive TUI or one-shot output (DSH). */
   interactiveTui: boolean;
+  /** How this session's bytes travel; see KanbanSessionTransport. */
+  transport: KanbanSessionTransport;
   /** Last harness hook event applied to this session, for debugging (v13 M3). */
   lastHookEvent?: string;
   lastHookAt?: string;

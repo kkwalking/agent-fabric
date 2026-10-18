@@ -386,7 +386,7 @@ export class KanbanService {
 
   async createSession(
     card: KanbanCard,
-    input: { cwd: string; interactiveTui: boolean }
+    input: { cwd: string; interactiveTui: boolean; transport: KanbanSession["transport"] }
   ): Promise<KanbanSession> {
     const session: KanbanSession = {
       id: newId("kbsess"),
@@ -396,6 +396,7 @@ export class KanbanService {
       executionMode: card.executionMode,
       status: "starting",
       interactiveTui: input.interactiveTui,
+      transport: input.transport,
       startedAt: now(),
     };
     await this.store.insert("kanbanSessions", session);

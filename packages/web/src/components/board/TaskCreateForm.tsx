@@ -366,7 +366,9 @@ export function TaskCreateForm({
               />
             </div>
           )}
-          {permissionModes.length > 1 && (
+          {/* One non-default mode is still a real choice (DSH Ask/Auto,
+              OpenCode Auto): hiding the select made it unreachable. */}
+          {permissionModes.length > 0 && (
             <div className="board-dialog-field">
               <label className="board-dialog-label" htmlFor="task-create-permission">
                 Permission mode

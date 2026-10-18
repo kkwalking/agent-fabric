@@ -681,3 +681,91 @@ test("clearing Done deletes only trashed card records", async () => {
     await h.cleanup();
   }
 });
+
+test("the agent chat socket shares the terminal socket's auth and transport guards", async () => {
+  const h = await makeHarness();
+  try {
+    // No token: the upgrade is rejected before any session logic runs.
+    await new Promise<void>((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${new URL(h.baseUrl).port}/api/kanban/sessions/nope/agent`);
+      ws.on("unexpected-response", (_req, res) => {
+        res.resume();
+        assert.equal(res.statusCode, 401);
+        resolve();
+      });
+      ws.on("error", () => resolve());
+      ws.on("open", () => {
+        ws.close();
+        assert.fail("unauthenticated agent socket opened");
+      });
+    });
+
+    // A valid token still cannot open a chat on a session that does not exist.
+    const unknown = await new Promise<string[]>((resolve) => {
+      const seen: string[] = [];
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${new URL(h.baseUrl).port}/api/kanban/sessions/does-not-exist/agent`,
+        { headers: { authorization: `Bearer ${h.token}` } }
+      );
+      ws.on("message", (raw) => seen.push(raw.toString()));
+      ws.on("close", () => resolve(seen));
+      ws.on("error", () => resolve(seen));
+    });
+    const notFound = unknown.map((frame) => JSON.parse(frame)).find((frame) => frame.type === "agent_error");
+    assert.equal(notFound?.code, "kanban-session-not-found");
+
+    // A PTY session is a terminal, not a chat: the agent socket says so
+    // instead of silently streaming nothing.
+    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "stay alive",
+      agentId: "claude",
+    });
+    const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    const frames = await new Promise<string[]>((resolve) => {
+      const seen: string[] = [];
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${new URL(h.baseUrl).port}/api/kanban/sessions/${session.id}/agent`,
+        { headers: { authorization: `Bearer ${h.token}` } }
+      );
+      ws.on("message", (raw) => seen.push(raw.toString()));
+      ws.on("close", () => resolve(seen));
+      ws.on("error", () => resolve(seen));
+    });
+    const wrongTransport = frames.map((frame) => JSON.parse(frame)).find((frame) => frame.type === "agent_error");
+    assert.equal(wrongTransport?.code, "kanban-session-not-agent");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a malformed session id in a socket upgrade is rejected without taking the server down", async () => {
+  const h = await makeHarness();
+  try {
+    await new Promise<void>((resolve) => {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${new URL(h.baseUrl).port}/api/kanban/sessions/%E0%A4%A/agent`,
+        { headers: { authorization: `Bearer ${h.token}` } }
+      );
+      ws.on("unexpected-response", (_req, res) => {
+        res.resume();
+        assert.equal(res.statusCode, 400);
+        resolve();
+      });
+      ws.on("error", () => resolve());
+      ws.on("open", () => {
+        ws.close();
+        assert.fail("malformed session id opened a socket");
+      });
+    });
+    // The upgrade listener ran inside the HTTP server; an exception there would
+    // have exited the process, so a healthy answer proves it was contained.
+    const health = await fetch(`${h.baseUrl}/api/health`);
+    assert.equal(health.status, 200);
+  } finally {
+    await h.cleanup();
+  }
+});

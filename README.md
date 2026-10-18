@@ -63,7 +63,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Source Credential | 独立于 Project 的 Git 凭据（HTTPS Token / SSH Private Key），敏感值走 Secrets，仅在单次 Git 操作期间临时materialize；公开仓库无需凭据 |
 | Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ **强制隔离 Runtime** → Agent → **完工 pin + 隔离 Validation Agent 判定**（不通过则返工闭环）→ Git Finalization（**冻结 final revision**）→ Publish（**只发布冻结 revision**）→ Cleanup；阶段与 agent/validation/finalization/publish 状态分别、单调地记录（validation 循环是单调性的唯一显式例外，见下文） |
 | Git Publish | 平台负责 commit 策略与 push：只推本 Task 的 working branch、绝不 force、保护分支拒推、push 结果以远端实际状态为准（可重试且幂等） |
-| Kanban（v13） | 四列看板（Backlog / In Progress / Review / Done）管理本地 Coding Agent CLI：BoardProject = 任意本地目录（folder-first、Git optional）、Card、PTY 终端会话、Direct / Worktree 执行、hooks 自动 Review、重启恢复；支持 Claude Code / Pi / OpenCode / DSH（headless） |
+| Kanban（v13） | 四列看板（Backlog / In Progress / Review / Done）管理本地 Coding Agent CLI：BoardProject = 任意本地目录（folder-first、Git optional）、Card、PTY 终端会话 / DSH ACP 交互聊天、Direct / Worktree 执行、hooks 与 ACP turn 自动 Review、重启恢复；支持 Claude Code / Pi / OpenCode / DSH（ACP） |
 | Runtime | OpenCode / Pi / Codex / Claude Code / DSH / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
 | Workspace | Managed Workspace（由 Project+Task 自动创建、Task 独占、durable）与 External Workspace（本地目录 / Git / Volume / 导入），持久化，与 Run 关联 |
@@ -105,7 +105,7 @@ npm run dev:web
 侧边栏按用途分组：
 
 * **Tasks / Dashboard** — 主要工作入口。Dashboard 汇总各资源数量、总成本，并提供 Deleted tasks 入口。
-* **Resources** — `Kanban`（v13：四列看板 + 本地 Agent 终端）、`Projects`（项目与 Coding Task 生命周期）、`LLM`（Provider 与 Model 列表及编辑）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
+* **Resources** — `Kanban`（v13：四列看板 + 本地 Agent 会话：终端 / DSH ACP 聊天）、`Projects`（项目与 Coding Task 生命周期）、`LLM`（Provider 与 Model 列表及编辑）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
 * **System** — `Runs`、`Usage`、`Proxy`、`Settings`。
 
 Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
@@ -119,13 +119,15 @@ Board 是独立于 Project Coding Task 的产品面：一个 **BoardProject** = 
 * **新建项目**：`Add project` 打开对话框，两种入口——**Server path**（服务端目录自动补全：逐级浏览本机目录，条目标注是否为 Git 仓库，支持 `~` 与直接输入绝对路径）或 **Git clone**（Git URL + Clone into + Folder name，目录名默认取仓库名，clone 到非空目录会明确报错）。选中的目录不是 Git 仓库时会先询问：**Add without Git**（纯目录也是合法 BoardProject）或 **Initialize Git repository**（`git init` + 初始 commit，让 Worktree 立即可用）。项目名默认取目录名；同一个目录不能重复添加。
 * **新建 Card**：Backlog 列顶部 **Create task**（快捷键 `c`）或页面右上 **New task** 打开创建对话框：prompt、可选标题（留空时从 prompt 首句自动生成）、Agent（Claude Code / Pi / OpenCode / DSH）、Model、Permission mode、Workspace（Direct / Worktree）与 Worktree base ref（列出项目的本地分支，默认当前分支）。`⌘/Ctrl+Enter` 创建，`⇧⌘/Ctrl+Enter` 创建并立即启动；勾选 **Create more** 时创建后对话框保留以便连续录入。一段编号或项目符号列表可 **Split into N tasks** 批量创建 / 批量启动。对话框用该项目上次的选择（agent / model / permission / workspace / base ref）预填；项目侧栏第一行用 `git` 标记 Git 项目（非 Git 项目不显示），路径下方用 `B | 1` / `IP | 1` / `R | 1` / `D | 1` 徽章显示四列卡片数（对齐 Cline kanban）。
 * **实时性**：看板自行保持近实时——卡片与各会话状态每 2s 轮询，项目列表与四列计数每 5s 刷新，切回标签页时立即补拉一次；因此页面上没有手动 refresh 按钮。
-* **卡片详情布局**：任务信息（Prompt + 元信息）默认折叠成左侧一条竖向细栏（`DETAILS`），点击展开；展开后与右侧终端之间的分隔条可拖动调整宽度比例（宽度记在浏览器本地），终端卡片上下不留空白、占满整个高度；左上角 ← 返回看板。
-* **本地 PTY**：用 `node-pty` 直接启动本机 Claude Code / Pi / OpenCode；DSH 走 `dsh --profile headless -- <prompt>`，终端展示 headless runner 的文本输出（官方没有交互 TUI）。卡片详情内嵌 xterm 终端，可输入、resize、stop / restart；关闭详情只是 detach，重新打开时服务端 replay 最近的 PTY 输出（不自动重连）。
+* **卡片详情布局**：任务信息（Prompt + 元信息）默认折叠成左侧一条竖向细栏（`DETAILS`），点击展开；展开后与右侧会话面板（终端或 ACP 聊天）之间的分隔条可拖动调整宽度比例（宽度记在浏览器本地），面板上下不留空白、占满整个高度；左上角 ← 返回看板。
+* **本地 PTY**：用 `node-pty` 直接启动本机 Claude Code / Pi / OpenCode，卡片详情内嵌 xterm 终端，可输入、resize、stop / restart；关闭详情只是 detach，重新打开时服务端 replay 最近的 PTY 输出（不自动重连）。
+* **DSH（ACP 聊天）**：DSH 没有交互 TUI，每张运行中的卡片起一个 `dsh --profile acp` 进程（ACP / Agent Client Protocol stdio），prompt 通过协议发送而不是 argv。卡片详情是 AgentFabric 自己渲染的聊天：assistant 消息（Markdown）、Thinking（默认折叠）、工具调用（状态点，可展开 input / output / error）、权限卡片与 composer；一个 turn 结束进程不退出，可以继续追问。聊天 WS 是 `GET /api/kanban/sessions/:sessionId/agent`（与终端 socket 同一套 `af_token` / loopback 规则，JSON 文本帧），关闭详情同样只是 detach，重新打开 replay 服务端内存里的记录（不自动重连）。
 * **执行模式**：Direct（直接在项目目录运行）或 Worktree（`git worktree add --detach <baseRef>` 切出独立工作树，源工作树不受影响）。每张 Worktree 卡片可指定 **base ref**（本地分支 / tag / commit，缺省 `HEAD`），仓库里不存在的 ref 会以 `base-ref-not-found` 明确失败。Worktree 只对「项目根自己就是 Git 仓库」的 BoardProject 开放；非 Git / multi-git / google-repo 只能用 Direct。**不实现** isolated 目录拷贝或 Docker 隔离，worktree 就是第一期的隔离手段。
 * **并发**：同一 BoardProject 允许多个 Direct 会话并行，平台不加写者锁；并发写冲突由 agent 自己处理（用户明确接受这一点）。
-* **状态流转**：Claude / OpenCode 通过 harness hooks 自动流转——`Stop` / `session.idle` → 卡片进 Review（PTY 保持可交互），`UserPromptSubmit` / `busy` → 回 In Progress，权限请求 → Needs Attention；用户往 Review 卡片的终端里输入也会自动回 In Progress。DSH 退出码 0 自动进 Review；Pi 没有 hooks，用卡片详情的 **Mark for review** 手动兜底（所有 agent 都保留该按钮）。
-* **重启恢复**：服务端退出后所有非终态 session 标记为 `interrupted`，卡片保留原列，用户可 restart；不自动重跑 agent。
-* **边界**：看板 agent 在宿主 PTY 中运行，**不经过** Project Coding Task 的隔离 Runtime；第一期没有 diff / review / commit / PR、依赖链与 auto-review。完整规格见 `specs/v13.md`。
+* **状态流转**：Claude / OpenCode 通过 harness hooks 自动流转——`Stop` / `session.idle` → 卡片进 Review（PTY 保持可交互），`UserPromptSubmit` / `busy` → 回 In Progress，权限请求 → Needs Attention；用户往 Review 卡片的终端里输入也会自动回 In Progress。DSH 走 ACP，不需要 hooks：一个 turn 以 `end_turn` 或 `cancelled` 结束即进 Review（**进程不退出**），在聊天里发新 prompt 就回 In Progress。Pi 没有 hooks，用卡片详情的 **Mark for review** 手动兜底（所有 agent 都保留该按钮）。
+* **DSH 权限模式**：`Ask` 时 ACP 的 `session/request_permission` 会以允许 / 拒绝卡片插进聊天、session 标为 `needs_attention`，答完回 `running`；`Auto-approve`（risky）直接选 ACP 给出的 allow 选项、不打断对话（没有 allow 选项时仍会询问）。
+* **重启恢复**：服务端退出后所有非终态 session 标记为 `interrupted`，卡片保留原列，用户可 restart；不自动重跑 agent。DSH 的聊天记录只在服务端内存，重启后旧卡片的聊天无法 attach（`nativeSessionId` 只记录、不续跑），restart 起的是新会话。
+* **边界**：看板 agent 作为宿主机子进程运行（PTY 或 ACP stdio），**不经过** Project Coding Task 的隔离 Runtime；第一期没有 diff / review / commit / PR、依赖链与 auto-review。完整规格见 `specs/v13.md`。
 
 ### Projects（`/projects`、`/projects/:id`、`/projects/:id/tasks/new`）
 
@@ -909,6 +911,8 @@ DSH 没有官方运行镜像，容器化执行需自备镜像（参考 `docker/d
 
 DSH 没有 headless 侧的系统提示词 flag，Agent Profile 的系统指令以前置块拼进任务文本交付（与 Codex 同法）。
 
+看板（Kanban）的 DSH 卡片走的是**另一条** DSH 路径：`dsh --profile acp` 以 ACP stdio 进程运行，由 AgentFabric 自己渲染对话（见「Kanban」一节），不产生 Run 事件、不经过这里的 headless 适配器；本节关于 headless profile、`--session-id` 采纳校验与容器化的描述都只适用于 Task / Run。
+
 ### 系统指令交付
 
 Agent Profile 的 `systemInstructions` 在创建 Run 时快照到 `run.systemInstructions`。没有 harness 侧系统提示词 flag 的 Runtime（Codex / DSH）把系统指令以前置块拼进任务文本交付。
@@ -925,7 +929,7 @@ Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）是本地 
 * **Claude Code Sessions（`kind: claude-code`）**：读本地 transcript `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`。
 * **ZCode Sessions（`kind: zcode`）**：ZCode 没有列出历史会话的官方命令，发现直接读本地会话库 `~/.zcode/cli/db/db.sqlite`（SQLite，只读打开，仅触碰 `session` / `message` / `part` 三张会话表）。只列主会话（`parent_id` 为空的分支子会话是内部簿记）；消息/部件按库内 `sequence` 列重建顺序；标题用 `session.title`；`Bash` 工具调用投影为命令行活动，`Write` / `Edit` 系投影为文件活动，其余按通用工具调用投影；compaction 摘要作为 reasoning 条目保留在原位。
 * **Pi Sessions（`kind: pi`）**：读 Pi 自己的 transcript（`~/.pi/agent/sessions/--<cwd>--/<时间戳>_<id>.jsonl`，可用 `AGENTFABRIC_PI_SESSIONS_DIR` 覆盖）——与 `pi --session` 恢复读的是同一批文件。首行 `{"type":"session",…}` 头是格式签名，无此头的 `.jsonl` 直接跳过；transcript 条目经 `id`/`parentId` 组成树，只读活动分支（末条目沿 parent 链走到根）；`session_info.name` 是标题（缺省回退首条用户输入），`model_change` 提供模型；`bash` 工具调用与其 `toolResult` 条目按 `toolCallId` 配对成命令行活动，compaction / branch 摘要投影为 reasoning 条目。
-* **DSH Sessions（`kind: dsh`）**：读 DSH 的会话事件日志（`$DSH_HOME/sessions`，默认 `~/.dsh/sessions`，可用 `AGENTFABRIC_DSH_SESSIONS_DIR` 覆盖）下 `<encoded-cwd>/<session-id>/session[.vN].jsonl[.zstd]`。存储是全局一棵树：DSH 的所有 surface——Desktop / Web / headless——写这同一个会话库，探测天然覆盖全部来源，无需按 profile 合并。会话头记录 `agentPreset`（可被会话中的 `agent-preset/selected` 事件改写），探测按 DSH 自己的算法重建出当前 preset 作为会话的 `source` 属性带出。标题取最后一个非空 `session/title` 事件——DSH 先落一条首条提问截断的占位标题（`source.kind: "fallback"`），生成的标题随后改写它；列表读到生成标题出现为止（512KB 解压预算兜底）。`.zstd` 日志是逐次追加的拼接 zstd 帧——探测器按帧头切分、逐帧解压（fzstd），列表只解到首个 turn 的标题与输入前缀，读取只整解目标会话那一份；`delegationDepth > 0` 的子代理会话不进列表（按 id 仍可读）。事件投影：`turn/start` 分轮，`user/message` 首条是轮输入，`assistant/message` 的 reasoning / text 块投影为推理与回复，`tool/call` 与 `tool/result` 按 `callId` 配对，`compaction/summary` 作为 reasoning 条目保留，流式 chunk 与 sandbox/approval/retry 状态不进对话。
+* **DSH Sessions（`kind: dsh`）**：读 DSH 的会话事件日志（`$DSH_HOME/sessions`，默认 `~/.dsh/sessions`，可用 `AGENTFABRIC_DSH_SESSIONS_DIR` 覆盖）下 `<encoded-cwd>/<session-id>/session[.vN].jsonl[.zstd]`。存储是全局一棵树：DSH 的所有 surface——Desktop / Web / headless / ACP（看板卡片）——写这同一个会话库，探测天然覆盖全部来源，无需按 profile 合并。会话头记录 `agentPreset`（可被会话中的 `agent-preset/selected` 事件改写），探测按 DSH 自己的算法重建出当前 preset 作为会话的 `source` 属性带出。标题取最后一个非空 `session/title` 事件——DSH 先落一条首条提问截断的占位标题（`source.kind: "fallback"`），生成的标题随后改写它；列表读到生成标题出现为止（512KB 解压预算兜底）。`.zstd` 日志是逐次追加的拼接 zstd 帧——探测器按帧头切分、逐帧解压（fzstd），列表只解到首个 turn 的标题与输入前缀，读取只整解目标会话那一份；`delegationDepth > 0` 的子代理会话不进列表（按 id 仍可读）。事件投影：`turn/start` 分轮，`user/message` 首条是轮输入，`assistant/message` 的 reasoning / text 块投影为推理与回复，`tool/call` 与 `tool/result` 按 `callId` 配对，`compaction/summary` 作为 reasoning 条目保留，流式 chunk 与 sandbox/approval/retry 状态不进对话。
 
 ### 接管（Import / Adopt）
 
@@ -1149,7 +1153,7 @@ packages/
   runtimes/  Runtime Adapters：mock / opencode / pi / codex / claude-code /
              dsh / docker，以及各 Harness 的本地会话探测与 Execution Backend
   server/    Express REST API + SSE + 静态 Web UI 托管 +
-             Kanban PTY 终端会话（node-pty / WebSocket / agent 启动契约）
+             Kanban 会话（node-pty 终端 / DSH ACP 聊天 / WebSocket / agent 启动契约）
   cli/       af 命令行（对接 REST API）
   web/       React + Vite Web UI
 docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
@@ -1173,14 +1177,14 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * **Secret 加密不做数据迁移**：升级前写入的明文 Secret 在读取时按 `secret-legacy-format` 明确报错，需要重新录入一次（值本身无法从旧记录恢复）。`secret.key` 必须随数据目录一起备份，丢失后已加密的值不可恢复。
 * 通知只在**终态**触发一次，没有「开始 / 进度 / 卡住」类事件，也没有按事件类型分别配置订阅。
 * **Kanban（v13）本期边界**：
-  * Agent 在宿主 PTY 中直接运行（Direct）或在本机 git worktree 中运行，不经过 Project Coding Task 的隔离 Runtime；**不做** isolated 目录拷贝 / Docker 隔离。
+  * Agent 作为宿主机子进程（PTY 或 ACP stdio）直接运行（Direct）或在本机 git worktree 中运行，不经过 Project Coding Task 的隔离 Runtime；**不做** isolated 目录拷贝 / Docker 隔离。
   * Worktree 只支持项目根自身是 Git 仓库；worktree 不自动删除、不自动 commit；multi-git / google-repo / 普通目录只能用 Direct。
   * 同一 BoardProject 允许多个 Direct 会话并行，没有单写者锁；并发改动由 agent 自行处理。
   * 第一期没有 diff / review / commit / PR、依赖链与 auto-review；Review 列只表示「agent 完成一轮」，不是代码审查。
   * 第一期只做「创建」：不能在看板里编辑已有卡片的 prompt / 标题 / agent / 执行模式（改需求请在详情里 restart 或新建卡片），也不支持粘贴 / 拖拽图片。
-  * 没有单独的「Start in plan mode」开关（用 agent 的 **Plan** 权限模式表达同一意图），也没有 forge 的 auto-review（commit / PR）选项——Review 列由 hooks 自动推进且不产生提交。Worktree 卡片在新目录里首次启动时，Claude Code 可能弹一次工作区信任确认，属于 CLI 自身行为。
-  * DSH 没有官方交互 TUI，只展示 `dsh --profile headless -- <prompt>` 的文本输出；Claude Code / Pi / OpenCode 是否可用取决于本机 PATH，缺失时启动报 `kanban-agent-not-installed`。Pi 没有 hooks，进 Review 需要 Mark for review。
-  * 终端输出不落盘：服务重启后不能回放上一次会话；终端 WS 不自动重连。
+  * 没有单独的「Start in plan mode」开关（用 agent 的 **Plan** 权限模式表达同一意图），也没有 forge 的 auto-review（commit / PR）选项——Review 列由 hooks / ACP turn 自动推进且不产生提交。Worktree 卡片在新目录里首次启动时，Claude Code 可能弹一次工作区信任确认，属于 CLI 自身行为。
+  * DSH 没有官方交互 TUI；看板改用 ACP（`dsh --profile acp`）在卡片详情里渲染聊天，但 ACP app 是自动化面：没有 DSH 的 plan / todo / 终端卡片呈现，没有 `session/load`（本期不做 resume），也没有 DSH 的模型选择器（ACP 的 `configOptions` 未接到卡片的 model）。一个卡片同时只跑一个 ACP 进程；聊天记录只在内存，重启后旧卡片的聊天打不开，只能 restart 起新会话。本次改动前启动的卡片没有 `transport` 字段，按纯输出终端展示（不迁移）。DSH 需要 0.2.1+（自带 acp profile）；首次 `dsh --profile acp` 会从模板生成 profile，探测失败以 `kanban-agent-profile-missing` 报错。Claude Code / Pi / OpenCode 是否可用取决于本机 PATH，缺失时启动报 `kanban-agent-not-installed`。Pi 没有 hooks，进 Review 需要 Mark for review。
+  * 会话输出不落盘：终端字节与 ACP 聊天记录都只在内存，服务重启后不能回放上一次会话；WS 不自动重连。
 * **Project Coding Task 本期边界**：
   * 一个 Project 只支持一个 primary source（单 Repository）；monorepo 多 Source、mirror、submodule 独立管理未实现。
   * Source Credential 只实现 HTTPS Token 与 SSH Private Key；GitHub App / Deploy Key / OAuth / Short-lived Credential 预留未实现。
@@ -1232,7 +1236,7 @@ v11 hardening 的专项测试：
 
 `packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、大小写变体的 API 路径同样要求认证、api-key reveal 确认、config 往返（脱敏 URL 与 header 掩码不被写回覆盖；掩码但无存储值 → 400 `config-invalid`；畸形 JSON → 400 `invalid-request`）与优雅停机。
 
-v13 看板测试：`src/v13.kanban.test.ts` 覆盖 folder-first 目录、workspace 类型识别（none / git / multi-git / google-repo）、worktree 仅限 Git 项目根、多 direct 会话、卡片移动白名单、session → 列迁移、重启标记 interrupted 与删除级联、卡片标题派生、同目录去重、worktree base ref 存取；`packages/server/src/kanban.terminal.test.ts` 用**真实 PTY** 验证 spawn / 输出 / 退出码 / resize / 进程组 stop / scrollback 上限；`packages/server/src/kanban.routes.test.ts` 用 fake CLI 端到端验证 REST + WebSocket（未认证升级被拒、restore 快照、输入、resize、stop）、真实 `git worktree` 隔离与 base ref 检出、目录浏览接口、非 Git 目录的询问/确认/去重、`git init`、本地 URL clone，以及 Claude Stop hook → 自动 Review、输入 → 回 In Progress、hook token 拒绝；`packages/server/src/kanban.hooks.test.ts` 覆盖 Claude settings / OpenCode plugin 的生成与 ESM 语法。
+v13 看板测试：`src/v13.kanban.test.ts` 覆盖 folder-first 目录、workspace 类型识别（none / git / multi-git / google-repo）、worktree 仅限 Git 项目根、多 direct 会话、卡片移动白名单、session → 列迁移、重启标记 interrupted 与删除级联、卡片标题派生、同目录去重、worktree base ref 存取；`packages/server/src/kanban.terminal.test.ts` 用**真实 PTY** 验证 spawn / 输出 / 退出码 / resize / 进程组 stop / scrollback 上限；`packages/server/src/kanban.acp.test.ts` 用 fake ACP peer（stdio JSON-RPC，与 `dsh --profile acp` 同形）验证 initialize / session/new / 流式 update / 权限请求往返 / cancel / close / 进程退出（含真实 DSH 会在 stdout 打的非 JSON 噪声行），并单独测 `AcpChatProjector` 按 `messageId` 聚合 chunk、按 `toolCallId` 合并 `tool_call_update`；`packages/server/src/kanban.acp.runtime.test.ts` 把 fake `dsh` 放进 PATH，端到端跑真实 KanbanSessionRuntime：握手期 attach 与提前 prompt 被拒（`kanban-agent-starting`）、权限卡片问答、turn → Review、进程保持、同会话追问、stop 后 socket 关闭与 not-live 拒绝；`packages/server/src/kanban.agents.test.ts` 钉住 DSH 的 `--profile acp`、`transport: "acp"`、Ask / Auto-approve 权限模式与「prompt 不进 argv」；`packages/server/src/kanban.routes.test.ts` 用 fake CLI 端到端验证 REST + WebSocket（未认证升级被拒、restore 快照、输入、resize、stop）、真实 `git worktree` 隔离与 base ref 检出、目录浏览接口、非 Git 目录的询问/确认/去重、`git init`、本地 URL clone，以及 Claude Stop hook → 自动 Review、输入 → 回 In Progress、hook token 拒绝；`packages/server/src/kanban.hooks.test.ts` 覆盖 Claude settings / OpenCode plugin 的生成与 ESM 语法。
 
 端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
 
