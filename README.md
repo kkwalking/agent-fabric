@@ -1161,7 +1161,7 @@ packages/
 docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
 docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）、
              validation.md（任务校验机制的使用指南）、
-             kanban-dsh-acp.md（Kanban 卡片驱动 DSH 的 ACP 实现原理）
+             kanban-dsh-acp.md / .html（Kanban 卡片驱动 DSH 的 ACP 实现原理，HTML 为可视化版）
 scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）、
              fix-node-pty.js（修复 node-pty 预建 spawn-helper 的可执行位）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
