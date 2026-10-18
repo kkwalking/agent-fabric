@@ -129,7 +129,7 @@ Board 是独立于 Project Coding Task 的产品面：一个 **BoardProject** = 
 * **DSH 模型与推理强度**：模型不由 argv 指定，而是 ACP 的 `model` config option。可在 **新建 Card** 时填模型（写 `deepseek-v4-pro`、`DeepSeek-V4-Pro` 或直接的 `["provider","model"]` 都行）并选推理强度，服务端在第一次 turn 前用 `session/set_config_option` 应用；卡片详情显示会话**实际**所在的 provider / model / reasoning effort。**聊天顶栏**有两个下拉：模型（按 provider 分组，选项来自 DSH 的实时目录）与推理强度，随时切换、对下一个 turn 生效，并广播给同一会话的其他标签页；在右侧还能看到上下文 token 用量。填了 DSH 不提供的模型会明确失败（`kanban-agent-model-unavailable`），不会静默回落到默认模型。
 * **DSH 权限模式**：`Ask` 时 ACP 的 `session/request_permission` 会以允许 / 拒绝卡片插进聊天、session 标为 `needs_attention`，答完回 `running`；`Auto-approve`（risky）直接选 ACP 给出的 allow 选项、不打断对话（没有 allow 选项时仍会询问）。
 * **重启恢复**：服务端退出后所有非终态 session 标记为 `interrupted`，卡片保留原列，用户可 restart；不自动重跑 agent。DSH 的聊天记录与 `nativeSessionId` 都已持久化：重启后旧卡片仍可打开查看完整对话，并用 **Resume session** 接回原会话（见上一条）；**Start new session** 则是全新会话（旧 session 记录与聊天文件保留到卡片被删除）。
-* **边界**：看板 agent 作为宿主机子进程运行（PTY 或 ACP stdio），**不经过** Project Coding Task 的隔离 Runtime；第一期没有 diff / review / commit / PR、依赖链与 auto-review。完整规格见 `specs/v13.md`。
+* **边界**：看板 agent 作为宿主机子进程运行（PTY 或 ACP stdio），**不经过** Project Coding Task 的隔离 Runtime；实现原理见 `docs/kanban-dsh-acp.md`；第一期没有 diff / review / commit / PR、依赖链与 auto-review。完整规格见 `specs/v13.md`。
 
 ### Projects（`/projects`、`/projects/:id`、`/projects/:id/tasks/new`）
 
@@ -1160,7 +1160,8 @@ packages/
   web/       React + Vite Web UI
 docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
 docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）、
-             validation.md（任务校验机制的使用指南）
+             validation.md（任务校验机制的使用指南）、
+             kanban-dsh-acp.md（Kanban 卡片驱动 DSH 的 ACP 实现原理）
 scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）、
              fix-node-pty.js（修复 node-pty 预建 spawn-helper 的可执行位）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
