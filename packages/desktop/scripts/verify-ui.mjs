@@ -530,6 +530,43 @@ try {
     `switching cards does not carry the armed delete over (${(boardOps.switched ?? []).join(" / ")})`
   );
 
+  // 9d. Deletes confirm through the app's Modal, never window.confirm.
+  //     A native dialog blocks the page, so this both checks consistency and
+  //     keeps every delete flow reachable from an automated check.
+  const confirmOps = await evaluate(
+    cdp,
+    `(async () => {
+       const real = window.confirm;
+       let native = 0;
+       window.confirm = () => { native += 1; return false; };
+       history.pushState({}, "", "/runtimes");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1600));
+       const del = [...document.querySelectorAll("main button")]
+         .find((b) => b.textContent.trim() === "delete");
+       if (!del) { window.confirm = real; return { error: "no delete button on /runtimes" }; }
+       del.click();
+       await new Promise((r) => setTimeout(r, 600));
+       const modal = [...document.querySelectorAll(".modal, [role=dialog]")]
+         .find((m) => /Delete/.test(m.innerText));
+       const opened = Boolean(modal);
+       let cleared = true;
+       if (modal) {
+         [...modal.querySelectorAll("button")]
+           .find((b) => /Cancel/.test(b.textContent))?.click();
+         await new Promise((r) => setTimeout(r, 400));
+         cleared = ![...document.querySelectorAll(".modal, [role=dialog]")]
+           .some((m) => /Delete/.test(m.innerText));
+       }
+       window.confirm = real;
+       return { opened, cleared, native };
+     })()`
+  );
+  if (confirmOps.error) failures.push(`delete confirmation: ${confirmOps.error}`);
+  check(confirmOps.opened === true, "a resource delete opens the in-app confirmation Modal");
+  check(confirmOps.native === 0, `no native window.confirm is used (${confirmOps.native} call(s))`);
+  check(confirmOps.cleared === true, "cancelling the confirmation closes it and deletes nothing");
+
   // 10. A terminal session actually spawns a PTY process inside the bundle.
   //     (The UI half: the board's session list must reach the API.)
   const board = await evaluate(
