@@ -98,6 +98,90 @@ npm run dev:web
 
 打开 http://localhost:7377 查看 Web UI。
 
+### macOS 桌面 App（`.app` / `.dmg`）
+
+`packages/desktop` 把同一个 API 服务器 + Web UI 打包成 macOS App：一个 Electron 窗口，里面装的就是 `http://127.0.0.1:<随机端口>` 上的普通 Web UI，REST/SSE/终端 WebSocket 全部走真实 loopback http，和浏览器里的行为一致。
+
+```bash
+npm run desktop                        # 从源码跑窗口（不打包）
+npm run desktop:app                    # 构建 .app → packages/desktop/release/mac-arm64/AgentFabric.app
+npm run desktop:dmg                    # 构建 .app + .dmg
+npm run desktop:dmg -- --arch=x64      # 构建 Intel 版
+```
+
+数据目录与 CLI 相同（默认 `~/.fabric`，`AGENTFABRIC_DATA_DIR` 可覆盖），所以桌面 App 直接看到终端里创建的看板、provider 和设置。服务器仍是 loopback-only，API Token 仍是 `<dataDir>/token`。启动失败时完整报错写入 `<dataDir>/desktop-startup.log`（Dock 启动没有终端）。
+
+打包后的 App 里各部件放在哪里（都在 `Contents/Resources/`）：
+
+| 位置 | 内容 |
+| --- | --- |
+| `backend/server.cjs` | 服务器单文件 bundle（`createServer` + 全部 workspace 包 + express/ws，esbuild 产出） |
+| `backend/node_modules/node-pty` | 原生 PTY 模块，按 **Node ABI** 编译（`scripts/build-native.mjs`） |
+| `web/` | 构建后的 Web UI（`packages/web/dist`） |
+| `app.asar` | 窗口主进程 `src/main.js` |
+
+三条约束，改的时候不要踩：
+
+* **主进程必须是 CommonJS（`src/main.js`）。** 打包后的 App 里 Electron 根本不会执行 ESM 入口：进程起来了、窗口不出现、日志一行没有，因为脚本没有被加载。`afterPack` 与 `verify-app` 都会检查 asar 里没有 `.mjs`、`package.json` 没有 `"type": "module"`。
+* **服务器跑在 Electron 主进程内，不在子进程里。** 一是它要用 `node:sqlite`；二是"从 app 里把 Electron 当 Node 子进程拉起"在 packaged app 里不可靠（app 内的 helper 用 `ELECTRON_RUN_AS_NODE` 拉起不会进入 Node 模式）。因此 `node-pty` 按 Node ABI 编译：Electron 主进程用的就是 Node 的 ABI。**升级 Electron 主版本后要重跑 `npm run desktop:app`**（`build-native` 会针对当前 Node 重新编译）。
+* **`ELECTRON_RUN_AS_NODE` 会让整个 App 变成纯 Node 进程。** 如果启动环境里带着这个变量（某些自动化/IDE 的集成终端会注入），Electron 会以 Node 模式跑主脚本：没有窗口系统、拿不到 `app`。主进程启动时会清掉它；手动启动时若遇到"窗口不出现"，先检查这个变量。
+
+构建流水线（`npm run desktop:dmg`）任一检查失败即不出包：
+
+1. `scripts/build-native.mjs`：按当前 Node 的 ABI 编译 `node-pty`，并立刻 spawn 一次验证。
+2. `scripts/smoke-pty.mjs`：用打包后的目录布局加载 bundle、起服务器、开一个看板终端会话，确认 PTY 真的 spawn 出进程并从 WebSocket 收到字节（本机没有可用的 agent CLI 时跳过该项并明说）。
+3. `afterPack`：校验资源齐全、asar 入口是 CommonJS、`node-pty` 能在当前 Node 上加载并 spawn。
+4. `scripts/verify-app.mjs`：按 App 的方式从打包目录加载服务器，检查首页 UI、`/api/health`、看板 API、PTY。
+5. `scripts/build-dmg.mjs`：用 `hdiutil` 生成 dmg 并实际挂载校验布局（`.app` + `/Applications` 快捷方式）。
+
+窗口本身需要 GUI 会话才能观察；`npm run desktop:dmg -- --gui-check` 会启动打包好的 App 直到它返回首页（会清掉 `ELECTRON_RUN_AS_NODE` 再启动，以免测到的是环境而不是 App）。
+
+### 性能回归检查
+
+```bash
+npm run desktop:perf                # 对已打包的 App 跑一遍（需先 npm run desktop:app）
+npm run desktop:perf -- --update    # 有意改动之后更新基线
+```
+
+基线在 `packages/desktop/scripts/perf-baseline.json`，当前值：
+
+| 指标 | 基线 | 上限 |
+| --- | --- | --- |
+| 首屏 JS | 162 KB | 180 KB |
+| 按需加载的视图 chunk | 20 | 必须正好 20 |
+| 冷启动（到服务可连接） | 240–260 ms | 1500 ms |
+| UI 可访问 | 290–330 ms | 1800 ms |
+| 列表接口耗时 | 3 ms | 150 ms |
+| Tasks 页 API 请求数 | 5 | 7 |
+
+设计成「形状变化报警」而不是跑分：
+
+* **体积和数量是精确判据**——视图 chunk 数必须正好 20，因为**只要 `App.tsx` 里有一个视图不再惰性加载，它就会被并回首屏 chunk**，这正是这项检查存在的理由。这条经过反向验证：故意把一个视图改成同步 import，检查立即失败并指出「19 lazy chunks, expected 20」。
+* **时间类指标留足抖动空间**——同一台机器上冷启动实测会在 240–560 ms 之间波动（系统负载），所以上限设在 1500/1800 ms，只抓数量级的变化。
+
+脚本不依赖 Playwright 或浏览器，只用 Node 内置能力启动 App、读构建产物。
+
+### 桌面端的性能与交互
+
+打包后的 App 与浏览器共同同一套 Web UI，因此优化对两边都生效：
+
+* **按需加载的视图**：每个视图一个 chunk，首屏只加载外壳（侧栏 + 路由 + 健康检查）。首屏 JS 从 ~305KB 降到 ~163KB（gzip 93KB → 52KB）。Board 单独成块（xterm 约 400KB），只在打开看板时加载。
+* **空闲预取**：首屏渲染后按顺序预取 12 个视图 chunk（不含 Board），点导航时内容直接切换。实测：同一份数据、同样服务下，点「Tasks」到内容出现 **约 38ms**。
+* **静态资源缓存**：`assets/` 下带内容哈希的文件标为 `immutable`（一年），`index.html` 为 `no-cache`——窗口第二次启动不再重新校验每个资源。
+* **窗口体验**：记住窗口大小/位置（显示器拔掉时自动丢弃越界坐标）；首帧就绪后才显示窗口（不再有白屏闪烁）；补上标准菜单（Edit/View，含开发者工具）；`before-input-event` 兜底 Cmd+C/V/X/A/Z；渲染进程在后台不降级（长任务、看板回放不会因为切到别的 App 而卡住）。
+* **请求缓存**：GET 响应缓存 5 秒并共享在途请求——多个视图读同一批列表（`/api/models`、`/api/providers`、`/api/workspaces` 等）只发一次请求。实测连续切换 9 次导航：**25 次请求 → 9 次，且无重复**。任何写操作（POST/PUT/PATCH/DELETE）都会作废缓存；视图里的「刷新」按钮强制走服务器，不读缓存。
+* **长列表分页**：Tasks / Runs 每页 50 条并显示「当前范围 / 总数」。实测 2000 条任务时：渲染行 2000→50、DOM 节点 36,137→1,044、重排 0.9ms→<0.01ms、JS 堆 24MB→6MB。分页而不是虚拟滚动，是因为这些行带菜单、卡片样式，页内 50 条已把 DOM 与重渲染成本压平，且无需测量/滚动锚定。
+* **输入框的实时行为**：任务页的输入框 `Enter` 发送、`Shift+Enter` 换行（之前只认 Cmd/Ctrl+Enter，按 Enter 没有任何反应）；未发送的内容按任务分别存在 `localStorage`，切换任务、离开页面、重新加载都不会丢——提交成功才清除，提交失败（比如需要先做 handoff）保留原文。
+* **相对时间会自动走**：列表里的「3m ago」原来是渲染时算一次就冻结（除非别的操作触发重渲染），现在由 `subscribeClock` 共享一个 30 秒定时器统一刷新——全应用一个计时器、窗口隐藏时停掉、没有订阅者时自动停止。实测：虚拟推进 5 分钟后「3m ago」正确变为「8m ago」。
+* **键盘可达**：任务/项目卡片、provider 行原来只能用鼠标点（`<div onClick>`），现在可 Tab 聚焦、Enter/Space 打开，并带可见焦点环；看板卡片本就是完整的 `role="button"` + 键盘处理，这次把其余列表对齐到同一契约（共用 `clickableRow`）。实测：Tab 到达行 → 按 Enter/Space 都能打开任务，鼠标点击与行内菜单互不干扰。
+* **列表内的查找与排序**：每行从 `workspaces` 列表线性查找改成一次构建的 Map；所有排序改为拷贝后排序——`sort` 是原地操作，直接排 API 缓存里的数组会让其他视图读到被改动的顺序。
+* **轮询只在窗口可见时进行**：任务详情/运行详情等轮询在窗口切到后台时停止，回到前台立即刷新一次。实测：可见时每 2 秒一次、隐藏 4 秒内 0 次、回前台立刻 1 次。
+* **服务端**：静态资源缓存头；发布的 bundle 不再带 sourcemap（构建时 `AF_BACKEND_SOURCEMAP=1` 可要回）。热路径实测（列表/健康检查/首页）均在 1ms 内。
+
+签名：默认 ad-hoc/未签名（`identity: null`），没有签名证书也能出包。首次打开需要右键 → 打开，或 `xattr -dr com.apple.quarantine /Applications/AgentFabric.app`。正式分发需配好 Apple Developer 证书并去掉 `electron-builder.yml.js` 里的 `identity: null`。应用图标在 `packages/desktop/build/icon.icns`（改图标重新生成 icns 后重跑构建即可）。
+
+网络受限环境：Electron 二进制从 `ELECTRON_MIRROR`（默认 npmmirror）下载；dmg 由 macOS 自带的 `hdiutil` 生成，不需要从 GitHub 拉 electron-builder 的 dmg 工具链。
+
 服务器默认只监听 `127.0.0.1`（`AGENTFABRIC_HOST` 可覆盖）。所有 `/api/*`（`/api/health` 除外）都要求 Bearer Token：首次启动时在数据目录生成 `<dataDir>/token`（`0600`），浏览器通过首屏下发的 `af_token` Cookie 携带，CLI 自动读取该文件。用 `AGENTFABRIC_HOST` 绑到非 loopback 地址时服务器会打印警告——此时 API Token 是保护全部凭据的唯一屏障。
 
 ## Web UI
@@ -105,10 +189,41 @@ npm run dev:web
 侧边栏按用途分组：
 
 * **Tasks / Dashboard** — 主要工作入口。Dashboard 汇总各资源数量、总成本，并提供 Deleted tasks 入口。
-* **Resources** — `Kanban`（v13：四列看板 + 本地 Agent 会话：终端 / DSH ACP 聊天）、`Projects`（项目与 Coding Task 生命周期）、`LLM`（Provider 与 Model 列表及编辑）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
-* **System** — `Runs`、`Usage`、`Proxy`、`Settings`。
+* **Resources** — `Kanban`（v13：四列看板 + 本地 Agent 会话：终端 / DSH ACP 聊天）、`Projects`（项目与 Coding Task 生命周期）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
+* **System** — `Runs`、`Usage`、`Settings`（模型与代理都在 Settings 里，见下）。
 
 Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
+
+### Settings（`/settings/<section>`）
+
+Settings 是一个带左侧导航的弹窗，按分区呈现，而不是把原始 JSON 甩给用户：
+
+`通用设置`（含界面语言）、`模型`、`代理`、`通知`、`Harness CLI 路径`、`Docker`、`自动重试`、`关于`。导航在左侧，URL 随之变化（`/settings/proxy`），刷新或重新打开都停在同一页；旧的 `/proxy`、`/llm` 书签分别落到「代理」「模型」分区。
+
+* **模型也在配置文件里**：`providers` 段就是供应商与模型的声明，形如
+
+  ```json
+  "providers": [
+    {
+      "id": "my-gateway",
+      "name": "My gateway",
+      "type": "openai-completions",
+      "baseUrl": "https://llm.example.com/v1",
+      "apiKey": "sk-…",
+      "models": [{ "name": "gpt-4o", "alias": "4o", "parameters": { "temperature": 0.2 } }]
+    }
+  ]
+  ```
+
+  模型 id 由名字推出（`mod_gpt-4o`），所以在文件里改一个模型的名字与在界面上改名是同一件事，引用它的 Task / Runtime 也仍然指向同一个模型。密钥有两种放法：写在本文件的 `apiKey`（文件 `0600`，用户能直接读）或放在 AgentFabric 加密的 Secret store 里并用 `apiKeySecretId` 引用——在界面上填的 Key 一律进 Secret store，文件里只记引用，不会把密钥抄一份到文件。API 永远不返回密钥本身，只返回掩码（`apiKeyMasked`）。
+* **两个方向都同步**：在「模型」页保存（新增/修改/删除供应商与模型）会立刻重写文件的 `providers` 段；手工改这段再「应用并重启」会按文件重建列表——文件里没有的供应商就是被删除了。
+
+* **界面语言**：中文 / English 两套文案，在「通用设置」里切换，侧边栏底部的指南针图标也可以一键切换。选择存在浏览器 `localStorage`，只影响这个浏览器；服务端配置里不放语言项。文案表在 `packages/web/src/i18n.ts`：中文是键集合的事实来源，英文缺键是编译错误，不会静默回落到另一种语言。
+* **配置文件**：所有设置都落在一个文件里——`<dataDir>/config.json`（默认 `~/.fabric/config.json`，`0600`）。页面顶部是「打开配置文件」：在宿主机默认文本编辑器里打开它（macOS 用 `open -t`，绕开 `.json` 的关联程序）。文件顶部带 `$schema: /api/settings/schema`，编辑器据此补全键名并显示每个字段的说明；该 schema 端点不需要 token（它是格式描述，不含用户数据），否则编辑器拿不到。
+* **手工编辑怎么生效**：页面上的表单保存后立即写入文件；手工改文件后，文件卡片会显示「文件已在磁盘上修改，但尚未应用」，点 `应用并重启` 才生效（`POST /api/settings/apply`）。重启是**原地重启**：同一个进程内拉起一个新的服务器实例，所以 `npm start` 这种没有看守进程的启动方式也能恢复；桌面端等同理（只换服务器，不动窗口）。
+* **文件坏了不会把服务带崩**：正在运行的服务不会因为配置文件暂时不合法而退出——文件卡片显示解析错误，运行中的配置保持不变，`应用并重启` 被禁用。只有在服务**启动时**配置文件不合法，才会拒绝启动（带上错误信息）。
+* **只有一个写入者**：`GET/PUT /api/config` 与「应用」都会把整份结果写回文件；启动时只有当文件不存在才创建它，已存在的文件不会被启动流程改写，因此编辑器里未保存的改动不会被覆盖，「revision 一致/不一致」也才有意义。
+* **保存是合并**：`PUT /api/config` 以**磁盘上现有的键**为底，替换请求里给出的分区，其余分区原样保留；`server` 分区由启动流程拥有（记录本次实际绑定的地址），保存不会改动它。读侧投影（`urlSet`、脱敏后的 webhook）永远不会被当成设置写回文件。
 
 ### Kanban（`/kanban`，v13）
 
@@ -977,7 +1092,7 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 
 ## 任务完成通知（Webhook）
 
-一个 Coding Task 可能跑几十分钟，通知让「任务结束了」不必靠盯着页面。配置在 `config.notifications`（Settings 页或 `PUT /api/config`）：
+一个 Coding Task 可能跑几十分钟，通知让「任务结束了」不必靠盯着页面。配置在 `config.notifications`（Settings → 通知，或 `PUT /api/config`）：
 
 ```jsonc
 {
@@ -995,12 +1110,12 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 * **载荷来自记录本身**：`event`、`taskId`、`status`、`phase`、逐阶段 `stages`（原样拷贝，不重算）、`failure{stage,code,message}`、`finalCommitSha`、`workingBranch`、`durationMs`、`link`（`/tasks/<id>`，主机名由接收方决定）。instruction 默认截断到 300 字符并置 `instructionTruncated`。
 * **通知永远不能改变 Task 的结果**：投递发生在终态写入**之后**，且 `deliverTaskNotification` 不抛异常——失败以 `DeliveryResult` 返回，写成 Run 上的 `notification-failed` 事件（带 `attempts` / `errorKind`）。Webhook 挂掉不会让任务变 failed。
 * **重试策略**：网络错误、超时、429、5xx 重试；其余 4xx（token 错、路径错）立即放弃——重复不会让它变对。
-* **URL 与 Header 都是密钥**：事件、日志、`GET /api/config` 里 URL 一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉；`headers` 的值同样全部替换为 `***`（webhook 常用 `Authorization: Bearer …` 认证），只保留 header 名。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 与 Settings 页都是「读出整份 → 改一个字段 → 整份写回」）若收到恰好等于脱敏形式的 URL 或 header 值，按「未改动」处理并保留原值——占位符本身是合法 URL / 合法字符串，原样入库会静默把真 webhook 换成它；一个被打上 `***` 掩码、但存储里并不存在的 header 名按 `config-invalid` 明确报错（400），而不是把掩码存进去。
+* **URL 与 Header 都是密钥**：事件、日志、`GET /api/config` 里 URL 一律脱敏为 `scheme://host/***`（Slack/飞书 webhook 的路径就是 token），响应体里的回显也会被擦掉；`headers` 的值同样全部替换为 `***`（webhook 常用 `Authorization: Bearer …` 认证），只保留 header 名。`GET /api/config` 额外给出 `urlSet` 表明「是否已配置」而不暴露是哪一个。写回时（`af config` 是「读出 → 改一个字段 → 写回」；Settings 页只提交改动的那一个分区，见「Settings」一节）若收到恰好等于脱敏形式的 URL 或 header 值，按「未改动」处理并保留原值——占位符本身是合法 URL / 合法字符串，原样入库会静默把真 webhook 换成它；一个被打上 `***` 掩码、但存储里并不存在的 header 名按 `config-invalid` 明确报错（400），而不是把掩码存进去。
 * **配置写入口做形状校验**：`notifications` 不是对象、`url` 不是字符串、`headers` 的值不是字符串都会以 `config-invalid`（HTTP 400）拒绝，存储中的原配置保持不变——一个被写坏的配置会让之后每次读取与投递都失败，必须在入口挡住。
 
 ## 自动重试（环境类失败）
 
-一个跑了几十分钟的 Task 因为 docker 抽风、网络抖动、push 超时而失败，重试一次往往就好——不必等人盯页面。策略在 `config.autoRetry`（Settings 页或 `PUT /api/config`）：
+一个跑了几十分钟的 Task 因为 docker 抽风、网络抖动、push 超时而失败，重试一次往往就好——不必等人盯页面。策略在 `config.autoRetry`（Settings → 自动重试，或 `PUT /api/config`）；这一项不需要重启，下一次重试判定就按新值走：
 
 ```jsonc
 {
@@ -1024,7 +1139,7 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 
 ## Proxy
 
-全局出网代理（Web UI 的 Proxy 页 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机（`host.docker.internal`），且容器的 `NO_PROXY` 同时豁免 `host.docker.internal`——容器内对宿主机 loopback 服务（例如本地 Provider 网关）的请求直达宿主，不经代理绕行。Proxy 页提供连通性测试（`POST /api/proxy/test`）。
+全局出网代理（Settings → 代理 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机（`host.docker.internal`），且容器的 `NO_PROXY` 同时豁免 `host.docker.internal`——容器内对宿主机 loopback 服务（例如本地 Provider 网关）的请求直达宿主，不经代理绕行。「代理」分区提供连通性测试（`POST /api/proxy/test`）。
 
 **Provider base URL 与容器**：Provider 的 base URL 指向宿主机 loopback（`127.0.0.1` / `localhost` / `::1`，如本地模型网关）时，容器化 Run 生成的 harness 配置（pi `models.json` / opencode `opencode.json`）会自动改写为 `host.docker.internal`——容器内的 `127.0.0.1` 是容器自己，不改写则每次模型请求都连接失败。宿主执行（非容器化）保持原值不变。
 

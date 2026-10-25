@@ -229,6 +229,19 @@ export class Store {
     return this.db.config;
   }
 
+  /**
+   * Replaces a whole collection with `items` and persists once.
+   *
+   * For collections whose declaration is a document (the `providers` section
+   * of the config file): the document is the source, so the projection is
+   * rewritten as a set — records the document no longer lists are removed,
+   * rather than merged in place.
+   */
+  async replaceCollection<T extends { id: ID }>(col: CollectionName, items: T[]): Promise<void> {
+    (this.db[col] as unknown as T[]) = items;
+    await this.persist();
+  }
+
   async updateConfig(patch: AppConfig): Promise<AppConfig> {
     this.db.config = { ...this.db.config, ...patch };
     await this.persist();

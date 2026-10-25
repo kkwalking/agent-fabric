@@ -95,6 +95,7 @@ export type ErrorCode =
   | "kanban-terminal-unauthorized"
   /* Platform */
   | "config-invalid"
+  | "settings-open-failed"
   | "supervisor-restarted"
   | "internal-error";
 

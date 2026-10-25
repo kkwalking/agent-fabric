@@ -31,7 +31,10 @@ export type IconName =
   | "stop"
   | "branch"
   | "folderOpen"
-  | "restore";
+  | "restore"
+  | "close"
+  | "edit"
+  | "compass";
 
 const iconPaths: Record<IconName, ReactNode> = {
   grid: (
@@ -210,6 +213,22 @@ const iconPaths: Record<IconName, ReactNode> = {
       <path d="M21 3v5h-5" />
     </>
   ),
+  // Panel dismissal (Settings close).
+  close: <path d="M6 6l12 12M18 6 6 18" />,
+  // "Edit on disk": a pencil over a sheet.
+  edit: (
+    <>
+      <path d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17Z" />
+      <path d="M4 20v-3" />
+    </>
+  ),
+  // Language switch: a compass rose, i.e. "this is a locale choice".
+  compass: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m15 9-2 5-4 1 2-5z" />
+    </>
+  ),
   stop: (
     <>
       <rect x="7" y="7" width="10" height="10" rx="1.5" />
@@ -340,4 +359,28 @@ export function emptyTableHint(loading: boolean, error: string | null) {
   if (loading) return <div className="muted">Loading…</div>;
   if (error) return <div className="muted" style={{ color: "var(--red)" }}>{error}</div>;
   return <div className="muted">No items yet.</div>;
+}
+
+/**
+ * Subscribers of the shared minute ticker. The ticker is started by whoever
+ * subscribes first and stops with the last unsubscribe, so a list showing "3m
+ * ago" keeps moving while no extra timer runs for the rest of the app.
+ */
+const clockSubscribers = new Set<() => void>();
+let clockTimer: number | undefined;
+
+export function subscribeClock(onTick: () => void): () => void {
+  clockSubscribers.add(onTick);
+  if (clockTimer === undefined && clockSubscribers.size === 1) {
+    clockTimer = window.setInterval(() => {
+      for (const fn of clockSubscribers) fn();
+    }, 30_000);
+  }
+  return () => {
+    clockSubscribers.delete(onTick);
+    if (clockSubscribers.size === 0 && clockTimer !== undefined) {
+      window.clearInterval(clockTimer);
+      clockTimer = undefined;
+    }
+  };
 }

@@ -5,3 +5,13 @@ dist/
 data/
 .env
 coverage/
+# macOS app build outputs (packages/desktop): the server bundle and the packed app
+packages/desktop/backend/
+packages/desktop/release/
+packages/desktop/native/
+
+# Tool session state (worktrees, transcripts) — never part of the source tree
+.claude/
+
+# A checkout of the release repository, not part of this one
+fabric/

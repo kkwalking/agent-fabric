@@ -32,7 +32,6 @@ export interface Route {
     | "trash"
     | "runs"
     | "run"
-    | "llm"
     | "runtimes"
     | "sessions"
     | "agents"
@@ -45,10 +44,36 @@ export interface Route {
     | "handoffs"
     | "handoff"
     | "usage"
-    | "proxy"
     | "settings";
   id?: string;
+  /** Which page of the settings panel; only for `settings`. */
+  section?: SettingsSection;
 }
+
+/**
+ * Sections of the settings panel. The list lives here (not in the view) so the
+ * URL can be parsed without loading the settings chunk.
+ */
+export type SettingsSection =
+  | "general"
+  | "llm"
+  | "proxy"
+  | "notifications"
+  | "harness"
+  | "docker"
+  | "retry"
+  | "about";
+
+const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
+  "general",
+  "llm",
+  "proxy",
+  "notifications",
+  "harness",
+  "docker",
+  "retry",
+  "about",
+];
 
 const PATH_VIEWS: Record<string, Route["view"]> = {
   "/": "dashboard",
@@ -56,7 +81,6 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   "/tasks": "tasks",
   "/trash": "trash",
   "/runs": "runs",
-  "/llm": "llm",
   "/runtimes": "runtimes",
   "/sessions": "sessions",
   // AGENT_UI_HIDDEN: Agents 页隐藏期间，直接访问 /agents 回落到 Dashboard；
@@ -71,12 +95,12 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   "/source-credentials": "source-credentials",
   "/handoffs": "handoffs",
   "/usage": "usage",
-  "/proxy": "proxy",
   "/settings": "settings",
 };
 
 export function parsePath(path: string): Route {
   const base = PATH_VIEWS[path];
+  if (base === "settings") return { view: "settings", section: "general" };
   if (base) return { view: base };
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "tasks" && parts[1]) {
@@ -86,6 +110,14 @@ export function parsePath(path: string): Route {
   }
   if (parts[0] === "runs" && parts[1]) return { view: "run", id: decodeURIComponent(parts[1]) };
   if (parts[0] === "handoffs" && parts[1]) return { view: "handoff", id: decodeURIComponent(parts[1]) };
+  if (parts[0] === "settings") {
+    const section = SETTINGS_SECTIONS.find((id) => id === parts[1]);
+    return { view: "settings", section: section ?? "general" };
+  }
+  // `/proxy` and `/llm` used to be pages of their own; their bookmarks now open
+  // the matching settings section instead of dropping the user on the dashboard.
+  if (parts[0] === "proxy") return { view: "settings", section: "proxy" };
+  if (parts[0] === "llm") return { view: "settings", section: "llm" };
   if (parts[0] === "projects" && parts[1]) {
     const id = decodeURIComponent(parts[1]);
     if (parts[2] === "tasks" && parts[3] === "new") return { view: "project-new-task", id };

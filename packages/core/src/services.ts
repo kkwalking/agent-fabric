@@ -1879,3 +1879,101 @@ export async function seedDefaults(store: Store): Promise<void> {
 export async function dataDirFromEnv(): Promise<string> {
   return process.env.AGENTFABRIC_DATA_DIR ?? join(homedir(), ".fabric");
 }
+
+/* ------------------------------------------------------------------ */
+/* Providers & models declared in the configuration file              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Projects the configuration file's `providers` section into the flat
+ * `Provider` / `Model` records the rest of the system works with.
+ *
+ * The config file is the source of record; these records are the in-memory
+ * projection every existing consumer reads (creation of a run, model lookup by
+ * alias, the runtime's model choice). Ids are derived from names rather than
+ * random so that re-running the projection — which `apply` does — reproduces
+ * the same ids, and so a task or runtime that references `mod_<name>` keeps
+ * pointing at the same model after an edit. Deterministic ids also make a
+ * hand-written file and a UI-saved file indistinguishable.
+ */
+export function projectConfigProviders(config: ProviderConfigSection): {
+  providers: Provider[];
+  models: Model[];
+} {
+  const providers: Provider[] = [];
+  const models: Model[] = [];
+  const at = now();
+  for (const entry of config ?? []) {
+    const id = entry.id.trim();
+    if (!id) continue;
+    providers.push({
+      id,
+      name: entry.name || id,
+      type: entry.type,
+      remark: entry.remark,
+      website: entry.website,
+      baseUrl: entry.baseUrl,
+      apiKeySecretId: entry.apiKeySecretId,
+      // The mask is a read-side projection (see `Provider.apiKeyMasked`): an
+      // inlined key is masked here, and a Secret-store key is masked by the
+      // API response from the Secret it points at.
+      ...(entry.apiKey && !entry.apiKeySecretId ? { apiKeyMasked: maskSecret(entry.apiKey) } : {}),
+      headers: entry.headers,
+      enabled: entry.enabled ?? true,
+      createdAt: at,
+      updatedAt: at,
+    });
+    for (const model of entry.models ?? []) {
+      const name = model.name.trim();
+      if (!name) continue;
+      models.push({
+        id: `mod_${name}`,
+        providerId: id,
+        name,
+        alias: model.alias && model.alias !== name ? model.alias : undefined,
+        parameters: model.parameters,
+        capabilities: model.capabilities,
+        enabled: model.enabled ?? true,
+        createdAt: at,
+        updatedAt: at,
+      });
+    }
+  }
+  return { providers, models };
+}
+
+/** The `providers` section of a config document, if any. */
+export type ProviderConfigSection = AppConfig["providers"];
+
+/**
+ * Writes the file's provider section back from the live records. The API keys
+ * of Secret-store providers are never inlined here: the section records the
+ * Secret reference, so the file never grows a copy of a key the UI chose to
+ * keep encrypted.
+ */
+export function providersToConfigSection(
+  providers: Provider[],
+  models: Model[]
+): NonNullable<AppConfig["providers"]> {
+  return providers.map((provider) => {
+    const own = models.filter((m) => m.providerId === provider.id);
+    return {
+      id: provider.id,
+      name: provider.name,
+      type: provider.type,
+      ...(provider.remark ? { remark: provider.remark } : {}),
+      ...(provider.website ? { website: provider.website } : {}),
+      ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
+      ...(provider.apiKeySecretId ? { apiKeySecretId: provider.apiKeySecretId } : {}),
+      ...(provider.headers ? { headers: provider.headers } : {}),
+      enabled: provider.enabled,
+      models: own.map((m) => ({
+        name: m.name,
+        ...(m.alias ? { alias: m.alias } : {}),
+        ...(m.parameters ? { parameters: m.parameters } : {}),
+        ...(m.capabilities ? { capabilities: m.capabilities } : {}),
+        enabled: m.enabled,
+      })),
+    };
+  });
+}

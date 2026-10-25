@@ -39,7 +39,17 @@ const formatLabel = (value?: string) => API_FORMATS.find((f) => f.value === valu
 /* LLM：供应商列表 + 编辑页                                            */
 /* ------------------------------------------------------------------ */
 
-export function LlmView() {
+/**
+ * Providers and their models, as a section of the settings panel.
+ *
+ * It is the panel's page rather than a view of its own because it edits a
+ * section of the same configuration file the other pages edit (`providers`),
+ * and because the file is the record: the server rewrites that section on
+ * every save here, so "Open configuration file" shows exactly what this page
+ * holds. `embedded` only drops the page-level frame the panel provides; the
+ * list and the editor are the same components either way.
+ */
+export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
   const providers = useAsync<ProviderRow[]>(() => get("/api/providers"), []);
   const models = useAsync<ModelRow[]>(() => get("/api/models"), []);
   // null = 列表页；"new" = 新增；否则为正在编辑的 provider id
@@ -86,12 +96,14 @@ export function LlmView() {
   return (
     <div>
       <div className="row">
-        <h1>LLM</h1>
+        {!embedded && <h1>LLM</h1>}
         <span className="right">
           <button className="primary" onClick={() => setEditing("new")}>+ 新增供应商</button>
         </span>
       </div>
-      <p className="sub">统一配置模型供应商：在供应商内维护接口格式、API Key、Base URL 以及可用的模型列表。</p>
+      {!embedded && (
+        <p className="sub">统一配置模型供应商：在供应商内维护接口格式、API Key、Base URL 以及可用的模型列表。</p>
+      )}
       <ErrorBox message={error} />
 
       {(providers.data ?? []).length === 0 ? (

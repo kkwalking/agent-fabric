@@ -2,7 +2,8 @@ import express, { type Express, type NextFunction, type Request, type RequestHan
 import cors from "cors";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { sep, resolve } from "node:path";
+import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import {
@@ -30,6 +31,8 @@ import {
   runtimeIsolation,
   renderHandoffBody,
   redactWebhookUrl,
+  projectConfigProviders,
+  providersToConfigSection,
   toHandoffListRow,
   HandoffUnavailableError,
   HandoffRequiredError,
@@ -37,6 +40,8 @@ import {
   isDomainError,
   httpStatusForCode,
   type AppConfig,
+  type Provider,
+  type Model,
   type NewTaskInput,
   type ContinueTaskInput,
   type StartProjectTaskInput,
@@ -45,6 +50,19 @@ import {
   KanbanService,
 } from "@agentfabric/core";
 import { loadOrCreateToken, requireToken, TOKEN_COOKIE } from "./auth.js";
+import {
+  CONFIG_SCHEMA,
+  SCHEMA_REF,
+  changedConfigKeys,
+  configFilePath,
+  parseConfigText,
+  readConfigFile,
+  revisionOf,
+  writeConfigFile,
+  type ConfigFileRead,
+  type SettingsFileInfo,
+  type SettingsHistoryEntry,
+} from "./settings.js";
 import { teardownWork } from "./shutdown.js";
 import { KanbanSessionRuntime } from "./kanban/sessions.js";
 import { registerKanbanRoutes } from "./kanban/routes.js";
@@ -68,6 +86,31 @@ export interface ServerOptions {
    * point passes the real listening port; tests pass their ephemeral one.
    */
   hookBaseUrl?: string;
+  /**
+   * Port to listen on. When given, the server listens itself and only resolves
+   * once it accepts connections — the desktop app relies on that to load its
+   * window without racing the socket. Omitted (the CLI entry point and tests
+   * create their own HTTP server), it does not listen at all.
+   */
+  port?: number;
+  /** Receives this server's own log lines (in addition to the console). */
+  onLog?: (line: string) => void;
+  /**
+   * Restarts the server after POST `/api/settings/apply` has applied the
+   * edited configuration file; `changed` names the top-level keys whose value
+   * changed. Absent means "this host cannot restart me" and the endpoint
+   * answers `restarted: false`, so the page says plainly that the running
+   * process still holds the old configuration instead of implying a restart
+   * happened.
+   */
+  restart?: (changed: string[]) => void;
+  /**
+   * Keys changed by the config file that this boot is applying (a restart
+   * finished the apply). Recorded in the history so the page can still show
+   * which section changed, even though the change happened in a process that
+   * has since exited.
+   */
+  appliedFromRestart?: string[];
 }
 
 /** What `createServer` hands back: the Express app plus its teardown. */
@@ -82,6 +125,11 @@ export interface ServerHandle {
   shutdown(): void;
   /** Raw HTTP upgrade handler for terminal websockets (v13 §5.1). */
   upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void;
+  /**
+   * The listening server — present only when `ServerOptions.port` was given
+   * (the server bound the port itself). Its upgrade handler is already wired.
+   */
+  server?: ReturnType<typeof createHttpServer>;
 }
 
 /**
@@ -120,6 +168,21 @@ function staticDirCandidate(configured: string): string | undefined {
 }
 
 const LOOPBACK_ORIGIN = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/;
+
+/**
+ * Keys in a hand-edited config file that this build does not know.
+ *
+ * A misspelled key would otherwise be stored and silently do nothing (the
+ * file is the only writer, so there is no UI to catch the typo). The schema
+ * served next to the file tells an editor the same thing; this is the server
+ * refusing to accept the document.
+ */
+function unknownConfigKeys(config: AppConfig): string[] {
+  const known = Object.keys(CONFIG_SCHEMA.properties);
+  return Object.keys(config as Record<string, unknown>)
+    .filter((key) => !known.includes(key))
+    .sort();
+}
 
 function isLoopbackOrigin(origin: string | undefined): boolean {
   return origin !== undefined && LOOPBACK_ORIGIN.test(origin);
@@ -262,13 +325,128 @@ function sseHeaders(res: Response): void {
  * have something to call.
  */
 export async function createServer(options: ServerOptions): Promise<ServerHandle> {
+  // Route this server's log lines to the caller as well as the console: the
+  // desktop app runs the server in its own process and needs the lines without
+  // scraping its stdout. The callback runs *after* the line reached the
+  // console, and a throwing or re-entrant callback must not affect logging —
+  // an earlier version let the callback's own `console.log` re-enter this
+  // wrapper and print forever. Restored by `shutdown()`.
+  const onLog = options.onLog;
+  const consoleLog = console.log;
+  let inCallback = false;
+  if (onLog) {
+    console.log = (...args: unknown[]) => {
+      consoleLog(...args);
+      // The callback may log itself (the desktop app writes to stderr, but a
+      // future caller may not). Re-entering here would print forever, so the
+      // callback's own lines go to the console only.
+      if (inCallback) return;
+      inCallback = true;
+      try {
+        onLog(args.map((arg) => (typeof arg === "string" ? arg : String(arg))).join(" "));
+      } catch {
+        /* the console line is the record; the callback is best-effort */
+      } finally {
+        inCallback = false;
+      }
+    };
+  }
+
   const store = await Store.open(options.dataDir);
   await seedDefaults(store);
+
+  /* ---------------- configuration file ---------------- */
+
+  // See `./settings.ts`. The file is created **only when missing**, so a host
+  // that starts the server directly (tests, embedders) still gets one. An
+  // existing file is never rewritten here: an editor may hold it with unsaved
+  // changes, and every rewrite changes the byte image whose hash the Settings
+  // page compares against the applied revision — two writers, one file, and
+  // every read would report an unapplied edit that nobody made.
+  const configFile = configFilePath(store.dataDir);
+  if (!existsSync(configFile)) {
+    try {
+      await writeConfigFile(configFile, store.config(), SCHEMA_REF);
+    } catch (err) {
+      throw new Error(
+        `Could not write the configuration file ${configFile}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+  /** The file content the running config was last synchronised with. */
+  let appliedConfig = { revision: revisionOf((await readConfigFile(configFile)).text), at: new Date().toISOString() };
+  let settingsHistory: SettingsHistoryEntry[] =
+    options.appliedFromRestart && options.appliedFromRestart.length > 0
+      ? [{ at: appliedConfig.at, source: "file", keys: options.appliedFromRestart }]
+      : [];
+  const recordSettingsChange = (source: SettingsHistoryEntry["source"], keys: string[], at: string) => {
+    if (keys.length === 0) return;
+    settingsHistory = [{ at, source, keys }, ...settingsHistory].slice(0, 20);
+  };
+
   const bus = new EventBus();
   const registry = buildRegistry();
 
   const providers = new ProviderService(store);
   const models = new ModelService(store);
+
+  /* ---------------- providers & models live in the config file ---------------- */
+  //
+  // `providers` in `<dataDir>/config.json` is the declaration; the store's
+  // `providers` / `models` collections are the projection every consumer reads.
+  // The two are synchronised in exactly two places:
+  // - here, at boot — a file that declares providers replaces the projection
+  //   (a provider removed from the file is removed); a file that declares none
+  //   (an older file) is seeded *from* the projection once, so an install that
+  //   configured its providers in the UI before this existed keeps them;
+  // - after every write from the LLM page (`writeProvidersToConfig`), so the
+  //   file is never stale relative to what the UI shows.
+  const syncProvidersFromConfig = async (config: AppConfig): Promise<void> => {
+    if (!config.providers) {
+      // An install that configured its providers before they moved into the
+      // file: copy the records into the file once. Their model ids were random;
+      // the file's are `mod_<name>`, so a reference to a dropped id (the handoff
+      // model) is rewritten to the model that now plays that role instead of
+      // pointing at a model a restart cannot find.
+      const legacy = store.list<Model>("models");
+      const legacyHandoff = config.handoff?.modelId;
+      const legacyModel = legacyHandoff ? legacy.find((m) => m.id === legacyHandoff) : undefined;
+      if (store.list<Provider>("providers").length > 0) await writeProvidersToConfig();
+      if (legacyModel) {
+        const migrated = providers.list().find((p) => p.id === legacyModel.providerId);
+        const current = (await readConfigFile(configFile)).parsed ?? {};
+        const declaredName = current.providers
+          ?.find((entry) => entry.id === migrated?.id)
+          ?.models?.find((m) => m.name === legacyModel.name)?.name;
+        if (declaredName) {
+          await store.updateConfig({ handoff: { ...config.handoff, modelId: `mod_${declaredName}` } });
+          const rewritten = (await readConfigFile(configFile)).parsed ?? {};
+          await writeConfigFile(
+            configFile,
+            { ...rewritten, handoff: { ...(rewritten.handoff ?? {}), modelId: `mod_${declaredName}` } },
+            SCHEMA_REF
+          );
+          appliedConfig = { revision: revisionOf((await readConfigFile(configFile)).text), at: appliedConfig.at };
+        }
+      }
+      return;
+    }
+    const { providers: projected, models: projectedModels } = projectConfigProviders(config.providers);
+    store.replaceCollection("providers", projected);
+    store.replaceCollection("models", projectedModels);
+    await store.updateConfig(config);
+  };
+  /** Writes the live provider/model records back into the file's `providers`. */
+  const writeProvidersToConfig = async (): Promise<void> => {
+    const current = (await readConfigFile(configFile)).parsed ?? {};
+    const section = providersToConfigSection(providers.list(), models.list());
+    await writeConfigFile(configFile, { ...current, providers: section }, SCHEMA_REF);
+    const before = store.config();
+    await store.updateConfig({ providers: section });
+    appliedConfig = { revision: revisionOf((await readConfigFile(configFile)).text), at: new Date().toISOString() };
+    recordSettingsChange("ui", changedConfigKeys(before, store.config()), appliedConfig.at);
+  };
+  await syncProvidersFromConfig(store.config());
   const runtimes = new RuntimeService(store);
   const workspaces = new WorkspaceService(store);
   const secrets = new SecretService(store);
@@ -361,6 +539,12 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   app.use((req, res, next) => {
     if (!isApiPath(req.path)) return next();
     if (req.method === "GET" && req.path.toLowerCase() === "/api/health") return next();
+    // The config file's `$schema` points here, and a JSON-schema resolver in an
+    // editor has no token: the schema is a description of the format, carries
+    // no user data, and without it an editor cannot validate the file at all.
+    // Every /api/settings/* route is matched case-insensitively here for the
+    // same reason as the isApiPath test below.
+    if (req.method === "GET" && req.path.toLowerCase() === "/api/settings/schema") return next();
     auth(req, res, next);
   });
 
@@ -373,6 +557,10 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
 
   app.get("/api/health", (_req, res) => ok(res, { status: "ok", time: new Date().toISOString() }));
 
+  //
+  // Counts, not lists: this is the start page, and with thousands of tasks and
+  // runs the difference is between sending 13 rows of numbers and sending every
+  // record just to read `.length` off it.
   app.get("/api/dashboard", (_req, res) => {
     ok(res, {
       counts: {
@@ -398,32 +586,55 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
 
   /* ---------------- providers ---------------- */
 
-  app.get("/api/providers", (_req, res) => ok(res, providers.list()));
+  /**
+   * A provider as the API hands it out: no key material.
+   *
+   * A provider declared in the config file may carry an inlined `apiKey`. That
+   * record is the projection of a file the user can read anyway, but the API
+   * still must not echo a raw key back as a field: `apiKeySecretId` is dropped
+   * in favour of the masked `apiKeyMasked`, which is exactly what the Secret
+   * store providers already expose.
+   */
+  const providerForClient = (p: Provider): Provider => ({
+    ...p,
+    apiKeySecretId: undefined,
+    ...(p.apiKeyMasked ? { apiKeyMasked: p.apiKeyMasked } : {}),
+  });
+
+  app.get("/api/providers", (_req, res) => ok(res, providers.list().map(providerForClient)));
   app.post("/api/providers", async (req, res) => {
     try {
-      ok(res, await providers.create(req.body), 201);
+      const created = await providers.create(req.body);
+      await writeProvidersToConfig();
+      ok(res, providerForClient(created), 201);
     } catch (e) {
       fail(res, e);
     }
   });
   app.get("/api/providers/:id", (req, res) => {
     const p = providers.get(req.params.id);
-    p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
+    p ? ok(res, providerForClient(p)) : fail(res, new Error("Provider not found"), 404);
   });
   // Reveal the stored API key on demand (the eye button in the provider
   // editor). Raw keys never appear in list/get responses, only here — and
   // only for a caller that states the intent in a header (see
   // `requireRevealConfirmation`).
-  app.get("/api/providers/:id/api-key", requireRevealConfirmation, (req, res) => {
+  app.get("/api/providers/:id/api-key", requireRevealConfirmation, ah(async (req, res) => {
     const p = providers.get(req.params.id);
     if (!p) return fail(res, new Error("Provider not found"), 404);
-    const secret = p.apiKeySecretId ? secrets.getWithValue(p.apiKeySecretId) : undefined;
-    ok(res, { apiKey: secret?.value });
-  });
+    // Two homes for a key (see `ConfigProvider`): the encrypted Secret store for
+    // one typed into the form, the config file itself for one inlined there.
+    if (p.apiKeySecretId) return ok(res, { apiKey: secrets.getWithValue(p.apiKeySecretId)?.value });
+    const file = (await readConfigFile(configFile)).parsed ?? {};
+    const entry = (file.providers ?? []).find((candidate) => candidate.id === p.id);
+    ok(res, { apiKey: entry?.apiKey });
+  }));
   app.put("/api/providers/:id", async (req, res) => {
     try {
       const p = await providers.update(req.params.id, req.body);
-      p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
+      if (!p) return fail(res, new Error("Provider not found"), 404);
+      await writeProvidersToConfig();
+      ok(res, providerForClient(p));
     } catch (e) {
       fail(res, e);
     }
@@ -432,21 +643,27 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     "/api/providers/:id/enable",
     ah(async (req, res) => {
       const p = await providers.setEnabled(req.params.id, true);
-      p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
+      if (!p) return fail(res, new Error("Provider not found"), 404);
+      await writeProvidersToConfig();
+      ok(res, providerForClient(p));
     })
   );
   app.post(
     "/api/providers/:id/disable",
     ah(async (req, res) => {
       const p = await providers.setEnabled(req.params.id, false);
-      p ? ok(res, p) : fail(res, new Error("Provider not found"), 404);
+      if (!p) return fail(res, new Error("Provider not found"), 404);
+      await writeProvidersToConfig();
+      ok(res, providerForClient(p));
     })
   );
   app.delete(
     "/api/providers/:id",
     ah(async (req, res) => {
       const removed = await providers.remove(req.params.id);
-      removed ? ok(res, { ok: true }) : fail(res, new Error("Provider not found"), 404);
+      if (!removed) return fail(res, new Error("Provider not found"), 404);
+      await writeProvidersToConfig();
+      ok(res, { ok: true });
     })
   );
 
@@ -455,7 +672,9 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   app.get("/api/models", (_req, res) => ok(res, models.list()));
   app.post("/api/models", async (req, res) => {
     try {
-      ok(res, await models.create(req.body), 201);
+      const created = await models.create(req.body);
+      await writeProvidersToConfig();
+      ok(res, created, 201);
     } catch (e) {
       fail(res, e);
     }
@@ -468,14 +687,18 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     "/api/models/:id",
     ah(async (req, res) => {
       const m = await models.update(req.params.id, req.body);
-      m ? ok(res, m) : fail(res, new Error("Model not found"), 404);
+      if (!m) return fail(res, new Error("Model not found"), 404);
+      await writeProvidersToConfig();
+      ok(res, m);
     })
   );
   app.delete(
     "/api/models/:id",
     ah(async (req, res) => {
       const removed = await models.remove(req.params.id);
-      removed ? ok(res, { ok: true }) : fail(res, new Error("Model not found"), 404);
+      if (!removed) return fail(res, new Error("Model not found"), 404);
+      await writeProvidersToConfig();
+      ok(res, { ok: true });
     })
   );
 
@@ -1349,16 +1572,181 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     } as AppConfig;
   };
 
+  /**
+   * The running config and the file it is kept in.
+   *
+   * `pending` is what makes hand editing safe to reason about: it says the file
+   * on disk is not what this process is running — because it failed to parse,
+   * or because it was edited after the last apply — so the Settings page can
+   * offer "apply and restart" instead of implying the edit already took effect.
+   */
+  const settingsFileInfo = async (file?: ConfigFileRead): Promise<SettingsFileInfo> => {
+    const current = file ?? (await readConfigFile(configFile));
+    const pending = current.parsed === undefined || current.revision !== appliedConfig.revision;
+    return { path: configFile, config: configForClient(), file: current, pending };
+  };
+
   app.get("/api/config", (_req, res) => ok(res, configForClient()));
   app.put(
     "/api/config",
     ah(async (req, res) => {
       try {
-        await store.updateConfig(configFromClient(req.body));
+        const before = store.config();
+        const next = configFromClient(req.body);
+        const at = new Date().toISOString();
+        // A save replaces the settings it names and keeps everything else.
+        //
+        // Two rules, both learned the hard way:
+        // - **The file's key set wins.** Sections the file on disk no longer
+        //   has are dropped even if the running config still carries them, so
+        //   deleting a key by hand and pressing apply removes it. (Merging over
+        //   the in-memory config instead made a deleted `docker` block come
+        //   back on the next save from the UI.)
+        // - **Nothing read-side is written back.** `urlSet`, the redacted
+        //   webhook form and `$schema` describe the document; storing them as
+        //   settings would put a placeholder over a real webhook URL. `server`
+        //   belongs to the entry point (the address the process bound) and is
+        //   carried over untouched.
+        const onDisk = (await readConfigFile(configFile)).parsed ?? {};
+        const stored: Record<string, unknown> = { ...(onDisk as Record<string, unknown>) };
+        if (!("server" in stored) && "server" in before) stored.server = (before as Record<string, unknown>).server;
+        for (const [key, value] of Object.entries(next as Record<string, unknown>)) {
+          if (key === "$schema" || key === "server") continue;
+          if (value === undefined || value === null || (typeof value === "object" && Object.keys(value).length === 0)) {
+            delete stored[key];
+          } else {
+            stored[key] = value;
+          }
+        }
+        // The file is written first: a save the server accepted must be the
+        // same document a later restart reads.
+        await writeConfigFile(configFile, stored as AppConfig, SCHEMA_REF);
+        await store.updateConfig(stored as AppConfig);
+        appliedConfig = { revision: revisionOf((await readConfigFile(configFile)).text), at };
+        recordSettingsChange("ui", changedConfigKeys(before, stored as AppConfig), at);
       } catch (e) {
         return failDomain(res, e);
       }
       ok(res, configForClient());
+    })
+  );
+
+  /* ---------------- settings file ---------------- */
+
+  app.get("/api/settings/schema", (_req, res) => ok(res, CONFIG_SCHEMA));
+
+  app.get(
+    "/api/settings/file",
+    ah(async (_req, res) => ok(res, { ...(await settingsFileInfo()), applied: appliedConfig, history: settingsHistory }))
+  );
+
+  /**
+   * Opens the config file in the host's text editor.
+   *
+   * Pathless on purpose: the client names an action, not a path — a browser page
+   * must not be able to ask a server that can run processes to open an arbitrary
+   * file. macOS gets `open -t`, which forces the default *text* editor and
+   * bypasses a `.json` file association; other platforms use the desktop opener.
+   */
+  app.post(
+    "/api/settings/open",
+    ah(async (_req, res) => {
+      // The file is the record of the running config, so it always exists by the
+      // time a server answers; a missing one is the entry point's problem.
+      if (!existsSync(configFile)) {
+        return fail(res, new Error(`The configuration file ${configFile} does not exist`), 500);
+      }
+      const [bin, args] =
+        process.platform === "darwin"
+          ? ["open", ["-t", configFile]]
+          : process.platform === "win32"
+            ? ["cmd", ["/c", "start", "", configFile]]
+            : ["xdg-open", [configFile]];
+      await new Promise<void>((resolve, reject) => {
+        execFile(bin, args, { timeout: 10_000 }, (err) => (err ? reject(err) : resolve()));
+      }).catch((err: unknown) => {
+        throw new DomainError(
+          "settings-open-failed",
+          `Could not open ${configFile}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      });
+      ok(res, { path: configFile });
+    })
+  );
+
+  /**
+   * Validates the file on disk without applying it.
+   *
+   * The Settings page uses this to say whether a restart would come back clean
+   * before it offers one — a restart over a broken file would bring the server
+   * up on whatever it last ran.
+   */
+  app.get(
+    "/api/settings/validate",
+    ah(async (_req, res) => {
+      const file = await readConfigFile(configFile);
+      const unknown = file.parsed ? unknownConfigKeys(file.parsed) : [];
+      ok(res, {
+        path: configFile,
+        ok: file.parsed !== undefined && unknown.length === 0,
+        error: file.error,
+        unknownKeys: unknown,
+        revision: file.revision,
+        appliedRevision: appliedConfig.revision,
+      });
+    })
+  );
+
+  /**
+   * Applies the file on disk: writes it into the store, then triggers the
+   * caller's restart hook. `ok` never means "now running": the store is
+   * updated synchronously but the process that reads the file's effect (the
+   * supervisor's model choice, harness processes) is only restarted after the
+   * response, so the answer says what happened and what is about to.
+   */
+  app.post(
+    "/api/settings/apply",
+    ah(async (_req, res) => {
+      const file = await readConfigFile(configFile);
+      if (!file.parsed) return fail(res, new Error(`The configuration file could not be parsed: ${file.error}`), 400);
+      const unknown = unknownConfigKeys(file.parsed);
+      if (unknown.length > 0) {
+        return fail(res, new Error(`Unknown configuration key(s): ${unknown.join(", ")}`), 400);
+      }
+      if (file.revision === appliedConfig.revision) {
+        return ok(res, { ok: true, applied: false, restarted: false, path: configFile });
+      }
+      let changed: string[] = [];
+      try {
+        const before = store.config();
+        await store.updateConfig(file.parsed);
+        const at = new Date().toISOString();
+        appliedConfig = { revision: file.revision, at };
+        // A hand-edited provider list takes effect with the rest of the file:
+        // the projection is rebuilt from the document just applied.
+        if (file.parsed.providers) {
+          const { providers: projected, models: projectedModels } = projectConfigProviders(file.parsed.providers);
+          store.replaceCollection("providers", projected);
+          store.replaceCollection("models", projectedModels);
+        }
+        changed = changedConfigKeys(before, file.parsed);
+        recordSettingsChange("file", changed, at);
+      } catch (e) {
+        return failDomain(res, e);
+      }
+      const restarted = options.restart !== undefined;
+      if (restarted) {
+        // After the response: the caller must learn that the apply succeeded
+        // even though its own connection is about to go away.
+        res.on("finish", () => {
+          try {
+            options.restart?.(changed);
+          } catch (err) {
+            console.error("[agent-fabric] restart after applying the configuration file failed:", err);
+          }
+        });
+      }
+      ok(res, { ok: true, applied: true, restarted, path: configFile });
     })
   );
 
@@ -1440,13 +1828,28 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     // Resolved per request rather than only at boot: the dev loop starts the
     // API server before (or while) the first web build finishes, and a build
     // that lands later must be served without restarting the server.
+    //
+    // Vite emits content-hashed file names under `assets/` and an unhashed
+    // `index.html`. Caching the hashed files forever removes every revalidation
+    // from the window's second and later loads (the desktop app is the main
+    // consumer: same files, same machine, no network); `index.html` must stay
+    // uncached so a rebuilt UI is picked up. Without this, every asset was
+    // re-validated on each start — a loopback round trip each, but the
+    // revalidation also delays first paint.
+    const staticOptions = { setHeaders: (res: Response, filePath: string) => {
+      if (filePath.includes(`${sep}assets${sep}`)) {
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      } else {
+        res.setHeader("Cache-Control", "no-cache");
+      }
+    } };
     app.use((req, res, next) => {
       const dir = staticDirCandidate(configuredStaticDir);
       if (!dir) {
         next();
         return;
       }
-      express.static(dir)(req, res, next);
+      express.static(dir, staticOptions)(req, res, next);
     });
     app.get(/^\/(?!api\/).*/, (_req, res) => {
       const dir = staticDirCandidate(configuredStaticDir);
@@ -1476,6 +1879,7 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     if (stopped) return;
     stopped = true;
     clearInterval(purgeTimer);
+    if (onLog) console.log = consoleLog;
     // Board PTYs are host processes too; kill them before anything else can
     // return early. Their records stay non-terminal and the next boot marks
     // them interrupted (recoverInterrupted).
@@ -1487,7 +1891,24 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     teardownWork({ taskIds, runIds, log: (message) => console.log(`[agent-fabric] ${message}`) });
   };
 
-  return { app, shutdown, upgrade: createKanbanUpgradeHandler({ token, runtime: kanbanRuntime }) };
+  const upgrade = createKanbanUpgradeHandler({ token, runtime: kanbanRuntime });
+  if (options.port !== undefined) {
+    const listenPort = options.port;
+    // An explicit HTTP server (rather than `app.listen`) so the kanban
+    // terminal websocket shares the same port and auth token (v13 §5.1).
+    const server = createHttpServer(app);
+    server.on("upgrade", upgrade);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(listenPort, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    return { app, shutdown, upgrade, server };
+  }
+
+  return { app, shutdown, upgrade };
 }
 
 /** The app alone (tests, callers that never stop the server). */

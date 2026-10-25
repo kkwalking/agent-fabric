@@ -37,9 +37,15 @@ export interface Provider {
   website?: string;
   /** Custom API endpoint / base URL. */
   baseUrl?: string;
-  /** Reference to a Secret id holding the API key. */
+  /**
+   * Reference to the Secret holding the API key. Absent for a provider whose
+   * key is inlined in the configuration file (`providers[].apiKey`).
+   */
   apiKeySecretId?: string;
-  /** Masked preview of the key, e.g. `sk-***xyz`. */
+  /**
+   * Masked preview of the key, e.g. `sk-***xyz`. A read-side projection: it is
+   * derived wherever a provider is shown externally, never stored.
+   */
   apiKeyMasked?: string;
   /** Extra headers injected into every request. */
   headers?: Record<string, string>;
@@ -1538,6 +1544,45 @@ export interface ProxyConfig {
  */
 export type HandoffModelSource = "configured" | "previous-run" | "first-enabled";
 
+/**
+ * A provider as it appears in the configuration file.
+ *
+ * Models and providers are configuration, not application data: the file is
+ * where they are declared, so a fresh install has models to run without
+ * clicking through a UI first. The key can be inlined here (`apiKey`) or kept
+ * in AgentFabric's encrypted Secret store (`apiKeySecretId`, which is what the
+ * UI writes when a key is typed in the form). The file is `0600`; inlining a
+ * key keeps it readable by the user, which is the point of a config file.
+ */
+export interface ConfigProvider {
+  id: string;
+  name: string;
+  type: ProviderType;
+  remark?: string;
+  website?: string;
+  baseUrl?: string;
+  /** Key in the clear, in this file. `apiKeySecretId` is the alternative. */
+  apiKey?: string;
+  /** Secret-store reference; a key typed in the UI lands here. */
+  apiKeySecretId?: string;
+  headers?: Record<string, string>;
+  /** Default true. */
+  enabled?: boolean;
+  models?: ConfigModel[];
+}
+
+/** A model as it appears in the configuration file (`providers[].models[]`). */
+export interface ConfigModel {
+  /** Model name as the provider understands it, e.g. `gpt-4o`. */
+  name: string;
+  /** Display name and submission alias. Defaults to `name`. */
+  alias?: string;
+  parameters?: Record<string, unknown>;
+  capabilities?: string[];
+  /** Default true. */
+  enabled?: boolean;
+}
+
 export interface AppConfig {
   server?: {
     host?: string;
@@ -1574,6 +1619,12 @@ export interface AppConfig {
   };
   notifications?: NotificationConfig;
   autoRetry?: AutoRetryConfig;
+  /**
+   * Providers and their models. The file is the source: saving the LLM page
+   * rewrites this section, and editing it by hand and applying it replaces the
+   * whole set (a provider left out of the file is removed).
+   */
+  providers?: ConfigProvider[];
 }
 
 /**

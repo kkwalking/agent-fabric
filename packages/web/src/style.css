@@ -3884,3 +3884,367 @@ button.stat.clickable:hover {
   flex: none;
   margin-top: 1px;
 }
+
+/* ---------- Settings panel ---------- */
+/*
+ * A modal with its own navigation, in the shape the DeepSeek Harness settings
+ * use: a fixed-size panel (800 × 800, capped by the viewport), a 188px nav
+ * column on the left, and the page header — carrying "Open configuration file"
+ * — on the right. The configuration file is edited in the header's action and
+ * in the file card; no page shows the raw JSON document.
+ */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(32, 31, 28, 0.32);
+  animation: af-fade 0.12s ease;
+}
+.settings-panel {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: 800px;
+  height: min(800px, calc(100vh - 48px));
+  max-width: calc(100vw - 48px);
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 18px 60px rgba(32, 31, 28, 0.22);
+  overflow: hidden;
+  animation: af-pop 0.14s ease;
+}
+
+.settings-nav {
+  flex: none;
+  width: 188px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 12px 0;
+  box-sizing: border-box;
+  border-right: 1px solid var(--border-soft);
+}
+.settings-nav-title {
+  padding: 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  color: var(--text);
+}
+.settings-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+.settings-nav-cell {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  text-align: left;
+}
+.settings-nav-cell:hover {
+  background: var(--sidebar-hover);
+}
+.settings-nav-cell.active {
+  background: var(--sidebar-active);
+  font-weight: 550;
+}
+.settings-nav-cell .icon {
+  flex: none;
+  opacity: 0.75;
+}
+.settings-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-content {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+.settings-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 54px;
+  padding: 14px 14px 8px 20px;
+  box-sizing: border-box;
+}
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.settings-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+.settings-status.ok {
+  color: var(--green);
+}
+.settings-action-error {
+  font-size: 12px;
+  color: var(--red);
+}
+.settings-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+}
+.settings-close:hover {
+  background: var(--panel-2);
+}
+/* The shared button classes the panel uses next to the app's `primary`. */
+.btn-primary,
+.btn-outline {
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.btn-primary {
+  background: var(--dark);
+  border-color: var(--dark);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--dark-hover);
+  border-color: var(--dark-hover);
+}
+.btn-outline {
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 24px 28px;
+}
+.settings-loading {
+  height: 120px;
+}
+.settings-page {
+  max-width: 640px;
+}
+.settings-page-title {
+  margin: 4px 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  color: var(--text);
+  text-transform: none;
+}
+.settings-page-desc {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.settings-subtitle {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-hint {
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.settings-field-hint {
+  margin: -2px 0 14px;
+}
+.settings-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+.settings-field-label {
+  font-size: 13px;
+  color: var(--text);
+}
+.settings-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: #f2f2f0;
+}
+.settings-segmented button {
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  padding: 4px 12px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.settings-segmented button[aria-pressed="true"] {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(32, 31, 28, 0.12);
+}
+.settings-switch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 6px 0 14px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+}
+.settings-switch input {
+  width: auto;
+  margin: 0;
+  flex: none;
+}
+.settings-facts {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px 16px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.settings-facts dt {
+  color: var(--muted);
+}
+.settings-facts dd {
+  margin: 0;
+  word-break: break-all;
+}
+.settings-env {
+  width: 100%;
+  font-size: 12.5px;
+}
+.settings-env td {
+  padding: 4px 8px 4px 0;
+  vertical-align: top;
+}
+.settings-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 2px 0 8px;
+}
+.settings-result {
+  font-size: 12px;
+}
+.settings-result.ok {
+  color: var(--green);
+}
+.settings-result.bad {
+  color: var(--red);
+}
+.settings-error-line {
+  color: var(--red);
+  font-size: 12px;
+  margin: 2px 0 8px;
+}
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 20px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* The configuration file card: path and state at a glance, actions on the right. */
+.settings-filecard {
+  margin: 2px 0 22px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fbfbfa;
+}
+.settings-filecard-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.settings-filecard-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-filecard-path {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.settings-filecard-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+.settings-filecard-state {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.settings-filecard-pending {
+  color: var(--yellow);
+}
+.settings-filecard-error {
+  color: var(--red);
+}
+.settings-filecard-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+.settings-filecard .settings-hint {
+  margin-top: 8px;
+}
+
+/* ---------- Settings: models section ---------- */
+/* The providers list is wider than a form page: cards in two columns and an
+   editor that keeps its own scroll region inside the panel. */
+.settings-page-wide {
+  max-width: none;
+}
+.settings-llm-head {
+  margin-bottom: 10px;
+}
+.settings-page-wide .card {
+  margin-bottom: 12px;
+}
