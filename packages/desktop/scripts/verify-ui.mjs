@@ -602,6 +602,53 @@ try {
     );
     check(firstUse.hasCreateEntry === true, "the projects page offers a way to create the first project");
     check(firstUse.dialogOpened === true, "clicking it opens the create dialog");
+
+    // After creating a project the next gate is a containerized runtime, and the
+    // message for it must lead to the Docker diagnosis rather than leaving the
+    // user to guess whether Docker is missing, stopped, or fine.
+    //
+    // This only exists once a project exists: with none, the Project selector
+    // itself is not rendered, so the runtime question cannot come up yet (that
+    // ordering is what the composer check above covers). Create one first.
+    const gateSource = join(dataDir, "gate-source");
+    mkdirSync(gateSource, { recursive: true });
+    await evaluate(
+      cdp,
+      `(async () => {
+         const res = await fetch("/api/projects", {
+           method: "POST",
+           headers: { "Content-Type": "application/json" },
+           body: JSON.stringify({ name: "gate-probe", source: { type: "directory", path: ${JSON.stringify(gateSource)} } }),
+         });
+         return res.status;
+       })()`
+    );
+    const runtimeGate = await evaluate(
+      cdp,
+      `(async () => {
+         // Create a project through the dialog's own API path is covered above;
+         // here the message text for the runtime gate is what matters.
+         // Leave and come back so the composer re-reads the project list: the
+         // GET cache lives 5s, and the project was created a moment ago.
+         history.pushState({}, "", "/tasks");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 5200));
+         history.pushState({}, "", "/new");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 2200));
+         const texts = [...document.querySelectorAll("main .card")].map((c) => c.textContent.trim());
+         const gate = texts.find((t) => t.includes("isolated Runtime")) ?? null;
+         return { gate, mentionsDocker: /Docker/.test(gate ?? ""), mentionsSettings: /设置/.test(gate ?? "") };
+       })()`
+    );
+    // With a project present and no containerized runtime on a fresh install,
+    // the gate must be on screen — asserting its wording only when it happens to
+    // appear would let a missing message pass silently.
+    check(runtimeGate.gate !== null, `a project without a containerized runtime shows the gate (${JSON.stringify((runtimeGate.gate ?? "").slice(0, 60))})`);
+    check(
+      runtimeGate.gate !== null && runtimeGate.mentionsDocker === true && runtimeGate.mentionsSettings === true,
+      `the runtime gate points at the Docker diagnosis (${JSON.stringify((runtimeGate.gate ?? "").slice(0, 60))})`
+    );
   }
 
   // 6. The "More" panel reaches the pages that have no nav row.

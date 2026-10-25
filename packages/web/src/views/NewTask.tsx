@@ -237,7 +237,7 @@ export function NewTaskView() {
         <ErrorBox message="还没有可用于任务的工作目录 — 最直接的方式：在左下角「更多」→ 项目里新建一个项目（git 仓库或本地目录），然后在这里选中它；平台会为每个任务自动创建独立的工作副本，不需要你手工建 Workspace。注意 Project 任务需要容器化隔离 Runtime：如果本机没有安装 Docker，请先在「更多」→ 运行时 里确认可用项，或安装 Docker 后重启应用。" />
       )}
       {missingProjectRuntime && (
-        <ErrorBox message="没有可用于 Project Task 的隔离 Runtime — Project Coding Task 必须运行在 isolated Runtime 中（v11 hardening §4），不会降级到 Host。请先在左下角「更多」→ 运行时里启用一个 containerized Runtime，或把 Project 改选为 none 走 Workspace 模式" />
+        <ErrorBox message="没有可用于 Project Task 的隔离 Runtime — Project Coding Task 必须运行在 isolated Runtime 中（v11 hardening §4），不会降级到 Host。请先在左下角「更多」→ 运行时里启用一个 containerized Runtime；启用前提是本机 Docker 可用，「更多」→ 设置 → Docker 会告诉你它是否装好并在运行。" />
       )}
       <ErrorBox message={error} />
 
