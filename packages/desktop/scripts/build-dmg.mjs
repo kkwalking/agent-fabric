@@ -40,11 +40,26 @@ export function buildDmg({ appPath, outFile, volumeName }) {
     rmSync(outFile, { force: true });
     // hdiutil writes deprecation notices for `create`/`attach` on newer macOS;
     // they are noise, not a problem — the image is verified by mounting it.
-    execFileSync(
-      "hdiutil",
-      ["create", "-volname", volumeName, "-srcfolder", staging, "-ov", "-format", "UDZO", outFile],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
+    // `create` needs the same timeout as attach/detach below: hdiutil has wedged
+    // here too, and without one the whole build waits forever with no output —
+    // which is indistinguishable from a slow build. 300s is generous: a healthy
+    // run of this image takes a few seconds.
+    try {
+      execFileSync(
+        "hdiutil",
+        ["create", "-volname", volumeName, "-srcfolder", staging, "-ov", "-format", "UDZO", outFile],
+        { stdio: ["ignore", "pipe", "pipe"], timeout: 300_000 }
+      );
+    } catch (e) {
+      if (e?.signal === "SIGTERM" || e?.code === "ETIMEDOUT") {
+        throw new Error(
+          `buildDmg: hdiutil create produced no result within 300s and was killed.\n` +
+            `The image is usually fine on the next attempt; if it repeats, check for a stale ` +
+            `mounted copy first: hdiutil info | grep -i agentfabric`
+        );
+      }
+      throw e;
+    }
     if (!existsSync(outFile)) throw new Error(`buildDmg: hdiutil reported success but ${outFile} does not exist`);
     verifyDmg(outFile);
     return outFile;

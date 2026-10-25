@@ -147,3 +147,14 @@ if (dirOnly) {
 
 console.log(`\n[desktop] done. Artifacts in ${join(desktopRoot, "release")}`);
 console.log(`[desktop]   app: ${appPath}`);
+
+// Exit deliberately now that the work is finished and printed.
+//
+// `verifyApp` runs in this process and its PTY round trip leaves a
+// `/dev/ptmx` handle open even after the server's shutdown kills the child
+// (node-pty on macOS does not close the parent side). That keeps the event
+// loop alive, so the build printed "done", wrote a good dmg — and then never
+// exited, which looks exactly like hdiutil hanging. Nothing below this point
+// needs an orderly teardown, and every failure path above already exits
+// loudly, so a plain exit is the right end here.
+process.exit(0);
