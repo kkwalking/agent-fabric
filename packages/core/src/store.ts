@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -20,7 +20,6 @@ import type {
   Project,
   SourceCredential,
   WorkspaceLock,
-  KanbanProject,
   KanbanCard,
   KanbanSession,
 } from "./types.js";
@@ -42,7 +41,6 @@ export type CollectionName =
   | "projects"
   | "sourceCredentials"
   | "workspaceLocks"
-  | "kanbanProjects"
   | "kanbanCards"
   | "kanbanSessions"
   | "config";
@@ -81,7 +79,6 @@ export interface Database {
   projects: Project[];
   sourceCredentials: SourceCredential[];
   workspaceLocks: WorkspaceLock[];
-  kanbanProjects: KanbanProject[];
   kanbanCards: KanbanCard[];
   kanbanSessions: KanbanSession[];
   config: AppConfig;
@@ -110,7 +107,6 @@ export function emptyDatabase(): Database {
     projects: [],
     sourceCredentials: [],
     workspaceLocks: [],
-    kanbanProjects: [],
     kanbanCards: [],
     kanbanSessions: [],
     config: {},
@@ -176,7 +172,6 @@ export class Store {
       if (!Array.isArray(this.db.projects)) this.db.projects = [];
       if (!Array.isArray(this.db.sourceCredentials)) this.db.sourceCredentials = [];
       if (!Array.isArray(this.db.workspaceLocks)) this.db.workspaceLocks = [];
-      if (!Array.isArray(this.db.kanbanProjects)) this.db.kanbanProjects = [];
       if (!Array.isArray(this.db.kanbanCards)) this.db.kanbanCards = [];
       if (!Array.isArray(this.db.kanbanSessions)) this.db.kanbanSessions = [];
       if (!this.db.config) this.db.config = {};
@@ -212,11 +207,20 @@ export class Store {
     await this.saving;
   }
 
+  /**
+   * Writes the whole database through a temp file and a rename.
+   *
+   * The temp name is unique per write: a single `<file>.tmp` is a shared name
+   * on disk, so two Stores opened on the same directory (two server instances
+   * in one test process, a restart that overlaps the previous flush) rename the
+   * *same* temp file, and one of them finds it already moved away. The rename
+   * itself stays atomic, so a reader never sees a half-written database.
+   */
   private async flush(): Promise<void> {
     if (!this.dirty) return;
     this.dirty = false;
     await mkdir(dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
+    const tmp = `${this.file}.${randomUUID()}.tmp`;
     await writeFile(tmp, JSON.stringify(this.db, null, 2), "utf8");
     await rename(tmp, this.file);
   }

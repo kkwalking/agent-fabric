@@ -20,7 +20,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { DomainError } from "@agentfabric/core";
-import type { KanbanAgentKind, KanbanCard, KanbanProject, KanbanSessionTransport } from "@agentfabric/core";
+import type { KanbanAgentKind, KanbanCard, KanbanSessionTransport, Project } from "@agentfabric/core";
 
 const execFileAsync = promisify(execFile);
 
@@ -252,7 +252,7 @@ export interface KanbanLaunch {
  */
 export function buildKanbanLaunch(
   card: KanbanCard,
-  project: KanbanProject,
+  project: Project,
   options: { resumeSessionId?: string } = {}
 ): KanbanLaunch {
   const entry = getKanbanAgent(card.agentId);

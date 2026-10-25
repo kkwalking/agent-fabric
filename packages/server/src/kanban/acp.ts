@@ -365,7 +365,13 @@ export class AcpSession extends EventEmitter {
   private send(message: unknown): void {
     if (this.closed) return;
     try {
-      this.child.stdin?.write(`${JSON.stringify(message)}\n`);
+      const written = this.child.stdin?.write(`${JSON.stringify(message)}\n`);
+      // `write` on a pipe reports a dead peer asynchronously: the return value is
+      // false and the stream emits `error` (EPIPE) on the next tick, which an
+      // unhandled stream error turns into a process-level throw. The close event
+      // is what actually settles the session, so the write failure itself is not
+      // actionable — but it must not escape as an uncaught exception.
+      if (written === false) this.child.stdin?.once("error", () => undefined);
     } catch {
       // A closed stdin is reported by the close event; nothing to recover.
     }

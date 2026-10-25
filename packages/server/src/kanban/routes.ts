@@ -1,14 +1,19 @@
 /**
- * REST surface for the board (v13 §八).
+ * REST surface for the board (v13 §八, unified with Projects in v14).
  *
  * Routes are thin: validation and column rules live in `KanbanService`, the
  * process lifecycle lives in `KanbanSessionRuntime`. Failures are thrown as
  * `DomainError` and reach the app's existing error middleware, so the HTTP
  * status always comes from the code table instead of a per-route guess.
+ *
+ * **Projects are not a board-owned collection.** Listing, renaming and deleting
+ * a board project is the plain `/api/projects` API. The single board-specific
+ * project route is the "pick a folder / clone a URL → add it as a Project"
+ * entry point, because the Git question it asks is board-specific.
  */
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 import { DomainError } from "@agentfabric/core";
-import type { ID, KanbanColumn, KanbanProject, KanbanService } from "@agentfabric/core";
+import type { ID, KanbanColumn, KanbanService, Project, ProjectService, WorkspaceService } from "@agentfabric/core";
 import { listKanbanAgents } from "./agents.js";
 import { listKanbanDirectories } from "./fs.js";
 import { readGitInfo } from "./git.js";
@@ -27,20 +32,41 @@ function asGitInit(value: unknown): KanbanGitInitChoice {
   return "ask";
 }
 
-/** Per-project column counts, so the project list shows live card totals. */
-function projectWithCounts(kanban: KanbanService, project: KanbanProject): KanbanProject & {
+/**
+ * The board fields a project list row adds to a `Project`: how many cards it
+ * has and how many of them are running. Computed for this response only; the
+ * Project record itself stays the plain record.
+ */
+export interface BoardProjectRow extends Project {
   cardCounts: Record<KanbanColumn, number>;
-} {
-  const counts: Record<KanbanColumn, number> = { backlog: 0, in_progress: 0, review: 0, trash: 0 };
-  for (const card of kanban.listCards(project.id)) counts[card.column] += 1;
-  return { ...project, cardCounts: counts };
+  /** Cards whose latest session still owns a live process. */
+  runningCards: number;
 }
 
-export function registerKanbanRoutes(
-  app: Express,
-  deps: { kanban: KanbanService; runtime: KanbanSessionRuntime }
-): void {
-  const { kanban, runtime } = deps;
+function projectWithCounts(
+  kanban: KanbanService,
+  project: Project,
+  isLive: (sessionId: ID) => boolean
+): BoardProjectRow {
+  const counts: Record<KanbanColumn, number> = { backlog: 0, in_progress: 0, review: 0, trash: 0 };
+  let runningCards = 0;
+  for (const card of kanban.listCards(project.id)) {
+    counts[card.column] += 1;
+    const session = kanban.latestSessionForCard(card.id);
+    if (session && isLive(session.id)) runningCards += 1;
+  }
+  return { ...project, cardCounts: counts, runningCards };
+}
+
+export interface KanbanRouteDeps {
+  kanban: KanbanService;
+  runtime: KanbanSessionRuntime;
+  projects: ProjectService;
+  workspaces: WorkspaceService;
+}
+
+export function registerKanbanRoutes(app: Express, deps: KanbanRouteDeps): void {
+  const { kanban, runtime, projects, workspaces } = deps;
   const ah = (handler: (req: Request, res: Response) => Promise<void>): RequestHandler => {
     return (req, res, next: NextFunction) => {
       void handler(req, res).catch(next);
@@ -82,19 +108,15 @@ export function registerKanbanRoutes(
 
   /* ---------------- projects ---------------- */
 
-  app.get(
-    "/api/kanban/projects",
-    ah(async (_req, res) => {
-      res.json({ projects: kanban.listProjects().map((project) => projectWithCounts(kanban, project)) });
-    })
-  );
-
   /**
    * Adds a board project from a folder (`path`) or a clone URL (`gitUrl`).
    *
    * A folder that is not a Git repository is a valid board project; the
    * response asks the user how to proceed (`gitInit: "init" | "skip"`) instead
    * of guessing or refusing. Any other failure is a typed `DomainError`.
+   *
+   * The result is an ordinary `Project`; listing, renaming and deleting it
+   * afterwards is `/api/projects`.
    */
   app.post(
     "/api/kanban/projects",
@@ -116,7 +138,7 @@ export function registerKanbanRoutes(
         });
         return;
       }
-      res.status(201).json({ project: projectWithCounts(kanban, result.project) });
+      res.status(201).json({ project: projectWithCounts(kanban, result.project, (id) => runtime.isLive(id)) });
     })
   );
 
@@ -125,37 +147,7 @@ export function registerKanbanRoutes(
     "/api/kanban/projects/:id/git",
     ah(async (req, res) => {
       const project = kanban.getProject(projectParams(req));
-      res.json({ git: await readGitInfo(project.rootPath) });
-    })
-  );
-
-  app.patch(
-    "/api/kanban/projects/:id",
-    ah(async (req, res) => {
-      const project = await kanban.updateProject(projectParams(req), {
-        name: req.body?.name,
-        defaultAgentId: req.body?.defaultAgentId,
-        defaultExecutionMode: req.body?.defaultExecutionMode,
-      });
-      res.json({ project });
-    })
-  );
-
-  app.delete(
-    "/api/kanban/projects/:id",
-    ah(async (req, res) => {
-      const projectId = projectParams(req);
-      const cards = kanban.listCards(projectId);
-      const sessionIds = cards.flatMap((card) => kanban.listSessions(card.id).map((session) => session.id));
-      // Kill this project's live PTYs first: deleting records must not leave
-      // orphaned agents writing into the user's directory.
-      for (const card of cards) {
-        const session = kanban.latestSessionForCard(card.id);
-        if (session && runtime.isLive(session.id)) await runtime.stop(session.id);
-      }
-      await kanban.deleteProject(projectId);
-      await runtime.discardSessionChats(sessionIds);
-      res.json({ ok: true });
+      res.json({ git: await readGitInfo(kanban.rootOf(project)) });
     })
   );
 
@@ -164,7 +156,8 @@ export function registerKanbanRoutes(
   app.get(
     "/api/kanban/projects/:id/cards",
     ah(async (req, res) => {
-      res.json({ cards: kanban.listCards(projectParams(req)) });
+      const project = kanban.getProject(projectParams(req));
+      res.json({ cards: kanban.listCards(project.id) });
     })
   );
 
@@ -226,14 +219,16 @@ export function registerKanbanRoutes(
   );
 
   /**
-   * Empties the Done column: the cards and their session records are deleted,
-   * never the working directories. Live sessions are stopped first so clearing
-   * Done cannot leave an agent writing with no record pointing at it.
+   * Empties the Done column: the cards are deleted (their Tasks go to the
+   * recycle bin, never a physical delete), never the working directories. Live
+   * sessions are stopped first so clearing Done cannot leave an agent writing
+   * with no record pointing at it.
    */
   app.post(
     "/api/kanban/projects/:id/trash/clear",
     ah(async (req, res) => {
-      const cards = kanban.listCards(projectParams(req)).filter((card) => card.column === "trash");
+      const project = kanban.getProject(projectParams(req));
+      const cards = kanban.listCards(project.id).filter((card) => card.column === "trash");
       for (const card of cards) {
         const latest = kanban.latestSessionForCard(card.id);
         if (latest && runtime.isLive(latest.id)) await runtime.stop(latest.id);
@@ -276,12 +271,20 @@ export function registerKanbanRoutes(
     "/api/kanban/cards/:id/start",
     ah(async (req, res) => {
       const cardId = cardParams(req);
-      if (req.body?.restart === true) {
-        const latest = kanban.latestSessionForCard(cardId);
-        if (latest && runtime.isLive(latest.id)) await runtime.stop(latest.id);
+      const latest = kanban.latestSessionForCard(cardId);
+      // Starting a card that is already running is a no-op, not a restart: the
+      // board's Start is also the "open the Backlog card and run it" action, and
+      // silently replacing a live agent would throw away the turn in progress.
+      // An explicit restart (or a stopped/finished session) is what relaunches.
+      if (req.body?.restart !== true && latest && runtime.isLive(latest.id)) {
+        res.json({ session: latest, card: kanban.getCard(cardId) });
+        return;
+      }
+      if (req.body?.restart === true && latest && runtime.isLive(latest.id)) {
+        await runtime.stop(latest.id);
       }
       const session = await runtime.start(cardId);
-      res.json({ session });
+      res.json({ session, card: kanban.getCard(cardId) });
     })
   );
 

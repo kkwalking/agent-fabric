@@ -1,13 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildKanbanLaunch, getKanbanAgent } from "./kanban/agents.js";
-import type { KanbanAgentKind, KanbanCard, KanbanProject } from "@agentfabric/core";
+import type { KanbanAgentKind, KanbanCard, Project } from "@agentfabric/core";
 
-const project: KanbanProject = {
-  id: "kbproj_test",
+// A board project is a Project: the folder is its `directory` source and the
+// board-only choices live in `board`.
+const project: Project = {
+  id: "proj_test",
   name: "test",
-  rootPath: "/tmp/kanban-agents-test",
-  workspaceType: "none",
+  source: { type: "directory", path: "/tmp/kanban-agents-test" },
+  board: { workspaceType: "none" },
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };

@@ -7,7 +7,17 @@ import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
+import type { Project, Run, Task, Workspace } from "@agentfabric/core";
 import { createServer } from "./app.js";
+
+/**
+ * A board project, as the board routes return it: the ordinary `Project` plus
+ * the board's card counts. There is no board-owned project type any more.
+ */
+type BoardProject = Project & {
+  cardCounts: Record<"backlog" | "in_progress" | "review" | "trash", number>;
+  runningCards: number;
+};
 
 interface Harness {
   dir: string;
@@ -96,11 +106,11 @@ async function api<T>(h: Harness, method: string, path: string, body?: unknown):
 test("board HTTP + terminal websocket end to end with a fake CLI", async () => {
   const h = await makeHarness();
   try {
-    const { project } = await api<{ project: { id: string; workspaceType: string } }>(h, "POST", "/api/kanban/projects", {
+    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
       path: join(h.dir, "project"),
       gitInit: "skip",
     });
-    assert.equal(project.workspaceType, "none");
+    assert.equal(project.board?.workspaceType, "none");
 
     const { card } = await api<{ card: { id: string; column: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
       prompt: "do the thing",
@@ -248,15 +258,32 @@ async function pollSession(
   throw new Error(`session did not reach the expected state; last=${JSON.stringify(last)}`);
 }
 
+/** Waits for a card to reach `column` (one transition is several writes). */
+async function pollColumn(h: Harness, projectId: string, cardId: string, column: string): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  let last = "unknown";
+  while (Date.now() < deadline) {
+    const { cards } = await api<{ cards: Array<{ id: string; column: string }> }>(
+      h,
+      "GET",
+      `/api/kanban/projects/${projectId}/cards`
+    );
+    last = cards.find((c) => c.id === cardId)?.column ?? "missing";
+    if (last === column) return last;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return last;
+}
+
 test("worktree mode runs in a git worktree and leaves the project tree untouched", async () => {
   const h = await makeHarness();
   try {
     const projectDir = join(h.dir, "project");
     initGitRepo(projectDir);
-    const { project } = await api<{ project: { id: string; workspaceType: string } }>(h, "POST", "/api/kanban/projects", {
+    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
       path: projectDir,
     });
-    assert.equal(project.workspaceType, "git");
+    assert.equal(project.board?.workspaceType, "git");
 
     const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
       prompt: "work in a worktree",
@@ -343,12 +370,10 @@ test("Claude Stop hook moves the card to Review; typing moves it back to In Prog
     ws.send(Buffer.from("x", "utf8"));
     const running = await pollSession(h, card.id, (s) => s.status === "running");
     assert.equal(running.status, "running");
-    const moved = await api<{ cards: Array<{ id: string; column: string }> }>(
-      h,
-      "GET",
-      `/api/kanban/projects/${project.id}/cards`
-    );
-    assert.equal(moved.cards.find((c) => c.id === card.id)?.column, "in_progress");
+    // The status write and the column move are two writes of one transition:
+    // the card is back in Progress once both have landed.
+    const column = await pollColumn(h, project.id, card.id, "in_progress");
+    assert.equal(column, "in_progress");
     ws.close();
   } finally {
     await h.cleanup();
@@ -538,18 +563,25 @@ test("adding a non-Git folder asks for an explicit choice, then honours it", asy
     assert.equal(asked.data.code, "kanban-project-not-git");
     assert.equal(asked.data.requiresGitInitialization, true);
     assert.equal(asked.data.path, plainDir);
-    const before = await api<{ projects: unknown[] }>(h, "GET", "/api/kanban/projects");
-    assert.equal(before.projects.length, 0);
+    // Nothing was created: projects are Projects, and there is no board-owned
+    // project collection to look at.
+    const before = await api<Project[]>(h, "GET", "/api/projects");
+    assert.deepEqual(before, []);
 
     // "Add without Git" is a real board project.
-    const skipped = await api<{ project: { id: string; workspaceType: string; name: string } }>(
-      h,
-      "POST",
-      "/api/kanban/projects",
-      { path: plainDir, gitInit: "skip" }
-    );
-    assert.equal(skipped.project.workspaceType, "none");
+    const skipped = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
+      path: plainDir,
+      gitInit: "skip",
+    });
+    assert.equal(skipped.project.board?.workspaceType, "none");
     assert.equal(skipped.project.name, "plain-folder");
+    assert.equal(skipped.project.source.type, "directory");
+    assert.equal(skipped.project.source.path, plainDir);
+    // The same Project is what the ordinary projects API lists.
+    const listed = await api<Project[]>(h, "GET", "/api/projects");
+    assert.deepEqual(listed.map((entry) => entry.id), [skipped.project.id]);
+    assert.equal(listed[0]?.source.type, "directory");
+    assert.equal(listed[0]?.source.path, plainDir);
 
     // The same folder cannot be a second board.
     const duplicate = await rawApi(h, "POST", "/api/kanban/projects", { path: plainDir, gitInit: "skip" });
@@ -567,13 +599,11 @@ test("initializing Git on an existing folder creates a worktree-ready repository
     mkdirSync(folder);
     writeFileSync(join(folder, "hello.txt"), "hello\n");
 
-    const { project } = await api<{ project: { id: string; workspaceType: string } }>(
-      h,
-      "POST",
-      "/api/kanban/projects",
-      { path: folder, gitInit: "init" }
-    );
-    assert.equal(project.workspaceType, "git");
+    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
+      path: folder,
+      gitInit: "init",
+    });
+    assert.equal(project.board?.workspaceType, "git");
     // The initial commit is what makes a detached worktree possible.
     const head = execFileSync("git", ["-C", folder, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).trim();
     assert.match(head, /^[0-9a-f]{40}$/);
@@ -599,14 +629,13 @@ test("cloning a Git URL adds the clone as a board project", async () => {
     initGitRepo(seed);
     const target = join(h.dir, "cloned");
 
-    const { project } = await api<{ project: { id: string; workspaceType: string; rootPath: string } }>(
-      h,
-      "POST",
-      "/api/kanban/projects",
-      { gitUrl: seed, path: target }
-    );
-    assert.equal(project.workspaceType, "git");
-    assert.equal(project.rootPath, target);
+    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
+      gitUrl: seed,
+      path: target,
+    });
+    assert.equal(project.board?.workspaceType, "git");
+    assert.equal(project.source.type, "directory");
+    assert.equal(project.source.path, target);
     assert.ok(existsSync(join(target, ".git")));
     assert.ok(existsSync(join(target, "README.md")));
 
@@ -752,13 +781,8 @@ test("a worktree card checks out its base ref, and an unknown ref fails loudly",
     execFileSync("git", ["-C", repo, "commit", "-q", "-m", "feature"]);
     execFileSync("git", ["-C", repo, "checkout", "-q", mainBranch]);
 
-    const { project } = await api<{ project: { id: string; workspaceType: string } }>(
-      h,
-      "POST",
-      "/api/kanban/projects",
-      { path: repo }
-    );
-    assert.equal(project.workspaceType, "git");
+    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", { path: repo });
+    assert.equal(project.board?.workspaceType, "git");
 
     const { git } = await api<{ git: { currentBranch: string | null; branches: string[]; defaultBranch: string | null } }>(
       h,
@@ -1055,6 +1079,134 @@ test("a malformed session id in a socket upgrade is rejected without taking the 
     // have exited the process, so a healthy answer proves it was contained.
     const health = await fetch(`${h.baseUrl}/api/health`);
     assert.equal(health.status, 200);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+/**
+ * A started card is a real Task of a real Project (spec
+ * `kanban-task-unification` §六 2–5):
+ *
+ * - 2: adding a folder creates an ordinary `Project` with a `directory` source;
+ * - 3: `start` produces one Task on the card's Project, in the Project's
+ *   external Workspace whose path is the folder, plus one Run;
+ * - 4: rerunning the card adds a Run, never a second Task;
+ * - 5: a failed session leaves the Run and `Task.execution` saying so, and the
+ *   read path returns exactly what was written.
+ */
+test("a started card is a Task of its Project, with one Run per start", async () => {
+  const h = await makeHarness();
+  try {
+    const projectDir = join(h.dir, "project");
+    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
+      path: projectDir,
+      gitInit: "skip",
+    });
+
+    // 2. The board project is a Project with a directory source.
+    assert.equal(project.source.type, "directory");
+    assert.equal(project.source.path, projectDir);
+    const projects = await api<Project[]>(h, "GET", "/api/projects");
+    assert.deepEqual(projects.map((entry) => entry.id), [project.id]);
+
+    const { card } = await api<{ card: { id: string; workspaceId?: string } }>(
+      h,
+      "POST",
+      `/api/kanban/projects/${project.id}/cards`,
+      { prompt: "do the thing", agentId: "claude" }
+    );
+    // The card records the folder it works in at creation time.
+    assert.ok(card.workspaceId);
+
+    const started = await api<{ session: { id: string; runId: string }; card: { taskId?: string; runId?: string } }>(
+      h,
+      "POST",
+      `/api/kanban/cards/${card.id}/start`,
+      {}
+    );
+    // The session handle's id IS its Run's id.
+    assert.equal(started.session.runId, started.session.id);
+    assert.equal(started.card.runId, started.session.id);
+    const taskId = started.card.taskId;
+    assert.ok(taskId);
+
+    // 3. The Task is visible through both task APIs.
+    const allTasks = await api<Task[]>(h, "GET", "/api/tasks");
+    assert.deepEqual(allTasks.map((task) => task.id), [taskId]);
+    const projectTasks = await api<Task[]>(h, "GET", `/api/projects/${project.id}/tasks`);
+    assert.deepEqual(projectTasks.map((task) => task.id), [taskId]);
+
+    const task = await api<Task>(h, "GET", `/api/tasks/${taskId}`);
+    assert.equal(task.projectId, project.id);
+    assert.equal(task.title, "do the thing");
+    // The folder is the Project's external Workspace, and it is the folder.
+    const workspaces = await api<Workspace[]>(h, "GET", "/api/workspaces");
+    const workspace = workspaces.find((entry) => entry.id === task.workspaceId);
+    assert.ok(workspace);
+    assert.equal(workspace.path, projectDir);
+    assert.equal(workspace.ownership, "external");
+    assert.equal(workspace.projectId, project.id);
+    // The projection is written at start, not derived on read.
+    assert.equal(task.execution?.phase, "agent.running");
+    assert.equal(task.execution?.agent?.status, "running");
+    assert.equal((task.metadata as { board?: { cardId?: string } } | undefined)?.board?.cardId, card.id);
+    assert.ok((task.metadata as { lastActivityAt?: string } | undefined)?.lastActivityAt);
+
+    const firstRuns = await api<Run[]>(h, "GET", `/api/tasks/${taskId}/runs`);
+    assert.deepEqual(firstRuns.map((run) => run.id), [started.session.id]);
+    assert.equal(firstRuns[0]?.status, "running");
+    assert.equal(firstRuns[0]?.purpose, "development");
+
+    // 4. A restart is a second run of the same task, not a second task.
+    await api(h, "POST", `/api/kanban/cards/${card.id}/start`, { restart: true });
+    const tasksAfterRerun = await api<Task[]>(h, "GET", "/api/tasks");
+    assert.equal(tasksAfterRerun.length, 1);
+    const secondRuns = await api<Run[]>(h, "GET", `/api/tasks/${taskId}/runs`);
+    assert.equal(secondRuns.length, firstRuns.length + 1);
+    assert.equal(secondRuns.filter((run) => run.taskId === taskId).length, 2);
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a failed board session writes the failure into its Run and Task", async () => {
+  // The agent kills itself: the session fails, and both the Run and the Task's
+  // execution must say so. The read path returns the stored projection.
+  const h = await makeHarness("#!/bin/sh\nprintf 'FAIL_AGENT\\n'\nexit 3\n");
+  try {
+    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
+      path: join(h.dir, "project"),
+      gitInit: "skip",
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      prompt: "fail on purpose",
+      agentId: "claude",
+    });
+    const started = await api<{ card: { taskId?: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    const taskId = started.card.taskId;
+    assert.ok(taskId);
+
+    await pollSession(h, card.id, (session) => session.status === "failed");
+
+    const task = await api<Task>(h, "GET", `/api/tasks/${taskId}`);
+    assert.equal(task.execution?.phase, "failed");
+    assert.equal(task.execution?.status, "failed");
+    assert.equal(task.execution?.failure?.stage, "agent");
+    assert.equal(task.execution?.failure?.code, "kanban-agent-failed");
+    assert.equal(task.execution?.agent?.status, "failed");
+
+    const runs = await api<Run[]>(h, "GET", `/api/tasks/${taskId}/runs`);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0]?.status, "failed");
+
+    // Deleting the card sends the Task to the recycle bin, never a hard delete.
+    await api(h, "DELETE", `/api/kanban/cards/${card.id}`);
+    const liveTasks = await api<Task[]>(h, "GET", "/api/tasks");
+    assert.deepEqual(liveTasks, []);
+    const deletedTasks = await api<Task[]>(h, "GET", "/api/tasks?deleted=true");
+    assert.deepEqual(deletedTasks.map((task) => task.id), [taskId]);
   } finally {
     await h.cleanup();
   }

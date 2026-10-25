@@ -1,10 +1,11 @@
 /**
- * "Add project" orchestration for the board (v13 §2.1).
+ * "Add project" orchestration for the board (v13 §2.1, unified with Projects).
  *
  * The dialog sends either a local folder or a clone URL. This module owns the
  * parts the dialog must not fake: path expansion, the Git-optional decision
- * (add as-is / initialize a repository / ask the user), cloning, and duplicate
- * detection. Record creation itself stays in `KanbanService`.
+ * (add as-is / initialize a repository / ask the user) and cloning. The
+ * project record itself is written by `KanbanService.addProject()`, which
+ * creates an ordinary `Project` — the board has no project collection.
  *
  * The Git confirmation is part of the flow, not an error path: a folder that is
  * not a repository is a perfectly good board project, and the user is the one
@@ -12,9 +13,9 @@
  */
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { DomainError } from "@agentfabric/core";
-import type { KanbanProject, KanbanService } from "@agentfabric/core";
+import type { KanbanService, Project } from "@agentfabric/core";
 import { expandKanbanPath } from "./fs.js";
 import {
   cloneGitRepository,
@@ -39,7 +40,7 @@ export interface AddKanbanProjectInput {
 }
 
 export type AddKanbanProjectResult =
-  | { kind: "created"; project: KanbanProject }
+  | { kind: "created"; project: Project }
   | { kind: "requires-git-init"; path: string };
 
 function normalizeGitInit(value: unknown): KanbanGitInitChoice {
@@ -117,16 +118,6 @@ export async function addKanbanProject(
 
   await assertDirectory(projectPath);
 
-  // Report the duplicate before asking about Git: "this folder is already a
-  // board" is the useful answer, and no Git question would change it.
-  const existing = kanban.listProjects().find((project) => resolve(project.rootPath) === resolve(projectPath));
-  if (existing) {
-    throw new DomainError(
-      "kanban-project-duplicate",
-      `This folder is already a board project: ${existing.name} (${existing.rootPath})`
-    );
-  }
-
   const gitInit = normalizeGitInit(input.gitInit);
   if (!isGitRepositoryAtRoot(projectPath)) {
     if (gitInit === "init") {
@@ -136,7 +127,7 @@ export async function addKanbanProject(
     }
   }
 
-  const project = await kanban.createProject({
+  const project = await kanban.addProject({
     rootPath: projectPath,
     ...(input.name?.trim() ? { name: input.name } : {}),
   });

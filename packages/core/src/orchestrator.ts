@@ -74,6 +74,7 @@ import type {
   RunContinuity,
   RunEvent,
   RunPhase,
+  RunStatus,
   Runtime,
   RuntimeCapability,
   RuntimeLifecycle,
@@ -175,6 +176,20 @@ function evaluateResumeCompatibility(
     };
   }
   return { compatible: true, reason: `same harness (${target.kind}) + same workspace + native state available` };
+}
+
+/**
+ * A caller that owns a run outside the execution supervisor (the kanban board
+ * runs a local CLI in a PTY and only records it here). Omitted fields are
+ * derived from the Task exactly as for a supervisor run.
+ */
+export interface RecordedRunSpec extends RunSpec {
+  /** Initial run status. Defaults to `pending`, like every other run. */
+  status?: RunStatus;
+  /** What the run is for (v12 §4.1); board runs are `development`. */
+  purpose?: Run["purpose"];
+  /** Harness name shown in run lists; the board uses the card's agent id. */
+  runtimeName?: string;
 }
 
 /**
@@ -556,6 +571,34 @@ export class RunService {
    */
   async createRunForTask(task: Task, spec: RunSpec): Promise<Run> {
     return this.createRunFromTask(task, spec);
+  }
+
+  /**
+   * Creates a Run for an existing Task that someone else executes — the kanban
+   * board runs its own CLI process and only needs the record. Unlike
+   * `createRunForTask` this takes the initial status, purpose and harness name:
+   * a board run starts life `running`, because the PTY/ACP child is the run.
+   */
+  async recordRunForTask(task: Task, spec: RecordedRunSpec): Promise<Run> {
+    return this.createRunFromTask(task, spec);
+  }
+
+  /**
+   * Appends one lifecycle event to a run this service did not execute
+   * (a board run) and fans it out on the bus, so an attached Task view sees
+   * the run start, phase changes and terminal status live.
+   */
+  async recordRunEvent(runId: ID, type: EventType, data: Record<string, unknown> = {}): Promise<void> {
+    const event: RunEvent = {
+      id: newId("evt"),
+      runId,
+      seq: this.store.nextSeq(),
+      type,
+      timestamp: new Date().toISOString(),
+      data,
+    };
+    await this.store.appendEvent(event);
+    this.bus.publish(event);
   }
 
   /** The adapter registered for a runtime kind (supervisor preflight). */
@@ -998,17 +1041,21 @@ export class RunService {
     const runtime = runtimeId ? this.runtimeService().get(runtimeId) : undefined;
     const model = modelId ? this.modelService().get(modelId) : undefined;
     const provider = model ? this.providerService().get(model.providerId) : undefined;
+    // `status`/`purpose`/`runtimeName` come from `RecordedRunSpec`: absent on
+    // every supervisor run, which keeps `pending` and the derived harness name.
+    const recorded = extra as RecordedRunSpec;
     const run: Run = {
       id: newId("run"),
       taskId: task.id,
       taskTitle: extra.title ?? task.title,
-      status: "pending",
+      status: recorded.status ?? "pending",
+      purpose: recorded.purpose,
       phase: extra.phase,
       projectId: extra.projectId ?? task.projectId,
       workingBranch: extra.workingBranch ?? task.workingBranch,
       baseCommitSha: extra.baseCommitSha ?? task.baseCommitSha,
       runtimeId,
-      runtimeName: runtime?.name,
+      runtimeName: recorded.runtimeName ?? runtime?.name,
       modelId,
       modelName: model?.alias ?? model?.name,
       providerId: provider?.id,

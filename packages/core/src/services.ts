@@ -39,6 +39,7 @@ import type {
   SourceCredential,
   SourceCredentialView,
   SourceCredentialType,
+  ProjectBoardSettings,
   ProjectExecutionConfig,
   ProjectSkill,
   McpServerConfig,
@@ -447,8 +448,44 @@ export class WorkspaceService {
     sourcePath?: string;
     workingBranch?: string;
     mountPath?: string;
+    /**
+     * Use `sourcePath` **as the workspace** instead of copying it (v11 §5.4,
+     * the board's in-place product). The user's folder stays the single tree
+     * the Task works in, which is why the board records it as this Task's
+     * workspace rather than a per-task copy of it.
+     */
+    inPlace?: boolean;
   }): Promise<Workspace> {
     const id = newId("ws");
+    const inPlacePath = input.inPlace ? input.sourcePath?.trim() : undefined;
+    if (input.inPlace && !inPlacePath) {
+      throw new DomainError(
+        "workspace-create-failed",
+        "An in-place workspace needs the directory to use — `sourcePath` is missing"
+      );
+    }
+    if (inPlacePath) {
+      // No directory is created and nothing is copied: this Task's working tree
+      // *is* the user's folder. `ownership` stays `managed` because the platform
+      // owns the record, but nothing here takes ownership of the files.
+      return this.store.insert("workspaces", {
+        id,
+        name: input.name,
+        type: "local",
+        path: resolve(inPlacePath),
+        repoUrl: input.repoUrl,
+        branch: input.workingBranch,
+        workingBranch: input.workingBranch,
+        mountPath: input.mountPath ?? "/workspace",
+        persistent: true,
+        source: "create",
+        status: "ready",
+        ownership: "managed",
+        projectId: input.projectId,
+        taskId: input.taskId,
+        createdAt: now(),
+      } satisfies Workspace);
+    }
     const path = join(this.store.dataDir, "workspaces", id);
     try {
       await mkdir(path, { recursive: true });
@@ -1275,6 +1312,11 @@ export interface NewProjectInput {
     remoteUrl?: string;
     /** Absolute path of a `directory` source. */
     path?: string;
+    /**
+     * Use the `directory` in place — the Task works in it instead of a managed
+     * copy (see `ProjectSource.workTree`). The board sets it.
+     */
+    workTree?: boolean;
     provider?: SourceProvider;
     defaultBranch?: string;
     credentialId?: ID;
@@ -1284,6 +1326,12 @@ export interface NewProjectInput {
   mcpServers?: McpServerConfig[];
   validation?: ValidationConfig;
   git?: GitPublishPolicy;
+  /**
+   * Board settings (spec kanban-task-unification §1). Only a board-created
+   * Project carries them; the update merges a partial patch into the stored
+   * value, the same rule `execution` follows.
+   */
+  board?: Partial<ProjectBoardSettings>;
 }
 
 /** Infers the provider from the host so users never have to pick one. */
@@ -1339,6 +1387,11 @@ export class ProjectService {
       mcpServers: input.mcpServers,
       validation: input.validation,
       git: input.git,
+      // Written once, complete: `workspaceType` is required on the record, so a
+      // Project that is a board project always carries the board's answer.
+      ...(input.board?.workspaceType !== undefined
+        ? { board: { ...input.board, workspaceType: input.board.workspaceType } }
+        : {}),
       createdAt: now(),
       updatedAt: now(),
     };
@@ -1371,6 +1424,21 @@ export class ProjectService {
     if (patch.mcpServers !== undefined) next.mcpServers = patch.mcpServers;
     if (patch.validation !== undefined) next.validation = patch.validation;
     if (patch.git !== undefined) next.git = patch.git;
+    // Same merge rule as `execution`: a board form submits only the fields it
+    // renders, so a partial board patch must not drop the others.
+    if (patch.board !== undefined) {
+      if (!project.board) {
+        if (patch.board.workspaceType === undefined) {
+          throw new DomainError(
+            "project-invalid",
+            "Board settings need a workspaceType the first time they are written — this Project is not a board project yet"
+          );
+        }
+        next.board = { ...patch.board, workspaceType: patch.board.workspaceType };
+      } else {
+        next.board = { ...project.board, ...patch.board };
+      }
+    }
     return this.store.update<Project>("projects", id, next);
   }
 
@@ -1401,7 +1469,15 @@ export class ProjectService {
           "A directory project cannot use a source credential — credentials are bound to a repository host"
         );
       }
-      return { type: "directory", path: resolve(path), defaultBranch: input.defaultBranch?.trim() || "main" };
+      return {
+        type: "directory",
+        path: resolve(path),
+        defaultBranch: input.defaultBranch?.trim() || "main",
+        // Carried over from the stored source: an update that only renames the
+        // Project must not silently turn an in-place board project into a
+        // per-task copy.
+        ...(input.workTree ?? previous?.workTree ? { workTree: true } : {}),
+      };
     }
     const remoteUrl = input.remoteUrl?.trim();
     if (!remoteUrl) throw new DomainError("project-invalid", "A git project needs a repository URL");

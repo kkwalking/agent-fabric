@@ -245,7 +245,14 @@ export interface TaskDetailView {
   task: Task;
   project: Project | null;
   source: {
-    remoteUrl: string;
+    /**
+     * The repository URL for a `git` Project. Absent for a `directory`
+     * Project — including a board project, whose Tasks run in place — because
+     * there is no remote to reach; a URL there would be a fabricated one.
+     */
+    remoteUrl?: string;
+    /** Absolute directory for a `directory` Project. */
+    path?: string;
     provider?: string;
     defaultBranch?: string;
     credential: {
@@ -500,6 +507,10 @@ export class ExecutionSupervisor {
       repoUrl: isGitProject(project) ? gitRemoteUrl(project) : undefined,
       sourcePath: project.source.path,
       workingBranch,
+      // An in-place source (`source.workTree`) is used as it is: the Task works
+      // in the user's folder instead of a copy. A copy would mean two divergent
+      // trees for the same code, and the folder is where a board agent runs.
+      ...(project.source.workTree ? { inPlace: true } : {}),
     });
 
     const execution: TaskExecution = {
@@ -891,7 +902,10 @@ export class ExecutionSupervisor {
       project,
       source: project
         ? {
-            remoteUrl: gitRemoteUrl(project),
+            // `gitRemoteUrl` throws for a source that has no remote; a board
+            // project's directory source is exactly that, and its folder — not
+            // a remote — is what the page should show.
+            ...(isGitProject(project) ? { remoteUrl: gitRemoteUrl(project) } : { path: project.source.path }),
             provider: project.source.provider,
             defaultBranch: project.source.defaultBranch,
             credential: credential
@@ -1903,6 +1917,11 @@ export class ExecutionSupervisor {
       await this.setPhase(task.id, runId, "source.checkout", "preparing");
       const head = await git.head({ dir });
       if (!head) {
+        // An in-place source (`source.workTree`) IS the user's directory, so a
+        // Task may legitimately run where no commit exists yet — there is no
+        // revision to pin and nothing to publish. Anything else has no revision
+        // to work from and must say so.
+        if (project.source.workTree) return;
         throw new DomainError(
           "source-not-found",
           `The project directory ${project.source.path ?? ""} is not a git repository, and a task needs a revision to work from`

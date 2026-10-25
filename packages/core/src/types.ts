@@ -424,6 +424,17 @@ export interface ProjectSource {
   remoteUrl?: string;
   /** Absolute directory for a `directory` source. */
   path?: string;
+  /**
+   * The `directory` source is a Git repository whose Tasks work **in place**:
+   * the Task's Workspace *is* this directory (no managed copy, so no working
+   * branch and no publish — the branch belongs to the folder, not the Task).
+   *
+   * Written only by the board, which runs local agent CLIs directly in the
+   * folder the user picked. A directory Project created from the Projects page
+   * keeps its copy semantics (`workTree` absent), so this is not a global
+   * behaviour flip.
+   */
+  workTree?: boolean;
   provider?: SourceProvider;
   /** Default branch used when a Task does not name a base ref. */
   defaultBranch?: string;
@@ -604,6 +615,12 @@ export interface Project {
   validation?: ValidationConfig;
   /** Default publish policy; a Task may override it. */
   git?: GitPublishPolicy;
+  /**
+   * Board settings — present only on a Project that was added from the kanban
+   * board. The board owns no project collection: this Project **is** the
+   * board project, and its root directory comes from `source`.
+   */
+  board?: ProjectBoardSettings;
   createdAt: string;
   updatedAt: string;
 }
@@ -1733,24 +1750,30 @@ export type KanbanExecutionMode = "direct" | "worktree";
 /** Repository shape discovered for a board project. Discovery never blocks. */
 export type KanbanWorkspaceType = "none" | "git" | "multi-git" | "google-repo";
 
-/** A local directory the user opened as a board (folder-first, Git optional). */
-export interface KanbanProject {
-  id: ID;
-  name: string;
-  /** The directory the user picked; never walked up to a containing Git root. */
-  rootPath: string;
+/**
+ * Board settings carried by a `Project` that was added from the board.
+ *
+ * The board has no project collection of its own: a board project **is** a
+ * `Project`, and its root directory is the Project's own `source` (a
+ * `directory` source's `path`) — never a second copy of the path. Only the
+ * board-specific choices live here.
+ */
+export interface ProjectBoardSettings {
   workspaceType: KanbanWorkspaceType;
-  /** Present when discovery failed; discovery is advisory only. */
+  /** Present when discovery failed; discovery is advisory and never blocks. */
   discoveryWarning?: string;
   defaultAgentId?: KanbanAgentKind;
   defaultExecutionMode?: KanbanExecutionMode;
-  createdAt: string;
-  updatedAt: string;
 }
 
-/** One board card. The card is the unit of work; sessions are its attempts. */
+/**
+ * One board card. The card is the unit of work; every start of it is a `Run`
+ * of the one `Task` the card created (`taskId`), and the live process is a
+ * `KanbanSession` whose id is that Run's id.
+ */
 export interface KanbanCard {
   id: ID;
+  /** The Project this card belongs to (a board project is a Project). */
   projectId: ID;
   title: string;
   prompt: string;
@@ -1775,8 +1798,19 @@ export interface KanbanCard {
    * means the project's current HEAD. Ignored in `direct` mode.
    */
   baseRef?: string;
-  /** Most recent session, if the card has ever been started. */
-  sessionId?: ID;
+  /**
+   * The card's working directory: the Project's external Workspace for the
+   * board folder. Fixed when the card is created.
+   */
+  workspaceId?: ID;
+  /**
+   * The Task this card produces. Created on the card's first start and never
+   * replaced afterwards — reruns and continued conversations are new Runs of
+   * the same Task.
+   */
+  taskId?: ID;
+  /** The most recent Run (= its `KanbanSession` process handle). */
+  runId?: ID;
   createdAt: string;
   updatedAt: string;
 }
@@ -1815,10 +1849,18 @@ export interface KanbanSessionModelRoute {
   label?: string;
 }
 
-/** One attempt to run a card. The process itself is server memory. */
+/**
+ * One board session: the **process handle** of a card's run, not a task
+ * record. `id` is the corresponding `Run`'s id (1:1) — terminal WebSockets and
+ * hook capability tokens are indexed by session id, so the handle has to exist
+ * on its own; the task facts themselves live on `Task` + `Run`.
+ */
 export interface KanbanSession {
+  /** = the id of the `Run` this handle drives (1:1). */
   id: ID;
   cardId: ID;
+  /** The Run this handle belongs to; always equal to `id`. */
+  runId: ID;
   agentId: KanbanAgentKind;
   /** Actual working directory (project root for direct mode). */
   cwd: string;

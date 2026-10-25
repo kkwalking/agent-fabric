@@ -34,10 +34,11 @@ import { DomainError } from "@agentfabric/core";
 import type {
   ID,
   KanbanCard,
-  KanbanProject,
   KanbanSession,
   KanbanSessionModelRoute,
   KanbanSessionStatus,
+  Project,
+  Task,
 } from "@agentfabric/core";
 import type { KanbanService } from "@agentfabric/core";
 import { assertKanbanAgentAvailable, buildKanbanLaunch, type KanbanLaunch } from "./agents.js";
@@ -59,6 +60,17 @@ export interface KanbanSessionRuntimeOptions {
   dataDir: string;
   /** Absolute callback base, e.g. http://127.0.0.1:7377/kanban-hooks/ingest. */
   hookBaseUrl: string;
+}
+
+/**
+ * What starting a card produced: its live process handle plus the records the
+ * start wrote (the card's one `Task` and this attempt's `Run`).
+ */
+export interface KanbanStart {
+  session: KanbanSession;
+  task: Task;
+  /** The Task was created by this start (false = a rerun/continue). */
+  taskCreated: boolean;
 }
 
 const ACTIVE_STATUSES: readonly KanbanSessionStatus[] = [
@@ -150,8 +162,25 @@ export class KanbanSessionRuntime {
   }
 
   async start(cardId: ID): Promise<KanbanSession> {
+    const { session } = await this.startAttempt(cardId);
+    return session;
+  }
+
+  /**
+   * Starts one attempt of a card and returns both halves of it: the process
+   * handle (`KanbanSession`) and the records it produced (the card's `Task`
+   * and this attempt's `Run`).
+   *
+   * The records are created by `KanbanService.startAttempt()` — one Task on the
+   * card's first start, one Run on every start, with the Run's id doubling as
+   * the session id. This method only owns the process: the working directory
+   * (worktree when the card asks for one), hooks, the PTY or ACP child, and the
+   * failure settlements that follow from a process that could not start.
+   */
+  async startAttempt(cardId: ID): Promise<KanbanStart> {
     const card = this.kanban.getCard(cardId);
     const project = this.kanban.getProject(card.projectId);
+
 
     if (card.column === "trash") {
       throw new DomainError("kanban-session-not-startable", "Restore the card from Done before starting it");
@@ -172,7 +201,8 @@ export class KanbanSessionRuntime {
 
     const launch = buildKanbanLaunch(card, project, resumeId ? { resumeSessionId: resumeId } : {});
     const pendingWorktree = card.executionMode === "worktree";
-    let cwd = project.rootPath;
+    let cwd = this.kanban.rootOf(project);
+    const rootPath = cwd;
     let worktreeCreated = false;
 
     // A resumed session reuses the previous record and its directory: a fresh
@@ -186,20 +216,16 @@ export class KanbanSessionRuntime {
       previous !== undefined &&
       previous.executionMode === card.executionMode &&
       (card.executionMode === "direct" || existsSync(previous.cwd));
-    const session = canReuse
-      ? await this.kanban.updateSession(previous.id, {
-          status: "starting",
-          endedAt: undefined,
-          exitCode: undefined,
-          error: undefined,
-          lastHookEvent: "resume",
-          lastHookAt: new Date().toISOString(),
-        })
-      : await this.kanban.createSession(card, {
-          cwd,
-          interactiveTui: launch.interactiveTui,
-          transport: launch.transport,
-        });
+
+    // The records are written before the process exists: a PTY/ACP child that
+    // dies instantly must still leave a Task and a Run that say why.
+    const attempt = await this.kanban.startAttempt(card.id, {
+      cwd,
+      interactiveTui: launch.interactiveTui,
+      transport: launch.transport,
+      ...(canReuse ? { resume: true } : {}),
+    });
+    let session = attempt.session;
     if (canReuse) {
       // The launch already carries the harness resume flag; point the card at
       // the reopened record and run in its directory. The worktree (if any)
@@ -210,10 +236,10 @@ export class KanbanSessionRuntime {
 
     if (pendingWorktree && !canReuse) {
       cwd = kanbanWorktreePath(this.options.dataDir, session.id);
-      await this.kanban.updateSession(session.id, { cwd });
+      session = await this.kanban.updateSession(session.id, { cwd });
       try {
         await createKanbanWorktree({
-          rootPath: project.rootPath,
+          rootPath,
           targetPath: cwd,
           ...(card.baseRef ? { baseRef: card.baseRef } : {}),
         });
@@ -228,7 +254,8 @@ export class KanbanSessionRuntime {
     }
 
     if (launch.transport === "acp") {
-      return this.startAcp({ card, project, launch, session, cwd, worktreeCreated });
+      const started = await this.startAcp({ card, project, launch, session, cwd, worktreeCreated, rootPath });
+      return { ...attempt, session: started };
     }
 
     // Claude blocks on a "trust this folder?" dialog in an unknown directory,
@@ -250,7 +277,7 @@ export class KanbanSessionRuntime {
         token: hookToken,
       });
     } catch (err) {
-      if (worktreeCreated) await removeKanbanWorktree(project.rootPath, cwd);
+      if (worktreeCreated) await removeKanbanWorktree(rootPath, cwd);
       await this.kanban.settleSession(session.id, {
         status: "failed",
         error: `Could not prepare ${card.agentId} hooks: ${err instanceof Error ? err.message : String(err)}`,
@@ -274,7 +301,7 @@ export class KanbanSessionRuntime {
         env: { ...launch.env, ...hookSetup.extraEnv },
       });
     } catch (err) {
-      if (worktreeCreated) await removeKanbanWorktree(project.rootPath, cwd);
+      if (worktreeCreated) await removeKanbanWorktree(rootPath, cwd);
       await cleanupKanbanHooks(hookSetup.dir);
       this.hookTokens.delete(session.id);
       await this.kanban.settleSession(session.id, {
@@ -292,7 +319,8 @@ export class KanbanSessionRuntime {
       void this.onExit(session, event);
     });
 
-    return this.kanban.getSession(session.id);
+    const current = this.kanban.getSession(session.id);
+    return { ...attempt, session: current };
   }
 
   /**
@@ -303,13 +331,15 @@ export class KanbanSessionRuntime {
    */
   private async startAcp(input: {
     card: KanbanCard;
-    project: KanbanProject;
+    project: Project;
     launch: KanbanLaunch;
     session: KanbanSession;
     cwd: string;
     worktreeCreated: boolean;
+    /** The project folder, for removing a worktree this start created. */
+    rootPath: string;
   }): Promise<KanbanSession> {
-    const { card, project, launch, session, cwd, worktreeCreated } = input;
+    const { card, project, launch, session, cwd, worktreeCreated, rootPath } = input;
     const acp = new AcpSession({ file: launch.file, args: launch.args, cwd, env: launch.env });
     const state: AcpState = {
       session,
@@ -347,7 +377,7 @@ export class KanbanSessionRuntime {
     } catch (err) {
       this.acpStates.delete(session.id);
       acp.stop();
-      if (worktreeCreated) await removeKanbanWorktree(project.rootPath, cwd);
+      if (worktreeCreated) await removeKanbanWorktree(rootPath, cwd);
       const detail = acp.stderr ? `\n${acp.stderr}` : "";
       const message = `Could not start ${launch.file} over ACP: ${
         err instanceof Error ? err.message : String(err)

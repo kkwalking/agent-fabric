@@ -462,21 +462,30 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   const projects = new ProjectService(store);
   const sourceCredentials = new SourceCredentialService(store);
   const workspaceLocks = new WorkspaceLockService(store);
-  // The board is a separate product surface from Project Coding Tasks: it
-  // launches local CLIs in PTYs, so it has its own runtime and records.
-  const kanban = new KanbanService(store);
-  const kanbanRuntime = new KanbanSessionRuntime(kanban, {
-    dataDir: store.dataDir,
-    hookBaseUrl:
-      options.hookBaseUrl ??
-      `http://127.0.0.1:${process.env.AGENTFABRIC_PORT ?? 7377}/kanban-hooks/ingest`,
-  });
   const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
     codex: codexThreadSource,
     "claude-code": claudeCodeThreadSource,
     zcode: zcodeThreadSource,
     pi: piThreadSource,
     dsh: dshThreadSource,
+  });
+  // The board is a separate product surface from Project Coding Tasks: it
+  // launches local CLIs in PTYs. Its records are not separate any more (a
+  // board project is a Project, a started card is a Task with Runs), so it
+  // writes through the same services.
+  const kanban = new KanbanService(store, {
+    projects,
+    tasks,
+    runs,
+    workspaces,
+    runtimes,
+    runtimeSessions,
+  });
+  const kanbanRuntime = new KanbanSessionRuntime(kanban, {
+    dataDir: store.dataDir,
+    hookBaseUrl:
+      options.hookBaseUrl ??
+      `http://127.0.0.1:${process.env.AGENTFABRIC_PORT ?? 7377}/kanban-hooks/ingest`,
   });
   // The execution supervisor owns the Project-based task lifecycle (v11 §13).
   const supervisor = new ExecutionSupervisor(store, bus, runs);
@@ -553,7 +562,7 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /* ---------------- board (v13) ---------------- */
   // Registered inside the authenticated /api region: the terminal data itself
   // travels over the websocket upgrade handler returned below.
-  registerKanbanRoutes(app, { kanban, runtime: kanbanRuntime });
+  registerKanbanRoutes(app, { kanban, runtime: kanbanRuntime, projects, workspaces });
 
   /* ---------------- health ---------------- */
 

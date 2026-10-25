@@ -93,6 +93,21 @@ export type ErrorCode =
   | "kanban-worktree-unavailable"
   | "kanban-worktree-failed"
   | "kanban-terminal-unauthorized"
+  /**
+   * A board card's agent reported failure (spec kanban-task-unification §2):
+   * written onto `Task.execution.failure` and the Run when a session fails.
+   */
+  | "kanban-agent-failed"
+  /**
+   * A board session was cut off by a restart while it was still active; its
+   * task is marked failed so nothing pretends the agent is still working.
+   */
+  | "kanban-session-interrupted"
+  /**
+   * No harness `Runtime` exists for a card's agent, so the card cannot produce
+   * a run. Refused at start time rather than silently picking another harness.
+   */
+  | "kanban-runtime-missing"
   /* Platform */
   | "config-invalid"
   | "settings-open-failed"
@@ -160,6 +175,11 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   // belongs to run preparation, and the agent never started.
   "profile-not-found": "agent",
   "model-not-found": "runtime",
+  // A board card's agent failure is an agent-stage failure of the card task,
+  // and an interrupted board session is an interrupted agent, not a
+  // platform-cancelled run.
+  "kanban-agent-failed": "agent",
+  "kanban-session-interrupted": "agent",
 };
 
 export function stageForCode(code: ErrorCode): FailureStage {
