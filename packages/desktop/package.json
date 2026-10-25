@@ -1,0 +1,28 @@
+{
+  "name": "@agentfabric/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AgentFabric desktop app (macOS .app / .dmg): an Electron window around the AgentFabric API server.",
+  "main": "src/main.js",
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.1",
+    "electron": "39.8.10",
+    "electron-builder": "^26.0.12"
+  },
+  "scripts": {
+    "build:backend": "node scripts/build-backend.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "start": "npm run build:native && npm run build:backend && node scripts/dev.mjs",
+    "dist:mac": "node scripts/build-mac.mjs",
+    "install:mac": "node scripts/install-mac.mjs",
+    "verify:ui": "node scripts/verify-ui.mjs",
+    "typecheck": "node --check src/main.js && node --check scripts/build-backend.mjs && node --check scripts/build-native.mjs && node --check scripts/build-mac.mjs && node --check scripts/install-mac.mjs && node --check scripts/verify-ui.mjs && node --check scripts/verify-app.mjs && node --check scripts/gui-verify.mjs",
+    "smoke": "node scripts/smoke-pty.mjs",
+    "perf": "node scripts/perf-check.mjs",
+    "perf:update": "node scripts/perf-check.mjs --update"
+  },
+  "files": [
+    "src/main.js",
+    "package.json"
+  ]
+}

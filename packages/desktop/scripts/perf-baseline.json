@@ -1,0 +1,21 @@
+{
+  "recordedAt": "2026-10-24T02:56:06.996Z",
+  "measurements": {
+    "firstLoadJsKb": 162,
+    "lazyViewChunks": true,
+    "coldStartMs": 417,
+    "uiReadyMs": 491,
+    "indexHtmlNoCache": true,
+    "assetImmutable": true,
+    "listApiMs": 3,
+    "apiCallsOnTasks": 5
+  },
+  "budgets": {
+    "coldStartMsMax": 1500,
+    "uiReadyMsMax": 1800,
+    "firstLoadJsKbMax": 180,
+    "expectedLazyChunks": 20,
+    "apiCallsOnTasksMax": 7,
+    "listApiMsMax": 150
+  }
+}
