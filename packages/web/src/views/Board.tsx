@@ -1307,6 +1307,12 @@ function CardDetail({
   // instead of opening a blank one; the button says so.
   const canResume = Boolean(session?.nativeSessionId) && !sessionLive;
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // The panel is reused when the user switches cards, and "arm the delete" must
+  // not survive that switch: otherwise a card opened later shows "Confirm
+  // delete" already armed, and one click destroys it.
+  useEffect(() => {
+    setConfirmDelete(false);
+  }, [card.id]);
   // Task details start collapsed: the terminal is the reason to open a card, and
   // the prompt/metadata are contextual. The rail is the affordance to expand.
   const [sideOpen, setSideOpen] = useState(false);
