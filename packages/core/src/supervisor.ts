@@ -17,7 +17,8 @@
  * a push whose result is uncertain is re-checked against the remote, and a
  * lock whose run is gone is reclaimed (v11 §36/§37).
  */
-import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { cp, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { EventBus } from "./eventbus.js";
 import { Store, newId } from "./store.js";
@@ -36,6 +37,7 @@ import {
   type MaterializedCredential,
 } from "./git.js";
 import { SecretRedactor } from "./redaction.js";
+import { gitRemoteUrl, isGitProject } from "./types.js";
 import { provisionEnvironment, MCP_CONFIG_ENV_VAR, SKILLS_ENV_VAR, type ProvisionedEnvironment } from "./provisioning.js";
 import {
   buildJudgeInstruction,
@@ -438,19 +440,29 @@ export class ExecutionSupervisor {
     const instruction = input.instruction?.trim();
     if (!instruction) throw new DomainError("task-state-invalid", "A task needs an instruction");
 
-    const urlCheck = validateRemoteUrl(project.source.remoteUrl);
-    if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
-
-    // Credential binding (v11 hardening §9/§10): the credential must be
-    // scoped to the repository's real host and compatible with its
-    // transport. Checked before anything is created — an incompatible
-    // pairing is a configuration error, not a failed clone.
-    if (project.source.credentialId) {
-      const credential = this.credentials().get(project.source.credentialId);
-      if (!credential) {
-        throw new DomainError("credential-not-found", `Source credential not found: ${project.source.credentialId}`);
+    // A git Project's remote and credential are checked before anything is
+    // created. A `directory` Project has neither: its only prerequisite is the
+    // path, which `ProjectService` validated, and it is re-checked here because
+    // the directory may have been deleted since the Project was configured.
+    if (isGitProject(project)) {
+      const urlCheck = validateRemoteUrl(gitRemoteUrl(project));
+      if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
+      // Credential binding (v11 hardening §9/§10): the credential must be
+      // scoped to the repository's real host and compatible with its
+      // transport. Checked before anything is created — an incompatible
+      // pairing is a configuration error, not a failed clone.
+      if (project.source.credentialId) {
+        const credential = this.credentials().get(project.source.credentialId);
+        if (!credential) {
+          throw new DomainError("credential-not-found", `Source credential not found: ${project.source.credentialId}`);
+        }
+        assertCredentialBinding(credential, gitRemoteUrl(project));
       }
-      assertCredentialBinding(credential, project.source.remoteUrl);
+    } else if (!project.source.path || !existsSync(project.source.path)) {
+      throw new DomainError(
+        "source-not-found",
+        `The project directory ${project.source.path ?? "(unset)"} does not exist any more`
+      );
     }
 
     const profile = this.resolveProfile(input.profileId, project.execution?.profileId);
@@ -483,7 +495,10 @@ export class ExecutionSupervisor {
       name: `${project.name} / ${title}`.slice(0, 120),
       projectId: project.id,
       taskId,
-      repoUrl: project.source.remoteUrl,
+      // A directory Project's working copy starts as a copy of the directory;
+      // there is no repository to clone (see `WorkspaceService.createManaged`).
+      repoUrl: isGitProject(project) ? gitRemoteUrl(project) : undefined,
+      sourcePath: project.source.path,
       workingBranch,
     });
 
@@ -876,7 +891,7 @@ export class ExecutionSupervisor {
       project,
       source: project
         ? {
-            remoteUrl: project.source.remoteUrl,
+            remoteUrl: gitRemoteUrl(project),
             provider: project.source.provider,
             defaultBranch: project.source.defaultBranch,
             credential: credential
@@ -1879,7 +1894,24 @@ export class ExecutionSupervisor {
   }): Promise<void> {
     const { task, runId, project, workspace, redactor, git } = opts;
     const dir = workspace.path!;
-    const remoteUrl = project.source.remoteUrl;
+    const isGit = isGitProject(project);
+    if (!isGit) {
+      // A directory-sourced Project: the workspace already holds the copy (see
+      // `WorkspaceService.createManaged`). Nothing is fetched, and the base
+      // revision is whatever the copy has — the contract with the user is "the
+      // task starts from the content that was there when it was created".
+      await this.setPhase(task.id, runId, "source.checkout", "preparing");
+      const head = await git.head({ dir });
+      if (!head) {
+        throw new DomainError(
+          "source-not-found",
+          `The project directory ${project.source.path ?? ""} is not a git repository, and a task needs a revision to work from`
+        );
+      }
+      await this.tasks().update(task.id, { baseCommitSha: head } as Partial<Task>);
+      return;
+    }
+    const remoteUrl = gitRemoteUrl(project);
     const baseRef = task.baseRef || project.source.defaultBranch || "main";
     const workingBranch = task.workingBranch!;
     const branchMode = task.branchMode ?? "new";
@@ -1946,7 +1978,7 @@ export class ExecutionSupervisor {
         throw new DomainError("git-state-invalid", `The workspace is on "${currentBranch ?? "(detached)"}" instead of "${workingBranch}"`);
       }
       await this.emit(runId, "source.prepared", {
-        remoteUrl: project.source.remoteUrl,
+        remoteUrl: gitRemoteUrl(project),
         provider: project.source.provider,
         baseRef,
         baseCommitSha,
@@ -2839,7 +2871,7 @@ export class ExecutionSupervisor {
       // timeout whose request actually succeeded — is detected from the remote.
       const remoteSha = await git.remoteBranchSha({
         dir,
-        remoteUrl: project.source.remoteUrl,
+        remoteUrl: gitRemoteUrl(project),
         branch,
         credential,
         timeoutMs: this.gitTimeoutMs,
@@ -2869,7 +2901,7 @@ export class ExecutionSupervisor {
       } catch (err) {
         // A failed push may still have landed; ask the remote before failing.
         const after = await this.git
-          .remoteBranchSha({ dir, remoteUrl: project.source.remoteUrl, branch, credential, timeoutMs: this.gitTimeoutMs, redactor })
+          .remoteBranchSha({ dir, remoteUrl: gitRemoteUrl(project), branch, credential, timeoutMs: this.gitTimeoutMs, redactor })
           .catch(() => undefined);
         if (after === finalCommitSha) {
           await this.recordPublish(task, {
@@ -2885,7 +2917,7 @@ export class ExecutionSupervisor {
         throw err;
       }
       const confirmed = await this.git
-        .remoteBranchSha({ dir, remoteUrl: project.source.remoteUrl, branch, credential, timeoutMs: this.gitTimeoutMs, redactor })
+        .remoteBranchSha({ dir, remoteUrl: gitRemoteUrl(project), branch, credential, timeoutMs: this.gitTimeoutMs, redactor })
         .catch(() => undefined);
       if (confirmed && confirmed !== finalCommitSha) {
         throw new DomainError("git-push-failed", `The remote branch "${branch}" is at ${confirmed.slice(0, 8)} after the push`);
@@ -2972,11 +3004,20 @@ export class ExecutionSupervisor {
     return bound as unknown as GitOps;
   }
 
+  /**
+   * The publish policy for one Task.
+   *
+   * A directory-sourced Project has no remote, so `push` is forced off
+   * regardless of what the Project or Task asks for: the alternative would be a
+   * push attempt that can only fail after the work was committed. Everything
+   * else (auto-commit, the working branch, the commit message) still applies —
+   * a directory Project still gets its own local commits.
+   */
   private effectiveGitPolicy(project: Project, taskPolicy?: GitPublishPolicy): ResolvedGitPolicy {
     const merged: GitPublishPolicy = { ...(project.git ?? {}), ...(taskPolicy ?? {}) };
     return {
       autoCommit: merged.autoCommit ?? DEFAULT_GIT_POLICY.autoCommit,
-      push: merged.push ?? DEFAULT_GIT_POLICY.push,
+      push: isGitProject(project) ? (merged.push ?? DEFAULT_GIT_POLICY.push) : false,
       remote: merged.remote || DEFAULT_GIT_POLICY.remote,
       protectedBranches: merged.protectedBranches ?? DEFAULT_GIT_POLICY.protectedBranches,
       commitMessage: merged.commitMessage,

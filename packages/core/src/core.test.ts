@@ -8,7 +8,7 @@ import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { RuntimeRegistry } from "./runtime.js";
 import { RunService } from "./orchestrator.js";
-import { ProviderService, ModelService, RuntimeService, TaskService, WorkspaceService, SecretService, seedDefaults } from "./services.js";
+import { ProviderService, ModelService, ProjectService, RuntimeService, TaskService, WorkspaceService, SecretService, seedDefaults } from "./services.js";
 import type { Runtime } from "./types.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import { addUsage, estimateCost } from "./cost.js";
@@ -296,7 +296,7 @@ test("provider enable/disable via service", async () => {
   assert.equal(providers.get(p.id)?.enabled, true);
 });
 
-test("git workspace clones a local repository into the data dir", async () => {
+test("a git repository is a Project source; a task works in a managed copy", async () => {
   const src = mkdtempSync(join(tmpdir(), "af-git-src-"));
   writeFileSync(join(src, "hello.txt"), "hello world\n");
   execFileSync("git", ["init", "-q", src]);
@@ -304,15 +304,46 @@ test("git workspace clones a local repository into the data dir", async () => {
   execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "init"], { cwd: src });
 
   const store = await freshStore();
-  const workspaces = new WorkspaceService(store);
-  const ws = await workspaces.create({
-    name: "git-ws",
-    type: "git",
-    repoUrl: `file://${src}`,
+  // The repository is described by a Project — there is no "git workspace" any
+  // more, so a workspace can no longer be pointed at a repository at all.
+  const projects = new ProjectService(store);
+  const project = await projects.create({
+    name: "git-project",
+    source: { type: "git", remoteUrl: `file://${src}` },
   });
-  assert.ok(ws.path, "git workspace should have a cloned path");
-  assert.ok(existsSync(join(ws.path!, "hello.txt")), "cloned file should exist");
-  assert.ok(existsSync(join(ws.path!, ".git")), "clone should be a git repository");
+  assert.equal(project.source.type, "git");
+  assert.equal(project.source.remoteUrl, `file://${src}`);
+
+  // A task's working copy is a plain directory the platform prepares: for a
+  // directory-sourced Project it starts as a copy of the directory.
+  const workspaces = new WorkspaceService(store);
+  const dirProject = await projects.create({
+    name: "dir-project",
+    source: { type: "directory", path: src },
+  });
+  assert.equal(dirProject.source.path, src);
+  const ws = await workspaces.createManaged({
+    name: "copy",
+    projectId: dirProject.id,
+    taskId: "task_x",
+    sourcePath: dirProject.source.path,
+  });
+  assert.equal(ws.type, "local");
+  assert.ok(existsSync(join(ws.path!, "hello.txt")), "the copy carries the directory's content");
+  assert.ok(existsSync(join(ws.path!, ".git")), "the copy carries the repository's history");
+  assert.notEqual(ws.path, src, "the copy is not the user's directory");
+});
+
+test("a repository is not a workspace type", async () => {
+  const store = await freshStore();
+  const workspaces = new WorkspaceService(store);
+  // `WorkspaceType` has no `git` member, but a wire request is untyped: the
+  // service refuses it instead of silently creating a "git" directory that
+  // nothing clones into and no task can run.
+  await assert.rejects(
+    () => workspaces.create({ name: "nope", type: "git" as never, repoUrl: "file:///tmp/x" } as never),
+    /A git repository is configured as a Project source/
+  );
 });
 
 test("task soft delete: hidden from live lists, restorable with all data intact", async () => {
