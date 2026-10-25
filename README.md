@@ -1291,6 +1291,7 @@ packages/
   web/       React + Vite Web UI
 docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
 docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）、
+             interaction-audit-2026-10-25.md（交互逻辑审查报告：已审交互面、发现的问题与修法、验证现状）、
              validation.md（任务校验机制的使用指南）、
              kanban-dsh-acp.md / .html（Kanban 卡片驱动 DSH 的 ACP 实现原理，HTML 为可视化版）
 scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）、
