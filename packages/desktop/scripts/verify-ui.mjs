@@ -567,6 +567,33 @@ try {
   check(confirmOps.native === 0, `no native window.confirm is used (${confirmOps.native} call(s))`);
   check(confirmOps.cleared === true, "cancelling the confirmation closes it and deletes nothing");
 
+  // 9e. Guidance must point at places that exist. The rail dropped the
+  //     Workspaces and LLM pages, so a hint that still says "go to the
+  //     Workspaces page" sends the user nowhere.
+  const guidance = await evaluate(
+    cdp,
+    `(async () => {
+       const stale = ["Workspaces 页面", "Runtimes 页面", "LLM 页面", "Proxy 页面", "Dashboard"];
+       // Every reachable page, plus the task composer, is rendered text.
+       const pages = ["/tasks", "/new", "/projects", "/runtimes", "/sessions", "/handoffs", "/runs", "/usage", "/kanban"];
+       const found = [];
+       for (const p of pages) {
+         history.pushState({}, "", p);
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 700));
+         const text = document.querySelector("main")?.innerText ?? "";
+         for (const phrase of stale) {
+           if (text.includes(phrase)) found.push(p + " → " + phrase);
+         }
+       }
+       return { found };
+     })()`
+  );
+  check(
+    guidance.found.length === 0,
+    `no page points at a page that no longer exists (${guidance.found.join(", ") || "none"})`
+  );
+
   // 10. A terminal session actually spawns a PTY process inside the bundle.
   //     (The UI half: the board's session list must reach the API.)
   const board = await evaluate(
