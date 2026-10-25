@@ -893,6 +893,42 @@ try {
     `switching cards does not carry the armed delete over (${(boardOps.switched ?? []).join(" / ")})`
   );
 
+  // 9c2. A card with no session explains itself instead of showing an empty box.
+  //      The xterm layer below this is covered by verify-app (a real PTY round
+  //      trip); what is checkable here without launching an agent is the state a
+  //      user actually lands on first.
+  const termEmpty = await evaluate(
+    cdp,
+    `(async () => {
+       const card = [...document.querySelectorAll(".board-card")]
+         .find((c) => !c.className.includes("trashed"));
+       if (!card) return { error: "no card on the board" };
+       card.click();
+       await new Promise((r) => setTimeout(r, 1400));
+       const empty = document.querySelector(".board-term-empty");
+       return {
+         hasEmpty: Boolean(empty),
+         text: empty?.innerText?.split(String.fromCharCode(10)).join(" | ").slice(0, 120) ?? null,
+         // Only a Backlog card offers Start; every other column must instead say
+         // how to get back to a startable state. Either way the box is never a
+         // dead end with no instruction.
+         offersStart: empty ? /Start session/.test(empty.innerText) : false,
+         explainsRecovery: empty ? /Restore the card|Move it to Done/.test(empty.innerText) : false,
+         column: document.querySelector(".board-detail")?.getAttribute("data-column") ?? null,
+         strayTerminal: Boolean(document.querySelector(".xterm")) && !document.querySelector(".board-detail"),
+       };
+     })()`
+  );
+  if (termEmpty.error) failures.push(`terminal empty state: ${termEmpty.error}`);
+  check(
+    termEmpty.hasEmpty === true && /No session/.test(termEmpty.text ?? ""),
+    `a card without a session says so instead of showing an empty box (${JSON.stringify((termEmpty.text ?? "").slice(0, 60))})`
+  );
+  check(
+    termEmpty.offersStart === true || termEmpty.explainsRecovery === true,
+    `and says how to get to a session (Backlog offers Start; others explain the way back)`
+  );
+
   }
 
   // 9d. Deletes confirm through the app's Modal, never window.confirm.
