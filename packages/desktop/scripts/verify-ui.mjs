@@ -124,12 +124,27 @@ function writeFixture(dir) {
     env: {}, secretIds: [], tools: [], createdAt: now, updatedAt: now,
     metadata: { lastActivityAt: now },
   });
+  // A board project plus two cards: one in Done (its panel offers the two-step
+  // delete) and one in Review (opened after abandoning an armed delete).
+  const kanbanProject = (id, name, rootPath) => ({
+    id, name, rootPath, workspaceType: "git",
+    createdAt: now, updatedAt: now,
+  });
+  const kanbanCard = (id, title, column) => ({
+    id, projectId: "kproj_verify", title, prompt: title, column,
+    agentId: "dsh", executionMode: "direct", createdAt: now, updatedAt: now,
+  });
   const db = {
     providers: [], models: [], runtimes: [], secrets: [], profiles: [],
     sources: [], sourceCredentials: [], projects: [], workspaceLocks: [],
     runs: [], eventShards: [], artifacts: [], handoffs: [],
-    runtimeSessions: [], nativeStates: [], kanbanProjects: [], kanbanCards: [], kanbanSessions: [],
+    runtimeSessions: [], nativeStates: [], kanbanSessions: [],
     config: {},
+    kanbanProjects: [kanbanProject("kproj_verify", "verify-board", "/tmp/af-verify-board")],
+    kanbanCards: [
+      kanbanCard("card_verify_done", "verify done card", "trash"),
+      kanbanCard("card_verify_open", "verify open card", "review"),
+    ],
     workspaces: [
       workspace("ws_verify_alpha", "verify-alpha", "/tmp/af-verify-alpha"),
       workspace("ws_verify_beta", "verify-beta", "/tmp/af-verify-beta"),
@@ -478,6 +493,42 @@ try {
       `${label} renders (${verdict.heading ?? "no heading"}, ${verdict.textLen} chars${verdict.errorText ? `, error: ${verdict.errorText}` : ""})`
     );
   }
+
+  // 9c. A card never opens with its delete already armed.
+  const boardOps = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/kanban");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1600));
+       const cards = () => [...document.querySelectorAll(".board-card")];
+       const actions = () => [...document.querySelectorAll(".board-detail-actions button")]
+         .map((b) => b.textContent.trim());
+       const done = cards().find((c) => c.className.includes("trashed"));
+       if (!done) return { error: "no Done card on the board", cards: cards().length };
+       done.click();
+       await new Promise((r) => setTimeout(r, 900));
+       const arm = [...document.querySelectorAll(".board-detail-actions button")]
+         .find((b) => /Delete permanently/.test(b.textContent));
+       if (!arm) return { error: "Done card has no 'Delete permanently'", actions: actions() };
+       arm.click();
+       await new Promise((r) => setTimeout(r, 350));
+       const armed = actions().includes("Confirm delete");
+       document.querySelector(".board-close")?.click();
+       await new Promise((r) => setTimeout(r, 500));
+       const other = cards().find((c) => !c.className.includes("trashed"));
+       if (!other) return { error: "no second card to switch to", armed };
+       other.click();
+       await new Promise((r) => setTimeout(r, 900));
+       return { armed, switched: actions() };
+     })()`
+  );
+  if (boardOps.error) failures.push(`board delete arming: ${boardOps.error}`);
+  check(boardOps.armed === true, "a Done card's delete needs the second click (Confirm delete)");
+  check(
+    boardOps.switched && !boardOps.switched.includes("Confirm delete"),
+    `switching cards does not carry the armed delete over (${(boardOps.switched ?? []).join(" / ")})`
+  );
 
   // 10. A terminal session actually spawns a PTY process inside the bundle.
   //     (The UI half: the board's session list must reach the API.)
