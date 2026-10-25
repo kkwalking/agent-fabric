@@ -274,8 +274,17 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   };
 
   const stopRun = async (runId: string) => {
-    await post(`/api/runs/${runId}/cancel`).catch(() => {});
-    bump();
+    // A failed stop used to be swallowed, so pressing Stop on a running (and
+    // billing) session looked like it worked while the run carried on. Say what
+    // happened instead, and still refresh: the run may have ended anyway.
+    try {
+      await post(`/api/runs/${runId}/cancel`);
+      setError(null);
+    } catch (e) {
+      setError(`Could not stop the run: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      bump();
+    }
   };
 
   // "Continue with Pi / OpenCode" (v6 §10): open the handoff confirmation,
@@ -1143,6 +1152,16 @@ function Composer({
   // opening another view, reloading): losing a half-written follow-up is the
   // one thing a user cannot undo. Stored per task, dropped on submit.
   const [prompt, setPrompt] = useState(() => readDraft(taskId));
+  /**
+   * Set once a handoff has been generated for the prompt currently in the box.
+   *
+   * `generateThenSubmit` does two things the server does not make idempotent:
+   * it generates a handoff (a new record and a model call) and then submits.
+   * If the submit fails, the old code asked again on retry and generated a
+   * *second* handoff for the same message. With this flag the retry goes
+   * straight to the submit it was trying to do.
+   */
+  const [handoffReady, setHandoffReady] = useState(false);
   useEffect(() => {
     setPrompt(readDraft(taskId));
   }, [taskId]);
@@ -1277,10 +1296,16 @@ function Composer({
     setBusy(true);
     setError(null);
     try {
-      await post(`/api/tasks/${taskId}/handoff`, {});
-      onSubmitted();
+      if (!handoffReady) {
+        await post(`/api/tasks/${taskId}/handoff`, {});
+        // The handoff exists now. Anything that fails from here on must not
+        // send the user back through generation.
+        setHandoffReady(true);
+        onSubmitted();
+      }
       await postContinue(false);
       setPrompt("");
+      setHandoffReady(false);
       onSubmitted();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1316,7 +1341,13 @@ function Composer({
           rows={2}
           placeholder={live ? "Agent 正在工作 — 可先停止或等待后再继续…" : "随心输入，继续这个任务…"}
           value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
+          onChange={(e) => {
+            setPrompt(e.target.value);
+            // Editing the message means the generated handoff no longer
+            // describes what the user is about to send: the next send must be
+            // allowed to generate a fresh one.
+            if (handoffReady) setHandoffReady(false);
+          }}
           onKeyDown={(e) => {
             if (e.key !== "Enter") return;
             // Enter sends, Shift+Enter breaks the line — what a chat composer
