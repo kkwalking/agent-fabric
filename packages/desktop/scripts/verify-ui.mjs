@@ -594,6 +594,53 @@ try {
     `no page points at a page that no longer exists (${guidance.found.join(", ") || "none"})`
   );
 
+  // 9f. Closing Settings with unsaved edits asks first. Escape and the mask are
+  //     both easy to hit by accident and used to throw the edit away silently.
+  const unsaved = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/settings/proxy");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1800));
+       const overlay = () => document.querySelector(".settings-overlay");
+       if (!overlay()) return { error: "settings panel did not open" };
+       const input = document.querySelector(".settings-body input[type=text], .settings-body input:not([type])");
+       if (!input) return { error: "no text field on the proxy page" };
+       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+       setter.call(input, "verify-dirty-host");
+       input.dispatchEvent(new Event("input", { bubbles: true }));
+       await new Promise((r) => setTimeout(r, 400));
+
+       const asking = () => [...document.querySelectorAll(".modal")]
+         .some((m) => /未保存|Unsaved/.test(m.innerText));
+
+       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+       await new Promise((r) => setTimeout(r, 500));
+       const keptOpen = Boolean(overlay());
+       const asked = asking();
+
+       // Keep editing, then discard and close.
+       [...document.querySelectorAll(".modal button")]
+         .find((b) => /继续编辑|Keep editing/.test(b.textContent))?.click();
+       await new Promise((r) => setTimeout(r, 400));
+       const stillEditing = Boolean(overlay());
+       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+       await new Promise((r) => setTimeout(r, 400));
+       [...document.querySelectorAll(".modal button")]
+         .find((b) => /丢弃并关闭|Discard and close/.test(b.textContent))?.click();
+       await new Promise((r) => setTimeout(r, 600));
+       const closed = !overlay();
+       return { asked, keptOpen, stillEditing, closed };
+     })()`
+  );
+  if (unsaved.error) failures.push(`unsaved-changes guard: ${unsaved.error}`);
+  check(
+    unsaved.asked === true && unsaved.keptOpen === true,
+    `closing Settings with edits asks instead of discarding (${unsaved.asked}, kept open: ${unsaved.keptOpen})`
+  );
+  check(unsaved.stillEditing === true, "\"Keep editing\" leaves the panel open");
+  check(unsaved.closed === true, "\"Discard and close\" closes the panel");
+
   // 10. A terminal session actually spawns a PTY process inside the bundle.
   //     (The UI half: the board's session list must reach the API.)
   const board = await evaluate(
