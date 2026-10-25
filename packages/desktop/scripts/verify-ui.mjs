@@ -167,7 +167,76 @@ function writeFixture(dir) {
       ...Array.from({ length: 25 }, (_, i) => task(`task_bulk_${i}`, `bulk session ${i}`, "ws_verify_bulk")),
     ],
   };
+  // A thread long enough to scroll, so the "keep the newest message in view"
+  // behaviour can be checked in the packaged app. Events live in their own
+  // JSONL file per run, which is the same shape the server reads back.
+  const longRunId = "run_verify_long";
+  const longRunId2 = "run_verify_long_b";
+  const runMessages = 60;
+  db.runs = [
+    {
+      id: longRunId,
+      taskId: "task_verify_1",
+      taskTitle: "verify task one",
+      status: "completed",
+      runtimeId: "rt_verify",
+      runtimeName: "verify",
+      modelId: "model_verify",
+      modelName: "verify",
+      providerId: "prov_verify",
+      workspaceId: "ws_verify_alpha",
+      inputInstruction: "verify task one",
+      continuity: "fresh",
+      lifecycle: "ephemeral",
+      artifactIds: [],
+      eventCount: runMessages + 2,
+      createdAt: now,
+      updatedAt: now,
+      startTime: now,
+      endTime: now,
+    },
+  ];
+  db.runs.push({
+    ...db.runs[0],
+    id: longRunId2,
+    taskId: "task_verify_2",
+    taskTitle: "verify task two",
+    inputInstruction: "verify task two",
+  });
+  const shard = (runId) => ({
+    runId,
+    file: `events/${runId}.jsonl`,
+    count: runMessages + 2,
+    bytes: 0,
+    lastSeq: runMessages + 2,
+    createdAt: now,
+    updatedAt: now,
+  });
+  db.eventShards = [shard(longRunId), shard(longRunId2)];
   mkdirSync(dir, { recursive: true });
+  mkdirSync(join(dir, "events"), { recursive: true });
+  const buildLines = (runId) => {
+  const lines = [{ id: `${runId}-0`, runId, seq: 0, type: "run.started", timestamp: now, data: {}, source: "server" }];
+  for (let i = 1; i <= runMessages; i++) {
+    lines.push({
+      id: `${runId}-${i}`,
+      runId,
+      seq: i,
+      // `agent.message` is what the timeline projects into a visible row;
+      // role must not be user/system or it is treated as a harness echo.
+      type: "agent.message",
+      timestamp: now,
+      // Long enough per message that the thread overflows the viewport.
+      data: { role: "assistant", content: `verify line ${i}: ${"x".repeat(90)}` },
+      source: "runtime",
+    });
+  }
+  lines.push({ id: `${runId}-end`, runId, seq: runMessages + 1, type: "run.completed", timestamp: now, data: {}, source: "server" });
+  return lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
+  };
+  for (const runId of [longRunId, longRunId2]) {
+    writeFileSync(join(dir, "events", `${runId}.jsonl`), buildLines(runId));
+  }
   writeFileSync(join(dir, "db.json"), JSON.stringify(db, null, 2));
 }
 if (!emptyMode) writeFixture(dataDir);
@@ -518,6 +587,7 @@ try {
        if (!Array.isArray(tasks) || !tasks.some((t) => t.id === idA) || !tasks.some((t) => t.id === idB)) {
          return { error: "fixture tasks missing" };
        }
+       const out = {};
        const goto = async (id) => {
          history.pushState({}, "", "/tasks/" + id);
          window.dispatchEvent(new PopStateEvent("popstate"));
@@ -533,20 +603,44 @@ try {
        await new Promise((r) => setTimeout(r, 400));
        await goto(idB);
        const onB = composer()?.value ?? null;
+       out.onB = onB;
        await goto(idA);
        const backOnA = composer()?.value ?? null;
+       out.backOnA = backOnA;
+       // Scroll behaviour, on the same switch: scroll the seeded long thread up,
+       // leave, come back and switch away — the next task must open at its
+       // newest message, not wherever the previous thread was left.
+       const scroller = () => [...document.querySelectorAll("main *")]
+         .find((el) => el.scrollHeight > el.clientHeight + 100 && el.clientHeight > 120);
+       const el = scroller();
+       const scroll = { hasScroller: Boolean(el) };
+       if (el) {
+         el.scrollTop = 0;
+         el.dispatchEvent(new Event("scroll", { bubbles: true }));
+         await new Promise((r) => setTimeout(r, 400));
+         scroll.parkedAtTop = Math.round(el.scrollTop) === 0;
+         await goto(idB);
+         const onB2 = scroller();
+         scroll.bAtBottom = onB2 ? onB2.scrollHeight - onB2.scrollTop - onB2.clientHeight < 60 : null;
+       }
+       Object.assign(out, scroll);
        // Leave the fixture's storage clean for any later check.
        const last = composer();
        if (last) {
          Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set.call(last, "");
          last.dispatchEvent(new Event("input", { bubbles: true }));
        }
-       return { onB, backOnA };
+       return out;
      })()`
   );
   if (taskSwitch.error) failures.push(`task switch isolation: ${taskSwitch.error}`);
   check(taskSwitch.onB === "", `a draft typed for one task does not appear in another (${JSON.stringify(taskSwitch.onB)})`);
   check(taskSwitch.backOnA === "draft-on-A", `and the original task still has its own draft (${JSON.stringify(taskSwitch.backOnA)})`);
+  check(taskSwitch.hasScroller === true, "the seeded thread is long enough to scroll");
+  check(
+    taskSwitch.bAtBottom === true,
+    `a thread scrolled up does not leave the next task parked at the top (${JSON.stringify(taskSwitch.bAtBottom)})`
+  );
 
   }
 
