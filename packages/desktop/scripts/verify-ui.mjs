@@ -439,6 +439,44 @@ try {
   check(errorProbe.seen === true, "the per-page error check can actually see an ErrorBox");
   check(errorProbe.goneAfterRemoval === true, "the planted probe was removed again");
 
+  // 5g. The Docker section says whether a containerized runtime can run at all.
+  //     Without this a Project task just refuses, with no way to tell a missing
+  //     Docker from a stopped one.
+  const dockerUi = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/settings/docker");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 2200));
+       const probe = await (await fetch("/api/settings/file")).status;
+       const status = document.querySelector('[role=status]');
+       const text = status?.innerText ?? "";
+       const out = {
+         panel: Boolean(document.querySelector(".settings-overlay")),
+         text: text.slice(0, 160),
+         // One of the four states must be named; a blank or generic line would
+         // leave the user where they started.
+         namesState: /Docker 可用|未安装 Docker|守护进程没有运行|无法确认 Docker|Docker is available|not installed|daemon is not running|could not be determined/.test(text),
+         hasRecheck: [...(status?.querySelectorAll("button") ?? [])].some((b) => /重新检测|Re-check/.test(b.textContent)),
+       };
+       // The button must actually re-probe.
+       const realFetch = window.fetch;
+       let probed = 0;
+       window.fetch = async (input, init) => {
+         const url = typeof input === "string" ? input : input.url;
+         if (url.includes("/api/docker/status")) probed += 1;
+         return realFetch(input, init);
+       };
+       [...(status?.querySelectorAll("button") ?? [])][0]?.click();
+       await new Promise((r) => setTimeout(r, 2500));
+       window.fetch = realFetch;
+       out.reprobed = probed >= 1;
+       return out;
+     })()`
+  );
+  check(dockerUi.panel === true && dockerUi.namesState === true, `the Docker section reports a real state (${JSON.stringify(dockerUi.text.slice(0, 80))})`);
+  check(dockerUi.hasRecheck === true && dockerUi.reprobed === true, "Re-check actually probes the daemon again");
+
   // 5h. Empty data: the very first screen of a fresh install.
   //     Skipped in fixture mode, where the data exists by construction.
   if (emptyMode) {

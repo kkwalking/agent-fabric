@@ -46,6 +46,15 @@ const SECTIONS: SectionDef[] = [
   { id: "about", label: "settings.nav.about", icon: "cpu" },
 ];
 
+/** What `/api/docker/status` answers. */
+interface DockerProbe {
+  available: boolean;
+  binary: string;
+  version?: string;
+  reason?: "not-installed" | "daemon-unreachable" | "probe-failed";
+  detail?: string | null;
+}
+
 /** What `/api/settings/file` answers. */
 interface FileInfo {
   path: string;
@@ -836,8 +845,55 @@ function DockerSection(props: { config: Record<string, unknown>; save: SaveSecti
           onChange={(e) => setForm({ ...form, image: e.target.value })}
         />
       </Field>
+      <DockerStatus />
       <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" />
     </Page>
+  );
+}
+
+/**
+ * Whether this machine can actually run a containerized runtime.
+ *
+ * A Project task refuses to run anywhere else, so with no working Docker the
+ * user is stuck — and "the CLI is installed but the daemon is not running" looks
+ * identical to "not installed at all" from the outside. Re-probed on demand
+ * because it is the Docker app's state that changes, not ours.
+ */
+function DockerStatus() {
+  const { t } = useI18n();
+  const [state, setState] = useState<DockerProbe | null>(null);
+  const [busy, setBusy] = useState(false);
+  const probe = useCallback(async () => {
+    setBusy(true);
+    try {
+      setState(await get<DockerProbe>("/api/docker/status", undefined, true));
+    } catch (e) {
+      setState({ available: false, binary: "docker", reason: "probe-failed", detail: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  useEffect(() => {
+    void probe();
+  }, [probe]);
+  if (!state) return <div className="settings-hint">{t("docker.checking")}</div>;
+  const heading = state.available
+    ? t("docker.ready").replace("{version}", state.version ?? "?")
+    : state.reason === "not-installed"
+      ? t("docker.missing")
+      : state.reason === "daemon-unreachable"
+        ? t("docker.stopped")
+        : t("docker.failed");
+  return (
+    <div className={`settings-hint ${state.available ? "" : "settings-warn"}`} role="status">
+      <strong>{heading}</strong>
+      {!state.available && state.detail && (
+        <div className="mono" style={{ marginTop: 4, fontSize: 11, opacity: 0.8 }}>{state.detail}</div>
+      )}
+      <button className="btn-outline" style={{ marginTop: 6 }} disabled={busy} onClick={() => void probe()}>
+        {busy ? t("docker.checking") : t("docker.recheck")}
+      </button>
+    </div>
   );
 }
 

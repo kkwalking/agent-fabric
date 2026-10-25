@@ -76,6 +76,8 @@ import {
   piThreadSource,
   dshThreadSource,
   createDockerContainerOps,
+  dockerBin,
+  execDocker,
 } from "@agentfabric/runtimes";
 
 export interface ServerOptions {
@@ -556,6 +558,44 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /* ---------------- health ---------------- */
 
   app.get("/api/health", (_req, res) => ok(res, { status: "ok", time: new Date().toISOString() }));
+
+  /**
+   * Can this machine run a containerized runtime?
+   *
+   * A Project task refuses to run anywhere but an isolated runtime, so with no
+   * Docker the user is stuck — and until now nothing on screen could tell them
+   * whether Docker was missing, stopped, or fine. Two separate questions get two
+   * separate answers: is the CLI there at all, and does the daemon respond.
+   */
+  app.get("/api/docker/status", async (_req, res) => {
+    const bin = dockerBin();
+    try {
+      const version = await execDocker(["version", "--format", "{{.Server.Version}}"], 8_000);
+      const serverVersion = version.stdout.trim();
+      if (version.code !== 0 || !serverVersion) {
+        // The CLI answered but the daemon did not: "installed but not running"
+        // is a different fix from "not installed", so keep them apart.
+        return ok(res, {
+          available: false,
+          binary: bin,
+          reason: "daemon-unreachable",
+          detail: (version.stderr || version.stdout).trim().slice(0, 400) || null,
+        });
+      }
+      return ok(res, { available: true, binary: bin, version: serverVersion });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // ENOENT means the binary is not on PATH — report it as such rather than
+      // as a generic failure the user cannot act on.
+      const notInstalled = /ENOENT|not found/i.test(message);
+      return ok(res, {
+        available: false,
+        binary: bin,
+        reason: notInstalled ? "not-installed" : "probe-failed",
+        detail: message.slice(0, 400),
+      });
+    }
+  });
 
   //
   // Counts, not lists: this is the start page, and with thousands of tasks and

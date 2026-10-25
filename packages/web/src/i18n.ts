@@ -122,6 +122,12 @@ const zh = {
 
   /* ---- docker ---- */
   "docker.socket": "Docker socket 路径（留空使用默认）",
+  "docker.checking": "正在检测 Docker…",
+  "docker.ready": "Docker 可用（服务端 {version}）— 容器化隔离 Runtime 可以启动。",
+  "docker.missing": "未安装 Docker — Project 任务需要容器化隔离 Runtime，请先安装 Docker Desktop 或 OrbStack。",
+  "docker.stopped": "Docker 已安装但守护进程没有运行 — 请先启动 Docker Desktop / OrbStack，再点下面的「重新检测」。",
+  "docker.failed": "无法确认 Docker 状态 — 详情见下方输出。",
+  "docker.recheck": "重新检测",
   "docker.image": "默认容器镜像",
   "docker.description":
     "容器化运行时使用本机的 Docker。运行时自身没有指定镜像时，才使用这里的默认镜像；单个运行的镜像在运行时设置里配置。",
@@ -284,6 +290,12 @@ const en: Record<MessageKey, string> = {
   "harness.claudeProjects": "~/.claude/projects transcript root override (usually empty)",
 
   "docker.socket": "Docker socket path (empty for the default)",
+  "docker.checking": "Checking Docker…",
+  "docker.ready": "Docker is available (server {version}) — containerized runtimes can start.",
+  "docker.missing": "Docker is not installed — a Project task needs a containerized runtime. Install Docker Desktop or OrbStack first.",
+  "docker.stopped": "Docker is installed but its daemon is not running — start Docker Desktop / OrbStack, then press Re-check.",
+  "docker.failed": "Docker status could not be determined — see the output below.",
+  "docker.recheck": "Re-check",
   "docker.image": "Default container image",
   "docker.description":
     "Containerized runtimes use the machine's own Docker. This default image is used only when a runtime has none of its own; a single run's image is set on the runtime.",

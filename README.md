@@ -1154,6 +1154,8 @@ Validation 阶段同样受这份 policy 约束：validation 容器与 agent 容�
 
 全局出网代理（Settings → 代理 / `config.proxy`）。默认关闭；打开后每个**新启动**的 Harness 进程收到标准代理环境变量，正在运行的进程与 AgentFabric 服务器本身不受影响。支持 `http` / `socks5`，容器化执行时 loopback 代理地址会改写到宿主机（`host.docker.internal`），且容器的 `NO_PROXY` 同时豁免 `host.docker.internal`——容器内对宿主机 loopback 服务（例如本地 Provider 网关）的请求直达宿主，不经代理绕行。「代理」分区提供连通性测试（`POST /api/proxy/test`）。
 
+`Docker` 分区会显示本机 Docker 的真实状态：`GET /api/docker/status` 区分**未安装**（二进制不在 PATH）、**已安装但守护进程没运行**（CLI 在，daemon 连不上，并给出 socket 路径与原始报错）与**可用**（带服务端版本）。Project 任务只能跑在容器化隔离 Runtime 上，所以没有可用的 Docker 时这个分区就是唯一能告诉你要修什么的地方；旁边的「重新检测」按钮按需重新探测。
+
 **Provider base URL 与容器**：Provider 的 base URL 指向宿主机 loopback（`127.0.0.1` / `localhost` / `::1`，如本地模型网关）时，容器化 Run 生成的 harness 配置（pi `models.json` / opencode `opencode.json`）会自动改写为 `host.docker.internal`——容器内的 `127.0.0.1` 是容器自己，不改写则每次模型请求都连接失败。宿主执行（非容器化）保持原值不变。
 
 ## 数据与安全
