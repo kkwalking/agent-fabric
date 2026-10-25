@@ -27,7 +27,7 @@
  * The app defaults to /Applications/AgentFabric.app.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -178,6 +178,38 @@ const env = { ...process.env, AGENTFABRIC_DATA_DIR: dataDir };
 // into a plain Node process with no window to inspect.
 delete env.ELECTRON_RUN_AS_NODE;
 // A separate profile keeps the check away from the user's own Electron state.
+/**
+ * Warn when the app being checked is not the one the current sources produce.
+ *
+ * This has cost a full round three times: the checks fail, the code looks
+ * broken, and the real cause is that /Applications still holds the previous
+ * build. A stale build cannot be caught by any assertion inside the app.
+ *
+ * The signal is the web bundle's mtime: `build-mac` rebuilds it while packing
+ * and `ditto` preserves it on install, so a current install matches dist within
+ * a second. It is a warning rather than an error because a legitimate workflow
+ * can rebuild dist afterwards without wanting to reinstall (e.g. iterating on
+ * the UI against the dev server) — but the checks should never be read as
+ * "this source tree is broken" without that caveat on screen.
+ */
+function checkBuildIsCurrent(target) {
+  const installed = join(target, "Contents", "Resources", "web", "assets");
+  const local = resolve(new URL("../../web/dist/assets", import.meta.url).pathname);
+  if (!existsSync(installed) || !existsSync(local)) return null;
+  const newest = (dir) =>
+    readdirSync(dir)
+      .filter((f) => f.endsWith(".js"))
+      .map((f) => statSync(join(dir, f)).mtimeMs)
+      .reduce((a, b) => Math.max(a, b), 0);
+  const installedAt = newest(installed);
+  const localAt = newest(local);
+  if (!installedAt || !localAt || localAt <= installedAt + 1000) return null;
+  const behind = Math.round((localAt - installedAt) / 1000);
+  return `WARNING: ${target} predates packages/web/dist by ${behind}s — these checks did NOT exercise your latest sources. Rebuild and reinstall: npm run desktop:dmg && npm run desktop:install`;
+}
+const staleBuildWarning = checkBuildIsCurrent(appPath);
+if (staleBuildWarning) console.warn(`\n[verify-ui] ${staleBuildWarning}\n`);
+
 const app = spawn(
   join(appPath, "Contents", "MacOS", "AgentFabric"),
   [
@@ -884,6 +916,7 @@ try {
 }
 
 console.log(`\n[verify-ui] ${appPath}`);
+if (staleBuildWarning) console.log(`  !!  ${staleBuildWarning}`);
 for (const line of notes) console.log(line);
 if (failures.length > 0) {
   console.error(`\n[verify-ui] FAIL — ${failures.length} problem(s):`);
