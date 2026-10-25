@@ -63,7 +63,7 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Source Credential | 独立于 Project 的 Git 凭据（HTTPS Token / SSH Private Key），敏感值走 Secrets，仅在单次 Git 操作期间临时materialize；公开仓库无需凭据 |
 | Task Lifecycle | Project-based Coding Task 全生命周期：Managed Workspace → Source Preparing（clone/fetch/base ref/working branch）→ **强制隔离 Runtime** → Agent → **完工 pin + 隔离 Validation Agent 判定**（不通过则返工闭环）→ Git Finalization（**冻结 final revision**）→ Publish（**只发布冻结 revision**）→ Cleanup；阶段与 agent/validation/finalization/publish 状态分别、单调地记录（validation 循环是单调性的唯一显式例外，见下文） |
 | Git Publish | 平台负责 commit 策略与 push：只推本 Task 的 working branch、绝不 force、保护分支拒推、push 结果以远端实际状态为准（可重试且幂等） |
-| Kanban（v13） | 四列看板（Backlog / In Progress / Review / Done）管理本地 Coding Agent CLI：BoardProject = 任意本地目录（folder-first、Git optional）、Card、PTY 终端会话 / DSH ACP 交互聊天、Direct / Worktree 执行、hooks 与 ACP turn 自动 Review、重启恢复；支持 Claude Code / Pi / OpenCode / DSH（ACP） |
+| Kanban（v13） | 四列看板（Backlog / In Progress / Review / Done）管理本地 Coding Agent CLI：**看板项目就是一个 Project**（目录来源，folder-first、Git optional）、Card、PTY 终端会话 / DSH ACP 交互聊天、Direct / Worktree 执行、hooks 与 ACP turn 自动 Review、重启恢复；支持 Claude Code / Pi / OpenCode / DSH（ACP）。**卡片跑起来会产出一条真正的 Task**，所以工作区任务树里能看到它 |
 | Runtime | OpenCode / Pi / Codex / Claude Code / DSH / Docker / Mock，统一 Adapter 协议，可扩展 |
 | Container / Sandbox | Docker 容器创建/销毁、CPU/Memory 限制、Workspace 挂载、Env/Secret 注入、网络策略、生命周期、超时 |
 | Workspace | Managed Workspace（由 Project+Task 自动创建、Task 独占、durable）与 External Workspace（本地目录 / Git / Volume / 导入），持久化，与 Run 关联 |
@@ -216,6 +216,8 @@ npm run desktop:perf -- --update    # 有意改动之后更新基线
 
 点一条会话，主区域就打开这个 Task。分组用的是 Task 自己记录的 `workspaceId`：托管工作区（平台为单个任务建的副本，命名形如「项目名 / 任务标题」）不会单独成组，而是归到该项目对应的外部工作区或项目名下；没有工作区的任务归入「未归类」。
 
+**侧边栏顶部**：品牌行只剩名字（搜索、通知、语言切换三个图标都拿掉了，语言切换在设置里）；**折叠/展开按钮在工作区标题行的最左边**（参考 DSH：控件放在它控制的那块面板的起始处，用「一块带左侧栏的面板」图标，展开/收起同一个图标，不做旋转）。收起后整块侧边栏收成一条窄图标栏：品牌行只剩 AF 标记，任务树隐藏，**折叠按钮下方就是「新会话」按钮**（加号气泡图标，等同于展开时的整行「新会话」按钮），再往下是原来的图标导航。工作区标题行右侧的 **+** 是新建任务；下面的树按工作区分组，**工作区是文件夹**（带文件夹图标，展开时是打开态的文件夹、折叠时是闭合的，不再额外画一个下三角），它比下级的会话标题更淡、更小一级，会话名带缩进，所以「文件夹 → 里面的会话」这一层关系一眼能看出来。
+
 **主区域只承载两件事**：打开某个 Task（对话 + 输入框），以及新建任务。其余页面收进侧栏底部的 **更多** 菜单：
 
 * `Resources` — `Kanban`（v13：四列看板 + 本地 Agent 会话：终端 / DSH ACP 聊天）、`Projects`（项目与 Coding Task 生命周期）、`Runtimes`、`Native sessions`、`Handoffs`。
@@ -251,7 +253,7 @@ Settings 是一个带左侧导航的弹窗，按分区呈现，而不是把原�
   模型 id 由名字推出（`mod_gpt-4o`），所以在文件里改一个模型的名字与在界面上改名是同一件事，引用它的 Task / Runtime 也仍然指向同一个模型。密钥有两种放法：写在本文件的 `apiKey`（文件 `0600`，用户能直接读）或放在 AgentFabric 加密的 Secret store 里并用 `apiKeySecretId` 引用——在界面上填的 Key 一律进 Secret store，文件里只记引用，不会把密钥抄一份到文件。API 永远不返回密钥本身，只返回掩码（`apiKeyMasked`）。
 * **两个方向都同步**：在「模型」页保存（新增/修改/删除供应商与模型）会立刻重写文件的 `providers` 段；手工改这段再「应用并重启」会按文件重建列表——文件里没有的供应商就是被删除了。
 
-* **界面语言**：中文 / English 两套文案，在「通用设置」里切换，侧边栏底部的指南针图标也可以一键切换。选择存在浏览器 `localStorage`，只影响这个浏览器；服务端配置里不放语言项。文案表在 `packages/web/src/i18n.ts`：中文是键集合的事实来源，英文缺键是编译错误，不会静默回落到另一种语言。
+* **界面语言**：中文 / English 两套文案，在「通用设置」里切换（侧边栏顶部不再有这个按钮，只为这个用途留一个图标不值得占位置）。选择存在浏览器 `localStorage`，只影响这个浏览器；服务端配置里不放语言项。文案表在 `packages/web/src/i18n.ts`：中文是键集合的事实来源，英文缺键是编译错误，不会静默回落到另一种语言。
 * **配置文件**：所有设置都落在一个文件里——`<dataDir>/config.json`（默认 `~/.fabric/config.json`，`0600`）。页面顶部是「打开配置文件」：在宿主机默认文本编辑器里打开它（macOS 用 `open -t`，绕开 `.json` 的关联程序）。文件顶部带 `$schema: /api/settings/schema`，编辑器据此补全键名并显示每个字段的说明；该 schema 端点不需要 token（它是格式描述，不含用户数据），否则编辑器拿不到。
 * **手工编辑怎么生效**：页面上的表单保存后立即写入文件；手工改文件后，文件卡片会显示「文件已在磁盘上修改，但尚未应用」，点 `应用并重启` 才生效（`POST /api/settings/apply`）。重启是**原地重启**：同一个进程内拉起一个新的服务器实例，所以 `npm start` 这种没有看守进程的启动方式也能恢复；桌面端等同理（只换服务器，不动窗口）。
 * **文件坏了不会把服务带崩**：正在运行的服务不会因为配置文件暂时不合法而退出——文件卡片显示解析错误，运行中的配置保持不变，`应用并重启` 被禁用。只有在服务**启动时**配置文件不合法，才会拒绝启动（带上错误信息）。
@@ -260,11 +262,18 @@ Settings 是一个带左侧导航的弹窗，按分区呈现，而不是把原�
 
 ### Kanban（`/kanban`，v13）
 
-Board 是独立于 Project Coding Task 的产品面：一个 **BoardProject** = 用户选定的任意本地目录（folder-first，不要求 Git；自动识别 `none` / `git` / `multi-git` / `google-repo`），一张 **Card** = 一段 prompt + 一个 agent + 执行模式。页面左侧是 BoardProject 列表，右侧是固定四列：
+Board 复用 Project 作为「代码来源」，而不是另建一套项目：一个**看板项目就是一个 `Project`**（`source.type = "directory"`，指向用户选定的本地目录；folder-first，不要求 Git；自动识别 `none` / `git` / `multi-git` / `google-repo`，识别结果与看板的默认 agent / 执行模式一起存在 `Project.board` 里），一张 **Card** = 一段 prompt + 一个 agent + 执行模式。页面左侧是 Project 列表（在 Projects 页加的项目也会出现在这里），右侧是固定四列：
+
+* **卡片就是 Task**：卡片第一次启动时创建一条**真正的 Task**（`projectId` = 看板项目、`workspaceId` = 该目录的 Workspace），每次启动是这条 Task 的一个 **Run**；续聊（`--resume` / ACP `session/resume`）复用同一个 Run。因此看板里跑起来的活儿和其它 Task 没有区别：侧边栏**工作区任务树**里按目录分组能看到它，点进去就是普通的 Task 线程（`/tasks/<id>`），看板卡片详情里有 **Open task** 入口，任务页也有 **Board card** 回到看板。
+  * **就地运行**：看板项目是「在你的目录里跑」，所以它的 `source` 带 `workTree: true`——Task 的 Workspace 就是那个目录本身，平台**不复制**一份（`workspaceId` 指向的 Workspace，`path` 就是你的目录）。这也是任务树能把它归到那个文件夹下的原因。Projects 页建的目录项目仍按老规则在副本里跑，两者不混。
+  * **Stopped ≠ Failed**：在卡片上按 Stop 只会把 agent 标成 `cancelled`，任务不会出现失败徽章或重试按钮；服务重启打断的会话才写 `failure`（Run 仍是 `cancelled`）。对**正在运行**的卡片再点 start 是幂等的，不会悄悄换掉正在跑的 agent（要换会话请用 restart）。
+  * 状态映射（写入时投影，读取不重算）：会话 `running` → Run `running`；turn 结束（`awaiting_review` / `needs_attention`）→ Run `completed`，Task 仍是 `running` 且 `execution.agent.status = completed`（等你）；`failed` → Run `failed` + `execution.failure.code = kanban-agent-failed`；服务重启中断 → Run `cancelled` + `kanban-session-interrupted`；`stopped` → Run `cancelled`。`validation` / `publish` 永远是 `pending`——看板不跑判定也不 publish，不会伪造通过。
+  * 看板不物理删除历史：删卡片（含「清空 Done」）只把 Task 软删除（回收站 30 天可恢复）并删掉进程句柄与聊天记录，项目目录与 Run 历史都留着。
+* **看板项目与 Projects 页是同一份记录**：`GET /api/projects` 是项目列表的唯一来源；只有「选目录 / Clone URL → 建项目」走看板专属的 `POST /api/kanban/projects`（它负责「这个目录还不是 Git 仓库，要不要 `git init`」这段问答），改名与删除都用通用的 `/api/projects/:id`。
 
 * **列与拖拽**：`Backlog` / `In Progress` / `Review` / `Done`（内部 id `trash`）。`Backlog → In Progress` = 启动；任意列 → `Done` = 归档并**释放进程**（不长期占用资源）；`Done → Review` = 恢复，再次启动时用 harness 自己的会话 id 接回原对话（Claude 走 `claude --resume <id>`，DSH 走 ACP `session/resume`）；`In Progress ↔ Review` 由 session 状态自动驱动，用户拖拽会被拒绝。没有 resume 能力的 agent（如 Pi）归档时保留进程，否则会丢掉唯一的对话记录。
-* **Done 列**：与 Cline kanban 一致——列头带红点、计数与垃圾桶按钮（清空 Done：只删卡片/session 记录，不动项目目录与 worktree）；Done 卡片标题与工作目录划线置灰，右上角 `↺` 一键恢复回 Review，不显示会话状态徽章。
-* **新建项目**：`Add project` 打开对话框，两种入口——**Server path**（服务端目录自动补全：逐级浏览本机目录，条目标注是否为 Git 仓库，支持 `~` 与直接输入绝对路径）或 **Git clone**（Git URL + Clone into + Folder name，目录名默认取仓库名，clone 到非空目录会明确报错）。选中的目录不是 Git 仓库时会先询问：**Add without Git**（纯目录也是合法 BoardProject）或 **Initialize Git repository**（`git init` + 初始 commit，让 Worktree 立即可用）。项目名默认取目录名；同一个目录不能重复添加。
+* **Done 列**：与 Cline kanban 一致——列头带红点、计数与垃圾桶按钮（清空 Done：删卡片、进程句柄与聊天记录，并把各自的 Task 软删除进回收站；不动项目目录、worktree 与 Run 历史）；Done 卡片标题与工作目录划线置灰，右上角 `↺` 一键恢复回 Review，不显示会话状态徽章。
+* **新建项目**：`Add project` 打开对话框，两种入口——**Server path**（服务端目录自动补全：逐级浏览本机目录，条目标注是否为 Git 仓库，支持 `~` 与直接输入绝对路径）或 **Git clone**（Git URL + Clone into + Folder name，目录名默认取仓库名，clone 到非空目录会明确报错）。选中的目录不是 Git 仓库时会先询问：**Add without Git**（纯目录也是合法看板项目）或 **Initialize Git repository**（`git init` + 初始 commit，让 Worktree 立即可用）。项目名默认取目录名；同一个目录不能重复添加。
 * **新建 Card**：Backlog 列顶部 **Create task**（快捷键 `c`）或页面右上 **New task** 打开创建对话框：prompt、可选标题（留空时从 prompt 首句自动生成）、Agent（Claude Code / Pi / OpenCode / DSH）、Model、Permission mode、Workspace（Direct / Worktree）与 Worktree base ref（列出项目的本地分支，默认当前分支）。`⌘/Ctrl+Enter` 创建，`⇧⌘/Ctrl+Enter` 创建并立即启动；勾选 **Create more** 时创建后对话框保留以便连续录入。一段编号或项目符号列表可 **Split into N tasks** 批量创建 / 批量启动。对话框用该项目上次的选择（agent / model / permission / workspace / base ref）预填；项目侧栏第一行用 `git` 标记 Git 项目（非 Git 项目不显示），路径下方用 `B | 1` / `IP | 1` / `R | 1` / `D | 1` 徽章显示四列卡片数（对齐 Cline kanban）。
 * **编辑 Card（对齐 Cline kanban）**：点击 **Backlog** 卡片打开的就是创建它的那张表单，字段预填卡片当前值（prompt / 标题 / agent / model / 推理强度 / 权限 / Workspace / base ref），只有一个 **Save changes** 动作（`⌘/Ctrl+Enter` 或点击保存，`Esc` 关闭），没有 Split 与 Create more；保存后卡片原地更新。其他列的卡片点击仍是详情（会话、终端 / 聊天、元信息）——卡片一旦离开 Backlog，prompt 与 agent 就是 agent 实际执行过的输入，看板不再改写这段历史；服务端同样只允许改动 Backlog 卡片（`kanban-card-not-editable`）。编辑过程中卡片若被启动、拖走或删除，表单自动关闭。
 * **实时性**：看板自行保持近实时——卡片与各会话状态每 2s 轮询，项目列表与四列计数每 5s 刷新，切回标签页时立即补拉一次；因此页面上没有手动 refresh 按钮。
@@ -272,8 +281,8 @@ Board 是独立于 Project Coding Task 的产品面：一个 **BoardProject** = 
 * **本地 PTY**：用 `node-pty` 直接启动本机 Claude Code / Pi / OpenCode，卡片详情内嵌 xterm 终端，可输入、resize、stop / restart；关闭详情只是 detach，重新打开时服务端回放整段会话历史（不自动重连）。回放不是重放原始字节，而是服务端用 `@xterm/headless` 实时跟着 PTY 解析、attach 时用 `@xterm/addon-serialize` 把当前屏幕 + 最多 1 万行 scrollback 一次性序列化下发——TUI 是绝对定位重绘的，只有这样才能还原出可以往上翻的完整历史（旧实现是 256KB 字节环形缓冲，超了就从头部截断，会切碎转义序列、只能看到碎片）。
 * **DSH（ACP 聊天）**：DSH 自带的 surface 没有交互 TUI（社区另有独立的 dsh-tui 启动器，看板仍选 ACP 以便结构化展示消息 / 工具 / 权限并复用 session/resume）。每张运行中的卡片起一个 `dsh --profile acp` 进程（ACP / Agent Client Protocol stdio），prompt 通过协议发送而不是 argv。卡片详情是 AgentFabric 自己渲染的聊天：assistant 消息（Markdown）、Thinking（默认折叠）、工具调用（状态点，可展开 input / output / error）、权限卡片与 composer；一个 turn 结束进程不退出，可以继续追问。聊天 WS 是 `GET /api/kanban/sessions/:sessionId/agent`（与终端 socket 同一套 `af_token` / loopback 规则，JSON 文本帧），关闭详情同样只是 detach，重新打开 replay 服务端保存的聊天记录（不自动重连）。聊天记录按 session 落盘在 `dataDir/kanban-chats/<sessionId>.json`（流式时防抖、turn 结束 / 权限 / 进程退出 / 服务端关闭时立即写），因此重启后仍能查看。
 * **DSH 续跑 / 像 TUI 一样直接输入**：进程消失（服务端重启、Stop、agent 退出）后打开卡片，聊天会 replay 已保存的记录，状态显示 **paused**。**输入框照常可用**——直接打字发送时，服务端先接回 agent（ACP `session/resume {sessionId, cwd}`，同一个会话、同一份模型上下文），再把这条消息作为新 turn 发出去；这与 TUI / DSH Desktop「停下后继续打字」的体验一致。也可以点 **Resume now** 先接回、再慢慢输入。接不回时明确报错（`kanban-session-resume-failed`），不静默换成新会话；没有可续跑的会话记录（极老的卡片）时，发送会起一个新会话并在聊天里说明。
-* **执行模式**：Direct（直接在项目目录运行）或 Worktree（`git worktree add --detach <baseRef>` 切出独立工作树，源工作树不受影响）。每张 Worktree 卡片可指定 **base ref**（本地分支 / tag / commit，缺省 `HEAD`），仓库里不存在的 ref 会以 `base-ref-not-found` 明确失败。Worktree 只对「项目根自己就是 Git 仓库」的 BoardProject 开放；非 Git / multi-git / google-repo 只能用 Direct。**不实现** isolated 目录拷贝或 Docker 隔离，worktree 就是第一期的隔离手段。
-* **并发**：同一 BoardProject 允许多个 Direct 会话并行，平台不加写者锁；并发写冲突由 agent 自己处理（用户明确接受这一点）。
+* **执行模式**：Direct（直接在项目目录运行）或 Worktree（`git worktree add --detach <baseRef>` 切出独立工作树，源工作树不受影响）。每张 Worktree 卡片可指定 **base ref**（本地分支 / tag / commit，缺省 `HEAD`），仓库里不存在的 ref 会以 `base-ref-not-found` 明确失败。Worktree 只对「项目根自己就是 Git 仓库」的看板项目开放；非 Git / multi-git / google-repo 只能用 Direct。**不实现** isolated 目录拷贝或 Docker 隔离，worktree 就是第一期的隔离手段。
+* **并发**：同一个看板项目允许多个 Direct 会话并行，平台不加写者锁；并发写冲突由 agent 自己处理（用户明确接受这一点）。
 * **状态流转**：Claude / OpenCode 通过 harness hooks 自动流转——`Stop` / `session.idle` → 卡片进 Review（PTY 保持可交互），`UserPromptSubmit` / `busy` → 回 In Progress，权限审批或提问弹卡 → **卡片移到 Review** 并标 Needs Attention（等你回答，不会被当成已完成）。Claude 弹卡片等回答时 turn 还没结束（`Stop` 要等用户答完才触发，AskUserQuestion 也不发 `Notification`），所以是 `PermissionRequest` 把卡送进 Review；你答完后卡继续工作、`Stop` 再把它送回 Review 转成 awaiting_review。用户往 Review 卡片的终端里输入也会自动回 In Progress。DSH 走 ACP，不需要 hooks：一个 turn 以 `end_turn` 或 `cancelled` 结束即进 Review（**进程不退出**），在聊天里发新 prompt 就回 In Progress。Pi 没有 hooks，用卡片详情的 **Mark for review** 手动兜底（所有 agent 都保留该按钮）。
 * **DSH 模型与推理强度**：模型不由 argv 指定，而是 ACP 的 `model` config option。可在 **新建 Card** 时填模型（写 `deepseek-v4-pro`、`DeepSeek-V4-Pro` 或直接的 `["provider","model"]` 都行）并选推理强度，服务端在第一次 turn 前用 `session/set_config_option` 应用；卡片详情显示会话**实际**所在的 provider / model / reasoning effort。**聊天顶栏**有两个下拉：模型（按 provider 分组，选项来自 DSH 的实时目录）与推理强度，随时切换、对下一个 turn 生效，并广播给同一会话的其他标签页；在右侧还能看到上下文 token 用量。填了 DSH 不提供的模型会明确失败（`kanban-agent-model-unavailable`），不会静默回落到默认模型。
 * **DSH 权限模式**：`Ask` 时 ACP 的 `session/request_permission` 会以允许 / 拒绝卡片插进聊天、session 标为 `needs_attention`，答完回 `running`；`Auto-approve`（risky）直接选 ACP 给出的 allow 选项、不打断对话（没有 allow 选项时仍会询问）。
@@ -1302,7 +1311,7 @@ packages/
              Execution Supervisor（Project Task 生命周期）、Git 操作与凭据隔离、
              Validation、Skill/MCP provisioning、领域错误模型、脱敏、
              Runtime 协议、Handoff 组装与渲染、Policy、Proxy、生命周期、
-             Kanban 领域（BoardProject / Card / Session 记录与列规则）
+             Kanban 领域（看板项目=Project / Card / 会话句柄与列规则，投影到 Task + Run）
   runtimes/  Runtime Adapters：mock / opencode / pi / codex / claude-code /
              dsh / docker，以及各 Harness 的本地会话探测与 Execution Backend
   server/    Express REST API + SSE + 静态 Web UI 托管 +
@@ -1334,7 +1343,7 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * **Kanban（v13）本期边界**：
   * Agent 作为宿主机子进程（PTY 或 ACP stdio）直接运行（Direct）或在本机 git worktree 中运行，不经过 Project Coding Task 的隔离 Runtime；**不做** isolated 目录拷贝 / Docker 隔离。
   * Worktree 只支持项目根自身是 Git 仓库；worktree 不自动删除、不自动 commit；multi-git / google-repo / 普通目录只能用 Direct。
-  * 同一 BoardProject 允许多个 Direct 会话并行，没有单写者锁；并发改动由 agent 自行处理。
+  * 同一个看板项目允许多个 Direct 会话并行，没有单写者锁；并发改动由 agent 自行处理。
   * 第一期没有 diff / review / commit / PR、依赖链与 auto-review；Review 列只表示「agent 完成一轮」，不是代码审查。
   * 第一期只做「创建」：不能在看板里编辑已有卡片的 prompt / 标题 / agent / 执行模式（改需求请在详情里 restart 或新建卡片），也不支持粘贴 / 拖拽图片。
   * 没有单独的「Start in plan mode」开关（用 agent 的 **Plan** 权限模式表达同一意图），也没有 forge 的 auto-review（commit / PR）选项——Review 列由 hooks / ACP turn 自动推进且不产生提交。Worktree 卡片在新目录里首次启动时，Claude Code 可能弹一次工作区信任确认，属于 CLI 自身行为。
@@ -1391,7 +1400,7 @@ v11 hardening 的专项测试：
 
 `packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、大小写变体的 API 路径同样要求认证、api-key reveal 确认、config 往返（脱敏 URL 与 header 掩码不被写回覆盖；掩码但无存储值 → 400 `config-invalid`；畸形 JSON → 400 `invalid-request`）与优雅停机。
 
-v13 看板测试：`src/v13.kanban.test.ts` 覆盖 folder-first 目录、workspace 类型识别（none / git / multi-git / google-repo）、worktree 仅限 Git 项目根、多 direct 会话、卡片移动白名单、session → 列迁移、重启标记 interrupted 与删除级联、卡片标题派生、同目录去重、worktree base ref 存取；`packages/server/src/kanban.terminal.test.ts` 用**真实 PTY** 验证 spawn / 输出 / 退出码 / resize / 进程组 stop / scrollback 上限；`packages/server/src/kanban.acp.test.ts` 用 fake ACP peer（stdio JSON-RPC，与 `dsh --profile acp` 同形）验证 initialize / session/new / 流式 update / 权限请求往返 / cancel / close / 进程退出（含真实 DSH 会在 stdout 打的非 JSON 噪声行）与 `session/resume` 能力广告 / 未广告时拒绝，并单独测 `AcpChatProjector` 按 `messageId` 聚合 chunk、按 `toolCallId` 合并 `tool_call_update`、从保存的转录恢复且不重用 id；`packages/server/src/kanban.transcript.test.ts` 覆盖转录原子读写、shutdown 同步写、损坏 / 旧版本文档按「没有历史」处理与按 session 删除；`packages/server/src/kanban.acp.runtime.test.ts` 把 fake `dsh` 放进 PATH，端到端跑真实 KanbanSessionRuntime：握手期 attach 与提前 prompt 被拒（`kanban-agent-starting`）、权限卡片问答、turn → Review、进程保持、同会话追问、stop 后 replay 已保存转录（`live:false` / `canResume:true`）、服务端重启后记录 `interrupted` 且转录仍可查看、`resume` 帧重新 spawn 并走 `session/resume` 续跑、二次重启仍能看到全部对话；`packages/server/src/kanban.agents.test.ts` 钉住 DSH 的 `--profile acp`、`transport: "acp"`、Ask / Auto-approve 权限模式与「prompt 不进 argv」；`packages/server/src/kanban.routes.test.ts` 用 fake CLI 端到端验证 REST + WebSocket（未认证升级被拒、restore 快照、输入、resize、stop）、真实 `git worktree` 隔离与 base ref 检出、目录浏览接口、非 Git 目录的询问/确认/去重、`git init`、本地 URL clone，以及 Claude Stop hook → 自动 Review、输入 → 回 In Progress、hook token 拒绝；`packages/server/src/kanban.hooks.test.ts` 覆盖 Claude settings / OpenCode plugin 的生成与 ESM 语法。
+v13 看板测试：`src/v13.kanban.test.ts` 覆盖 folder-first 目录、workspace 类型识别（none / git / multi-git / google-repo）、worktree 仅限 Git 项目根、多 direct 会话、卡片移动白名单、session → 列迁移、重启标记 interrupted 与删除级联、卡片标题派生、同目录去重、worktree base ref 存取，以及**看板统一**的关键断言：卡片首次启动产出 Task + Run（Run id 即会话句柄 id）、重跑同一卡片只新增 Run 而不新增 Task、续聊复用原 Run、三种终态的 `Task.execution` 投影、删除卡片是软删除、`board` 设置部分合并；`packages/server/src/kanban.terminal.test.ts` 用**真实 PTY** 验证 spawn / 输出 / 退出码 / resize / 进程组 stop / scrollback 上限；`packages/server/src/kanban.acp.test.ts` 用 fake ACP peer（stdio JSON-RPC，与 `dsh --profile acp` 同形）验证 initialize / session/new / 流式 update / 权限请求往返 / cancel / close / 进程退出（含真实 DSH 会在 stdout 打的非 JSON 噪声行）与 `session/resume` 能力广告 / 未广告时拒绝，并单独测 `AcpChatProjector` 按 `messageId` 聚合 chunk、按 `toolCallId` 合并 `tool_call_update`、从保存的转录恢复且不重用 id；`packages/server/src/kanban.transcript.test.ts` 覆盖转录原子读写、shutdown 同步写、损坏 / 旧版本文档按「没有历史」处理与按 session 删除；`packages/server/src/kanban.acp.runtime.test.ts` 把 fake `dsh` 放进 PATH，端到端跑真实 KanbanSessionRuntime：握手期 attach 与提前 prompt 被拒（`kanban-agent-starting`）、权限卡片问答、turn → Review、进程保持、同会话追问、stop 后 replay 已保存转录（`live:false` / `canResume:true`）、服务端重启后记录 `interrupted` 且转录仍可查看、`resume` 帧重新 spawn 并走 `session/resume` 续跑、二次重启仍能看到全部对话；`packages/server/src/kanban.agents.test.ts` 钉住 DSH 的 `--profile acp`、`transport: "acp"`、Ask / Auto-approve 权限模式与「prompt 不进 argv」；`packages/server/src/kanban.routes.test.ts` 用 fake CLI 端到端验证 REST + WebSocket（未认证升级被拒、restore 快照、输入、resize、stop）、真实 `git worktree` 隔离与 base ref 检出、目录浏览接口、非 Git 目录的询问/确认/去重、`git init`、本地 URL clone，以及 Claude Stop hook → 自动 Review、输入 → 回 In Progress、hook token 拒绝；`packages/server/src/kanban.hooks.test.ts` 覆盖 Claude settings / OpenCode plugin 的生成与 ESM 语法。
 
 端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
 
