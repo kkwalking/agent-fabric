@@ -168,13 +168,19 @@ if (uiCheck) {
   // Asynchronous on purpose: the check launches its own copy of the app and has
   // to wait for it, which a synchronous child-process call cannot do.
   const { spawn } = await import("node:child_process");
-  await new Promise((ok, fail) => {
-    const checker = spawn(process.execPath, [join(here, "verify-ui.mjs"), target], { stdio: "inherit" });
-    checker.once("error", fail);
-    checker.once("exit", (code) =>
-      code === 0 ? ok() : fail(new Error(`verify-ui exited with code ${code} — the installed UI has a problem`))
-    );
-  });
+  const runChecker = (extra) =>
+    new Promise((ok, fail) => {
+      const checker = spawn(process.execPath, [join(here, "verify-ui.mjs"), target, ...extra], { stdio: "inherit" });
+      checker.once("error", fail);
+      checker.once("exit", (code) =>
+        code === 0 ? ok() : fail(new Error(`verify-ui ${extra.join(" ")} exited with code ${code} — the installed UI has a problem`))
+      );
+    });
+  await runChecker([]);
+  // Then the same window against an empty data directory: that is what a fresh
+  // install looks like, and nothing else in the chain ever runs without data.
+  console.log("[install] checking the empty-install path");
+  await runChecker(["--empty"]);
   console.log("[install] UI check passed");
 }
 

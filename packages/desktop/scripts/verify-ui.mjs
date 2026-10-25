@@ -34,6 +34,14 @@ import { join, resolve } from "node:path";
 const args = process.argv.slice(2);
 const appPath = resolve(args.find((a) => !a.startsWith("--")) ?? "/Applications/AgentFabric.app");
 const keepOpen = args.includes("--keep-open");
+/**
+ * Run against an *empty* data directory instead of the fixture.
+ *
+ * Every other check runs with data, so the empty path (a fresh install: no
+ * tasks, no projects, nothing) was never exercised by anything automated — and
+ * it is the very first screen a new user sees.
+ */
+const emptyMode = args.includes("--empty");
 
 if (!existsSync(join(appPath, "Contents", "MacOS", "AgentFabric"))) {
   console.error(`[verify-ui] no app bundle at ${appPath}`);
@@ -162,7 +170,7 @@ function writeFixture(dir) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "db.json"), JSON.stringify(db, null, 2));
 }
-writeFixture(dataDir);
+if (!emptyMode) writeFixture(dataDir);
 const profileDir = mkdtempSync(join(tmpdir(), "af-verify-profile-"));
 const port = await freePort();
 const env = { ...process.env, AGENTFABRIC_DATA_DIR: dataDir };
@@ -218,8 +226,19 @@ try {
   //    written straight into `db.json` (the store's own format) *before* the
   //    app is launched — creating tasks through the API would start real agent
   //    runs, which is not what this check is about.
+  // FIXTURE-DATA ONLY (4-rail-groups)
+  if (!emptyMode) {
   // 4. The rail groups those tasks by workspace.
-  await waitFor(cdp, `document.querySelectorAll(".ws-group").length > 0`, 20_000, "the workspace tree to load");
+  // In empty mode there are no groups to appear: the rail having rendered *its
+  // own* empty message is what "loaded" means there.
+  await waitFor(
+    cdp,
+    emptyMode
+      ? `Boolean(document.querySelector(".ws-tree-empty"))`
+      : `document.querySelectorAll(".ws-group").length > 0`,
+    20_000,
+    emptyMode ? "the empty rail message" : "the workspace tree to load"
+  );
   const rail = await evaluate(
     cdp,
     `(() => {
@@ -246,6 +265,10 @@ try {
   const titled = await evaluate(cdp, `document.querySelector(".rail-head-title")?.textContent?.trim()`);
   check(/工作区|Workspaces/.test(titled ?? ""), `rail heading is "${titled}"`);
 
+  // FIXTURE-DATA ONLY (4-dist)
+  if (!emptyMode) {
+  }
+
   // 4. Distribution endpoints the rail depends on answer from the bundle.
   const api = await evaluate(
     cdp,
@@ -258,6 +281,10 @@ try {
      })()`
   );
   check(api.health === true, `/api/health answers ok (${api.tasks} tasks, ${api.workspaces} workspaces, ${api.projects} projects)`);
+
+  // FIXTURE-DATA ONLY (5-open)
+  if (!emptyMode) {
+  }
 
   // 5. Clicking a session opens that task.
   const opened = await evaluate(
@@ -283,6 +310,10 @@ try {
     opened.active !== null && opened.active === opened.label && opened.activeRows === 1,
     `the opened session is the only highlighted row (${opened.activeRows} highlighted, "${opened.active}")`
   );
+
+  // FIXTURE-DATA ONLY (5b)
+  if (!emptyMode) {
+  }
 
   // 5b. The rail's new-session button and the row menu.
   const railOps = await evaluate(
@@ -312,6 +343,10 @@ try {
   check(railOps.headIcons === 3, `the workspace heading carries ${railOps.headIcons} icons (search / filter / new)`);
   check(railOps.items.length === 4, `session menu offers ${railOps.items.length} actions: ${railOps.items.join(", ")}`);
   check(railOps.menuOnScreen && railOps.closedByEscape, "the session menu stays on screen and closes on Escape");
+
+  // FIXTURE-DATA ONLY (5c)
+  if (!emptyMode) {
+  }
 
   // 5c. Workspaces collapse, and each workspace has its own ··· menu.
   const groupOps = await evaluate(
@@ -347,6 +382,10 @@ try {
     `a workspace ··· menu offers ${groupOps.items.join(" / ")} and closes on Escape`
   );
 
+  // FIXTURE-DATA ONLY (5d)
+  if (!emptyMode) {
+  }
+
   // 5d. A long workspace pages by ten per click.
   const paging = await evaluate(
     cdp,
@@ -373,6 +412,8 @@ try {
   check(paging[2].rows === 25 && /收起/.test(paging[2].button ?? ""), `the second shows the remaining ${paging[2].rows}`);
   check(paging[3].rows === 6, `"collapse" returns to the first page (${paging[3].rows})`);
 
+  }
+
   // 9g. The page check above must be able to see an error at all.
   //     It matches ErrorBox by its text, so prove that match works by planting
   //     one: an assertion that cannot fail is worse than no assertion.
@@ -397,6 +438,54 @@ try {
   if (errorProbe.error) failures.push(`error detection probe: ${errorProbe.error}`);
   check(errorProbe.seen === true, "the per-page error check can actually see an ErrorBox");
   check(errorProbe.goneAfterRemoval === true, "the planted probe was removed again");
+
+  // 5h. Empty data: the very first screen of a fresh install.
+  //     Skipped in fixture mode, where the data exists by construction.
+  if (emptyMode) {
+    const empty = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/tasks");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1600));
+         const main = () => document.querySelector("main");
+         const text = () => main()?.innerText ?? "";
+         const out = {
+           tasksText: text().slice(0, 300),
+           railText: document.querySelector(".rail-scroll")?.innerText ?? "",
+           railGroups: document.querySelectorAll(".ws-group").length,
+           taskRows: document.querySelectorAll(".ws-task-row").length,
+           errors: [...document.querySelectorAll("main .card")]
+             .map((c) => c.textContent.trim())
+             .filter((t) => t.startsWith("Error:")),
+         };
+         // Every other page must also open clean on an empty install.
+         const pages = ["/runs", "/projects", "/runtimes", "/sessions", "/handoffs", "/usage", "/kanban", "/trash"];
+         out.pageErrors = [];
+         for (const p of pages) {
+           history.pushState({}, "", p);
+           window.dispatchEvent(new PopStateEvent("popstate"));
+           await new Promise((r) => setTimeout(r, 900));
+           const errs = [...document.querySelectorAll("main .card")]
+             .map((c) => c.textContent.trim())
+             .filter((t) => t.startsWith("Error:"));
+           if (errs.length) out.pageErrors.push(p + ": " + errs[0].slice(0, 60));
+           if (!document.querySelector("main h1")) out.pageErrors.push(p + ": no heading");
+         }
+         return out;
+       })()`
+    );
+    check(empty.taskRows === 0, `an empty install has no session rows (${empty.taskRows})`);
+    check(
+      /没有|no |No |尚未|还没有/i.test(empty.railText) || empty.railGroups === 0,
+      `the empty rail explains itself instead of showing a blank list (${JSON.stringify(empty.railText.slice(0, 60))})`
+    );
+    check(empty.errors.length === 0, `the empty task list shows no error (${empty.errors[0] ?? "none"})`);
+    check(
+      empty.pageErrors.length === 0,
+      `every page opens clean on an empty install (${empty.pageErrors.join("; ") || "none"})`
+    );
+  }
 
   // 6. The "More" panel reaches the pages that have no nav row.
   const more = await evaluate(
@@ -523,6 +612,8 @@ try {
     );
   }
 
+  // FIXTURE-DATA ONLY (9c - needs a board card)
+  if (!emptyMode) {
   // 9c. A card never opens with its delete already armed.
   const boardOps = await evaluate(
     cdp,
@@ -558,6 +649,8 @@ try {
     boardOps.switched && !boardOps.switched.includes("Confirm delete"),
     `switching cards does not carry the armed delete over (${(boardOps.switched ?? []).join(" / ")})`
   );
+
+  }
 
   // 9d. Deletes confirm through the app's Modal, never window.confirm.
   //     A native dialog blocks the page, so this both checks consistency and

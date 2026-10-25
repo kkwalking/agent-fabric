@@ -19,7 +19,8 @@
     "typecheck": "node --check src/main.js && node --check scripts/build-backend.mjs && node --check scripts/build-native.mjs && node --check scripts/build-mac.mjs && node --check scripts/install-mac.mjs && node --check scripts/verify-ui.mjs && node --check scripts/verify-app.mjs && node --check scripts/gui-verify.mjs",
     "smoke": "node scripts/smoke-pty.mjs",
     "perf": "node scripts/perf-check.mjs",
-    "perf:update": "node scripts/perf-check.mjs --update"
+    "perf:update": "node scripts/perf-check.mjs --update",
+    "verify:ui:empty": "node scripts/verify-ui.mjs --empty"
   },
   "files": [
     "src/main.js",

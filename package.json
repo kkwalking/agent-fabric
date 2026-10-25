@@ -23,7 +23,8 @@
     "cli": "npm run cli -w @agentfabric/cli --",
     "test": "npm run test --workspaces --if-present",
     "postinstall": "node scripts/fix-node-pty.js",
-    "desktop:perf": "npm run perf -w @agentfabric/desktop"
+    "desktop:perf": "npm run perf -w @agentfabric/desktop",
+    "desktop:verify:empty": "npm run verify:ui:empty -w @agentfabric/desktop"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
