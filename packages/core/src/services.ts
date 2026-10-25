@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { cp, mkdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { emptyUsage, addUsage, estimateCost } from "./cost.js";
@@ -67,26 +68,6 @@ export function localDay(iso: string): string {
 export function maskSecret(value: string): string {
   if (value.length <= 8) return "***";
   return `${value.slice(0, 3)}***${value.slice(-4)}`;
-}
-
-/**
- * Clones a git repository into `dest`. Uses a shallow, single-branch clone
- * when a branch is given; falls back to `git clone` for full history.
- * Rejects when `git` is not available or the clone fails.
- */
-export async function cloneGitRepo(repoUrl: string, dest: string, branch?: string): Promise<void> {
-  const args = ["clone", "--quiet"];
-  if (branch) args.push("--depth", "1", "--branch", branch, "--single-branch");
-  args.push(repoUrl, dest);
-  await new Promise<void>((resolvePromise, reject) => {
-    execFile("git", args, { timeout: 5 * 60 * 1000 }, (err) => {
-      if (err) {
-        reject(new Error(`Failed to clone ${repoUrl}: ${err instanceof Error ? err.message : String(err)}`));
-      } else {
-        resolvePromise();
-      }
-    });
-  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -374,12 +355,17 @@ export class RuntimeService {
 /* Workspace                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A user-owned working directory.
+ *
+ * There is no `repoUrl` here: a repository is described by a Project (`source`),
+ * which is also what carries the credential, default branch and execution
+ * defaults a task needs. A workspace is only ever a directory.
+ */
 export interface NewWorkspaceInput {
   name: string;
   type: Workspace["type"];
   path?: string;
-  repoUrl?: string;
-  branch?: string;
   mountPath?: string;
   persistent?: boolean;
 }
@@ -402,7 +388,23 @@ export class WorkspaceService {
     return this.store.get<Workspace>("workspaces", id);
   }
 
+  /**
+   * Creates an external (user-owned) working directory.
+   *
+   * A repository is not a workspace type: it is a Project `source`, which also
+   * carries the credential, default branch and execution defaults a task needs.
+   * `Project` is the only answer to "where does the code come from".
+   */
   async create(input: NewWorkspaceInput): Promise<Workspace> {
+    // A wire request has no type: a client built against the old shape can still
+    // send `type: "git"`. Refuse it instead of creating a directory nothing
+    // clones into and no task can run.
+    if ((input as { type: string }).type === "git") {
+      throw new DomainError(
+        "config-invalid",
+        "A git repository is configured as a Project source, not a workspace — create a Project instead"
+      );
+    }
     const id = newId("ws");
     let path = input.path;
     if (input.type === "local" && path) {
@@ -410,21 +412,11 @@ export class WorkspaceService {
       await mkdir(abs, { recursive: true });
       path = abs;
     }
-    if (input.type === "git" && input.repoUrl) {
-      // Clone the repository into the store's data directory so the
-      // workspace is a real, mountable directory (not just a record).
-      const cloneDir = join(this.store.dataDir, "workspaces", id);
-      await mkdir(dirname(cloneDir), { recursive: true });
-      await cloneGitRepo(input.repoUrl, cloneDir, input.branch);
-      path = cloneDir;
-    }
     const workspace: Workspace = {
       id,
       name: input.name,
       type: input.type,
       path,
-      repoUrl: input.repoUrl,
-      branch: input.branch,
       mountPath: input.mountPath ?? "/workspace",
       persistent: input.persistent ?? true,
       source: "create",
@@ -437,16 +429,22 @@ export class WorkspaceService {
 
   /**
    * Create the platform-managed working copy for one Project-based Task
-   * (v11 §5.1/§10). The directory is created eagerly and owned by the
-   * platform; the Git content is prepared by the execution supervisor.
+   * (v11 §5.1/§10), owned by the platform and never shared between tasks.
    *
-   * One Task = one managed Workspace, never shared with another Task.
+   * Two kinds of content, matching the two Project source types:
+   * - a git repository (`repoUrl`): the directory is created here and the
+   *   supervisor clones into it;
+   * - a directory (`sourcePath`): the directory is copied here, so the task
+   *   works on a copy and the user's own directory is never modified.
    */
   async createManaged(input: {
     name: string;
     projectId: ID;
     taskId: ID;
-    repoUrl: string;
+    /** Repository URL for a git-sourced Project. */
+    repoUrl?: string;
+    /** Directory to copy for a directory-sourced Project. */
+    sourcePath?: string;
     workingBranch?: string;
     mountPath?: string;
   }): Promise<Workspace> {
@@ -454,6 +452,12 @@ export class WorkspaceService {
     const path = join(this.store.dataDir, "workspaces", id);
     try {
       await mkdir(path, { recursive: true });
+      if (input.sourcePath) {
+        // Copy the tracked content into the task's own directory. `.git` is
+        // included on purpose: the supervisor commits the task's work in this
+        // copy and may need its history, and a copy keeps that off the original.
+        await cp(input.sourcePath, path, { recursive: true, errorOnExist: false });
+      }
     } catch (err) {
       throw new DomainError(
         "workspace-create-failed",
@@ -463,7 +467,10 @@ export class WorkspaceService {
     const workspace: Workspace = {
       id,
       name: input.name,
-      type: "git",
+      // A managed workspace is always a plain directory: for a git Project it is
+      // the clone the supervisor prepares into it, for a directory Project it is
+      // the copy made above.
+      type: "local",
       path,
       repoUrl: input.repoUrl,
       branch: input.workingBranch,
@@ -486,13 +493,8 @@ export class WorkspaceService {
    * used in place — AgentFabric does not copy or take ownership of it.
    */
   async import(input: NewWorkspaceInput): Promise<Workspace> {
-    if (input.type === "git" && input.repoUrl) {
-      const ws = await this.create(input);
-      await this.store.update<Workspace>("workspaces", ws.id, { source: "import" });
-      return { ...ws, source: "import" };
-    }
     const rawPath = input.path;
-    if (!rawPath) throw new Error("workspace import requires `path` (local directory) or `repoUrl` (git)");
+    if (!rawPath) throw new Error("workspace import requires `path` (a local directory)");
     const abs = resolve(rawPath);
     let st;
     try {
@@ -505,10 +507,8 @@ export class WorkspaceService {
     const workspace: Workspace = {
       id,
       name: input.name,
-      type: input.type === "git" ? "git" : "local",
+      type: "local",
       path: abs,
-      repoUrl: input.repoUrl,
-      branch: input.branch,
       mountPath: input.mountPath ?? "/workspace",
       persistent: input.persistent ?? true,
       source: "import",
@@ -563,7 +563,7 @@ export class WorkspaceService {
   }
 
   async ensureExists(input: NewWorkspaceInput): Promise<Workspace> {
-    const existing = this.list().find((w) => w.type === input.type && w.path === input.path && w.repoUrl === input.repoUrl);
+    const existing = this.list().find((w) => w.type === input.type && w.path === input.path);
     return existing ?? this.create(input);
   }
 }
@@ -1265,9 +1265,16 @@ export class UsageService {
 export interface NewProjectInput {
   name: string;
   description?: string;
+  /**
+   * Where the code comes from. `git` (the default) needs `remoteUrl`;
+   * `directory` needs `path` and must not carry a credential (there is no
+   * host to bind it to).
+   */
   source: {
     type?: SourceType;
-    remoteUrl: string;
+    remoteUrl?: string;
+    /** Absolute path of a `directory` source. */
+    path?: string;
     provider?: SourceProvider;
     defaultBranch?: string;
     credentialId?: ID;
@@ -1321,33 +1328,12 @@ export class ProjectService {
     const name = input.name?.trim();
     if (!name) throw new DomainError("project-invalid", "A project needs a name");
     assertValidationConfig(input.validation);
-    const remoteUrl = input.source?.remoteUrl?.trim();
-    if (!remoteUrl) throw new DomainError("project-invalid", "A project needs a repository URL");
-    const urlCheck = validateRemoteUrl(remoteUrl);
-    if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
-    const type = input.source.type ?? "git";
-    if (type !== "git") throw new DomainError("project-invalid", `Unsupported source type: ${String(type)}`);
-    if (input.source.credentialId) {
-      const credential = this.store.get<SourceCredential>("sourceCredentials", input.source.credentialId);
-      if (!credential) {
-        throw new DomainError("credential-not-found", `Source credential not found: ${input.source.credentialId}`);
-      }
-      // Host binding + transport compatibility are checked at configuration
-      // time (v11 hardening §10.2), so an unusable pairing fails here rather
-      // than after a clone was attempted.
-      assertCredentialBinding(credential, remoteUrl);
-    }
+    const source = this.normalizeSource(input.source);
     const project: Project = {
       id: newId("proj"),
       name,
       description: input.description,
-      source: {
-        type: "git",
-        remoteUrl,
-        provider: input.source.provider ?? inferSourceProvider(remoteUrl),
-        defaultBranch: input.source.defaultBranch?.trim() || "main",
-        credentialId: input.source.credentialId,
-      },
+      source,
       execution: input.execution,
       skills: input.skills,
       mcpServers: input.mcpServers,
@@ -1371,25 +1357,7 @@ export class ProjectService {
     }
     if (patch.description !== undefined) next.description = patch.description || undefined;
     if (patch.source !== undefined) {
-      const remoteUrl = patch.source.remoteUrl?.trim();
-      if (!remoteUrl) throw new DomainError("project-invalid", "A project needs a repository URL");
-      const urlCheck = validateRemoteUrl(remoteUrl);
-      if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
-      // The credential may be carried over from the current source; either
-      // way the *resulting* pairing must satisfy the host binding (§9/§10).
-      const credentialId = patch.source.credentialId !== undefined ? patch.source.credentialId : project.source.credentialId;
-      if (credentialId) {
-        const credential = this.store.get<SourceCredential>("sourceCredentials", credentialId);
-        if (!credential) throw new DomainError("credential-not-found", `Source credential not found: ${credentialId}`);
-        assertCredentialBinding(credential, remoteUrl);
-      }
-      next.source = {
-        type: "git",
-        remoteUrl,
-        provider: patch.source.provider ?? inferSourceProvider(remoteUrl),
-        defaultBranch: patch.source.defaultBranch?.trim() || project.source.defaultBranch || "main",
-        credentialId,
-      };
+      next.source = this.normalizeSource(patch.source, project.source);
     }
     // Merge, not replace: the settings form submits partial execution
     // patches (it only renders a few fields), and a wholesale replace would
@@ -1404,6 +1372,56 @@ export class ProjectService {
     if (patch.validation !== undefined) next.validation = patch.validation;
     if (patch.git !== undefined) next.git = patch.git;
     return this.store.update<Project>("projects", id, next);
+  }
+
+  /**
+   * Validates one `source` input and turns it into the stored shape.
+   *
+   * The two source types have different prerequisites, and both are checked
+   * here rather than when a task starts:
+   * - `git`: a credential-free remote URL, and — if a credential is named — a
+   *   credential bound to that URL's host and transport (v11 hardening §9/§10).
+   * - `directory`: an absolute path that exists. A credential is refused
+   *   outright: there is no host for it to be bound to, so accepting one would
+   *   store a secret that can never be used.
+   */
+  private normalizeSource(
+    input: NonNullable<NewProjectInput["source"]>,
+    previous?: Project["source"]
+  ): Project["source"] {
+    const type = input.type ?? previous?.type ?? "git";
+    if (type === "directory") {
+      const path = input.path?.trim();
+      if (!path) throw new DomainError("project-invalid", "A directory project needs a path");
+      if (!isAbsolute(path)) throw new DomainError("project-invalid", "The directory path must be absolute");
+      if (!existsSync(path)) throw new DomainError("source-not-found", `Directory not found: ${path}`);
+      if (input.credentialId) {
+        throw new DomainError(
+          "project-invalid",
+          "A directory project cannot use a source credential — credentials are bound to a repository host"
+        );
+      }
+      return { type: "directory", path: resolve(path), defaultBranch: input.defaultBranch?.trim() || "main" };
+    }
+    const remoteUrl = input.remoteUrl?.trim();
+    if (!remoteUrl) throw new DomainError("project-invalid", "A git project needs a repository URL");
+    const urlCheck = validateRemoteUrl(remoteUrl);
+    if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
+    // The credential may be carried over from the current source; either way
+    // the *resulting* pairing must satisfy the host binding (§9/§10).
+    const credentialId = input.credentialId !== undefined ? input.credentialId : previous?.credentialId;
+    if (credentialId) {
+      const credential = this.store.get<SourceCredential>("sourceCredentials", credentialId);
+      if (!credential) throw new DomainError("credential-not-found", `Source credential not found: ${credentialId}`);
+      assertCredentialBinding(credential, remoteUrl);
+    }
+    return {
+      type: "git",
+      remoteUrl,
+      provider: input.provider ?? inferSourceProvider(remoteUrl),
+      defaultBranch: input.defaultBranch?.trim() || previous?.defaultBranch || "main",
+      credentialId,
+    };
   }
 
   async remove(id: ID): Promise<boolean> {

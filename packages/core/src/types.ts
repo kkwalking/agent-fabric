@@ -322,7 +322,14 @@ export interface Runtime {
 /* Workspace                                                          */
 /* ------------------------------------------------------------------ */
 
-export type WorkspaceType = "local" | "git" | "volume";
+/**
+ * How a `Workspace` directory is backed.
+ *
+ * There is deliberately no `git` member: a repository is a Project `source`
+ * (see `SourceType`), never a workspace type. A managed workspace for a
+ * git-sourced Project is an ordinary directory that happens to hold a clone.
+ */
+export type WorkspaceType = "local" | "volume";
 
 /**
  * How a Workspace came into being (v11 §5.4):
@@ -388,7 +395,20 @@ export interface WorkspaceLock {
 /** Source providers with first-class recognition (v11 §3). */
 export type SourceProvider = "github" | "gitlab" | "gitee" | "generic";
 
-export type SourceType = "git";
+/**
+ * What a Project's code comes from.
+ *
+ * - `git`: a repository (remote URL + optional credential). Tasks get their own
+ *   branch and the work can be pushed back.
+ * - `directory`: a directory on this machine. Tasks run in a copy of it and the
+ *   result is committed locally; there is no remote to push to.
+ *
+ * A Project is the one place a code source is described — there is no separate
+ * "workspace type" for a git repository or a local folder. (The `Workspace`
+ * record still exists for the copy a task actually runs in; it is the
+ * platform's bookkeeping, not something the user configures.)
+ */
+export type SourceType = "git" | "directory";
 
 /**
  * A Project's primary source (v11 §3). One Project currently has exactly one
@@ -397,13 +417,41 @@ export type SourceType = "git";
  */
 export interface ProjectSource {
   type: SourceType;
-  /** Credential-free remote URL. Never carries a token or userinfo (v11 §12). */
-  remoteUrl: string;
+  /**
+   * Credential-free remote URL (v11 §12). Present for `git`; absent for a
+   * `directory` source, whose `path` is used instead.
+   */
+  remoteUrl?: string;
+  /** Absolute directory for a `directory` source. */
+  path?: string;
   provider?: SourceProvider;
   /** Default branch used when a Task does not name a base ref. */
   defaultBranch?: string;
   /** Reference to a SourceCredential; absent = public repository (v11 §4.3). */
   credentialId?: ID;
+}
+
+/**
+ * The repository URL of a `git` Project.
+ *
+ * Only a `git` source has one; the git lifecycle (clone, fetch, push, branch
+ * comparison) all needs it, so it is read through this accessor, which fails
+ * loudly for a `directory` Project instead of threading `undefined` through
+ * code that would silently degrade into "push nothing".
+ */
+export function gitRemoteUrl(project: Project): string {
+  const url = project.source.remoteUrl?.trim();
+  if (project.source.type !== "git" || !url) {
+    throw new Error(
+      `Project ${project.id} ("${project.name}") is not a git source (type: ${project.source.type}) — there is no remote to reach`
+    );
+  }
+  return url;
+}
+
+/** Whether the Project's code comes from a git repository (vs a local directory). */
+export function isGitProject(project: Project): boolean {
+  return project.source.type === "git";
 }
 
 /**

@@ -1070,6 +1070,44 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       t ? ok(res, t) : fail(res, new Error("Deleted task not found"), 404);
     })
   );
+  // Rename in place, and detach from a workspace. A task's prompt and runtime
+  // are what its runs were recorded against, so they are not editable here; the
+  // title and the workspace link are labels, and both are editable. An empty
+  // title is a caller error, not "clear it"; an empty workspaceId *is* the way
+  // to clear the link.
+  app.patch(
+    "/api/tasks/:id",
+    ah(async (req, res) => {
+      const body = req.body as { title?: unknown; workspaceId?: unknown };
+      const patch: { title?: string; workspaceId?: string } = {};
+      if (body?.title !== undefined) {
+        if (typeof body.title !== "string") {
+          return fail(res, new DomainError("config-invalid", "title must be a string"), 400);
+        }
+        const title = body.title.trim();
+        if (!title) return fail(res, new DomainError("config-invalid", "A task title cannot be empty"), 400);
+        patch.title = title;
+      }
+      // `workspaceId: ""` detaches the task from its workspace (used when a
+      // workspace is deleted); any other value must name a workspace that
+      // exists, so a typo cannot leave a dangling reference behind.
+      if (body?.workspaceId !== undefined) {
+        if (typeof body.workspaceId !== "string") {
+          return fail(res, new DomainError("config-invalid", "workspaceId must be a string"), 400);
+        }
+        const workspaceId = body.workspaceId.trim();
+        if (workspaceId && !workspaces.get(workspaceId)) {
+          return fail(res, new DomainError("workspace-invalid", `Workspace not found: ${workspaceId}`), 404);
+        }
+        patch.workspaceId = workspaceId;
+      }
+      if (Object.keys(patch).length === 0) {
+        return fail(res, new DomainError("config-invalid", "PATCH /api/tasks/:id accepts { title, workspaceId }"), 400);
+      }
+      const t = await tasks.update(req.params.id, patch);
+      t ? ok(res, t) : fail(res, new Error("Task not found"), 404);
+    })
+  );
   app.get("/api/tasks/:id/runs", (req, res) => ok(res, runs.forTask(req.params.id)));
 
   /* ---------------- project task lifecycle (v11 §23/§31/§32/§40) ---------------- */

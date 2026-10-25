@@ -955,8 +955,6 @@ export class RunService {
         name: profile.workspaceConfig.name ?? `${profile.name} workspace`,
         type: profile.workspaceConfig.type ?? "local",
         path: profile.workspaceConfig.path,
-        repoUrl: profile.workspaceConfig.repoUrl,
-        branch: profile.workspaceConfig.branch,
       });
       workspaceId = ws.id;
     }
