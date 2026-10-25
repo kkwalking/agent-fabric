@@ -136,6 +136,26 @@ npm run desktop:dmg -- --arch=x64      # 构建 Intel 版
 
 窗口本身需要 GUI 会话才能观察；`npm run desktop:dmg -- --gui-check` 会启动打包好的 App 直到它返回首页（会清掉 `ELECTRON_RUN_AS_NODE` 再启动，以免测到的是环境而不是 App）。
 
+#### 装完之后验证界面
+
+`npm run desktop:install` 把 dmg 里的 App 装到 `/Applications`，然后**在跑起来的 App 里**逐页验证界面——它连跑两遍，两个数据集都要过：
+
+```bash
+npm run desktop:install        # 安装，并跑下面两轮
+npm run desktop:verify         # 只跑有数据的夹具：57 项
+npm run desktop:verify:empty   # 只跑空数据目录（全新安装）：43 项
+```
+
+* **夹具模式**：在一个临时 `dataDir` 里写入任务、工作区、看板卡片、两条 60 消息的长线程等，覆盖交互行为（切换任务时草稿与滚动位置、看板两步删除、设置未保存保护、Docker 状态、终端空状态等）。
+* **空安装模式**：不写任何数据，只看用户第一次打开时看到什么（每个页面无错误、侧栏空状态、首次使用的阻断提示指向真实存在的页面）。依赖夹具的那 8 个断言块**显式跳过**（块首有 `FIXTURE-DATA ONLY` 标记），而不是留着假装通过。
+
+验证脚本启动 App 前会先自检两件事——这两类问题 App 内部任何断言都发现不了：
+
+1. **`/Applications` 里的 App 是否落后于 `packages/web/dist`**：改完前端没重新打包，检查的其实是上一版代码，失败原因看起来会像"代码坏了"。
+2. **`packages/web/dist` 里是否有多份构建**：两个 `vite build --watch` 同时写输出目录会让同一视图出现两份 chunk，`index.html` 指向其中一个，**页面静默空白**。
+
+两者都只警告不中断（重建 dist 不重装是正常开发循环），但会让结论带上明确的保留条件。审查结论与已修复问题见 `docs/interaction-audit-2026-10-25.md`。
+
 ### 性能回归检查
 
 ```bash
