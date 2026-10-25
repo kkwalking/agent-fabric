@@ -231,13 +231,13 @@ export function NewTaskView() {
         in a workspace you manage yourself.
       </p>
       {missingModel && (
-        <ErrorBox message="尚未配置任何 LLM 模型 — 请先前往 LLM 页面添加 Provider 与模型，再回来发起任务（或在 Runtime 选择 Codex / Claude Code，使用其自有登录）" />
+        <ErrorBox message="尚未配置任何 LLM 模型 — 请先在左下角「更多」→ 设置 → 模型里添加 Provider 与模型，再回来发起任务（或在 Runtime 选择 Codex / Claude Code，使用其自有登录）" />
       )}
       {missingWorkspace && (
-        <ErrorBox message="尚未配置 Workspace — 请先前往 Workspaces 页面创建一个，再回来选择" />
+        <ErrorBox message="尚未配置 Workspace — 请先在左下角「更多」→ 项目里新建一个项目（git 仓库或本地目录），再回来选择；也可以改用 Project 模式直接指定项目" />
       )}
       {missingProjectRuntime && (
-        <ErrorBox message="没有可用于 Project Task 的隔离 Runtime — Project Coding Task 必须运行在 isolated Runtime 中（v11 hardening §4），不会降级到 Host。请前往 Runtimes 页面启用一个 containerized Runtime，或把 Project 改选为 none 走 Workspace 模式" />
+        <ErrorBox message="没有可用于 Project Task 的隔离 Runtime — Project Coding Task 必须运行在 isolated Runtime 中（v11 hardening §4），不会降级到 Host。请先在左下角「更多」→ 运行时里启用一个 containerized Runtime，或把 Project 改选为 none 走 Workspace 模式" />
       )}
       <ErrorBox message={error} />
 
