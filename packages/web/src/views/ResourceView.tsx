@@ -1,4 +1,4 @@
-import { ReactNode, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { del, get, post, put, fmtTime, shortId } from "../api";
 import { StatusBadge, useAsync, ErrorBox, Field, Modal } from "../components";
 
@@ -191,8 +191,22 @@ const configs: Record<string, Config> = {
   },
 };
 
+/**
+ * How `removeItem` asks for confirmation.
+ *
+ * These row actions are plain functions inside a config object, not components,
+ * so they cannot own React state. The view installs an asker once (see
+ * ResourceView) rather than each call site reaching for `window.confirm`, whose
+ * native dialog both breaks the app's look and blocks the packaged UI checks.
+ * Unset = refuse: a delete that cannot ask must not happen.
+ */
+let askDelete: ((label: string) => Promise<boolean>) | null = null;
+
 async function removeItem(path: string, id: string, reload: () => void) {
-  if (!confirm(`Delete ${id}?`)) return;
+  if (!askDelete) {
+    throw new Error("Refusing to delete without a confirmation dialog installed");
+  }
+  if (!(await askDelete(id))) return;
   await del(path + "/" + id);
   reload();
 }
@@ -277,6 +291,29 @@ export function ResourceView({ kind }: { kind: string }) {
   // modal re-reads the fresh row, so toggles reflect without reopening.
   const [detailId, setDetailId] = useState<string | null>(null);
   const detailRow = data?.find((r) => r.id === detailId);
+
+  // Install the confirmation the row actions ask through; the resolver is held
+  // in a ref so the promise survives re-renders of the modal.
+  const [deleteLabel, setDeleteLabel] = useState<string | null>(null);
+  const deleteResolver = useRef<((ok: boolean) => void) | null>(null);
+  useEffect(() => {
+    askDelete = (label) =>
+      new Promise<boolean>((resolve) => {
+        deleteResolver.current = resolve;
+        setDeleteLabel(label);
+      });
+    return () => {
+      // A row action awaiting an answer must not hang if the view goes away.
+      deleteResolver.current?.(false);
+      deleteResolver.current = null;
+      askDelete = null;
+    };
+  }, []);
+  const answerDelete = (ok: boolean) => {
+    setDeleteLabel(null);
+    deleteResolver.current?.(ok);
+    deleteResolver.current = null;
+  };
 
   if (!cfg) return <div>Unknown resource kind: {kind}</div>;
 
@@ -383,6 +420,18 @@ export function ResourceView({ kind }: { kind: string }) {
       )}
 
       {kind === "runtimes" && <HarnessStatusCard />}
+
+      {deleteLabel && (
+        <Modal title="Delete" onClose={() => answerDelete(false)}>
+          <p>
+            Delete <strong className="mono">{deleteLabel}</strong>?
+          </p>
+          <div className="modal-actions">
+            <button onClick={() => answerDelete(false)}>Cancel</button>
+            <button className="danger" onClick={() => answerDelete(true)}>Delete</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

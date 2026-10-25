@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { del, get, post, put } from "../api";
-import { useAsync, clickableRow, ErrorBox, Icon } from "../components";
+import { useAsync, clickableRow, ErrorBox, Icon, Modal } from "../components";
 
 interface ProviderRow {
   id: string;
@@ -61,8 +61,13 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
     models.reload();
   };
 
+  // Deleting a provider takes its models with it, so it asks first. Rendered as
+  // the app's own Modal, not window.confirm: the native dialog is the one place
+  // the UI breaks its own look, and it blocks the page, which puts it out of
+  // reach of the packaged UI checks.
+  const [pendingProviderDelete, setPendingProviderDelete] = useState<ProviderRow | null>(null);
+
   const removeProvider = async (p: ProviderRow) => {
-    if (!confirm(`删除供应商「${p.name}」？其模型列表会一并删除。`)) return;
     try {
       await del(`/api/providers/${p.id}`);
       reloadAll();
@@ -129,13 +134,34 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
                 </div>
                 <button className="small" onClick={() => setEditing(p.id)}>编辑</button>
                 <button className="small" onClick={() => toggleProvider(p)}>{p.enabled ? "停用" : "启用"}</button>
-                <button className="small danger" onClick={() => removeProvider(p)}>删除</button>
+                <button className="small danger" onClick={() => setPendingProviderDelete(p)}>删除</button>
               </div>
             </div>
           );
         })
       )}
       <ErrorBox message={providers.error} />
+      {pendingProviderDelete && (
+        <Modal title="删除供应商" onClose={() => setPendingProviderDelete(null)}>
+          <p>
+            删除供应商 <strong>{pendingProviderDelete.name}</strong>？
+          </p>
+          <p className="muted">它下面的模型列表会一并删除，无法恢复。</p>
+          <div className="modal-actions">
+            <button onClick={() => setPendingProviderDelete(null)}>取消</button>
+            <button
+              className="danger"
+              onClick={() => {
+                const target = pendingProviderDelete;
+                setPendingProviderDelete(null);
+                void removeProvider(target);
+              }}
+            >
+              删除
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -500,11 +526,26 @@ function ModelConfig({ providerId }: { providerId: string }) {
     }
   };
 
+  // Same reasoning as the provider delete: a saved model asks through the app's
+  // Modal; a row that was never saved is only local state and just goes away.
+  const [pendingModelDelete, setPendingModelDelete] = useState<EditableModel | null>(null);
+
   const removeRow = async (row: EditableModel) => {
-    if (row.modelId && !confirm(`删除模型「${row.name}」？`)) return;
+    if (!row.modelId) {
+      clearTimeout(saveTimers.current[row.key]);
+      setRows((rs) => rs.filter((r) => r.key !== row.key));
+      return;
+    }
+    setPendingModelDelete(row);
+  };
+
+  const confirmModelDelete = async () => {
+    const row = pendingModelDelete;
+    setPendingModelDelete(null);
+    if (!row?.modelId) return;
     clearTimeout(saveTimers.current[row.key]);
     try {
-      if (row.modelId) await del(`/api/models/${row.modelId}`);
+      await del(`/api/models/${row.modelId}`);
       setRows((rs) => rs.filter((r) => r.key !== row.key));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -600,6 +641,20 @@ function ModelConfig({ providerId }: { providerId: string }) {
         </>
       )}
       <ErrorBox message={error} />
+      {pendingModelDelete && (
+        <Modal title="删除模型" onClose={() => setPendingModelDelete(null)}>
+          <p>
+            删除模型 <strong>{pendingModelDelete.name}</strong>？
+          </p>
+          <p className="muted">这条模型配置会被移除，无法恢复。</p>
+          <div className="modal-actions">
+            <button onClick={() => setPendingModelDelete(null)}>取消</button>
+            <button className="danger" onClick={() => void confirmModelDelete()}>
+              删除
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
