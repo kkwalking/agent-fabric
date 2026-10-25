@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { del, get, fmtRelative } from "../api";
-import { Icon, Modal, StatusBadge, useAsync, ErrorBox } from "../components";
+import { Icon, Modal, Pager, StatusBadge, clickableRow, useMinuteClock, useAsync, ErrorBox } from "../components";
 import { navigate } from "../router";
 
 // Per-browser UI preference: when set, deleting a task skips the confirm modal.
@@ -10,19 +10,34 @@ const SUPPRESS_DELETE_CONFIRM_KEY = "agentfabric.deleteTaskConfirmSuppressed";
  * Task List (v5 §16/§32): Tasks are the user's long-lived work threads;
  * Runs are executions inside them. Clicking a task opens its thread —
  * the primary surface — not a run page. The three-dot menu soft-deletes:
- * the task stays recoverable for 30 days from the Dashboard's deleted
- * tasks card.
+ * the task stays recoverable for 30 days, and the Trash entry in this page's
+ * header is where it is restored from.
  */
+/** Rows per page. */
+const TASKS_PAGE_SIZE = 50;
+
 export function TasksView() {
   const tasks = useAsync<any[]>(() => get("/api/tasks"), []);
   const runs = useAsync<any[]>(() => get("/api/runs"), []);
   const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
+  // The Trash entry used to live on the Dashboard. It needs the number of
+  // soft-deleted tasks, which is what `/api/dashboard` reports; nothing else on
+  // this page uses that endpoint.
+  const summary = useAsync<{ counts: Record<string, number>; usage: { estimatedCost: number } }>(
+    () => get("/api/dashboard"),
+    []
+  );
   // Which task's action menu is open (one at a time).
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   // Task awaiting confirmation in the delete modal.
   const [confirmTask, setConfirmTask] = useState<any | null>(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // "3m ago" labels move on their own (see `useMinuteClock`).
+  useMinuteClock();
+  // Page through a long list instead of mounting every row: a thread list grows
+  // without bound, and each row is a card with chips and a menu.
+  const [page, setPage] = useState(0);
 
   // Clicks outside the menu (and its three-dot button) close it. The
   // opening click itself also bubbles here after the effect attached, so
@@ -44,12 +59,18 @@ export function TasksView() {
     list.push(r);
     runsByTask.set(r.taskId, list);
   }
-  const wsName = (id?: string) => (workspaces.data ?? []).find((w) => w.id === id)?.name;
+  // A lookup map, not a per-row `find`: the list re-renders on every menu open
+  // and the workspaces array is scanned once per visible row otherwise.
+  const deletedCount = summary.data?.counts.deletedTasks ?? 0;
+  const wsById = new Map<string, any>((workspaces.data ?? []).map((w: any) => [w.id, w]));
+  const wsName = (id?: string) => (id ? wsById.get(id)?.name : undefined);
   const isLive = (s: string) => ["pending", "starting", "running"].includes(s);
 
-  const entries = (tasks.data ?? [])
+  // `[...]`: the source array is the shared API cache; sorting it in place would
+  // reorder what other views read.
+  const entries = [...(tasks.data ?? [])]
     .map((t) => {
-      const taskRuns = (runsByTask.get(t.id) ?? []).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      const taskRuns = [...(runsByTask.get(t.id) ?? [])].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       const last = taskRuns[taskRuns.length - 1];
       return {
         task: t,
@@ -60,6 +81,10 @@ export function TasksView() {
       };
     })
     .sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+
+  const pageCount = Math.max(1, Math.ceil(entries.length / TASKS_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageEntries = entries.slice(currentPage * TASKS_PAGE_SIZE, (currentPage + 1) * TASKS_PAGE_SIZE);
 
   const deleteTask = async (task: any) => {
     setConfirmTask(null);
@@ -94,13 +119,26 @@ export function TasksView() {
       <div className="row" style={{ marginBottom: 4 }}>
         <h1>Tasks</h1>
         <span className="right">
-          <button className="small" onClick={() => { tasks.reload(); runs.reload(); }}>refresh</button>{" "}
+          {deletedCount > 0 && (
+            <button className="small" onClick={() => navigate("/trash")} title="Deleted tasks are recoverable for 30 days">
+              Trash ({deletedCount})
+            </button>
+          )}{" "}
+          <button className="small" onClick={() => { tasks.reload(); runs.reload(); summary.reload(); }}>refresh</button>{" "}
           <button className="small primary" onClick={() => navigate("/new")}>New task</button>
         </span>
       </div>
       <p className="sub">
         A Task is your long-term work thread. The system executes each step as a Run — resume or hand off
         between agents without leaving the thread.
+        {/* The Dashboard used to show the total cost; it lives on the Usage page
+            in full, and one line here keeps it from becoming invisible. */}
+        {typeof summary.data?.usage?.estimatedCost === "number" && (
+          <>
+            {" "}Spent so far: ${summary.data.usage.estimatedCost.toFixed(4)} — see{" "}
+            <a onClick={() => navigate("/usage")}>Usage</a> for the breakdown.
+          </>
+        )}
       </p>
 
       <ErrorBox message={actionError} />
@@ -110,9 +148,10 @@ export function TasksView() {
           No tasks yet — create one with <a onClick={() => navigate("/new")}>New task</a>.
         </div>
       ) : (
+        <>
         <div className="task-list">
-          {entries.map(({ task, runs: taskRuns, last, status, lastActivity }) => (
-            <div key={task.id} className="task-item card" onClick={() => navigate(`/tasks/${task.id}`)}>
+          {pageEntries.map(({ task, runs: taskRuns, last, status, lastActivity }) => (
+            <div key={task.id} className="task-item card" {...clickableRow(() => navigate(`/tasks/${task.id}`))}>
               <div className="task-item-main">
                 <div className="task-item-head">
                   <strong className="task-item-title">{task.title}</strong>
@@ -165,6 +204,8 @@ export function TasksView() {
             </div>
           ))}
         </div>
+        <Pager page={currentPage} pageCount={pageCount} total={entries.length} pageSize={TASKS_PAGE_SIZE} onChange={setPage} />
+        </>
       )}
 
       {confirmTask && (
@@ -174,7 +215,7 @@ export function TasksView() {
               Delete task <strong>{confirmTask.title}</strong>?
             </p>
             <p className="muted">
-              It is hidden from Tasks but kept for 30 days — restore it from Dashboard → Deleted tasks.
+              It is hidden from Tasks but kept for 30 days — restore it from Trash in this page's header.
             </p>
             <label className="check">
               <input

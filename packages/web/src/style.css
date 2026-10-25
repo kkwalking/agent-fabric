@@ -1862,6 +1862,35 @@ tr.clickable:hover td {
 
 /* ---------- Task list (v5 §16) ---------- */
 
+/* Keyboard focus must be visible on rows that are reachable by Tab
+   (`clickableRow`): the default outline is removed elsewhere in the app. */
+.task-item:focus-visible,
+.provider-summary:focus-visible,
+.board-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Pager under a list that grows without bound (Tasks, Runs). */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 12.5px;
+}
+.pager-actions {
+  display: flex;
+  gap: 6px;
+}
+.pager-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .task-list {
   display: flex;
   flex-direction: column;
@@ -3459,6 +3488,12 @@ button.stat.clickable:hover {
 }
 .board-term-host .xterm {
   height: 100%;
+  /* Undo the app-wide `antialiased` from `body`, matching bruce-kanban, which
+     never sets it. Measured on this machine with the same font, size and line
+     height, `auto` lays down ~14% more ink than `antialiased` — the strokes read
+     as solid rather than washed out, which is what small monospace terminal text
+     needs. Edge sharpness is unchanged; only stroke weight moves. */
+  -webkit-font-smoothing: auto;
 }
 
 /* ---------- Narrow layouts ---------- */
@@ -4247,4 +4282,496 @@ button.stat.clickable:hover {
 }
 .settings-page-wide .card {
   margin-bottom: 12px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Rail: the task tree, grouped by workspace, plus its overflow menu    */
+/* ------------------------------------------------------------------ */
+
+/* The rail is a column: header, scrollable tree, then the menu and the
+   server footer pinned at the bottom. */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 4px 8px 11px;
+  flex-shrink: 0;
+}
+.rail-head-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.1px;
+}
+.rail-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.rail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 2px 8px;
+}
+
+/* One workspace and its sessions. */
+.ws-group {
+  margin-bottom: 10px;
+}
+.ws-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 8px;
+}
+.ws-group-head .icon {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+.ws-group-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A session row: title left, age right, both truncating rather than wrapping. */
+.ws-task {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px 7px 15px;
+  margin: 1px 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+}
+.ws-task:hover {
+  background: var(--sidebar-hover);
+}
+.ws-task.active {
+  background: var(--sidebar-active);
+  font-weight: 500;
+}
+.ws-task-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-task-time {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-size: 12px;
+}
+.ws-more {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px 6px 15px;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+}
+.ws-more:hover {
+  color: var(--text);
+}
+.ws-tree-empty,
+.ws-tree-error {
+  padding: 10px 12px;
+  color: var(--dim);
+  font-size: 13px;
+}
+.ws-tree-error {
+  color: var(--danger, #c0392b);
+}
+
+/* The overflow menu: the pages the rail no longer carries. */
+.rail-menu-root {
+  position: relative;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+.rail-menu {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+  padding: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+/* A collapsed rail is 60px wide: a popover anchored to it would be squeezed to
+   the width of the icons, so it opens outwards instead. */
+.sidebar.collapsed .rail-menu {
+  left: calc(100% + 8px);
+  right: auto;
+  width: 190px;
+  bottom: 0;
+}
+.rail-menu-section {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+  padding: 8px 9px 4px;
+}
+.rail-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+}
+.rail-menu-item:hover {
+  background: var(--sidebar-hover);
+  color: var(--text);
+}
+.rail-menu-item.active {
+  background: var(--sidebar-active);
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* ------------------------------------------------------------------ */
+/* Rail v2: new-session button, row actions, pinned markers            */
+/* ------------------------------------------------------------------ */
+
+/* The primary action of the whole app: a full-width button under the brand. */
+.rail-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 16px);
+  margin: 2px 8px 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  /* A soft tint, not a solid accent: it is the primary action, but the rail
+     stays calm so the session titles remain the thing that draws the eye. */
+  background: var(--sidebar-hover);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.rail-new:hover {
+  background: var(--sidebar-active);
+}
+.rail-new.active {
+  border-color: var(--text);
+}
+
+/* One session row: the title button, then the age, pin and ··· as siblings so
+   the menu can anchor to the row instead of the scrolling rail. */
+.ws-task-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 6px;
+  border-radius: 10px;
+}
+.ws-task-row .ws-task {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 0;
+}
+.ws-task-row:hover {
+  background: var(--sidebar-hover);
+}
+.ws-task-row .ws-task:hover {
+  background: transparent;
+}
+.ws-task-row.active {
+  background: var(--sidebar-active);
+}
+.ws-task-row .ws-task-time {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-size: 12px;
+}
+/* The age gives way to the ··· on hover, so neither is ever clipped. */
+.ws-task-more {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ws-task-row:hover .ws-task-more,
+.ws-task-row.menu-open .ws-task-more,
+.ws-task-row.menu-open .ws-task-time {
+  display: flex;
+}
+.ws-task-row.menu-open .ws-task-time,
+.ws-task-row:hover .ws-task-time {
+  display: none;
+}
+.ws-task-more:hover {
+  background: var(--sidebar-active);
+  color: var(--text);
+}
+.ws-pin {
+  flex: 0 0 auto;
+  display: flex;
+  color: var(--muted);
+  opacity: 0.9;
+}
+
+/* The row menu: opens over the content, anchored to its row. */
+.ws-task-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% - 2px);
+  right: 4px;
+  min-width: 178px;
+  padding: 5px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.18);
+}
+.ws-task-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-task-menu button:hover {
+  background: var(--sidebar-hover);
+}
+.ws-task-menu button.danger {
+  color: var(--danger, #c0392b);
+}
+
+/* "Show 21 more sessions" is an action, not a footnote: give it the same
+   contrast as the rows so it is findable at a glance. */
+.ws-more {
+  color: var(--muted);
+  font-weight: 500;
+  border-radius: 8px;
+}
+.ws-more:hover {
+  background: var(--sidebar-hover);
+  color: var(--text);
+}
+
+/* The filter row under the workspace heading. */
+.rail-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px 10px;
+  margin: 0 2px 4px;
+  border-radius: 10px;
+  background: var(--sidebar-hover);
+  font-size: 13px;
+  color: var(--muted);
+}
+.rail-filters label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+/* Rename is a small inline panel inside the rail, not a full modal: the rail is
+   narrow and the dialog only needs one field. */
+.ws-rename {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 4px 2px;
+  padding: 10px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.14);
+  z-index: 41;
+}
+.ws-rename-label {
+  font-size: 12px;
+  color: var(--dim);
+}
+.ws-rename input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+}
+.ws-rename-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.ws-rename-actions button {
+  padding: 5px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+}
+.ws-rename-actions button.primary {
+  background: var(--text);
+  color: var(--bg, #fff);
+  border-color: transparent;
+}
+.ws-rename-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------------ */
+/* Workspace group: collapsible heading with its own ··· menu          */
+/* ------------------------------------------------------------------ */
+
+.ws-group-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border-radius: 8px;
+  position: relative;
+}
+.ws-group-head:hover {
+  background: var(--sidebar-hover);
+}
+.ws-group-head.menu-open {
+  background: var(--sidebar-active);
+}
+
+/* The heading itself is the collapse toggle: one hit target for the whole row. */
+.ws-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 4px 6px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-group-toggle .icon {
+  flex-shrink: 0;
+  opacity: 0.65;
+  transition: transform 120ms ease;
+  /* The chevron points down when open, right when collapsed. */
+  transform: rotate(90deg);
+}
+.ws-group-head.collapsed .ws-group-toggle .icon {
+  transform: rotate(0deg);
+}
+.ws-group-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The session count is reference information, not a badge to compete with. */
+.ws-group-count {
+  flex: 0 0 auto;
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 400;
+}
+.ws-group-more {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ws-group-head:hover .ws-group-more,
+.ws-group-head.menu-open .ws-group-more {
+  display: flex;
+}
+.ws-group-more:hover {
+  background: var(--sidebar-active);
+  color: var(--text);
+}
+.ws-group-menu {
+  top: calc(100% - 4px);
+  right: 6px;
+  left: auto;
+}
+
+.ws-rename-actions button.danger {
+  background: var(--danger, #c0392b);
+  color: #fff;
+  border-color: transparent;
 }

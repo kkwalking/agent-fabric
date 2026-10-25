@@ -1,36 +1,96 @@
 import { Suspense, lazy, useEffect, useState } from "react";
-import { Dashboard } from "./views/Dashboard";
-import { ResourceView } from "./views/ResourceView";
-import { RunsView, RunDetailView } from "./views/Runs";
-import { TasksView } from "./views/Tasks";
-import { TrashView } from "./views/Trash";
-import { NewTaskView } from "./views/NewTask";
-import { SessionsView } from "./views/Sessions";
-import { TaskThreadView } from "./views/TaskThread";
-import { HandoffsView, HandoffDetailView } from "./views/Handoffs";
-import { UsageView } from "./views/Usage";
-import { SettingsView as SettingsPanel } from "./views/Settings";
-import { NewProjectTaskView, ProjectDetailView, ProjectsView } from "./views/Projects";
-import { SourceCredentialsView } from "./views/SourceCredentials";
-import { TaskLifecycleView } from "./views/TaskLifecycle";
 import { Icon, IconName } from "./components";
 import { LanguageContext, useI18n, useLanguageState } from "./i18n-react";
 import type { Language, MessageKey } from "./i18n";
 import { navigate, parsePath, usePath, type Route, type SettingsSection } from "./router";
-
-// The Board pulls in xterm; keep it in its own chunk so every other page stays
-// small (v13 §七 asks for a dedicated terminal chunk).
-const KanbanView = lazy(() =>
-  import("./views/Board").then((module) => ({ default: module.BoardView }))
-);
+import { WorkspaceTaskList } from "./views/WorkspaceTaskList";
+import { RailMenu } from "./views/RailMenu";
 
 /**
- * The open settings panel survives a reload of the page.
+ * Every view is its own chunk: the shell (sidebar, router, health polling) is
+ * what a page load pays for, and a view costs one small request when it is
+ * opened. Keeping them eager put all ~20 views — and whatever they import —
+ * into the file the window must parse before it can paint anything.
  *
- * A dev-server rebuild (or a manual refresh) would otherwise drop the user back
- * on the dashboard: the URL carries the panel only while it is open
- * (`/settings/<section>`), so a save made from the panel loses the "apply the
- * configuration file" step that follows. Closing the panel clears the flag.
+ * The Board is separate twice over: it pulls in xterm, the largest dependency
+ * in the app (v13 §七 asks for a dedicated terminal chunk).
+ */
+const load = <T extends Record<string, unknown>, K extends keyof T>(
+  importer: () => Promise<T>,
+  name: K
+): React.LazyExoticComponent<React.ComponentType<any>> =>
+  lazy(async () => ({ default: (await importer())[name] as React.ComponentType<any> }));
+
+const ResourceView = load(() => import("./views/ResourceView"), "ResourceView");
+const RunsView = load(() => import("./views/Runs"), "RunsView");
+const RunDetailView = load(() => import("./views/Runs"), "RunDetailView");
+const TasksView = load(() => import("./views/Tasks"), "TasksView");
+const TrashView = load(() => import("./views/Trash"), "TrashView");
+const NewTaskView = load(() => import("./views/NewTask"), "NewTaskView");
+const SessionsView = load(() => import("./views/Sessions"), "SessionsView");
+const TaskThreadView = load(() => import("./views/TaskThread"), "TaskThreadView");
+const HandoffsView = load(() => import("./views/Handoffs"), "HandoffsView");
+const HandoffDetailView = load(() => import("./views/Handoffs"), "HandoffDetailView");
+const UsageView = load(() => import("./views/Usage"), "UsageView");
+// The settings panel is its own chunk: it is opened deliberately, and it is
+// the only view that writes the configuration file.
+const SettingsPanel = load(() => import("./views/Settings"), "SettingsView");
+const ProjectsView = load(() => import("./views/Projects"), "ProjectsView");
+const ProjectDetailView = load(() => import("./views/Projects"), "ProjectDetailView");
+const NewProjectTaskView = load(() => import("./views/Projects"), "NewProjectTaskView");
+const TaskLifecycleView = load(() => import("./views/TaskLifecycle"), "TaskLifecycleView");
+const KanbanView = load(() => import("./views/Board"), "BoardView");
+
+/**
+ * The view importers, by route. Kept so the chunks a user is likely to open
+ * next can be fetched while the window is idle: navigation then swaps content
+ * instead of first waiting for a request. The Board is left out on purpose —
+ * it carries xterm and is only worth loading when it is actually opened.
+ */
+const VIEW_IMPORTERS: Array<() => Promise<unknown>> = [
+  () => import("./views/Tasks"),
+  () => import("./views/NewTask"),
+  () => import("./views/Runs"),
+  () => import("./views/Projects"),
+  () => import("./views/Llm"),
+  () => import("./views/ResourceView"),
+  () => import("./views/Sessions"),
+  () => import("./views/Handoffs"),
+  () => import("./views/Usage"),
+];
+
+/**
+ * Fetches the view chunks one by one, after the first paint.
+ *
+ * `requestIdleCallback` is only used while the document is visible: a background
+ * tab never becomes idle, so relying on it alone left the prefetch never
+ * running (measured: only the two chunks the page actually needed were
+ * fetched). The timer fallback covers exactly that case.
+ */
+function prefetchViews(): void {
+  const idle = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void })
+    .requestIdleCallback;
+  const run = async () => {
+    for (const load of VIEW_IMPORTERS) {
+      try {
+        await load();
+      } catch {
+        // A failed prefetch is not an error: the view loads on demand instead.
+      }
+    }
+  };
+  if (idle && document.visibilityState === "visible") idle(() => void run(), { timeout: 3000 });
+  else setTimeout(() => void run(), 1200);
+}
+
+/**
+ * The open settings panel survives a dev-server reload.
+ *
+ * `npm run dev` rebuilds the UI on every source save, and Vite then reloads the
+ * page. The URL only carries the panel when it is open (`/settings/<section>`),
+ * so without this session flag a save made from the panel would drop the user
+ * back on the task list — losing the "apply the configuration file" step that
+ * follows an edit. Closing the panel clears it.
  */
 const SETTINGS_OPEN_KEY = "agentfabric.settingsOpen";
 
@@ -50,6 +110,21 @@ function writeSettingsOpen(open: boolean): void {
   }
 }
 
+/**
+ * Navigation (v5 §15/§33): users operate Tasks; Runs are execution
+ * details. Primary nav = New task / Tasks; Runs stay
+ * reachable as the operations/run-history view under System.
+ */
+
+/** Remembers whether the user collapsed the rail to icons only. */
+const SIDEBAR_COLLAPSED_KEY = "agentfabric.sidebarCollapsed";
+
+/**
+ * System nav. Proxy is not a page of its own: it is a settings section (see
+ * `views/Settings.tsx`), because a proxy is one of the settings the config file
+ * holds, not a separate surface with its own save button. `/proxy` still routes
+ * there so an old bookmark lands on the section instead of the task list.
+ */
 /** The sidebar's language switch: one click between the two dictionaries. */
 function LanguageToggle() {
   const { language, setLanguage } = useI18n();
@@ -62,52 +137,9 @@ function LanguageToggle() {
   );
 }
 
-/**
- * Navigation (v5 §15/§33): users operate Tasks; Runs are execution
- * details. Primary nav = New task / Tasks / Dashboard; Runs stay
- * reachable as the operations/run-history view under System.
- */
-
-/** Remembers whether the user collapsed the rail to icons only. */
-const SIDEBAR_COLLAPSED_KEY = "agentfabric.sidebarCollapsed";
-
-interface NavEntry {
-  path: string;
-  /** Dictionary key, resolved at render: the nav follows the current language. */
-  label: MessageKey;
-  icon: IconName;
-  /** Prefix used for active-state highlighting. */
-  match: string;
-}
-
-const primaryNav: NavEntry[] = [
-  { path: "/tasks", label: "nav.tasks", icon: "history", match: "/tasks" },
-  { path: "/", label: "nav.dashboard", icon: "grid", match: "/" },
-];
-
-const resourceNav: NavEntry[] = [
-  { path: "/kanban", label: "nav.kanban", icon: "grid", match: "/kanban" },
-  { path: "/projects", label: "nav.projects", icon: "folder", match: "/projects" },
-  { path: "/runtimes", label: "nav.runtimes", icon: "box", match: "/runtimes" },
-  { path: "/sessions", label: "nav.sessions", icon: "terminal", match: "/sessions" },
-  { path: "/handoffs", label: "nav.handoffs", icon: "archive", match: "/handoffs" },
-  // AGENT_UI_HIDDEN: Agents 页暂不开放（后端 / API 未动）。恢复前端入口时，
-  // 取消注释所有带 AGENT_UI_HIDDEN 标记的位置：本文件上下两处、router.ts 的
-  // PATH_VIEWS、NewTask.tsx 与 TaskThread.tsx 里的 Agent 选择器。
-  // { path: "/agents", label: "Agents", icon: "bot", match: "/agents" },
-  { path: "/workspaces", label: "nav.workspaces", icon: "folder", match: "/workspaces" },
-  { path: "/source-credentials", label: "nav.sourceCredentials", icon: "key", match: "/source-credentials" },
-];
-
-const systemNav: NavEntry[] = [
-  { path: "/runs", label: "nav.runs", icon: "play", match: "/runs" },
-  { path: "/usage", label: "nav.usage", icon: "chart", match: "/usage" },
-  { path: "/settings", label: "nav.settings", icon: "gear", match: "/settings" },
-];
-
-/** Where closing the settings panel returns to (its opener, else the dashboard). */
+/** Where closing the settings panel returns to (its opener, else the task list). */
 function closeSettings(): void {
-  navigate("/");
+  navigate("/tasks");
 }
 
 export function App() {
@@ -115,8 +147,8 @@ export function App() {
   const t = language.t;
   const path = usePath();
   const parsed: Route = parsePath(path);
-  // Reopened after a reload: the route says where to go, the session flag says
-  // the settings panel is still open over it.
+  // Reopened after a dev-server reload: the route says where to go, the session
+  // flag says the settings panel is still open over it.
   const [settingsOpen, setSettingsOpen] = useState(readSettingsOpen);
   const route: Route = settingsOpen && parsed.view !== "settings" ? { view: "settings", section: "general" } : parsed;
 
@@ -126,6 +158,10 @@ export function App() {
     setSettingsOpen(open);
     writeSettingsOpen(open);
   }, [parsed.view]);
+  // The rail's filter row: two independent narrowing switches.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterPinnedOnly, setFilterPinnedOnly] = useState(false);
+  const [filterProjectsOnly, setFilterProjectsOnly] = useState(false);
   const [health, setHealth] = useState<string>("connecting…");
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -150,18 +186,10 @@ export function App() {
       .catch(() => setHealth("offline"));
   }, []);
 
-  const renderNav = (items: NavEntry[]) =>
-    items.map(({ path: p, label, icon, match }) => (
-      <button
-        key={p}
-        className={`nav-item ${isActive(path, route, match) ? "active" : ""}`}
-        onClick={() => navigate(p)}
-        title={t(label)}
-      >
-        <Icon name={icon} />
-        <span>{t(label)}</span>
-      </button>
-    ));
+  // The shell is painted; fetch the other views while nothing else is going on.
+  useEffect(() => {
+    prefetchViews();
+  }, []);
 
   // The Task Thread is a full-height, composer-anchored layout (v5 §3); the
   // Kanban owns its own full-height scroll regions (v13 §七).
@@ -172,7 +200,7 @@ export function App() {
     <div className="app">
       <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
         <div className="brand">
-          <button className="brand-btn" onClick={() => navigate("/")} title={t("nav.dashboard")}>
+          <button className="brand-btn" onClick={() => navigate("/tasks")} title={t("nav.tasks")}>
             {sidebarCollapsed && <span className="brand-mark">AF</span>}
             {!sidebarCollapsed && <span className="brand-name">AgentFabric</span>}
           </button>
@@ -200,36 +228,99 @@ export function App() {
           </span>
         </div>
 
-        <button
-          className={`nav-item ${route.view === "new-task" ? "active" : ""}`}
-          onClick={() => navigate("/new")}
-          title={t("nav.newTask")}
-        >
-          <Icon name="compose" size={15} />
-          <span>{t("nav.newTask")}</span>
-        </button>
+        {/* The rail is the app's primary navigation: Tasks, grouped by the
+            workspace they run in. Everything else is behind `RailMenu`, and the
+            main area shows a Task or the new-task form. */}
+        {!sidebarCollapsed && (
+          <>
+            {/* The one action every session starts with, given the weight it has
+                in the reference UI: a full-width button, not an icon. */}
+            <button
+              className={`rail-new ${route.view === "new-task" ? "active" : ""}`}
+              onClick={() => navigate("/new")}
+            >
+              <Icon name="plus" size={15} />
+              <span>{t("sidebar.newSession")}</span>
+            </button>
+            <div className="rail-head">
+              <span className="rail-head-title">{t("sidebar.workspaces")}</span>
+              <span className="rail-head-actions">
+                <button
+                  className="icon-btn"
+                  title={t("sidebar.search")}
+                  aria-label={t("sidebar.search")}
+                  onClick={() => navigate("/tasks")}
+                >
+                  <Icon name="search" size={15} />
+                </button>
+                <button
+                  className="icon-btn"
+                  title={t("sidebar.filter")}
+                  aria-label={t("sidebar.filter")}
+                  onClick={() => setFiltersOpen((open) => !open)}
+                  aria-expanded={filtersOpen}
+                >
+                  <Icon name="grid" size={15} />
+                </button>
+                <button
+                  className="icon-btn"
+                  title={t("sidebar.newInWorkspace")}
+                  aria-label={t("sidebar.newInWorkspace")}
+                  onClick={() => navigate("/new")}
+                >
+                  <Icon name="folderOpen" size={15} />
+                </button>
+              </span>
+            </div>
+            <nav className="rail-scroll" aria-label={t("sidebar.workspaces")}>
+              {filtersOpen && (
+                <div className="rail-filters">
+                  <label>
+                    <input type="checkbox" checked={filterPinnedOnly} onChange={(e) => setFilterPinnedOnly(e.target.checked)} />
+                    {t("sidebar.filterPinned")}
+                  </label>
+                  <label>
+                    <input type="checkbox" checked={filterProjectsOnly} onChange={(e) => setFilterProjectsOnly(e.target.checked)} />
+                    {t("sidebar.filterProjects")}
+                  </label>
+                </div>
+              )}
+              <WorkspaceTaskList
+                activeTaskId={route.view === "task" ? route.id : undefined}
+                pinnedOnly={filterPinnedOnly}
+                projectsOnly={filterProjectsOnly}
+              />
+            </nav>
+          </>
+        )}
+        {sidebarCollapsed && (
+          <button
+            className={`nav-item ${route.view === "new-task" ? "active" : ""}`}
+            onClick={() => navigate("/new")}
+            title={t("nav.newTask")}
+          >
+            <Icon name="compose" size={15} />
+            <span>{t("nav.newTask")}</span>
+          </button>
+        )}
 
-        <nav className="nav">
-          {renderNav(primaryNav)}
-          <div className="nav-section">{t("nav.resources")}</div>
-          {renderNav(resourceNav)}
-          <div className="nav-section">{t("nav.system")}</div>
-          {renderNav(systemNav)}
-        </nav>
+        <RailMenu currentPath={path} />
 
-        <div className="foot" title={`local server — api: ${health}`}>
+        <div className="foot" title={`${t("nav.localServer")} — ${t("nav.api")}: ${health}`}>
           <span className="avatar">AF</span>
           <span className="foot-text">
-            <span className="foot-title">local server</span>
+            <span className="foot-title">{t("nav.localServer")}</span>
             <span className="foot-sub">
               <span className={`dot ${health === "ok" ? "on" : ""}`} />
-              api: {health}
+              {t("nav.api")}: {health}
             </span>
           </span>
         </div>
       </aside>
       <main className={`main ${fullBleed ? "fullbleed" : ""}`}>
-        {route.view === "dashboard" && <Dashboard />}
+        {/* One boundary for whichever view chunk is loading; the fallback is
+            deliberately quiet so a fast chunk swap does not flash a message. */}
+        <Suspense fallback={<div className="view-loading" role="status" aria-live="polite" />}>
         {route.view === "new-task" && <NewTaskView />}
         {route.view === "tasks" && <TasksView />}
         {route.view === "trash" && <TrashView />}
@@ -241,16 +332,10 @@ export function App() {
         {route.view === "sessions" && <SessionsView />}
         {/* AGENT_UI_HIDDEN: 与上面侧边栏的 Agents 导航一起恢复。 */}
         {/* {route.view === "agents" && <ResourceView kind="agents" />} */}
-        {route.view === "workspaces" && <ResourceView kind="workspaces" />}
         {route.view === "projects" && <ProjectsView />}
-        {route.view === "kanban" && (
-          <Suspense fallback={<div className="board-loading muted">Loading Kanban…</div>}>
-            <KanbanView />
-          </Suspense>
-        )}
+        {route.view === "kanban" && <KanbanView />}
         {route.view === "project" && route.id && <ProjectDetailView projectId={route.id} />}
         {route.view === "project-new-task" && route.id && <NewProjectTaskView projectId={route.id} />}
-        {route.view === "source-credentials" && <SourceCredentialsView />}
         {route.view === "handoffs" && <HandoffsView />}
         {route.view === "handoff" && route.id && <HandoffDetailView handoffId={route.id} />}
         {route.view === "usage" && <UsageView />}
@@ -263,6 +348,7 @@ export function App() {
             onClose={closeSettings}
           />
         )}
+        </Suspense>
       </main>
     </div>
     </LanguageContext.Provider>
@@ -270,6 +356,8 @@ export function App() {
 }
 
 function isActive(currentPath: string, route: Route, match: string): boolean {
-  if (match === "/") return route.view === "dashboard";
+  // `/` resolves to the task list, so the task entry must light up there too:
+  // matching only on the URL would leave the home page with no active entry.
+  if (match === "/tasks" && currentPath === "/") return true;
   return currentPath === match || currentPath.startsWith(`${match}/`);
 }
