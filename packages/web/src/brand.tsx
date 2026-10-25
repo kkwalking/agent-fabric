@@ -5,8 +5,9 @@
  * file the Dock icon (`packages/desktop/build/icon.icns`) is exported from, so
  * the in-app mark and the app icon cannot drift apart:
  *
- * - `tile`: the whole icon — dark rounded square plus the gradient "A". Used
- *   where the mark stands alone and should read as *the app*.
+ * - `tile`: the whole icon — dark rounded square plus the gradient "A", filling
+ *   the canvas edge to edge the way the `.icns` does. Used where the mark
+ *   stands alone and should read as *the app*.
  * - `glyph`: the "A" alone, no tile. Used inline beside the product name,
  *   where the row already carries the surface.
  *
@@ -46,7 +47,9 @@ export function BrandMark({
           <linearGradient id={purple} x1="505" y1="285" x2="727" y2="730" gradientUnits="userSpaceOnUse"><stop offset="0" stopColor="#AE9AFF"/><stop offset=".48" stopColor="#887BFF"/><stop offset="1" stopColor="#6F6FF4"/></linearGradient>
       </defs>
       {/* The icon's tile: the dark rounded square, in the icon's own colour. */}
-      {variant === "tile" && <rect x="74" y="74" width="876" height="876" rx="205" fill="#151D32" />}
+      {/* Same square as the icon file, drawn edge to edge: the icon fills its
+          whole canvas, so a Dock icon needs no extra inset of its own. */}
+      {variant === "tile" && <rect x="0" y="0" width="1024" height="1024" rx="229" fill="#151D32" />}
       <g>
         <path d="M306 721 L448 357 Q467 304 508 303" fill="none" stroke="#050917" strokeOpacity=".42" strokeWidth="121" strokeLinecap="round" strokeLinejoin="round" transform="translate(0 16)"/>
         <path d="M306 721 L448 357 Q467 304 508 303" fill="none" stroke={`url(#${cyan})`} strokeWidth="111" strokeLinecap="round" strokeLinejoin="round"/>
