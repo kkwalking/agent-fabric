@@ -76,6 +76,26 @@ function displayUserPrompt(run: any, task: any): string {
   return instr || task.prompt;
 }
 
+/** Where a task's unsent composer text lives. */
+const draftKey = (taskId: string) => `af.composer.draft.${taskId}`;
+
+function readDraft(taskId: string): string {
+  try {
+    return window.localStorage.getItem(draftKey(taskId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeDraft(taskId: string, text: string): void {
+  try {
+    if (text) window.localStorage.setItem(draftKey(taskId), text);
+    else window.localStorage.removeItem(draftKey(taskId));
+  } catch {
+    /* a draft that cannot be stored must not break the composer */
+  }
+}
+
 export function TaskThreadView({ taskId }: { taskId: string }) {
   const [thread, setThread] = useState<ThreadData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1119,7 +1139,16 @@ function Composer({
   // 字段）原样保留——选择器隐藏期间 profileId 恒为 ""，这些分支不会命中；
   // 恢复入口只需取消注释带 AGENT_UI_HIDDEN 标记的块。
   const profiles = useAsync<any[]>(() => get("/api/agents"), []);
-  const [prompt, setPrompt] = useState("");
+  // The message being written survives leaving the thread (switching task,
+  // opening another view, reloading): losing a half-written follow-up is the
+  // one thing a user cannot undo. Stored per task, dropped on submit.
+  const [prompt, setPrompt] = useState(() => readDraft(taskId));
+  useEffect(() => {
+    setPrompt(readDraft(taskId));
+  }, [taskId]);
+  useEffect(() => {
+    writeDraft(taskId, prompt);
+  }, [taskId, prompt]);
   const [runtimeChoice, setRuntimeChoice] = useState("");
   const [runtimeTouched, setRuntimeTouched] = useState(false);
   const [modelChoice, setModelChoice] = useState("");
@@ -1289,7 +1318,15 @@ function Composer({
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
+            if (e.key !== "Enter") return;
+            // Enter sends, Shift+Enter breaks the line — what a chat composer
+            // is expected to do, and what this textarea looked like it did
+            // (it only sent on Cmd/Ctrl+Enter, so a typed message silently did
+            // nothing when Enter was pressed). Cmd/Ctrl+Enter still sends.
+            if (e.metaKey || e.ctrlKey || !e.shiftKey) {
+              e.preventDefault();
+              void submit();
+            }
           }}
         />
         <div className="composer-bar">

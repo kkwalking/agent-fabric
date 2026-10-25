@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { get, post, fmtRelative, shortId } from "../api";
-import { CopyButton, ErrorBox, Icon, StatusBadge, useAsync } from "../components";
+import { CopyButton, ErrorBox, Icon, StatusBadge, useAsync, usePolling } from "../components";
 import { navigate } from "../router";
 
 /**
@@ -23,13 +23,9 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
   // retry starting (and the phase advancing past "failed") shows up.
   const retryPending = Boolean(detail.data?.task?.execution?.autoRetry?.nextAt);
 
-  // Poll while the lifecycle is in flight so the phase advances visibly.
-  useEffect(() => {
-    if (!inFlight && !retryPending) return;
-    const timer = window.setInterval(() => detail.reload(), 2000);
-    return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inFlight, retryPending]);
+  // Poll while the lifecycle is in flight so the phase advances visibly — and
+  // only while the window is visible (see `usePolling`).
+  usePolling(detail.reload, 2000, Boolean(inFlight || retryPending));
 
   if (detail.error) return <ErrorBox message={detail.error} />;
   if (!detail.data) return <div className="muted">Loading…</div>;

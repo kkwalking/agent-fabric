@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { del, get, post, put, fmtRelative, shortId } from "../api";
-import { ErrorBox, Field, Icon, Modal, StatusBadge, useAsync } from "../components";
+import { ErrorBox, Field, Icon, Modal, StatusBadge, clickableRow, useMinuteClock, useAsync } from "../components";
 import { navigate } from "../router";
 
 /**
@@ -132,6 +132,8 @@ function ProjectTaskTable({ tasks, onAction }: { tasks: any[]; onAction?: () => 
 }
 
 export function ProjectsView() {
+  // "3m ago" labels move on their own (see `useMinuteClock`).
+  useMinuteClock();
   const projects = useAsync<any[]>(() => get("/api/projects"), []);
   const credentials = useAsync<any[]>(() => get("/api/source-credentials"), []);
   // Project Coding Tasks require an isolated runtime (v11 hardening §4), so
@@ -141,7 +143,9 @@ export function ProjectsView() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
     name: "",
+    sourceType: "git" as "git" | "directory",
     remoteUrl: "",
+    path: "",
     credentialId: "",
     defaultBranch: "main",
     runtimeId: "",
@@ -158,13 +162,17 @@ export function ProjectsView() {
     setError(null);
     try {
       const validationPrompt = form.validation.trim();
+      const isGit = form.sourceType === "git";
       const project = await post<{ id: string }>("/api/projects", {
         name: form.name,
-        source: {
-          remoteUrl: form.remoteUrl,
-          credentialId: form.credentialId || undefined,
-          defaultBranch: form.defaultBranch || undefined,
-        },
+        source: isGit
+          ? {
+              type: "git",
+              remoteUrl: form.remoteUrl,
+              credentialId: form.credentialId || undefined,
+              defaultBranch: form.defaultBranch || undefined,
+            }
+          : { type: "directory", path: form.path, defaultBranch: form.defaultBranch || undefined },
         execution: {
           runtimeId: form.runtimeId || undefined,
           modelId: form.modelId || undefined,
@@ -195,9 +203,9 @@ export function ProjectsView() {
         </span>
       </div>
       <p className="sub">
-        A Project is the codebase you keep working on: it binds a Git repository (and optionally a Source
-        Credential) and provides the execution defaults every Task inherits. Tasks get their own managed
-        Workspace and working branch automatically.
+        A Project is the codebase you keep working on: it binds a source — a Git repository (plus an optional
+        Source Credential) or a directory on this machine — and provides the execution defaults every Task
+        inherits. Tasks get their own managed copy and working branch automatically.
       </p>
 
       <ErrorBox message={error} />
@@ -209,18 +217,27 @@ export function ProjectsView() {
       ) : (
         <div className="task-list">
           {(projects.data ?? []).map((project) => (
-            <div key={project.id} className="task-item card" onClick={() => navigate(`/projects/${project.id}`)}>
+            <div key={project.id} className="task-item card" {...clickableRow(() => navigate(`/projects/${project.id}`))}>
               <div className="task-item-main">
                 <div className="task-item-head">
                   <strong className="task-item-title">{project.name}</strong>
                 </div>
                 <div className="task-item-meta">
-                  <span className="meta-chip">{project.source?.remoteUrl}</span>
+                  <span className="meta-chip">
+                    {project.source?.type === "directory"
+                      ? project.source?.path
+                      : project.source?.remoteUrl}
+                  </span>
                   <span className="meta-chip">
                     <span className="muted">branch</span> {project.source?.defaultBranch ?? "-"}
                   </span>
                   <span className="meta-chip">
-                    <span className="muted">credential</span> {project.source?.credentialId ? "configured" : "public"}
+                    <span className="muted">credential</span>
+                    {project.source?.type === "directory"
+                      ? "n/a (directory)"
+                      : project.source?.credentialId
+                        ? "configured"
+                        : "public"}
                   </span>
                   <span className="meta-chip">
                     <span className="muted">validation</span> {project.validation?.prompt ? "configured" : "none"}
@@ -228,7 +245,9 @@ export function ProjectsView() {
                 </div>
               </div>
               <div className="task-item-side">
-                <span className="muted task-item-time">{project.source?.provider ?? "-"}</span>
+                <span className="muted task-item-time">
+                  {project.source?.type === "directory" ? "directory" : project.source?.provider ?? "-"}
+                </span>
               </div>
             </div>
           ))}
@@ -241,23 +260,44 @@ export function ProjectsView() {
             <Field label="Name">
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="agent-fabric" />
             </Field>
-            <Field label="Repository URL">
-              <input
-                value={form.remoteUrl}
-                onChange={(e) => setForm({ ...form, remoteUrl: e.target.value })}
-                placeholder="https://github.com/org/repo.git or git@github.com:org/repo.git"
-              />
-            </Field>
-            <Field label="Credential (optional — public repositories need none)">
-              <select value={form.credentialId} onChange={(e) => setForm({ ...form, credentialId: e.target.value })}>
-                <option value="">(public / no credential)</option>
-                {(credentials.data ?? []).map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} ({c.type}{c.host ? ` · ${c.host}` : ""})
-                  </option>
-                ))}
+            <Field label="Source">
+              <select
+                value={form.sourceType}
+                onChange={(e) => setForm({ ...form, sourceType: e.target.value as "git" | "directory" })}
+              >
+                <option value="git">Git repository</option>
+                <option value="directory">Directory on this machine</option>
               </select>
             </Field>
+            {form.sourceType === "git" ? (
+              <>
+                <Field label="Repository URL">
+                  <input
+                    value={form.remoteUrl}
+                    onChange={(e) => setForm({ ...form, remoteUrl: e.target.value })}
+                    placeholder="https://github.com/org/repo.git or git@github.com:org/repo.git"
+                  />
+                </Field>
+                <Field label="Credential (optional — public repositories need none)">
+                  <select value={form.credentialId} onChange={(e) => setForm({ ...form, credentialId: e.target.value })}>
+                    <option value="">(public / no credential)</option>
+                    {(credentials.data ?? []).map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} ({c.type}{c.host ? ` · ${c.host}` : ""})
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </>
+            ) : (
+              <Field label="Directory (absolute path — each task works on a copy of it)">
+                <input
+                  value={form.path}
+                  onChange={(e) => setForm({ ...form, path: e.target.value })}
+                  placeholder="/Users/me/code/my-repo"
+                />
+              </Field>
+            )}
             <Field label="Default branch">
               <input value={form.defaultBranch} onChange={(e) => setForm({ ...form, defaultBranch: e.target.value })} />
             </Field>
@@ -290,13 +330,21 @@ export function ProjectsView() {
             <input type="checkbox" checked={form.autoCommit} onChange={(e) => setForm({ ...form, autoCommit: e.target.checked })} />
             Commit the agent's remaining changes automatically
           </label>
-          <label className="check">
-            <input type="checkbox" checked={form.push} onChange={(e) => setForm({ ...form, push: e.target.checked })} />
-            Push the working branch when the task completes
-          </label>
+          {form.sourceType === "git" && (
+            <label className="check">
+              <input type="checkbox" checked={form.push} onChange={(e) => setForm({ ...form, push: e.target.checked })} />
+              Push the working branch when the task completes
+            </label>
+          )}
           <div className="modal-actions">
             <button onClick={() => setCreating(false)}>Cancel</button>
-            <button className="primary" disabled={busy || !form.name || !form.remoteUrl} onClick={create}>Create</button>
+            <button
+              className="primary"
+              disabled={busy || !form.name || (form.sourceType === "git" ? !form.remoteUrl : !form.path)}
+              onClick={create}
+            >
+              Create
+            </button>
           </div>
         </Modal>
       )}
@@ -310,7 +358,14 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
   const credentials = useAsync<any[]>(() => get("/api/source-credentials"), []);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: "", remoteUrl: "", credentialId: "", defaultBranch: "" });
+  const [form, setForm] = useState({
+    name: "",
+    sourceType: "git" as "git" | "directory",
+    remoteUrl: "",
+    path: "",
+    credentialId: "",
+    defaultBranch: "",
+  });
   const [busy, setBusy] = useState(false);
 
   if (project.error) return <ErrorBox message={project.error} />;
@@ -324,11 +379,17 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
     try {
       await put(`/api/projects/${projectId}`, {
         name: form.name,
-        source: {
-          remoteUrl: form.remoteUrl,
-          credentialId: form.credentialId || undefined,
-          defaultBranch: form.defaultBranch || undefined,
-        },
+        // The source type is part of the form: switching git ↔ directory is an
+        // edit like any other, and `ProjectService` validates the new pairing.
+        source:
+          form.sourceType === "git"
+            ? {
+                type: "git",
+                remoteUrl: form.remoteUrl,
+                credentialId: form.credentialId || undefined,
+                defaultBranch: form.defaultBranch || undefined,
+              }
+            : { type: "directory", path: form.path, defaultBranch: form.defaultBranch || undefined },
       });
       setEditing(false);
       project.reload();
@@ -363,7 +424,9 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
             onClick={() => {
               setForm({
                 name: p.name,
+                sourceType: p.source?.type === "directory" ? "directory" : "git",
                 remoteUrl: p.source?.remoteUrl ?? "",
+                path: p.source?.path ?? "",
                 credentialId: p.source?.credentialId ?? "",
                 defaultBranch: p.source?.defaultBranch ?? "",
               });
@@ -383,15 +446,21 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
             split comes from the dt/dd elements (see ResourceView). Wrapper
             divs would collapse each pair into one cell and overlap. */}
         <dl className="detail-list">
-          <dt>Repository</dt>
-          <dd>{p.source?.remoteUrl}</dd>
-          <dt>Provider</dt>
-          <dd>{p.source?.provider ?? "-"}</dd>
+          <dt>{p.source?.type === "directory" ? "Directory" : "Repository"}</dt>
+          <dd className="mono">
+            {p.source?.type === "directory" ? p.source?.path : p.source?.remoteUrl}
+          </dd>
+          <dt>Source type</dt>
+          <dd>{p.source?.type === "directory" ? "directory (each task works on a copy)" : p.source?.provider ?? "git"}</dd>
           <dt>Default branch</dt>
           <dd>{p.source?.defaultBranch ?? "-"}</dd>
           <dt>Credential</dt>
           <dd>
-            {credential ? `${credential.name} (${credential.type}${credential.secretMasked ? ` · ${credential.secretMasked}` : ""})` : "public — no credential"}
+            {p.source?.type === "directory"
+              ? "not applicable — a directory has no host"
+              : credential
+                ? `${credential.name} (${credential.type}${credential.secretMasked ? ` · ${credential.secretMasked}` : ""})`
+                : "public — no credential"}
           </dd>
           <dt>Default runtime</dt>
           <dd>{p.execution?.runtimeId ?? "-"}</dd>
@@ -401,7 +470,10 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
           <dd>{p.validation?.prompt ?? "none"}</dd>
           <dt>Publish</dt>
           <dd>
-            autoCommit={String(p.git?.autoCommit ?? true)} push={String(p.git?.push ?? true)} remote={p.git?.remote ?? "origin"}
+            autoCommit={String(p.git?.autoCommit ?? true)}{" "}
+            {p.source?.type === "directory"
+              ? "push=never (a directory has no remote)"
+              : `push=${String(p.git?.push ?? true)} remote=${p.git?.remote ?? "origin"}`}
           </dd>
           <dt>Skills</dt>
           <dd>{(p.skills ?? []).map((s: any) => s.name).join(", ") || "none"}</dd>
@@ -419,17 +491,35 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
             <Field label="Name">
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </Field>
-            <Field label="Repository URL">
-              <input value={form.remoteUrl} onChange={(e) => setForm({ ...form, remoteUrl: e.target.value })} />
-            </Field>
-            <Field label="Credential (optional)">
-              <select value={form.credentialId} onChange={(e) => setForm({ ...form, credentialId: e.target.value })}>
-                <option value="">(public / no credential)</option>
-                {(credentials.data ?? []).map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
+            <Field label="Source">
+              <select
+                value={form.sourceType}
+                onChange={(e) => setForm({ ...form, sourceType: e.target.value as "git" | "directory" })}
+              >
+                <option value="git">Git repository</option>
+                <option value="directory">Directory on this machine</option>
               </select>
             </Field>
+            {form.sourceType === "directory" && (
+              <Field label="Directory (absolute path)">
+                <input value={form.path} onChange={(e) => setForm({ ...form, path: e.target.value })} />
+              </Field>
+            )}
+            {form.sourceType === "git" && (
+              <Field label="Repository URL">
+                <input value={form.remoteUrl} onChange={(e) => setForm({ ...form, remoteUrl: e.target.value })} />
+              </Field>
+            )}
+            {form.sourceType === "git" && (
+              <Field label="Credential (optional)">
+                <select value={form.credentialId} onChange={(e) => setForm({ ...form, credentialId: e.target.value })}>
+                  <option value="">(public / no credential)</option>
+                  {(credentials.data ?? []).map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <Field label="Default branch">
               <input value={form.defaultBranch} onChange={(e) => setForm({ ...form, defaultBranch: e.target.value })} />
             </Field>

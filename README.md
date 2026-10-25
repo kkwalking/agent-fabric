@@ -186,11 +186,22 @@ npm run desktop:perf -- --update    # 有意改动之后更新基线
 
 ## Web UI
 
-侧边栏按用途分组：
+界面是「侧栏 + 主区域」两栏：
 
-* **Tasks / Dashboard** — 主要工作入口。Dashboard 汇总各资源数量、总成本，并提供 Deleted tasks 入口。
-* **Resources** — `Kanban`（v13：四列看板 + 本地 Agent 会话：终端 / DSH ACP 聊天）、`Projects`（项目与 Coding Task 生命周期）、`Runtimes`、`Native sessions`、`Handoffs`、`Workspaces`、`Source credentials`。
-* **System** — `Runs`、`Usage`、`Settings`（模型与代理都在 Settings 里，见下）。
+**侧栏就是任务入口。** 顶部是 **新会话** 按钮（主操作，整条重占一行）；下面「工作区」标题行带三个图标：搜索（跳到完整任务列表）、筛选（只看已置顶 / 只看项目工作区）、新建任务。列表按工作区分组：**点标题行可折叠/展开**该工作区（标题右侧显示会话数），标题悬浮时的 **···** 菜单提供「折叠 / 重命名工作区 / 删除工作区」。删除只删工作区记录：它下面的会话会移到「未归类」，会话本身不删，磁盘上的目录也不动。
+
+每个工作区默认显示最近 6 条，下面有「展开其余 10 个会话 (剩余数)」，**每点一次多显示 10 条**，全部展开后按钮变成「收起」回到第一页。
+
+每条会话悬浮时右侧出现 **···** 菜单：置顶 / 重命名 / 复制会话 ID / 删除会话。置顶是**本浏览器的偏好**（存在 `localStorage`），不写服务端——它只影响这台机器上看列表的顺序；重命名走 `PATCH /api/tasks/:id`（只接受 `title`，空标题与未知字段都会被拒）。
+
+点一条会话，主区域就打开这个 Task。分组用的是 Task 自己记录的 `workspaceId`：托管工作区（平台为单个任务建的副本，命名形如「项目名 / 任务标题」）不会单独成组，而是归到该项目对应的外部工作区或项目名下；没有工作区的任务归入「未归类」。
+
+**主区域只承载两件事**：打开某个 Task（对话 + 输入框），以及新建任务。其余页面收进侧栏底部的 **更多** 菜单：
+
+* `Resources` — `Kanban`（v13：四列看板 + 本地 Agent 会话：终端 / DSH ACP 聊天）、`Projects`（项目与 Coding Task 生命周期）、`Runtimes`、`Native sessions`、`Handoffs`。
+* `System` — `Runs`、`Usage`、`Settings`（模型、代理、代码源凭据都在 Settings 里，见下）。
+
+这些页面本身仍是独立路由（`/projects`、`/kanban` 等），链接和书签照常可用；`/tasks` 仍显示完整任务列表（含 Trash 入口与累计花费），只是它不再是唯一入口。侧栏折叠成图标栏时，任务树隐藏、**更多** 菜单改为向右弹出。
 
 Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
 
@@ -198,7 +209,9 @@ Agent Profiles 目前仅通过 API 与 CLI 提供，Web UI 未开放入口。
 
 Settings 是一个带左侧导航的弹窗，按分区呈现，而不是把原始 JSON 甩给用户：
 
-`通用设置`（含界面语言）、`模型`、`代理`、`通知`、`Harness CLI 路径`、`Docker`、`自动重试`、`关于`。导航在左侧，URL 随之变化（`/settings/proxy`），刷新或重新打开都停在同一页；旧的 `/proxy`、`/llm` 书签分别落到「代理」「模型」分区。
+`通用设置`（含界面语言）、`模型`、`代理`、`通知`、`Harness CLI 路径`、`Docker`、`自动重试`、`代码源凭据`、`关于`。导航在左侧，URL 随之变化（`/settings/proxy`），刷新或重新打开都停在同一页；旧的 `/proxy`、`/llm`、`/source-credentials` 书签分别落到「代理」「模型」「代码源凭据」分区。
+
+凡是全局设置都在这里：**代码源凭据**（Git 的 HTTPS token 或 SSH 私钥）不挂在任何项目下，项目只按 id 引用一个凭据。凭据值写入 Secret store 后只显示掩码，只在单次 Git 操作期间临时落地，不会进入远端 URL、命令行参数、日志或 agent 的运行环境。
 
 * **模型也在配置文件里**：`providers` 段就是供应商与模型的声明，形如
 
@@ -298,7 +311,7 @@ Runs 页每个产生过 native session 的 Run 在操作列提供 **copy session
 ### 任务删除与恢复（软删除 + 30 天保留）
 
 * **删除入口（Tasks 页）**：每条 Task 行右侧的三点菜单提供 **Delete**。删除是**软删除**——写 `deletedAt` 时间戳后从 Tasks 列表消失，但对该 Task 的一切 scoped 读写（thread 页、continue、handoff、sync-thread、按 id 读取）表现为「不存在」（404）；它的 runs、事件、handoffs 等从属数据原样保留，不发生任何改写。
-* **恢复入口（Dashboard）**：Dashboard 的 **Deleted tasks** 卡片显示已删除 Task 的数量，点击进入 `/trash`（Deleted tasks 页），每条可 **restore**——清除 `deletedAt` 后 Task 连同全部历史回到 Tasks 页。
+* **恢复入口（Tasks 页头部的 Trash）**：Tasks 页顶部在有已删除任务时显示 **Trash (N)**，点击进入 `/trash`（Deleted tasks 页），每条可 **restore**——清除 `deletedAt` 后 Task 连同全部历史回到 Tasks 页。
 * **30 天后物理清理**：保留期 `TASK_RETENTION_MS` = 30 天。服务器启动时执行一次、之后每小时一次后台清理 pass，把 `deletedAt` 超过保留期的 Task **连同其 runs、run 事件 shard 文件、artifacts、handoffs、runtime session 引用一起物理删除**；清理失败打错误日志。
 * **API**：`GET /api/tasks` 默认只返回未删除 Task，`?deleted=true` 返回已删除列表；`DELETE /api/tasks/:id` 软删除；`POST /api/tasks/:id/restore` 恢复；`GET /api/dashboard` 的 `counts.tasks` 只计未删除 Task，`counts.deletedTasks` 为已删除数量。
 

@@ -14,10 +14,16 @@
     "dev:server": "npm run dev -w @agentfabric/server",
     "dev:web": "npm run dev -w @agentfabric/web",
     "build:web": "npm run build -w @agentfabric/web",
+    "desktop": "npm run start -w @agentfabric/desktop",
+    "desktop:app": "npm run dist:mac -w @agentfabric/desktop -- --dir",
+    "desktop:dmg": "npm run dist:mac -w @agentfabric/desktop",
+    "desktop:install": "npm run install:mac -w @agentfabric/desktop --",
+    "desktop:verify": "npm run verify:ui -w @agentfabric/desktop",
     "start": "npm run start -w @agentfabric/server",
     "cli": "npm run cli -w @agentfabric/cli --",
     "test": "npm run test --workspaces --if-present",
-    "postinstall": "node scripts/fix-node-pty.js"
+    "postinstall": "node scripts/fix-node-pty.js",
+    "desktop:perf": "npm run perf -w @agentfabric/desktop"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

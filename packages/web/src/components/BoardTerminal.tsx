@@ -17,6 +17,29 @@ import "@xterm/xterm/css/xterm.css";
  * frames are JSON control messages (`restore` / `exit` / `error`).
  */
 
+/**
+ * Terminal typography, copied verbatim from bruce-kanban's
+ * `web-ui/src/terminal/terminal-options.ts` so the same Claude Code TUI looks
+ * the same in both boards.
+ *
+ * Two details are easy to get wrong:
+ *
+ * - `JetBrainsMono Nerd Font` is a *separate family* from `JetBrains Mono`.
+ *   Nerd Font builds ship under that name, and only their patched glyphs draw
+ *   the powerline separators and icons agent CLIs emit. Without it, machines
+ *   that have just the patched build installed silently fall back to Menlo.
+ * - The size/line-height pair is not a style preference. xterm derives the cell
+ *   height from the font's own bounding box, not from the font size: JetBrains
+ *   Mono's box is 1.32em where Menlo's is 1.17em. `lineHeight: 1` therefore
+ *   already produces the roomy spacing bruce-kanban shows, and raising it to
+ *   1.25 (what this file used with Menlo) would add another 25% of leading.
+ */
+const TERM_FONT_FAMILY =
+  "'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'JetBrainsMono Nerd Font', 'SF Mono', Menlo, Monaco, 'Courier New', monospace";
+const TERM_FONT_SIZE = 13;
+const TERM_LINE_HEIGHT = 1;
+const TERM_LETTER_SPACING = 0;
+
 /** Explicit ANSI palette: the app is light-themed, and xterm's defaults are
  *  designed for dark backgrounds. No `invert` — colors are chosen, not
  *  flipped. */
@@ -85,10 +108,12 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
     const term = new Terminal({
       convertEol: false,
       cursorBlink: true,
-      fontFamily:
-        'ui-monospace, "SF Mono", "Geist Mono", "Cascadia Mono", Menlo, Consolas, monospace',
-      fontSize: 12.5,
-      lineHeight: 1.25,
+      fontFamily: TERM_FONT_FAMILY,
+      fontSize: TERM_FONT_SIZE,
+      fontWeight: "normal",
+      fontWeightBold: "bold",
+      letterSpacing: TERM_LETTER_SPACING,
+      lineHeight: TERM_LINE_HEIGHT,
       scrollback: SCROLLBACK_LINES,
       theme: TERM_THEME,
       // Non-interactive agents get a read-only terminal: typing into a

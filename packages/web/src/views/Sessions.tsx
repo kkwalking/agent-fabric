@@ -142,7 +142,7 @@ function HarnessThreadsPanel({
   // not silently become a new workspace record.
   const [adopting, setAdopting] = useState<any | null>(null);
 
-  const auth = useAsync<any>(() => get(`/api/harness/${kind}/auth-status`), [kind, enabled, reloadSeq]);
+  const auth = useAsync<any>((force) => get(`/api/harness/${kind}/auth-status`, undefined, force), [kind, enabled, reloadSeq]);
   const threads = useAsync<any[]>(
     () =>
       enabled

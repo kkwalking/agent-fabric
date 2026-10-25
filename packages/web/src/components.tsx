@@ -1,5 +1,5 @@
-import { ReactNode, useEffect, useState } from "react";
-import { copyText } from "./api";
+import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useState } from "react";
+import { copyText, subscribeClock } from "./api";
 
 export type IconName =
   | "grid"
@@ -34,9 +34,13 @@ export type IconName =
   | "restore"
   | "close"
   | "edit"
+  | "star"
   | "compass";
 
 const iconPaths: Record<IconName, ReactNode> = {
+  star: (
+    <path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .74 4.3L8 11.6l-3.84 2 .74-4.3-3.1-3 4.3-.6z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+  ),
   grid: (
     <>
       <rect x="3" y="3" width="7" height="7" rx="1.5" />
@@ -259,15 +263,27 @@ export function StatusBadge({ status }: { status: string }) {
   return <span className={`badge ${status}`}>{status}</span>;
 }
 
-export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []): { data: T | null; error: string | null; loading: boolean; reload: () => void } {
+/**
+ * Loads data for a view.
+ *
+ * `fn` reads through the API cache (`get`), so a remount within its TTL is
+ * instant. `reload()` is the exception: it re-runs `fn` with `force`, because a
+ * user pressing refresh must reach the server rather than the cache.
+ */
+export function useAsync<T>(
+  fn: (force: boolean) => Promise<T>,
+  deps: unknown[] = []
+): { data: T | null; error: string | null; loading: boolean; reload: () => void } {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tick, setTick] = useState(0);
+  // `null` until the first reload: the mount pass goes through the cache, every
+  // later pass is an explicit refresh.
+  const [tick, setTick] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    fn()
+    fn(tick !== null)
       .then((d) => {
         if (alive) {
           setData(d);
@@ -281,7 +297,122 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []): { data:
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, tick]);
-  return { data, error, loading, reload: () => setTick((t) => t + 1) };
+  return { data, error, loading, reload: () => setTick((t) => (t ?? 0) + 1) };
+}
+
+/**
+ * Re-renders once a minute so "3m ago" labels move without user interaction
+ * (see `subscribeClock`). Used by the rows that show a relative timestamp.
+ */
+export function useMinuteClock(): void {
+  const [, setTick] = useState(0);
+  useEffect(() => subscribeClock(() => setTick((t) => t + 1)), []);
+}
+
+/**
+ * Polls while `active`, and only while the window is visible.
+ *
+ * A background window throttles timers anyway, so the requests it does issue
+ * only wake the server and burn battery — a task view left open behind another
+ * app does not need to refresh every two seconds. Coming back to the window
+ * refreshes once immediately, so the first painted state is current rather
+ * than up to one interval old.
+ */
+export function usePolling(reload: () => void, intervalMs: number, active: boolean): void {
+  useEffect(() => {
+    if (!active) return;
+    let timer: number | undefined;
+    const start = () => {
+      if (timer !== undefined) return;
+      timer = window.setInterval(reload, intervalMs);
+    };
+    const stop = () => {
+      if (timer === undefined) return;
+      window.clearInterval(timer);
+      timer = undefined;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        reload();
+        start();
+      } else {
+        stop();
+      }
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [reload, intervalMs, active]);
+}
+
+/**
+ * Props for a clickable row that should also be reachable by keyboard.
+ *
+ * `<div onClick>` is mouse-only: a keyboard user cannot tab to it, and screen
+ * readers do not announce it as actionable. These rows navigate somewhere, so
+ * they get `role="button"`, are tab-focusable, and activate on Enter/Space —
+ * the same contract `CardTile` on the board already implements.
+ */
+export function clickableRow(onActivate: () => void): {
+  role: "button";
+  tabIndex: 0;
+  onClick: () => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
+} {
+  return {
+    role: "button",
+    tabIndex: 0,
+    onClick: onActivate,
+    onKeyDown: (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onActivate();
+      }
+    },
+  };
+}
+
+/**
+ * Page controls for a list that grows without bound.
+ *
+ * Rows are paged rather than virtualised: these lists are cards and table rows
+ * with per-row menus, and a page of 50 keeps both the DOM and the re-render
+ * cost flat while staying simple (no measurement, no scroll anchoring). The
+ * label says which rows are shown and how many exist, so paging never hides the
+ * size of the list.
+ */
+export function Pager({
+  page,
+  pageCount,
+  total,
+  pageSize,
+  onChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  pageSize: number;
+  onChange: (page: number) => void;
+}) {
+  if (pageCount <= 1) return null;
+  const from = page * pageSize + 1;
+  const to = Math.min(total, (page + 1) * pageSize);
+  return (
+    <div className="pager">
+      <span className="muted">
+        {from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()}
+      </span>
+      <span className="pager-actions">
+        <button className="small" disabled={page === 0} onClick={() => onChange(0)} title="First page">«</button>
+        <button className="small" disabled={page === 0} onClick={() => onChange(page - 1)}>Prev</button>
+        <button className="small" disabled={page >= pageCount - 1} onClick={() => onChange(page + 1)}>Next</button>
+        <button className="small" disabled={page >= pageCount - 1} onClick={() => onChange(pageCount - 1)} title="Last page">»</button>
+      </span>
+    </div>
+  );
 }
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -359,28 +490,4 @@ export function emptyTableHint(loading: boolean, error: string | null) {
   if (loading) return <div className="muted">Loading…</div>;
   if (error) return <div className="muted" style={{ color: "var(--red)" }}>{error}</div>;
   return <div className="muted">No items yet.</div>;
-}
-
-/**
- * Subscribers of the shared minute ticker. The ticker is started by whoever
- * subscribes first and stops with the last unsubscribe, so a list showing "3m
- * ago" keeps moving while no extra timer runs for the rest of the app.
- */
-const clockSubscribers = new Set<() => void>();
-let clockTimer: number | undefined;
-
-export function subscribeClock(onTick: () => void): () => void {
-  clockSubscribers.add(onTick);
-  if (clockTimer === undefined && clockSubscribers.size === 1) {
-    clockTimer = window.setInterval(() => {
-      for (const fn of clockSubscribers) fn();
-    }, 30_000);
-  }
-  return () => {
-    clockSubscribers.delete(onTick);
-    if (clockSubscribers.size === 0 && clockTimer !== undefined) {
-      window.clearInterval(clockTimer);
-      clockTimer = undefined;
-    }
-  };
 }

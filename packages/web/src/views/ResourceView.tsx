@@ -268,7 +268,7 @@ function HarnessStatusRow({ kind, runtimes }: { kind: string; runtimes: any[] })
 
 export function ResourceView({ kind }: { kind: string }) {
   const cfg = configs[kind];
-  const { data, error, loading, reload } = useAsync<any[]>(() => get(cfg.path), [cfg.path]);
+  const { data, error, loading, reload } = useAsync<any[]>((force) => get(cfg.path, undefined, force), [cfg.path]);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);

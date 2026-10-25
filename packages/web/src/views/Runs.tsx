@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get, post, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
-import { StatusBadge, useAsync, ErrorBox, CopyButton } from "../components";
+import { StatusBadge, useMinuteClock, useAsync, ErrorBox, CopyButton, Pager, usePolling } from "../components";
 import { navigate } from "../router";
 
 /** How each harness resumes a native session by id (matches runtimes' buildArgs). */
@@ -16,14 +16,27 @@ const NATIVE_RESUME_CMD: Record<string, string> = {
  * not Runs — creation lives in New task; this page lists every execution
  * for inspection and operations (cancel / open inspector).
  */
+/** Rows per page: one row per execution, and executions accumulate. */
+const RUNS_PAGE_SIZE = 50;
+
 export function RunsView() {
-  const { data, error, loading, reload } = useAsync<any[]>(() => get("/api/runs"), []);
-  const { data: sessionRefs, reload: reloadSessions } = useAsync<any[]>(() => get("/api/runtime-sessions"), []);
+  const { data, error, loading, reload } = useAsync<any[]>((force) => get("/api/runs", undefined, force), []);
+  // Runs accumulate one per execution: page them, for the same reason the task
+  // list is paged (flat DOM and re-render cost).
+  const [page, setPage] = useState(0);
+  // "3m ago" labels move on their own (see `useMinuteClock`).
+  useMinuteClock();
+  const { data: sessionRefs, reload: reloadSessions } = useAsync<any[]>((force) => get("/api/runtime-sessions", undefined, force), []);
   const sessionById = useMemo(
     () => new Map((sessionRefs ?? []).map((s) => [s.id as string, s])),
     [sessionRefs]
   );
   const reloadAll = () => { reload(); reloadSessions(); };
+  const pageCount = Math.max(1, Math.ceil((data?.length ?? 0) / RUNS_PAGE_SIZE));
+  // Clamped: a refresh can shrink the list (a run deleted elsewhere) while the
+  // view is on the last page, which would otherwise show an empty table.
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageRows = (data ?? []).slice(currentPage * RUNS_PAGE_SIZE, (currentPage + 1) * RUNS_PAGE_SIZE);
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}>
@@ -35,14 +48,14 @@ export function RunsView() {
         lives in the <a onClick={() => navigate("/tasks")}>task thread</a>.
       </p>
       <ErrorBox message={error} />
+      {data && data.length > 0 ? (
       <div className="card">
-        {data && data.length > 0 ? (
           <table>
             <thead>
               <tr><th>Run</th><th>Task</th><th>Status</th><th>Runtime</th><th>Continuity</th><th>Model</th><th>Cost</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
-              {data.map((r) => {
+              {pageRows.map((r: any) => {
                 const sessionRef = r.runtimeSessionRefId ? sessionById.get(r.runtimeSessionRefId) : undefined;
                 const resumeCmd = sessionRef && NATIVE_RESUME_CMD[sessionRef.runtimeKind];
                 return (
@@ -75,10 +88,11 @@ export function RunsView() {
               })}
             </tbody>
           </table>
-        ) : (
-          <div className="muted">{loading ? "Loading…" : "No runs yet — create a task first."}</div>
-        )}
+          <Pager page={currentPage} pageCount={pageCount} total={data?.length ?? 0} pageSize={RUNS_PAGE_SIZE} onChange={setPage} />
       </div>
+      ) : (
+        <div className="card muted">{loading ? "Loading…" : "No runs yet — create a task first."}</div>
+      )}
     </div>
   );
 }
@@ -96,7 +110,7 @@ const CONTINUITY_LABEL: Record<string, string> = {
  * It is deliberately NOT the user's primary interaction surface.
  */
 export function RunDetailView({ runId }: { runId: string }) {
-  const { data: run, error, reload } = useAsync<any>(() => get(`/api/runs/${runId}`), [runId]);
+  const { data: run, error, reload } = useAsync<any>((force) => get(`/api/runs/${runId}`, undefined, force), [runId]);
   const [events, setEvents] = useState<any[]>([]);
   const [tab, setTab] = useState<"events" | "logs" | "artifacts" | "continuity">("events");
   const [artifacts, setArtifacts] = useState<any[]>([]);
@@ -144,16 +158,19 @@ export function RunDetailView({ runId }: { runId: string }) {
     };
   }, [run?.previousHandoffId, run?.generatedHandoffId, run?.runtimeSessionRefId, run?.nativeStateId]);
 
-  useEffect(() => {
-    if (!run) return;
-    const id = setInterval(() => {
-      get(`/api/runs/${runId}`).then((r: any) => {
-        if (r.status !== run.status) reload();
-      }).catch(() => {});
-    }, 3000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [run]);
+  // Watch for a terminal status change while the run is live — only while the
+  // window is visible: a run detail left open in the background does not need
+  // a request every three seconds.
+  const statusRef = useRef<string | undefined>(run?.status);
+  statusRef.current = run?.status;
+  const pollStatus = useCallback(() => {
+    get<any>(`/api/runs/${runId}`, undefined, true)
+      .then((r) => {
+        if (r.status !== statusRef.current) reload();
+      })
+      .catch(() => {});
+  }, [runId, reload]);
+  usePolling(pollStatus, 3000, Boolean(run));
 
   if (error) return <ErrorBox message={error} />;
   if (!run) return <div className="muted">Loading…</div>;

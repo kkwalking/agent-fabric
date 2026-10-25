@@ -311,7 +311,7 @@ function HandoffModelCard() {
 }
 
 export function HandoffsView() {
-  const { data, error, reload } = useAsync<any[]>(() => get("/api/handoffs"), []);
+  const { data, error, reload } = useAsync<any[]>((force) => get("/api/handoffs", undefined, force), []);
 
   return (
     <div>

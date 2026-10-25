@@ -14,7 +14,9 @@ export function TrashView() {
 
   if (tasks.error) return <ErrorBox message={tasks.error} />;
 
-  const entries = (tasks.data ?? []).sort((a, b) => (b.deletedAt ?? "").localeCompare(a.deletedAt ?? ""));
+  // `[...]` on purpose: the array comes from the shared API cache, and sorting
+  // it in place would reorder what every other view reads.
+  const entries = [...(tasks.data ?? [])].sort((a, b) => (b.deletedAt ?? "").localeCompare(a.deletedAt ?? ""));
 
   const restore = async (task: any) => {
     setError(null);

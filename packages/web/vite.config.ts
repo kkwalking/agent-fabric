@@ -84,5 +84,19 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+    // The initial CSS is render-blocking. Splitting it per entry keeps the
+    // stylesheet a lazy view needs in that view's own chunk instead of in the
+    // file the window must parse before it can paint anything.
+    cssCodeSplit: true,
+    // Keep a single vendor chunk that changes rarely: the app chunk then
+    // re-downloads alone when the UI changes (matters for the dev loop).
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes("node_modules/react") || id.includes("node_modules/scheduler")) return "react";
+          return undefined;
+        },
+      },
+    },
   },
 });

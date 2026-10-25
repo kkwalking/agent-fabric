@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,8 +41,47 @@ export interface DockerRunOutcome {
   error?: string;
 }
 
+/**
+ * Where Docker's clients install themselves, most specific first.
+ *
+ * `docker` is usually a symlink the user added to a directory their *shell*
+ * knows about (`/usr/local/bin`, `/opt/homebrew/bin`, `~/.docker/bin`). A GUI
+ * app launched from the Dock inherits launchd's PATH — `/usr/bin:/bin:/usr/sbin:/sbin`
+ * — and never sees those, so a bare `docker` spawn fails with ENOENT even
+ * though the same command works in a terminal. Looking in the standard
+ * locations keeps the desktop app working without asking users to install a
+ * symlink into /usr/bin.
+ */
+function dockerCandidates(): string[] {
+  const home = process.env.HOME ?? "";
+  return [
+    "/usr/local/bin/docker", // Docker Desktop / OrbStack / colima on Intel
+    "/opt/homebrew/bin/docker", // Homebrew on Apple silicon
+    "/Applications/Docker.app/Contents/Resources/bin/docker", // Docker Desktop bundle
+    "/Applications/OrbStack.app/Contents/MacOS/xbin/docker", // OrbStack bundle
+    home ? join(home, ".docker/bin/docker") : "",
+    home ? join(home, ".rd/bin/docker") : "", // Rancher Desktop
+  ].filter(Boolean);
+}
+
+/**
+ * The Docker client to run.
+ *
+ * `AGENTFABRIC_DOCKER_BIN` wins (an explicit choice is never second-guessed);
+ * otherwise `docker` from PATH, then the standard install locations above.
+ * When none exists the bare `docker` name is returned anyway, so the spawn
+ * fails with the ordinary ENOENT and callers report it as usual.
+ */
 export function dockerBin(): string {
-  return process.env.AGENTFABRIC_DOCKER_BIN ?? "docker";
+  const configured = process.env.AGENTFABRIC_DOCKER_BIN;
+  if (configured) return configured;
+  const dirs = (process.env.PATH ?? "").split(":");
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const candidate = join(dir, "docker");
+    if (existsSync(candidate)) return "docker"; // PATH resolves it
+  }
+  return dockerCandidates().find((candidate) => existsSync(candidate)) ?? "docker";
 }
 
 export function execDocker(args: string[], timeoutMs = 60_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
