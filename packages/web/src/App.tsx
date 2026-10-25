@@ -321,23 +321,29 @@ export function App() {
         {/* One boundary for whichever view chunk is loading; the fallback is
             deliberately quiet so a fast chunk swap does not flash a message. */}
         <Suspense fallback={<div className="view-loading" role="status" aria-live="polite" />}>
+        {/* Every view that is opened *by id* is keyed on that id. Without the
+            key React reuses one instance across ids, and every ref and piece of
+            state survives the switch: a thread scrolled up in one task opened
+            the next at the top, and one task's in-flight action kept another
+            task's buttons disabled. Remounting per id is the cheap fix; drafts
+            are kept in localStorage, so nothing the user typed is lost. */}
         {route.view === "new-task" && <NewTaskView />}
         {route.view === "tasks" && <TasksView />}
         {route.view === "trash" && <TrashView />}
-        {route.view === "task" && route.id && <TaskThreadView taskId={route.id} />}
-        {route.view === "task-lifecycle" && route.id && <TaskLifecycleView taskId={route.id} />}
+        {route.view === "task" && route.id && <TaskThreadView key={route.id} taskId={route.id} />}
+        {route.view === "task-lifecycle" && route.id && <TaskLifecycleView key={route.id} taskId={route.id} />}
         {route.view === "runs" && <RunsView />}
-        {route.view === "run" && route.id && <RunDetailView runId={route.id} />}
+        {route.view === "run" && route.id && <RunDetailView key={route.id} runId={route.id} />}
         {route.view === "runtimes" && <ResourceView kind="runtimes" />}
         {route.view === "sessions" && <SessionsView />}
         {/* AGENT_UI_HIDDEN: 与上面侧边栏的 Agents 导航一起恢复。 */}
         {/* {route.view === "agents" && <ResourceView kind="agents" />} */}
         {route.view === "projects" && <ProjectsView />}
         {route.view === "kanban" && <KanbanView />}
-        {route.view === "project" && route.id && <ProjectDetailView projectId={route.id} />}
-        {route.view === "project-new-task" && route.id && <NewProjectTaskView projectId={route.id} />}
+        {route.view === "project" && route.id && <ProjectDetailView key={route.id} projectId={route.id} />}
+        {route.view === "project-new-task" && route.id && <NewProjectTaskView key={route.id} projectId={route.id} />}
         {route.view === "handoffs" && <HandoffsView />}
-        {route.view === "handoff" && route.id && <HandoffDetailView handoffId={route.id} />}
+        {route.view === "handoff" && route.id && <HandoffDetailView key={route.id} handoffId={route.id} />}
         {route.view === "usage" && <UsageView />}
         {/* The settings panel is a modal over whatever view is behind it, so
             closing it returns to where the user was instead of a blank page. */}

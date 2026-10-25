@@ -471,6 +471,53 @@ try {
   check(errorProbe.seen === true, "the per-page error check can actually see an ErrorBox");
   check(errorProbe.goneAfterRemoval === true, "the planted probe was removed again");
 
+  // FIXTURE-DATA ONLY (5f - needs two fixture tasks)
+  if (!emptyMode) {
+  // 5f. Switching tasks must not carry the previous task's state over.
+  //     The id-scoped views are keyed on the id, so a switch remounts them; the
+  //     observable effect is that a draft typed for one task does not appear in
+  //     another (and comes back on its own when you return).
+  const taskSwitch = await evaluate(
+    cdp,
+    `(async () => {
+       const tasks = await (await fetch("/api/tasks")).json();
+       const idA = "task_verify_1";
+       const idB = "task_verify_2";
+       if (!Array.isArray(tasks) || !tasks.some((t) => t.id === idA) || !tasks.some((t) => t.id === idB)) {
+         return { error: "fixture tasks missing" };
+       }
+       const goto = async (id) => {
+         history.pushState({}, "", "/tasks/" + id);
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1800));
+       };
+       const composer = () => document.querySelector("main textarea");
+       await goto(idA);
+       const a = composer();
+       if (!a) return { error: "no composer on the task page" };
+       Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")
+         .set.call(a, "draft-on-A");
+       a.dispatchEvent(new Event("input", { bubbles: true }));
+       await new Promise((r) => setTimeout(r, 400));
+       await goto(idB);
+       const onB = composer()?.value ?? null;
+       await goto(idA);
+       const backOnA = composer()?.value ?? null;
+       // Leave the fixture's storage clean for any later check.
+       const last = composer();
+       if (last) {
+         Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set.call(last, "");
+         last.dispatchEvent(new Event("input", { bubbles: true }));
+       }
+       return { onB, backOnA };
+     })()`
+  );
+  if (taskSwitch.error) failures.push(`task switch isolation: ${taskSwitch.error}`);
+  check(taskSwitch.onB === "", `a draft typed for one task does not appear in another (${JSON.stringify(taskSwitch.onB)})`);
+  check(taskSwitch.backOnA === "draft-on-A", `and the original task still has its own draft (${JSON.stringify(taskSwitch.backOnA)})`);
+
+  }
+
   // 5g. The Docker section says whether a containerized runtime can run at all.
   //     Without this a Project task just refuses, with no way to tell a missing
   //     Docker from a stopped one.
