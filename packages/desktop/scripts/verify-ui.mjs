@@ -373,6 +373,31 @@ try {
   check(paging[2].rows === 25 && /收起/.test(paging[2].button ?? ""), `the second shows the remaining ${paging[2].rows}`);
   check(paging[3].rows === 6, `"collapse" returns to the first page (${paging[3].rows})`);
 
+  // 9g. The page check above must be able to see an error at all.
+  //     It matches ErrorBox by its text, so prove that match works by planting
+  //     one: an assertion that cannot fail is worse than no assertion.
+  const errorProbe = await evaluate(
+    cdp,
+    `(async () => {
+       const main = document.querySelector("main");
+       if (!main) return { error: "no main element" };
+       const probe = document.createElement("div");
+       probe.className = "card";
+       probe.textContent = "Error: planted probe";
+       main.appendChild(probe);
+       const seen = [...main.querySelectorAll(".card")]
+         .map((c) => c.textContent.trim())
+         .some((t) => t.startsWith("Error:"));
+       probe.remove();
+       const goneAfterRemoval = ![...main.querySelectorAll(".card")]
+         .some((c) => c.textContent.includes("planted probe"));
+       return { seen, goneAfterRemoval };
+     })()`
+  );
+  if (errorProbe.error) failures.push(`error detection probe: ${errorProbe.error}`);
+  check(errorProbe.seen === true, "the per-page error check can actually see an ErrorBox");
+  check(errorProbe.goneAfterRemoval === true, "the planted probe was removed again");
+
   // 6. The "More" panel reaches the pages that have no nav row.
   const more = await evaluate(
     cdp,
@@ -484,7 +509,11 @@ try {
          return {
            heading: main?.querySelector("h1")?.textContent?.trim() ?? null,
            textLen: (main?.innerText ?? "").length,
-           errorText: document.querySelector(".error-box, [role='alert']")?.textContent?.slice(0, 80) ?? null,
+           // ErrorBox renders a red-bordered .card, not an .error-box, and has no
+           // ARIA role: match its text so this check cannot pass vacuously.
+           errorText: [...document.querySelectorAll("main .card")]
+             .map((c) => c.textContent.trim())
+             .find((t) => t.startsWith("Error:"))?.slice(0, 80) ?? null,
          };
        })()`
     );
