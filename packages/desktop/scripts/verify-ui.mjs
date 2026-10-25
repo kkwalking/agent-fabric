@@ -207,8 +207,40 @@ function checkBuildIsCurrent(target) {
   const behind = Math.round((localAt - installedAt) / 1000);
   return `WARNING: ${target} predates packages/web/dist by ${behind}s — these checks did NOT exercise your latest sources. Rebuild and reinstall: npm run desktop:dmg && npm run desktop:install`;
 }
+/**
+ * Detect the build being broken by two watchers writing the same dist.
+ *
+ * `vite build --watch` does not clean its output directory. Two of them running
+ * (an old `npm run dev` left over from a previous session plus a new one) leave
+ * *two* chunks per view, and index.html ends up pointing at one of them while
+ * the other lingers. The visible symptom is a page that renders nothing at all,
+ * which reads like a component bug and is not one. This happened once and cost
+ * a full round of diagnosis, so it is checked before anything is launched.
+ */
+function checkDistIsConsistent() {
+  const outDir = resolve(new URL("../../web/dist/assets", import.meta.url).pathname);
+  if (!existsSync(outDir)) return null;
+  // Count per base name *and extension*: a view legitimately emits both a .js and
+  // a .css under the same base, so only a repeated .js (or repeated .css) means
+  // two builds are on disk.
+  const seen = new Map();
+  for (const file of readdirSync(outDir)) {
+    const m = file.match(/^(.+)-[A-Za-z0-9_-]{8}\.(js|css)$/);
+    if (!m) continue;
+    const key = `${m[1]}.${m[2]}`;
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  const duplicated = [...seen].filter(([key, count]) => count > 1 && !key.startsWith("index."));
+  if (duplicated.length === 0) return null;
+  return `WARNING: packages/web/dist holds more than one build (duplicated chunks: ${duplicated
+    .map(([b, n]) => `${b}×${n}`)
+    .join(", ")}). A page may render blank. Fix: kill every extra \`vite build --watch\`, then rm -rf packages/web/dist && npm run build -w @agentfabric/web`;
+}
+
 const staleBuildWarning = checkBuildIsCurrent(appPath);
 if (staleBuildWarning) console.warn(`\n[verify-ui] ${staleBuildWarning}\n`);
+const distWarning = checkDistIsConsistent();
+if (distWarning) console.warn(`\n[verify-ui] ${distWarning}\n`);
 
 const app = spawn(
   join(appPath, "Contents", "MacOS", "AgentFabric"),
@@ -1011,6 +1043,7 @@ try {
 
 console.log(`\n[verify-ui] ${appPath}`);
 if (staleBuildWarning) console.log(`  !!  ${staleBuildWarning}`);
+if (distWarning) console.log(`  !!  ${distWarning}`);
 for (const line of notes) console.log(line);
 if (failures.length > 0) {
   console.error(`\n[verify-ui] FAIL — ${failures.length} problem(s):`);
