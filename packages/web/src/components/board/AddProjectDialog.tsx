@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, get, post } from "../../api";
 import { Icon } from "../../components";
 import { DirectoryAutocomplete } from "./DirectoryAutocomplete";
-import type { KanbanDirectoryListing, KanbanProject } from "./types";
+import type { KanbanDirectoryListing, Project } from "./types";
 
 type AddProjectTab = "path" | "clone";
 
@@ -38,13 +38,18 @@ function joinPath(directory: string, name: string): string {
  * valid — the server answers `requiresGitInitialization` and the user chooses
  * "add without Git" or "initialize a repository", rather than the platform
  * deciding for them.
+ *
+ * This is the only board-specific project call left: everything else about a
+ * board project (list, rename, delete) is the ordinary Project API. The
+ * response is the created `Project`, which is why an added project shows up on
+ * the Projects page too.
  */
 export function AddProjectDialog({
   onClose,
   onAdded,
 }: {
   onClose: () => void;
-  onAdded: (project: KanbanProject) => void;
+  onAdded: (project: Project) => void;
 }) {
   const [tab, setTab] = useState<AddProjectTab>("path");
   const [pathInput, setPathInput] = useState("");
@@ -86,7 +91,7 @@ export function AddProjectDialog({
       setBusy(true);
       setError(null);
       try {
-        const response = await post<{ project: KanbanProject }>("/api/kanban/projects", body);
+        const response = await post<{ project: Project }>("/api/kanban/projects", body);
         onAdded(response.project);
       } catch (err) {
         if (err instanceof ApiError && err.code === "kanban-project-not-git") {

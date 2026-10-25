@@ -69,10 +69,12 @@ export async function verifyApp(appPath) {
     check(page.ok && html.includes('<div id="root"'), `the server did not serve the web UI (status ${page.status})`);
     const health = await fetch(`${served.url}/api/health`, { headers: { Authorization: `Bearer ${served.token}` } });
     check(health.ok, `/api/health answered ${health.status}`);
-    const board = await fetch(`${served.url}/api/kanban/projects`, {
+    // The board shares the Project collection, so this is the same endpoint the
+    // Projects page reads — one record, not a parallel board collection.
+    const projects = await fetch(`${served.url}/api/projects`, {
       headers: { Authorization: `Bearer ${served.token}` },
     });
-    check(board.ok, `/api/kanban/projects answered ${board.status}`);
+    check(projects.ok, `/api/projects answered ${projects.status}`);
     const ptyVerdict = await ptyRoundTrip(served.url, served.token, scratch);
     if (failures.length > 0) throw new Error(`verify: the packaged bundle misbehaves —\n  - ${failures.join("\n  - ")}`);
     return `bundle ok: the packaged server runs from the bundle (UI, API, ${ptyVerdict})`;

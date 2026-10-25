@@ -198,6 +198,9 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   });
 
   const turnIds = useMemo(() => new Set((thread?.runs ?? []).map((t) => t.run.id)), [thread]);
+  // The card this task came from, when it was started on the board. Recorded
+  // on the task itself at creation, so it survives restarts and reruns.
+  const boardCardId = (thread?.task?.metadata as { board?: { cardId?: string } } | undefined)?.board?.cardId;
 
   // Real-time updates ride the existing global SSE stream, filtered to
   // this task's runs (v5 §27).
@@ -382,6 +385,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           {thread.task.projectId && (
             <a className="switch-link" onClick={() => navigate(`/tasks/${thread.task.id}/lifecycle`)}>
               <Icon name="box" size={12} /> Lifecycle
+            </a>
+          )}
+          {/* A board card's Task keeps living on the board it came from: the
+              card owns the column, the terminal and the chat. Without this
+              link the board conversation would be a dead end from the task
+              side, since the thread only shows run events. */}
+          {boardCardId && (
+            <a className="switch-link" onClick={() => navigate("/kanban")} title="Open this task's card on the board">
+              <Icon name="grid" size={12} /> Board card
             </a>
           )}
         </div>

@@ -6,8 +6,9 @@ import {
   type DragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { ApiError, del, fmtTime, get, patch, post, shortId } from "../api";
+import { ApiError, del, fmtTime, get, patch, post, put, shortId } from "../api";
 import { ErrorBox, Icon, Modal, StatusBadge } from "../components";
+import { navigate } from "../router";
 import { AcpChat } from "../components/AcpChat";
 import { BoardTerminal } from "../components/BoardTerminal";
 import { AddProjectDialog } from "../components/board/AddProjectDialog";
@@ -15,12 +16,16 @@ import { TaskCreateDialog, TaskEditDialog } from "../components/board/TaskCreate
 import { initialFromDefaults, type TaskCreateSubmissionOptions } from "../components/board/TaskCreateForm";
 import type {
   BoardColumnId,
+  BoardProject,
   ExecutionMode,
   KanbanAgent,
   KanbanCard,
   KanbanGitInfo,
-  KanbanProject,
   KanbanSession,
+  KanbanWorkspace,
+  Project,
+  /** The board's view of a Project's board settings. */
+  ProjectBoardSettings,
   SessionStatus,
   TaskDraft,
   TaskFormDefaults,
@@ -28,10 +33,18 @@ import type {
 } from "../components/board/types";
 
 /**
- * Board (v13 §七): four fixed columns over one BoardProject directory, with
- * local agent sessions and their live PTY terminals. This is a separate
- * product surface from Tasks/Projects — a board project is any folder, not a
- * Git source, and cards never enter the coding-task lifecycle.
+ * Board (v13 §七): four fixed columns over one Project's folder, with local
+ * agent sessions and their live PTY terminals.
+ *
+ * A board project *is* a Project: the board reads `/api/projects` and shows the
+ * folders among them, so the same project appears on the Projects page and in
+ * the sidebar's workspace tree. `project.source` says where the code comes from
+ * and `project.board` carries the board-only settings (folder shape, default
+ * agent and execution mode).
+ *
+ * Every started card produces a real Task (one Task per card, one Run per
+ * start): the card detail has an "Open task" entry into the ordinary task
+ * thread, and the Task lands under the project's folder in the workspace tree.
  *
  * Project creation and task creation follow the Cline Kanban fork's flow:
  * - add a project from a server-path picker or a Git clone, with the
@@ -74,6 +87,9 @@ const WORKSPACE_LABEL: Record<WorkspaceType, string> = {
   "google-repo": "google repo",
 };
 
+/** What `<select>` offers for a project's board settings. */
+const BOARD_WORKSPACE_TYPES: WorkspaceType[] = ["none", "git", "multi-git", "google-repo"];
+
 /** Session statuses that still own a running PTY (stop/restart are meaningful). */
 const LIVE_SESSION_STATUSES = new Set<SessionStatus>([
   "starting",
@@ -91,6 +107,33 @@ function errText(error: unknown): string {
     return error.code ? `${error.message} (${error.code})` : error.message;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Where a project's board lives on disk.
+ *
+ * A board root is never stored on the Project as a second copy of a path — two
+ * copies always drift apart. A `directory` source carries the folder itself; a
+ * `git` source has none of its own, so the board folder is the external
+ * workspace the board attached to that project (created when its first card is
+ * added). `null` means "no folder to show yet", never a guessed path: the
+ * server owns the actual resolution and fails loudly when there is none.
+ */
+function projectRoot(project: Project, workspaces: KanbanWorkspace[]): string | null {
+  if (project.source.type === "directory") return project.source.path ?? null;
+  const workspace = workspaces.find(
+    (entry) => entry.ownership === "external" && entry.projectId === project.id
+  );
+  return workspace?.path ?? null;
+}
+
+/**
+ * The board settings of a project. A Project that was not added from the board
+ * has none (any folder is a valid board), so it boards as a plain folder with
+ * no defaults — that default is computed here, never stored back.
+ */
+function boardSettingsOf(project: Project): ProjectBoardSettings {
+  return project.board ?? { workspaceType: "none" };
 }
 
 /** `/Users/you/x` → `~/x` for display; the absolute path is the fallback. */
@@ -131,16 +174,17 @@ function readStoredJson<T>(key: string): T | null {
   }
 }
 
-function readTaskDefaults(project: KanbanProject | null): TaskFormDefaults {
+function readTaskDefaults(project: BoardProject | null): TaskFormDefaults {
   if (!project) return {};
+  const board = boardSettingsOf(project);
   const stored = readStoredJson<TaskFormDefaults>(`${TASK_DEFAULTS_PREFIX}${project.id}`) ?? {};
   return {
-    ...(stored.agentId ?? project.defaultAgentId
-      ? { agentId: stored.agentId ?? project.defaultAgentId }
+    ...(stored.agentId ?? board.defaultAgentId
+      ? { agentId: stored.agentId ?? board.defaultAgentId }
       : {}),
     ...(stored.model ? { model: stored.model } : {}),
     ...(stored.permissionModeId ? { permissionModeId: stored.permissionModeId } : {}),
-    executionMode: stored.executionMode ?? project.defaultExecutionMode ?? "direct",
+    executionMode: stored.executionMode ?? board.defaultExecutionMode ?? "direct",
     ...(stored.baseRef ? { baseRef: stored.baseRef } : {}),
   };
 }
@@ -175,7 +219,7 @@ function writeTaskDefaults(projectId: string, draft: TaskDraft): void {
 }
 
 export function BoardView() {
-  const [projects, setProjects] = useState<KanbanProject[] | null>(null);
+  const [projects, setProjects] = useState<BoardProject[] | null>(null);
   const [projectId, setProjectId] = useState<string | null>(() =>
     window.localStorage.getItem(PROJECT_STORAGE_KEY)
   );
@@ -184,14 +228,24 @@ export function BoardView() {
   const [cards, setCards] = useState<KanbanCard[]>([]);
   const [sessions, setSessions] = useState<Record<string, KanbanSession | null>>({});
   const [git, setGit] = useState<KanbanGitInfo | null>(null);
+  /**
+   * External workspaces, used for one thing: a `git` project's folder is only
+   * recorded on its workspace, so the sidebar and the header read it from
+   * there. A Project never stores a second copy of the path.
+   */
+  const [workspaces, setWorkspaces] = useState<KanbanWorkspace[]>([]);
   const [sessionStatusError, setSessionStatusError] = useState<string | null>(null);
   const [boardError, setBoardError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [addProjectOpen, setAddProjectOpen] = useState(false);
-  const [deletingProject, setDeletingProject] = useState<KanbanProject | null>(null);
+  const [deletingProject, setDeletingProject] = useState<BoardProject | null>(null);
   const [deletingProjectBusy, setDeletingProjectBusy] = useState(false);
+  /** The project whose board settings are being edited (agent/execution mode). */
+  const [settingsProject, setSettingsProject] = useState<BoardProject | null>(null);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
 
   const [clearTrashOpen, setClearTrashOpen] = useState(false);
   const [clearTrashBusy, setClearTrashBusy] = useState(false);
@@ -225,17 +279,22 @@ export function BoardView() {
 
   // ---------- loading ----------
 
+  /**
+   * Loads the Project list — the same endpoint the Projects page reads, so the
+   * board has no project collection of its own. Card totals are attached by
+   * rendering (`useCardCounts` below), not by a board-specific project API.
+   */
   const loadProjects = useCallback(async () => {
     try {
-      const result = await get<{ projects: KanbanProject[] }>("/api/kanban/projects");
-      setProjects(result.projects);
+      const result = await get<Project[]>("/api/projects");
+      setProjects(result);
       setBoardError(null);
       setProjectId((current) => {
         const stored = window.localStorage.getItem(PROJECT_STORAGE_KEY);
         const pick =
-          result.projects.find((project) => project.id === current) ??
-          result.projects.find((project) => project.id === stored) ??
-          result.projects[0];
+          result.find((project) => project.id === current) ??
+          result.find((project) => project.id === stored) ??
+          result[0];
         return pick?.id ?? null;
       });
     } catch (error) {
@@ -245,9 +304,23 @@ export function BoardView() {
     }
   }, []);
 
+  /** External workspaces: the folder of every `git`-sourced board project. */
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      const result = await get<KanbanWorkspace[]>("/api/workspaces");
+      setWorkspaces(result);
+    } catch (error) {
+      // The board runs without this (a directory project knows its own path),
+      // but a `git` project would render as "no folder". Say so instead of
+      // silently dropping the path.
+      setBoardError(errText(error));
+    }
+  }, []);
+
   useEffect(() => {
     void loadProjects();
-  }, [loadProjects]);
+    void loadWorkspaces();
+  }, [loadProjects, loadWorkspaces]);
 
   useEffect(() => {
     if (projectId) window.localStorage.setItem(PROJECT_STORAGE_KEY, projectId);
@@ -308,13 +381,14 @@ export function BoardView() {
   }, [projectId, loadGit]);
 
   /** Cards + per-card session status. The board API returns cards only, so
-   *  session state is read one card at a time for cards that have a session. */
+   *  session state is read one card at a time for cards that have been started
+   *  (`taskId`; a Backlog card that never ran has none). */
   const refreshCards = useCallback(async (pid: string) => {
     const result = await get<{ cards: KanbanCard[] }>(
       `/api/kanban/projects/${encodeURIComponent(pid)}/cards`
     );
     setCards(result.cards);
-    const pending = result.cards.filter((card) => card.sessionId);
+    const pending = result.cards.filter((card) => card.taskId);
     if (pending.length === 0) {
       setSessions({});
       setSessionStatusError(null);
@@ -346,14 +420,14 @@ export function BoardView() {
     if (!projectId) return;
     try {
       await refreshCards(projectId);
-      // Card counts live on the project list, so an action that moves or
-      // creates cards must refresh it too (the 2s poll only reloads cards).
-      await loadProjects();
+      // The folder of a `git` project can appear when its first card starts, so
+      // a refresh that may have changed cards reloads the workspaces too.
+      await Promise.all([loadProjects(), loadWorkspaces()]);
       setBoardError(null);
     } catch (error) {
       setBoardError(errText(error));
     }
-  }, [projectId, refreshCards, loadProjects]);
+  }, [projectId, refreshCards, loadProjects, loadWorkspaces]);
 
   // Board poll: every 2s (§七). Cards are the expensive part; project metadata
   // is refreshed on explicit actions and initial load.
@@ -386,16 +460,18 @@ export function BoardView() {
     };
   }, [projectId, projectsLoaded, refreshCards]);
 
-  // Project list poll (counts, projects added or removed elsewhere). Slower
-  // than the card poll because it changes far less often, but it still means
-  // the sidebar never waits for a manual refresh.
+  // Project list poll (projects added or removed elsewhere, and a `git`
+  // project's folder appearing once its first card runs). Slower than the card
+  // poll because it changes far less often, but the sidebar never waits for a
+  // manual refresh.
   useEffect(() => {
     if (!projectId) return;
     const timer = window.setInterval(() => {
       void loadProjects();
+      void loadWorkspaces();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [projectId, loadProjects]);
+  }, [projectId, loadProjects, loadWorkspaces]);
 
   // Returning to the tab refreshes immediately: a background tab throttles
   // timers, so the first paint after focus must not show stale sessions.
@@ -507,7 +583,7 @@ export function BoardView() {
   const trashCard = async (card: KanbanCard): Promise<boolean> => {
     setActionError(null);
     const known = sessions[card.id] ?? null;
-    const needsStop = Boolean(card.sessionId) && (known ? LIVE_SESSION_STATUSES.has(known.status) : true);
+    const needsStop = Boolean(card.taskId) && (known ? LIVE_SESSION_STATUSES.has(known.status) : true);
     if (needsStop) {
       try {
         await post(`/api/kanban/cards/${encodeURIComponent(card.id)}/stop`, {});
@@ -531,12 +607,17 @@ export function BoardView() {
     }
   };
 
+  /**
+   * Deletes the Project itself (`DELETE /api/projects/:id`), not a board-only
+   * copy: there is only one project record, so the Projects page loses it too.
+   * The folder on disk, the worktrees and the Tasks that already ran are kept.
+   */
   const deleteProject = async () => {
     if (!deletingProject) return;
     setDeletingProjectBusy(true);
     setActionError(null);
     try {
-      await del(`/api/kanban/projects/${encodeURIComponent(deletingProject.id)}`);
+      await del(`/api/projects/${encodeURIComponent(deletingProject.id)}`);
       setDeletingProject(null);
       if (deletingProject.id === projectId) {
         setProjectId(null);
@@ -548,6 +629,25 @@ export function BoardView() {
       setDeletingProject(null);
     } finally {
       setDeletingProjectBusy(false);
+    }
+  };
+
+  /**
+   * Saves the board settings of a project (`PUT /api/projects/:id` with a
+   * partial `board`). `ProjectService.update` merges the patch, so the fields
+   * this dialog does not show are left as they are.
+   */
+  const saveBoardSettings = async (project: BoardProject, next: ProjectBoardSettings) => {
+    setSettingsBusy(true);
+    setSettingsError(null);
+    try {
+      await put<Project>(`/api/projects/${encodeURIComponent(project.id)}`, { board: next });
+      setSettingsProject(null);
+      await loadProjects();
+    } catch (error) {
+      setSettingsError(`Save failed: ${errText(error)}`);
+    } finally {
+      setSettingsBusy(false);
     }
   };
 
@@ -757,7 +857,7 @@ export function BoardView() {
       return;
     }
     setSelectedCardId(card.id);
-    setDetailSession(card.sessionId ? (sessions[card.id] ?? null) : null);
+    setDetailSession(card.taskId ? (sessions[card.id] ?? null) : null);
     setDetailError(null);
   };
 
@@ -783,12 +883,22 @@ export function BoardView() {
   }
 
   const detailSessionLive = detailSession ? LIVE_SESSION_STATUSES.has(detailSession.status) : false;
-  const countsFor = (project: KanbanProject) => {
-    if (project.id !== projectId) return project.cardCounts;
+  /**
+   * Card totals per column. The selected project's totals are counted from the
+   * cards on screen (they are already loaded and are what the columns show);
+   * every other project has no board card endpoint of its own any more, so its
+   * row simply shows no badges until it is selected.
+   */
+  const countsFor = (project: BoardProject): Record<BoardColumnId, number> | null => {
+    if (project.id !== projectId) return null;
     const counts: Record<BoardColumnId, number> = { backlog: 0, in_progress: 0, review: 0, trash: 0 };
     for (const card of cards) counts[card.column] += 1;
     return counts;
   };
+  const selectedRoot = selectedProject ? projectRoot(selectedProject, workspaces) : null;
+  const selectedBoard: ProjectBoardSettings | null = selectedProject
+    ? boardSettingsOf(selectedProject)
+    : null;
 
   return (
     <div className="board">
@@ -803,7 +913,7 @@ export function BoardView() {
           {projects === null && <div className="muted board-projects-empty">Loading…</div>}
           {projects?.length === 0 && (
             <div className="muted board-projects-empty">
-              No Kanban projects yet. A Kanban project is any local folder — Git is optional.
+              No projects yet. A project is any folder or Git repository — Git is optional.
             </div>
           )}
           {(projects ?? []).map((project) => {
@@ -811,6 +921,8 @@ export function BoardView() {
             const total = counts
               ? counts.backlog + counts.in_progress + counts.review + counts.trash
               : 0;
+            const board = boardSettingsOf(project);
+            const root = projectRoot(project, workspaces);
             return (
               <div
                 key={project.id}
@@ -826,15 +938,18 @@ export function BoardView() {
                 }}
               >
                 <span className="board-project-top">
-                  {project.workspaceType === "git" && (
+                  {board.workspaceType === "git" && (
                     <span className="board-project-git" title="Git repository at the project root">
                       git
                     </span>
                   )}
                   <span className="board-project-name">{project.name}</span>
                 </span>
-                <span className="board-project-path mono" title={project.rootPath}>
-                  {project.rootPath}
+                <span
+                  className="board-project-path mono"
+                  title={root ?? project.source.remoteUrl ?? undefined}
+                >
+                  {root ?? project.source.remoteUrl ?? "no folder yet"}
                 </span>
                 {total > 0 && counts && (
                   <span className="board-project-counts">
@@ -853,7 +968,8 @@ export function BoardView() {
                 )}
                 <button
                   className="board-project-del"
-                  title="Delete Kanban project (the folder itself is not touched)"
+                  title="Delete this project (the folder itself is not touched)"
+                  aria-label={`Delete project ${project.name}`}
                   onClick={(event) => {
                     event.stopPropagation();
                     setDeletingProject(project);
@@ -875,21 +991,32 @@ export function BoardView() {
           <div className="board-head-main">
             <div className="board-head-title">
               <h1>{selectedProject?.name ?? "Kanban"}</h1>
-              {selectedProject && (
+              {selectedBoard && (
                 <span className="board-workspace-chip">
-                  {WORKSPACE_LABEL[selectedProject.workspaceType]}
+                  {WORKSPACE_LABEL[selectedBoard.workspaceType]}
                 </span>
               )}
             </div>
             <div className="board-head-path mono">
-              {selectedProject?.rootPath ?? "Select or create a Kanban project to load the board"}
+              {selectedRoot ?? "Select or create a project to load this board"}
             </div>
-            {selectedProject?.discoveryWarning && (
-              <div className="board-hint warn">{selectedProject.discoveryWarning}</div>
+            {selectedBoard?.discoveryWarning && (
+              <div className="board-hint warn">{selectedBoard.discoveryWarning}</div>
             )}
           </div>
           <div className="board-head-actions">
             {agentsError && <span className="board-hint warn">{agentsError}</span>}
+            <button
+              className="small"
+              disabled={!selectedProject}
+              title="Board settings (folder shape, default agent, execution mode)"
+              onClick={() => {
+                setSettingsError(null);
+                setSettingsProject(selectedProject);
+              }}
+            >
+              board settings
+            </button>
             <button className="small primary" disabled={!selectedProject} onClick={openTaskDialog}>
               <Icon name="plus" size={12} /> New task
             </button>
@@ -906,7 +1033,7 @@ export function BoardView() {
 
         {!selectedProject ? (
           <div className="board-empty muted">
-            <p>No Kanban project selected.</p>
+            <p>No project selected.</p>
             <button className="small primary" onClick={() => setAddProjectOpen(true)}>
               <Icon name="plus" size={12} /> Add project
             </button>
@@ -1002,20 +1129,22 @@ export function BoardView() {
         <AddProjectDialog
           onClose={() => setAddProjectOpen(false)}
           onAdded={(project) => {
+            // The dialog returns the Project the server created; the list is
+            // re-read so the row is exactly what `/api/projects` reports.
             setAddProjectOpen(false);
-            setProjects((current) => [...(current ?? []), project]);
             selectProject(project.id);
+            void loadProjects();
           }}
         />
       )}
 
-      {taskDialogOpen && selectedProject && (
+      {taskDialogOpen && selectedProject && selectedBoard && (
         <TaskCreateDialog
           key={`dialog-${taskFormKey}`}
-          workspaceType={selectedProject.workspaceType}
+          workspaceType={selectedBoard.workspaceType}
           agents={agents ?? []}
           git={git}
-          initial={initialFromDefaults(taskDefaults, selectedProject.defaultExecutionMode ?? "direct")}
+          initial={initialFromDefaults(taskDefaults, selectedBoard.defaultExecutionMode ?? "direct")}
           busy={taskBusy}
           error={taskError}
           createMore={createMore}
@@ -1025,11 +1154,11 @@ export function BoardView() {
         />
       )}
 
-      {editingCard && selectedProject && (
+      {editingCard && selectedProject && selectedBoard && (
         <TaskEditDialog
           key={editingCard.id}
           card={editingCard}
-          workspaceType={selectedProject.workspaceType}
+          workspaceType={selectedBoard.workspaceType}
           agents={agents ?? []}
           git={git}
           busy={editBusy}
@@ -1042,14 +1171,29 @@ export function BoardView() {
         />
       )}
 
+      {settingsProject && (
+        <BoardSettingsDialog
+          project={settingsProject}
+          root={projectRoot(settingsProject, workspaces)}
+          agents={agents ?? []}
+          busy={settingsBusy}
+          error={settingsError}
+          onSubmit={(next) => void saveBoardSettings(settingsProject, next)}
+          onClose={() => setSettingsProject(null)}
+        />
+      )}
+
       {deletingProject && (
-        <Modal title="Delete Kanban project" onClose={() => setDeletingProject(null)}>
+        <Modal title="Delete project" onClose={() => setDeletingProject(null)}>
           <p>
-            Delete Kanban project <strong>{deletingProject.name}</strong>?
+            Delete project <strong>{deletingProject.name}</strong>?
           </p>
           <p className="muted">
-            Only the AgentFabric record is removed. The folder{" "}
-            <span className="mono">{deletingProject.rootPath}</span> and your files stay untouched.
+            This is the project record itself — it disappears from the Projects page too. The folder{" "}
+            <span className="mono">
+              {projectRoot(deletingProject, workspaces) ?? deletingProject.source.remoteUrl ?? "(no folder)"}
+            </span>{" "}
+            and your files stay untouched; tasks that already ran keep their own working copies.
           </p>
           <div className="modal-actions">
             <button onClick={() => setDeletingProject(null)}>Cancel</button>
@@ -1086,7 +1230,7 @@ export function BoardView() {
       {selectedCard && (
         <CardDetail
           card={selectedCard}
-          project={selectedProject}
+          projectRootPath={selectedRoot}
           agents={agents ?? []}
           session={detailSession}
           sessionLive={detailSessionLive}
@@ -1257,12 +1401,12 @@ function CardTile({
           {shortenHomePath(session.cwd, homePath)}
         </div>
       )}
-      {!isTrash && (session || card.sessionId) && (
+      {!isTrash && card.taskId && (
         <div className="board-card-foot">
           {session ? (
             <StatusBadge status={session.status} />
           ) : (
-            <span className="board-chip">session {card.sessionId ? shortId(card.sessionId) : "—"}</span>
+            <span className="board-chip">task {shortId(card.taskId)}</span>
           )}
         </div>
       )}
@@ -1272,7 +1416,7 @@ function CardTile({
 
 function CardDetail({
   card,
-  project,
+  projectRootPath,
   agents,
   session,
   sessionLive,
@@ -1288,7 +1432,8 @@ function CardDetail({
   onDelete,
 }: {
   card: KanbanCard;
-  project: KanbanProject | null;
+  /** The project's folder on disk; `null` until a `git` project has one. */
+  projectRootPath: string | null;
   agents: KanbanAgent[];
   session: KanbanSession | null;
   sessionLive: boolean;
@@ -1323,6 +1468,8 @@ function CardDetail({
   const acpSession = session?.transport === "acp";
   // What the session is actually running on, mirrored from ACP's model option.
   const sessionModelLabel = session?.modelRoute?.label ?? session?.modelRoute?.model;
+  /** The Task this card drives; absent until the card has been started once. */
+  const taskId = card.taskId;
 
   useEffect(() => {
     try {
@@ -1385,6 +1532,20 @@ function CardDetail({
             <div className="board-detail-title">{cardTitle(card)}</div>
           </div>
           <div className="board-detail-actions">
+            {/* The started card *is* a Task. Once it has one, the ordinary task
+                thread (Runs, lifecycle, handoff) is the fuller view of the same
+                work, so it is one click away; a card that never ran has no
+                taskId and therefore no entry. */}
+            {taskId && (
+              <button
+                className="small"
+                disabled={busy}
+                title={`Open task ${taskId}`}
+                onClick={() => navigate(`/tasks/${encodeURIComponent(taskId)}`)}
+              >
+                <Icon name="compose" size={12} /> Open task
+              </button>
+            )}
             {card.column === "backlog" && (
               <button className="primary" disabled={busy} onClick={onStart}>
                 Start
@@ -1491,8 +1652,8 @@ function CardDetail({
                 )}
                 <div className="board-meta-row">
                   <dt>Project</dt>
-                  <dd className="mono" title={project?.rootPath}>
-                    {project?.rootPath ?? "—"}
+                  <dd className="mono" title={projectRootPath ?? undefined}>
+                    {projectRootPath ?? "—"}
                   </dd>
                 </div>
                 <div className="board-meta-row">
@@ -1500,8 +1661,20 @@ function CardDetail({
                   <dd className="mono">{card.id}</dd>
                 </div>
                 <div className="board-meta-row">
-                  <dt>Session</dt>
-                  <dd className="mono">{session?.id ?? card.sessionId ?? "—"}</dd>
+                  <dt>Task</dt>
+                  <dd className="mono">
+                    {taskId ? (
+                      <a onClick={() => navigate(`/tasks/${encodeURIComponent(taskId)}`)}>
+                        {taskId}
+                      </a>
+                    ) : (
+                      "not started yet"
+                    )}
+                  </dd>
+                </div>
+                <div className="board-meta-row">
+                  <dt>Run</dt>
+                  <dd className="mono">{session?.runId ?? card.runId ?? "—"}</dd>
                 </div>
                 {session && (
                   <>
@@ -1623,5 +1796,128 @@ function CardDetail({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Board settings of a Project (`project.board`).
+ *
+ * These are the only board-specific fields left on a Project: the folder shape
+ * discovery reported, the agent and execution mode a new card starts with, and
+ * a discovery warning when that probe failed. The folder itself is not here —
+ * it is `source.path` for a directory project and the external workspace's
+ * path for a git one, which is why it is shown read-only.
+ *
+ * Saving sends a partial `board`; `ProjectService.update` merges it, so a field
+ * this dialog does not show keeps its stored value.
+ */
+function BoardSettingsDialog({
+  project,
+  root,
+  agents,
+  busy,
+  error,
+  onSubmit,
+  onClose,
+}: {
+  project: BoardProject;
+  root: string | null;
+  agents: KanbanAgent[];
+  busy: boolean;
+  error: string | null;
+  onSubmit: (next: ProjectBoardSettings) => void;
+  onClose: () => void;
+}) {
+  const current = boardSettingsOf(project);
+  const [workspaceType, setWorkspaceType] = useState<WorkspaceType>(current.workspaceType);
+  const [agentId, setAgentId] = useState(current.defaultAgentId ?? "");
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>(
+    current.defaultExecutionMode ?? "direct"
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const available = agents.filter((agent) => agent.available);
+
+  return (
+    <Modal title="Board settings" onClose={onClose}>
+      <p className="muted">
+        <strong>{project.name}</strong> ·{" "}
+        <span className="mono">{root ?? project.source.remoteUrl ?? "(no folder yet)"}</span>
+      </p>
+      <div className="form-grid-2">
+        <label className="board-dialog-field">
+          <span className="board-dialog-label">Folder shape</span>
+          <select
+            value={workspaceType}
+            disabled={busy}
+            onChange={(event) => setWorkspaceType(event.target.value as WorkspaceType)}
+          >
+            {BOARD_WORKSPACE_TYPES.map((type) => (
+              <option key={type} value={type}>
+                {WORKSPACE_LABEL[type]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="board-dialog-field">
+          <span className="board-dialog-label">Default agent</span>
+          <select
+            value={agentId}
+            disabled={busy}
+            onChange={(event) => setAgentId(event.target.value)}
+          >
+            <option value="">(first available)</option>
+            {available.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="board-dialog-field">
+          <span className="board-dialog-label">Default execution mode</span>
+          <select
+            value={executionMode}
+            disabled={busy}
+            onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)}
+          >
+            <option value="direct">Direct — run in the project folder</option>
+            <option value="worktree">Worktree — a detached copy per card</option>
+          </select>
+        </label>
+      </div>
+      <p className="board-hint">
+        These become the defaults of a new card on this board; every card can still override them.
+      </p>
+      {error && <div className="board-hint warn board-dialog-error">{error}</div>}
+      <div className="modal-actions">
+        <button onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button
+          className="primary"
+          disabled={busy}
+          onClick={() =>
+            onSubmit({
+              workspaceType,
+              ...(agentId ? { defaultAgentId: agentId } : {}),
+              defaultExecutionMode: executionMode,
+              // The warning describes the folder as it was probed; nothing here
+              // re-probes it, so it is carried over as recorded.
+              ...(current.discoveryWarning ? { discoveryWarning: current.discoveryWarning } : {}),
+            })
+          }
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </Modal>
   );
 }

@@ -7,7 +7,10 @@
 
 export type BoardColumnId = "backlog" | "in_progress" | "review" | "trash";
 export type ExecutionMode = "direct" | "worktree";
+/** Repository shape discovered for a board project. Discovery never blocks. */
 export type WorkspaceType = "none" | "git" | "multi-git" | "google-repo";
+/** Where a Project's code comes from (`Project.source.type`). */
+export type ProjectSourceType = "git" | "directory";
 export type SessionStatus =
   | "starting"
   | "running"
@@ -71,17 +74,65 @@ export interface KanbanAgent {
 
 export type ColumnCounts = Record<BoardColumnId, number>;
 
-export interface KanbanProject {
-  id: string;
-  name: string;
-  rootPath: string;
+/** Where a Project's code comes from; the board root is derived from it. */
+export interface ProjectSource {
+  type: ProjectSourceType;
+  /** Present for `git`: the credential-free repository URL. */
+  remoteUrl?: string;
+  /** Present for `directory`: the absolute folder the user picked. */
+  path?: string;
+  provider?: string;
+  defaultBranch?: string;
+  credentialId?: string;
+}
+
+/**
+ * Board settings of a Project — only a Project added from the board has them.
+ * The board root itself is never stored here: it comes from `source` (or, for
+ * a `git` source, from the external Workspace the cards run in).
+ */
+export interface ProjectBoardSettings {
   workspaceType: WorkspaceType;
+  /** Present when discovery failed; discovery is advisory and never blocks. */
   discoveryWarning?: string;
   defaultAgentId?: string;
   defaultExecutionMode?: ExecutionMode;
-  cardCounts?: ColumnCounts;
+}
+
+/**
+ * A Project record (`/api/projects`), as the board sees it.
+ *
+ * A board project *is* a Project: the board keeps no project collection of its
+ * own, so this is the same list the Projects page renders. Fields the board
+ * does not read are left out rather than mirrored.
+ */
+export interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  source: ProjectSource;
+  /** Present only for a Project that was added from the board. */
+  board?: ProjectBoardSettings;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One project row as the board's sidebar lists it (Project plus card totals). */
+export interface BoardProject extends Project {
+  cardCounts?: ColumnCounts;
+}
+
+/**
+ * An external Workspace (`/api/workspaces`): the folder a `git`-sourced board
+ * project works in. Only `external` workspaces matter here — a managed one is
+ * one task's scratch copy.
+ */
+export interface KanbanWorkspace {
+  id: string;
+  name: string;
+  ownership?: "managed" | "external";
+  projectId?: string;
+  path?: string;
 }
 
 export interface KanbanCard {
@@ -98,14 +149,22 @@ export interface KanbanCard {
   executionMode: ExecutionMode;
   /** Git ref a worktree checkout starts from; absent = project HEAD. */
   baseRef?: string;
-  sessionId?: string;
+  /** The external Workspace (folder) the card works in; fixed when created. */
+  workspaceId?: string;
+  /** The Task this card drives: created on the first start, never replaced. */
+  taskId?: string;
+  /** The Task's most recent Run (= the current `KanbanSession.id`). */
+  runId?: string;
   createdAt: string;
   updatedAt: string;
 }
 
+/** Runtime handle for the process behind one Run (not a task record). */
 export interface KanbanSession {
+  /** = the id of the Run it drives (1:1). */
   id: string;
   cardId: string;
+  runId: string;
   agentId: string;
   cwd: string;
   executionMode: ExecutionMode;
