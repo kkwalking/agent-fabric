@@ -3,6 +3,7 @@ import { get, post, put } from "../api";
 import { ErrorBox, Field, Icon, type IconName } from "../components";
 import { useI18n } from "../i18n-react";
 import { LlmView } from "./Llm";
+import { CredentialsSection } from "./SourceCredentials";
 import { LANGUAGES, type Language, type MessageKey } from "../i18n";
 import { navigate, type SettingsSection } from "../router";
 
@@ -39,6 +40,9 @@ const SECTIONS: SectionDef[] = [
   { id: "harness", label: "settings.nav.harness", icon: "terminal" },
   { id: "docker", label: "settings.nav.docker", icon: "box" },
   { id: "retry", label: "settings.nav.retry", icon: "refresh" },
+  // Git credentials are global settings, referenced by Project id — they belong
+  // beside the other app-wide settings, not in a page of their own.
+  { id: "credentials", label: "settings.nav.credentials", icon: "key" },
   { id: "about", label: "settings.nav.about", icon: "cpu" },
 ];
 
@@ -269,6 +273,13 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
             {config && current.id === "harness" && <HarnessSection config={config} save={saveSection} />}
             {config && current.id === "docker" && <DockerSection config={config} save={saveSection} />}
             {config && current.id === "retry" && <RetrySection config={config} save={saveSection} />}
+            {config && current.id === "credentials" && (
+              <div className="settings-page">
+                <h2 className="settings-page-title">{t("settings.nav.credentials")}</h2>
+                <p className="settings-page-desc">{t("credentials.description")}</p>
+                <CredentialsSection />
+              </div>
+            )}
             {config && current.id === "about" && <AboutSection config={config} />}
           </div>
         </div>

@@ -24,7 +24,6 @@ export function usePath(): string {
 
 export interface Route {
   view:
-    | "dashboard"
     | "new-task"
     | "tasks"
     | "task"
@@ -35,12 +34,10 @@ export interface Route {
     | "runtimes"
     | "sessions"
     | "agents"
-    | "workspaces"
     | "projects"
     | "kanban"
     | "project"
     | "project-new-task"
-    | "source-credentials"
     | "handoffs"
     | "handoff"
     | "usage"
@@ -62,6 +59,7 @@ export type SettingsSection =
   | "harness"
   | "docker"
   | "retry"
+  | "credentials"
   | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
@@ -72,27 +70,29 @@ const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "harness",
   "docker",
   "retry",
+  "credentials",
   "about",
 ];
 
 const PATH_VIEWS: Record<string, Route["view"]> = {
-  "/": "dashboard",
+  // The dashboard was removed: the task list is the home page, since it is the
+  // one surface every session starts from. `/` stays a valid URL so old
+  // bookmarks, the brand button and "close settings" all land somewhere real.
+  "/": "tasks",
   "/new": "new-task",
   "/tasks": "tasks",
   "/trash": "trash",
   "/runs": "runs",
   "/runtimes": "runtimes",
   "/sessions": "sessions",
-  // AGENT_UI_HIDDEN: Agents 页隐藏期间，直接访问 /agents 回落到 Dashboard；
+  // AGENT_UI_HIDDEN: Agents 页隐藏期间，直接访问 /agents 回落到任务列表；
   // 与 App.tsx 的两处标记一起恢复。
   // "/agents": "agents",
-  "/workspaces": "workspaces",
   "/projects": "projects",
   "/kanban": "kanban",
   // `/board` was the pre-rename URL; keep it landing on the same page instead of
-  // dropping an open tab on the dashboard after the rename.
+  // dropping an open tab on the task list after the rename.
   "/board": "kanban",
-  "/source-credentials": "source-credentials",
   "/handoffs": "handoffs",
   "/usage": "usage",
   "/settings": "settings",
@@ -114,14 +114,16 @@ export function parsePath(path: string): Route {
     const section = SETTINGS_SECTIONS.find((id) => id === parts[1]);
     return { view: "settings", section: section ?? "general" };
   }
-  // `/proxy` and `/llm` used to be pages of their own; their bookmarks now open
-  // the matching settings section instead of dropping the user on the dashboard.
+  // `/proxy`, `/llm` and `/source-credentials` used to be pages of their own;
+  // their bookmarks now open the matching settings section instead of dropping
+  // the user on the task list.
   if (parts[0] === "proxy") return { view: "settings", section: "proxy" };
   if (parts[0] === "llm") return { view: "settings", section: "llm" };
+  if (parts[0] === "source-credentials") return { view: "settings", section: "credentials" };
   if (parts[0] === "projects" && parts[1]) {
     const id = decodeURIComponent(parts[1]);
     if (parts[2] === "tasks" && parts[3] === "new") return { view: "project-new-task", id };
     return { view: "project", id };
   }
-  return { view: "dashboard" };
+  return { view: "tasks" };
 }

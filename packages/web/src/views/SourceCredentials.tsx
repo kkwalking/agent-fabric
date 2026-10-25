@@ -3,14 +3,18 @@ import { del, get, post } from "../api";
 import { ErrorBox, Field, Modal, useAsync } from "../components";
 
 /**
- * Source Credentials (v11 §4).
+ * Source Credentials (v11 §4) — a section of the settings panel.
  *
  * Global, Project-independent Git credentials. The sensitive value is always a
- * Secret: this page creates the credential *and* its secret in one step, and
- * afterwards only ever shows the masked preview — the API never returns the
+ * Secret: creating a credential writes the secret in the same step, and
+ * afterwards only the masked preview is ever shown — the API never returns the
  * value again (v11 §4.2/§34).
+ *
+ * These are settings, not project data: a Project only references a credential
+ * by id, so the list belongs beside the other global settings rather than in a
+ * top-level page of its own.
  */
-export function SourceCredentialsView() {
+export function CredentialsSection() {
   const credentials = useAsync<any[]>(() => get("/api/source-credentials"), []);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,18 +64,12 @@ export function SourceCredentialsView() {
 
   return (
     <div>
-      <div className="row" style={{ marginBottom: 4 }}>
-        <h1>Source credentials</h1>
+      <div className="row" style={{ marginBottom: 8 }}>
         <span className="right">
           <button className="small" onClick={() => credentials.reload()}>refresh</button>{" "}
           <button className="small primary" onClick={() => setAdding(true)}>Add credential</button>
         </span>
       </div>
-      <p className="sub">
-        Git credentials are global settings, not project data: a Project only references one by id. The token or
-        private key is stored as a Secret and is materialized for the duration of a single Git operation —
-        never into a remote URL, a command argument, a log line or the agent's runtime.
-      </p>
       <ErrorBox message={error} />
 
       {(credentials.data ?? []).length === 0 ? (

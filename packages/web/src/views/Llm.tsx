@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { del, get, post, put } from "../api";
-import { useAsync, ErrorBox, Icon } from "../components";
+import { useAsync, clickableRow, ErrorBox, Icon } from "../components";
 
 interface ProviderRow {
   id: string;
@@ -45,7 +45,7 @@ const formatLabel = (value?: string) => API_FORMATS.find((f) => f.value === valu
  * It is the panel's page rather than a view of its own because it edits a
  * section of the same configuration file the other pages edit (`providers`),
  * and because the file is the record: the server rewrites that section on
- * every save here, so "Open configuration file" shows exactly what this page
+ * every save here, so `Open configuration file` shows exactly what this page
  * holds. `embedded` only drops the page-level frame the panel provides; the
  * list and the editor are the same components either way.
  */
@@ -95,7 +95,7 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
 
   return (
     <div>
-      <div className="row">
+      <div className={embedded ? "row settings-llm-head" : "row"}>
         {!embedded && <h1>LLM</h1>}
         <span className="right">
           <button className="primary" onClick={() => setEditing("new")}>+ 新增供应商</button>
@@ -114,7 +114,7 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
           return (
             <div className="card provider-card" key={p.id}>
               <div className="row">
-                <div className="grow provider-summary" onClick={() => setEditing(p.id)}>
+                <div className="grow provider-summary" {...clickableRow(() => setEditing(p.id))}>
                   <div className="provider-name">
                     {p.name}
                     <span className="badge">{formatLabel(p.type)}</span>
