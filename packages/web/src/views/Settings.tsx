@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { get, post, put } from "../api";
-import { ErrorBox, Field, Icon, type IconName } from "../components";
+import { ErrorBox, Field, Icon, Modal, type IconName } from "../components";
 import { useI18n } from "../i18n-react";
 import { LlmView } from "./Llm";
 import { CredentialsSection } from "./SourceCredentials";
@@ -79,6 +79,15 @@ interface SettingsProps {
   onClose: () => void;
 }
 
+/**
+ * Tells the panel whether the page currently shown has unsaved edits.
+ *
+ * Each section keeps its own `form` and derives `dirty` locally, so the panel
+ * has no way to know. `SaveRow` reports it here; closing the panel consults it
+ * instead of dropping the edit on the floor.
+ */
+const DirtyContext = createContext<((dirty: boolean) => void) | null>(null);
+
 export function SettingsView({ section, onSection, onClose }: SettingsProps) {
   const { t } = useI18n();
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
@@ -90,6 +99,14 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
   const [applying, setApplying] = useState(false);
   const [applyNote, setApplyNote] = useState<string | null>(null);
   const navRef = useRef<HTMLButtonElement | null>(null);
+  // Shown when closing with unsaved edits: the edits are not thrown away by a
+  // stray Escape or a click outside the dialog.
+  const [dirty, setDirty] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const requestClose = useCallback(() => {
+    if (dirty) setConfirmClose(true);
+    else onClose();
+  }, [dirty, onClose]);
 
   const load = useCallback(async () => {
     try {
@@ -114,12 +131,19 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
   // Escape closes the panel; the keyboard focus starts on the selected section.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // Escape first dismisses the unsaved-changes question, if it is open.
+      if (e.key === "Escape") {
+        setConfirmClose((asking) => {
+          if (asking) return false;
+          requestClose();
+          return false;
+        });
+      }
     };
     window.addEventListener("keydown", onKey);
     navRef.current?.focus();
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [requestClose]);
 
   /** Writes the whole document (transitive change) and keeps the local copy. */
   const saveDocument = useCallback(
@@ -199,8 +223,9 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
   const current = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
 
   return (
+    <DirtyContext.Provider value={setDirty}>
     <div className="settings-overlay" role="dialog" aria-modal="true" aria-label={t("settings.title")}>
-      <div className="settings-mask" onClick={onClose} />
+      <div className="settings-mask" onClick={requestClose} />
       <div className="settings-panel">
         <nav className="settings-nav" aria-label={t("settings.title")}>
           <div className="settings-nav-title">{t("settings.title")}</div>
@@ -233,7 +258,7 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
               <button className="btn-outline" onClick={openFile} title={file?.path}>
                 {t("settings.openFile")}
               </button>
-              <button className="settings-close" onClick={onClose} aria-label={t("settings.close")} title={t("settings.close")}>
+              <button className="settings-close" onClick={requestClose} aria-label={t("settings.close")} title={t("settings.close")}>
                 <Icon name="close" size={16} />
               </button>
             </span>
@@ -284,7 +309,20 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
           </div>
         </div>
       </div>
+
+      {/* Closing with unsaved edits asks instead of discarding them: an Escape
+          or a click on the mask is easy to do by accident, and the edit is gone. */}
+      {confirmClose && (
+        <Modal title={t("settings.unsavedTitle")} onClose={() => setConfirmClose(false)}>
+          <p>{t("settings.unsavedBody")}</p>
+          <div className="modal-actions">
+            <button onClick={() => setConfirmClose(false)}>{t("settings.keepEditing")}</button>
+            <button className="danger" onClick={onClose}>{t("settings.discardAndClose")}</button>
+          </div>
+        </Modal>
+      )}
     </div>
+    </DirtyContext.Provider>
   );
 }
 
@@ -411,6 +449,11 @@ function SaveRow(props: {
   hint: MessageKey;
 }) {
   const { t } = useI18n();
+  const reportDirty = useContext(DirtyContext);
+  useEffect(() => {
+    reportDirty?.(props.dirty);
+    return () => reportDirty?.(false);
+  }, [props.dirty, reportDirty]);
   return (
     <div className="settings-save-row">
       <button className="btn-primary" disabled={!props.dirty || props.saving} onClick={props.onSave}>
