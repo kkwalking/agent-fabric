@@ -24,6 +24,24 @@ export function RunsView() {
   // Runs accumulate one per execution: page them, for the same reason the task
   // list is paged (flat DOM and re-render cost).
   const [page, setPage] = useState(0);
+  // Cancel in flight per run, and the last failure. A cancel that fails used to
+  // be an unhandled rejection: the row simply stayed there with nothing said.
+  const [cancelling, setCancelling] = useState<Record<string, boolean>>({});
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const cancelRun = async (runId: string) => {
+    if (cancelling[runId]) return;
+    setCancelling((prev) => ({ ...prev, [runId]: true }));
+    setActionError(null);
+    try {
+      await post(`/api/runs/${runId}/cancel`);
+      reloadAll();
+    } catch (e) {
+      setActionError(`Could not cancel ${runId}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCancelling((prev) => ({ ...prev, [runId]: false }));
+    }
+  };
   // "3m ago" labels move on their own (see `useMinuteClock`).
   useMinuteClock();
   const { data: sessionRefs, reload: reloadSessions } = useAsync<any[]>((force) => get("/api/runtime-sessions", undefined, force), []);
@@ -47,7 +65,7 @@ export function RunsView() {
         Every task execution produces an independent Run. This is the operations view — the conversation
         lives in the <a onClick={() => navigate("/tasks")}>task thread</a>.
       </p>
-      <ErrorBox message={error} />
+      <ErrorBox message={actionError ?? error} />
       {data && data.length > 0 ? (
       <div className="card">
           <table>
@@ -80,7 +98,13 @@ export function RunsView() {
                       />
                     )}{" "}
                     {["pending", "starting", "running"].includes(r.status) && (
-                      <button className="small danger" onClick={async () => { await post(`/api/runs/${r.id}/cancel`); reloadAll(); }}>cancel</button>
+                      <button
+                        className="small danger"
+                        disabled={Boolean(cancelling[r.id])}
+                        onClick={() => void cancelRun(r.id)}
+                      >
+                        {cancelling[r.id] ? "cancelling…" : "cancel"}
+                      </button>
                     )}
                   </td>
                 </tr>
@@ -112,6 +136,10 @@ const CONTINUITY_LABEL: Record<string, string> = {
 export function RunDetailView({ runId }: { runId: string }) {
   const { data: run, error, reload } = useAsync<any>((force) => get(`/api/runs/${runId}`, undefined, force), [runId]);
   const [events, setEvents] = useState<any[]>([]);
+  // Same reasoning as the list page: a cancel that fails must say so, and a
+  // second click while the first is in flight must not start another request.
+  const [cancelling, setCancelling] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [tab, setTab] = useState<"events" | "logs" | "artifacts" | "continuity">("events");
   const [artifacts, setArtifacts] = useState<any[]>([]);
   const [previousHandoff, setPreviousHandoff] = useState<any>(null);
@@ -174,6 +202,8 @@ export function RunDetailView({ runId }: { runId: string }) {
 
   if (error) return <ErrorBox message={error} />;
   if (!run) return <div className="muted">Loading…</div>;
+  // Declared after the early returns so the block below can render it. A failed
+  // cancel is not a load error: the run is still there and still yours to read.
 
   const isLive = ["pending", "starting", "running"].includes(run.status);
   const logs = events
@@ -187,11 +217,31 @@ export function RunDetailView({ runId }: { runId: string }) {
 
   return (
     <div>
+      {actionError && <ErrorBox message={actionError} />}
       <div className="row">
         <a onClick={() => navigate("/runs")}>← runs</a>
         <a onClick={() => navigate(`/tasks/${run.taskId}`)}>task thread ↗</a>
         <span className="right">
-          {isLive && <button className="danger" onClick={async () => { await post(`/api/runs/${runId}/cancel`); reload(); }}>cancel</button>}
+          {isLive && (
+            <button
+              className="danger"
+              disabled={cancelling}
+              onClick={async () => {
+                setCancelling(true);
+                setActionError(null);
+                try {
+                  await post(`/api/runs/${runId}/cancel`);
+                  reload();
+                } catch (e) {
+                  setActionError(`Could not cancel: ${e instanceof Error ? e.message : String(e)}`);
+                } finally {
+                  setCancelling(false);
+                }
+              }}
+            >
+              {cancelling ? "cancelling…" : "cancel"}
+            </button>
+          )}
           {" "}
           <button className="small" onClick={reload}>refresh</button>
         </span>
