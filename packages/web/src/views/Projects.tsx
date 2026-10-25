@@ -156,7 +156,6 @@ export function ProjectsView() {
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
   const create = async () => {
     setBusy(true);
     setError(null);
@@ -367,6 +366,16 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
     defaultBranch: "",
   });
   const [busy, setBusy] = useState(false);
+  /**
+   * Deleting a Project throws away the only description of where the code comes
+   * from; the tasks that ran from it stay, but the definition does not come back.
+   * Ask first, like every other destructive action.
+   *
+   * Declared up here with the other hooks: the early returns below would
+   * otherwise make the hook list depend on whether the project has loaded yet.
+   */
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
 
   if (project.error) return <ErrorBox message={project.error} />;
   if (!project.data) return <div className="muted">Loading…</div>;
@@ -435,11 +444,31 @@ export function ProjectDetailView({ projectId }: { projectId: string }) {
           >
             edit
           </button>{" "}
-          <button className="small danger" onClick={remove}>delete</button>{" "}
+          <button className="small danger" onClick={() => setConfirmRemove(true)}>delete</button>{" "}
           <button className="small primary" onClick={() => navigate(`/projects/${projectId}/tasks/new`)}>New task</button>
         </span>
       </div>
       <ErrorBox message={error} />
+      {confirmRemove && (
+        <Modal title="Delete project" onClose={() => setConfirmRemove(false)}>
+          <p>
+            Delete <strong>{p.name}</strong>? Tasks that already ran keep their own working copies, but this
+            definition — where the code comes from and how it is fetched — cannot be recovered.
+          </p>
+          <div className="row-end">
+            <button onClick={() => setConfirmRemove(false)}>Cancel</button>
+            <button
+              className="danger"
+              onClick={() => {
+                setConfirmRemove(false);
+                void remove();
+              }}
+            >
+              Delete project
+            </button>
+          </div>
+        </Modal>
+      )}
 
       <div className="card">
         {/* dl/dt/dd: `.detail-list` is a two-column grid whose label/value

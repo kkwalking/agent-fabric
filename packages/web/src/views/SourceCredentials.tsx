@@ -52,6 +52,13 @@ export function CredentialsSection() {
     }
   };
 
+  /**
+   * Deleting a credential discards a stored token or key — the API never returns
+   * the value again, so "removed by accident" means re-issuing the secret at the
+   * provider. Ask first, the way every other destructive action in the app does.
+   */
+  const [pendingRemove, setPendingRemove] = useState<{ id: string; name: string } | null>(null);
+
   const remove = async (id: string) => {
     setError(null);
     try {
@@ -91,7 +98,9 @@ export function CredentialsSection() {
                   <td className="muted">{c.username ?? "-"}</td>
                   <td className="muted">{c.secretMasked ?? "-"}</td>
                   <td className="actions">
-                    <button className="small danger" onClick={() => remove(c.id)}>remove</button>
+                    <button className="small danger" onClick={() => setPendingRemove({ id: c.id, name: c.name })}>
+                      remove
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -148,6 +157,27 @@ export function CredentialsSection() {
           <div className="modal-actions">
             <button onClick={() => setAdding(false)}>Cancel</button>
             <button className="primary" disabled={busy || !form.name || !form.value} onClick={create}>Create</button>
+          </div>
+        </Modal>
+      )}
+      {pendingRemove && (
+        <Modal title="Remove credential" onClose={() => setPendingRemove(null)}>
+          <p>
+            Remove <strong>{pendingRemove.name}</strong>? The stored secret is deleted and the API never returns
+            it again — you would have to re-issue the token or key at the provider.
+          </p>
+          <div className="row-end">
+            <button onClick={() => setPendingRemove(null)}>Cancel</button>
+            <button
+              className="danger"
+              onClick={() => {
+                const target = pendingRemove;
+                setPendingRemove(null);
+                void remove(target.id);
+              }}
+            >
+              Remove credential
+            </button>
           </div>
         </Modal>
       )}

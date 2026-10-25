@@ -144,7 +144,31 @@ function writeFixture(dir) {
   });
   const db = {
     providers: [], models: [], runtimes: [], secrets: [], profiles: [],
-    sources: [], sourceCredentials: [], projects: [], workspaceLocks: [],
+    sources: [],
+    // One credential and one project, so the two deletes that ask for
+    // confirmation have a row to act on. Without them the check below finds no
+    // button and can only report that it checked nothing.
+    sourceCredentials: [
+      {
+        id: "cred_verify",
+        name: "verify-credential",
+        type: "https-token",
+        host: "example.invalid",
+        username: "verify",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    projects: [
+      {
+        id: "proj_verify",
+        name: "verify-project",
+        source: { type: "directory", path: "/tmp/af-verify-project", defaultBranch: "main" },
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    workspaceLocks: [],
     runs: [], eventShards: [], artifacts: [], handoffs: [],
     runtimeSessions: [], nativeStates: [], kanbanSessions: [],
     config: {},
@@ -1061,6 +1085,57 @@ try {
   check(confirmOps.opened === true, "a resource delete opens the in-app confirmation Modal");
   check(confirmOps.native === 0, `no native window.confirm is used (${confirmOps.native} call(s))`);
   check(confirmOps.cleared === true, "cancelling the confirmation closes it and deletes nothing");
+
+  // FIXTURE-DATA ONLY (9d2 - needs the seeded project and credential)
+  if (!emptyMode) {
+  // 9d2. The two deletes that were missed by hand. Both destroy something that
+  //      cannot be reconstructed — the Project is the only description of where
+  //      the code comes from, and a credential's secret is never returned by the
+  //      API again — so both must open the in-app confirmation before deleting.
+  //
+  //      Each is checked where it actually lives: the Projects list row, and the
+  //      credential table inside the settings panel.
+  const guardedDeletes = await evaluate(
+    cdp,
+    `(async () => {
+       const process__DEBUG__ = false;
+       const openDeleteConfirm = async (path, match) => {
+         history.pushState({}, "", path);
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1800));
+         const btn = [...document.querySelectorAll("main button, .settings-body button")]
+           .filter((b) => b.className.split(/\\s+/).indexOf("danger") !== -1)
+           .find((b) => match.test(b.textContent));
+         if (!btn) return "no delete button on " + path;
+         const before = document.querySelectorAll(".modal, [role=dialog]").length;
+         if (process__DEBUG__) console.log("clicking", btn.textContent.trim(), "cls=" + btn.className, "modals-before=" + before);
+         btn.click();
+         await new Promise((r) => setTimeout(r, 700));
+         const opened = document.querySelectorAll(".modal, [role=dialog]").length > before;
+         for (const m of document.querySelectorAll(".modal, [role=dialog]")) {
+           const cancel = [...m.querySelectorAll("button")].find((b) => /cancel/i.test(b.textContent));
+           if (cancel) cancel.click();
+         }
+         await new Promise((r) => setTimeout(r, 300));
+         return opened ? null : "no confirmation for " + btn.textContent.trim() + " on " + path;
+       };
+       const out = [];
+       // A Project's delete lives on its detail page (the list row navigates
+       // there); the credential table is a settings section, which renders
+       // inside the panel rather than in <main>.
+       for (const [path, match] of [["/projects/proj_verify", /delete/i], ["/source-credentials", /remove/i]]) {
+         const problem = await openDeleteConfirm(path, match);
+         if (problem) out.push(problem);
+       }
+       return out;
+     })()`
+  );
+  check(
+    Array.isArray(guardedDeletes) && guardedDeletes.length === 0,
+    `the Project and credential deletes ask first (${Array.isArray(guardedDeletes) ? guardedDeletes.join("; ") || "both confirmed" : String(guardedDeletes)})`
+  );
+
+  }
 
   // 9e. Guidance must point at places that exist. The rail dropped the
   //     Workspaces and LLM pages, so a hint that still says "go to the
