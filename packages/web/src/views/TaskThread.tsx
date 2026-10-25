@@ -108,6 +108,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const [handoffDialog, setHandoffDialog] = useState<{ aimRuntimeId?: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
+  /**
+   * The view is one component reused for every task (App renders
+   * <TaskThreadView taskId=… /> with no key), so a ref survives a task switch.
+   * Having scrolled up in the previous thread would then open the next one at
+   * the top, with the newest message off-screen — so re-stick on every switch.
+   */
+  useEffect(() => {
+    stickBottom.current = true;
+  }, [taskId]);
   const composerPromptRef = useRef<HTMLTextAreaElement>(null);
   const composerRuntimeRef = useRef<HTMLSelectElement>(null);
   /** Handoff opened in the quick-view modal (from the ready banner). */
@@ -1164,6 +1173,10 @@ function Composer({
   const [handoffReady, setHandoffReady] = useState(false);
   useEffect(() => {
     setPrompt(readDraft(taskId));
+    // Same reused-component problem as the scroll ref: a handoff generated for
+    // the previous task's message must not make this task's first send skip the
+    // one it needs.
+    setHandoffReady(false);
   }, [taskId]);
   useEffect(() => {
     writeDraft(taskId, prompt);

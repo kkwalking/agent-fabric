@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { get, post, fmtRelative, shortId } from "../api";
 import { CopyButton, ErrorBox, Icon, StatusBadge, useAsync, usePolling } from "../components";
 import { navigate } from "../router";
@@ -17,6 +17,13 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
   const detail = useAsync<any>(() => get(`/api/tasks/${taskId}/detail`), [taskId]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // App renders <TaskLifecycleView taskId=… /> with no key, so this component is
+  // reused when the user switches tasks. Carrying `busy` over would leave the
+  // next task's buttons disabled until the previous task's request settled.
+  useEffect(() => {
+    setBusy(null);
+    setError(null);
+  }, [taskId]);
 
   const inFlight = detail.data && ["preparing", "running", "validating", "finalizing", "publishing"].includes(detail.data.status);
   // A failed task with a retry scheduled is still moving: poll it too, so the
