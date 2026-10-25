@@ -281,6 +281,15 @@ export function AcpChat({ sessionId }: AcpChatProps) {
   const [status, setStatus] = useState<string | null>(null);
   /** Whether a turn is in flight — the composer is locked while it is. */
   const [running, setRunning] = useState(false);
+  /**
+   * A stop request has been sent and the server has not confirmed it yet.
+   *
+   * The server's stop is idempotent, but the button gave no feedback at all:
+   * it still read "Stop" and stayed enabled, so the natural response to a
+   * process that takes a second to die was to click it again. This is pure
+   * UI feedback — the authoritative state stays `running` from the server.
+   */
+  const [stopping, setStopping] = useState(false);
   /** Whether the server currently owns an agent process for this session. */
   const [live, setLive] = useState<boolean | null>(null);
   /** A saved agent session exists; the chat can ask the server to resume it. */
@@ -331,6 +340,7 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           setAnswered({});
           setStatus(frame.status);
           setRunning(frame.running);
+          if (!frame.running) setStopping(false);
           setLive(frame.live !== false);
           setCanResume(frame.canResume === true);
           setHasTranscript(frame.hasTranscript === true);
@@ -531,9 +541,13 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           <button
             className="small"
             title="Stop the agent process for this card"
-            onClick={() => send({ type: "stop" })}
+            disabled={stopping}
+            onClick={() => {
+              setStopping(true);
+              send({ type: "stop" });
+            }}
           >
-            Stop
+            {stopping ? "Stopping…" : "Stop"}
           </button>
         )}
       </div>
@@ -622,10 +636,14 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           {running ? (
             <button
               className="danger"
-              onClick={() => send({ type: "cancel" })}
+              disabled={stopping}
+              onClick={() => {
+                setStopping(true);
+                send({ type: "cancel" });
+              }}
               title="Cancel the running turn"
             >
-              Cancel
+              {stopping ? "Cancelling…" : "Cancel"}
             </button>
           ) : (
             <button className="primary" disabled={!canPrompt} onClick={submit}>
