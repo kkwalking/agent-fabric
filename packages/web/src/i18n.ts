@@ -190,8 +190,6 @@ const zh = {
   "sidebar.deleteWorkspaceConfirm": "删除工作区「{name}」？它下面的 {n} 个会话会变成「未归类」，不会被删除。",
   "nav.expand": "展开菜单",
   "nav.collapse": "收起菜单",
-  "nav.search": "搜索",
-  "nav.notifications": "通知",
   "nav.localServer": "本机服务",
   "nav.api": "api",
 } as const;
@@ -356,8 +354,6 @@ const en: Record<MessageKey, string> = {
   "sidebar.deleteWorkspaceConfirm": "Delete the workspace “{name}”? Its {n} session(s) become “Unfiled”; the sessions themselves are not deleted.",
   "nav.expand": "Expand menu",
   "nav.collapse": "Collapse menu",
-  "nav.search": "Search",
-  "nav.notifications": "Notifications",
   "nav.localServer": "local server",
   "nav.api": "api",
 };

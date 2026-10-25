@@ -132,14 +132,18 @@ function writeFixture(dir) {
     env: {}, secretIds: [], tools: [], createdAt: now, updatedAt: now,
     metadata: { lastActivityAt: now },
   });
-  // A board project plus two cards: one in Done (its panel offers the two-step
-  // delete) and one in Review (opened after abandoning an armed delete).
-  const kanbanProject = (id, name, rootPath) => ({
-    id, name, rootPath, workspaceType: "git",
+  // The board shares the Project collection (`source` + `board`), so a board
+  // project is just a Project whose source is the folder the user picked.
+  const boardProject = (id, name, rootPath) => ({
+    id, name,
+    source: { type: "directory", path: rootPath, defaultBranch: "main" },
+    board: { workspaceType: "git", defaultAgentId: "dsh", defaultExecutionMode: "direct" },
     createdAt: now, updatedAt: now,
   });
+  // The board's folder is also an external Workspace: that is what the sidebar
+  // task tree groups a board card's Task under.
   const kanbanCard = (id, title, column) => ({
-    id, projectId: "kproj_verify", title, prompt: title, column,
+    id, projectId: "proj_verify_board", title, prompt: title, column,
     agentId: "dsh", executionMode: "direct", createdAt: now, updatedAt: now,
   });
   const db = {
@@ -160,6 +164,10 @@ function writeFixture(dir) {
       },
     ],
     projects: [
+      // The board's project first: opening /kanban selects `projects[0]` unless
+      // this browser already remembers another one. It is the same record the
+      // Projects page lists — the board has no collection of its own.
+      boardProject("proj_verify_board", "verify-board", "/tmp/af-verify-board"),
       {
         id: "proj_verify",
         name: "verify-project",
@@ -172,7 +180,6 @@ function writeFixture(dir) {
     runs: [], eventShards: [], artifacts: [], handoffs: [],
     runtimeSessions: [], nativeStates: [], kanbanSessions: [],
     config: {},
-    kanbanProjects: [kanbanProject("kproj_verify", "verify-board", "/tmp/af-verify-board")],
     kanbanCards: [
       kanbanCard("card_verify_done", "verify done card", "trash"),
       kanbanCard("card_verify_open", "verify open card", "review"),
@@ -891,17 +898,29 @@ try {
   check(settings.credentialsHeading !== null, `the credentials page renders ("${settings.credentialsHeading}")`);
 
   // 8. Language switch: the shell and the rail both follow it.
+  //    The switch lives in Settings → General (a segmented control), not in the
+  //    brand row — the toolbar keeps only the controls for the rail itself.
   const language = await evaluate(
     cdp,
     `(async () => {
+       history.pushState({}, "", "/settings/general");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 800));
        const before = { lang: document.documentElement.lang, heading: document.querySelector(".settings-nav-title")?.textContent?.trim() };
-       const toggle = [...document.querySelectorAll("button")].find((b) => /Switch to|切换到/.test(b.getAttribute("title") ?? ""));
-       toggle?.click();
-       await new Promise((r) => setTimeout(r, 700));
+       const group = document.querySelector(".settings-segmented");
+       const options = group ? [...group.querySelectorAll("button")] : [];
+       const other = options.find((b) => b.getAttribute("aria-pressed") !== "true");
+       other?.click();
+       await new Promise((r) => setTimeout(r, 900));
+       const switched = { lang: document.documentElement.lang };
+       // Back to the task list: the rail's own labels must follow too.
+       history.pushState({}, "", "/tasks");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 800));
        return {
          before,
          after: {
-           lang: document.documentElement.lang,
+           lang: switched.lang,
            heading: document.querySelector(".settings-nav-title")?.textContent?.trim(),
            rail: document.querySelector(".rail-head-title")?.textContent?.trim(),
          },
@@ -1212,16 +1231,17 @@ try {
   check(unsaved.closed === true, "\"Discard and close\" closes the panel");
 
   // 10. A terminal session actually spawns a PTY process inside the bundle.
-  //     (The UI half: the board's session list must reach the API.)
+  //     (The UI half: the board's project list — the shared Project collection —
+  //     must reach the API. There is no board-only project endpoint any more.)
   const board = await evaluate(
     cdp,
     `(async () => {
-       const res = await fetch("/api/kanban/projects");
+       const res = await fetch("/api/projects");
        const body = await res.json();
        return { ok: res.ok, count: Array.isArray(body) ? body.length : (body.projects?.length ?? 0) };
      })()`
   );
-  check(board.ok, `the board API answers from the bundle (${board.count} project(s))`);
+  check(board.ok, `the project API answers from the bundle (${board.count} project(s))`);
 
   const heading = await evaluate(cdp, `document.querySelector("h1")?.textContent?.trim()`);
   notes.push(`  info landed on "${heading}" (${home.path})`);

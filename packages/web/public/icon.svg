@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <linearGradient id="tile" x1="0.08" y1="0" x2="0.95" y2="1" gradientUnits="objectBoundingBox"><stop offset="0" stop-color="#243246"/><stop offset="0.43" stop-color="#151D32"/><stop offset="1" stop-color="#171229"/></linearGradient>
+  <radialGradient id="light1" cx="0" cy="0" r="1" gradientTransform="translate(275 214) rotate(42) scale(610 660)" gradientUnits="userSpaceOnUse"><stop stop-color="#61D6D5" stop-opacity=".16"/><stop offset="1" stop-color="#61D6D5" stop-opacity="0"/></radialGradient>
+  <radialGradient id="light2" cx="0" cy="0" r="1" gradientTransform="translate(755 770) rotate(50) scale(480 550)" gradientUnits="userSpaceOnUse"><stop stop-color="#A077FF" stop-opacity=".17"/><stop offset="1" stop-color="#A077FF" stop-opacity="0"/></radialGradient>
+  <linearGradient id="cyan" x1="285" y1="710" x2="512" y2="260" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#2E9AD9"/><stop offset=".49" stop-color="#42C5E0"/><stop offset="1" stop-color="#80EECF"/></linearGradient>
+  <linearGradient id="purple" x1="505" y1="285" x2="727" y2="730" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#AE9AFF"/><stop offset=".48" stop-color="#887BFF"/><stop offset="1" stop-color="#6F6FF4"/></linearGradient>
+  <linearGradient id="orange" x1="394" y1="548" x2="680" y2="572" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FFD18E"/><stop offset=".45" stop-color="#FFAE81"/><stop offset="1" stop-color="#FF7D92"/></linearGradient>
+  <linearGradient id="tileEdge" x1="130" y1="90" x2="900" y2="900" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF" stop-opacity=".23"/><stop offset=".5" stop-color="#FFFFFF" stop-opacity=".065"/><stop offset="1" stop-color="#FFFFFF" stop-opacity=".12"/></linearGradient>
+  <clipPath id="tileClip"><rect x="74" y="74" width="876" height="876" rx="205"/></clipPath>
+</defs>
+<rect x="74" y="74" width="876" height="876" rx="205" fill="url(#tile)"/>
+<g clip-path="url(#tileClip)">
+ <rect x="74" y="74" width="876" height="876" fill="url(#light1)"/>
+ <rect x="74" y="74" width="876" height="876" fill="url(#light2)"/>
+ <path d="M130 220 C285 145 540 96 878 166" fill="none" stroke="#FFFFFF" stroke-opacity=".027" stroke-width="74"/>
+ <circle cx="512" cy="512" r="296" stroke="#FFFFFF" stroke-opacity=".045" fill="none" stroke-width="2"/>
+ <circle cx="512" cy="512" r="244" stroke="#FFFFFF" stroke-opacity=".025" fill="none" stroke-width="2"/>
+ <!-- woven F/A hybrid: three independent routing strands -->
+ <path d="M306 721 L448 357 Q467 304 508 303" fill="none" stroke="#050917" stroke-opacity=".42" stroke-width="121" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 16)"/>
+ <path d="M306 721 L448 357 Q467 304 508 303" fill="none" stroke="url(#cyan)" stroke-width="111" stroke-linecap="round" stroke-linejoin="round"/>
+ <path d="M317 700 L458 352" fill="none" stroke="#FFFFFF" stroke-opacity=".15" stroke-width="12" stroke-linecap="round"/>
+ <!-- the warm shuttle threads over the left arm and under the right -->
+ <path d="M405 566 H656" stroke="#030817" stroke-opacity=".45" stroke-width="111" stroke-linecap="round" transform="translate(0 13)"/>
+ <path d="M405 566 H656" stroke="url(#orange)" stroke-width="101" stroke-linecap="round"/>
+ <path d="M419 551 H604" stroke="#FFF6DE" stroke-opacity=".28" stroke-width="10" stroke-linecap="round"/>
+ <!-- right leg is laid over horizontal weft -->
+ <path d="M508 303 Q551 302 572 357 L718 721" fill="none" stroke="#030615" stroke-opacity=".44" stroke-width="122" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 15)"/>
+ <path d="M508 303 Q551 302 572 357 L718 721" fill="none" stroke="url(#purple)" stroke-width="112" stroke-linecap="round" stroke-linejoin="round"/>
+ <path d="M540 324 Q557 341 569 374 L704 700" fill="none" stroke="#FFFFFF" stroke-opacity=".22" stroke-width="11" stroke-linecap="round"/>
+</g>
+<rect x="75.5" y="75.5" width="873" height="873" rx="204" fill="none" stroke="url(#tileEdge)" stroke-width="3"/>
+</svg>

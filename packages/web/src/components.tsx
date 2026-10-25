@@ -35,7 +35,9 @@ export type IconName =
   | "close"
   | "edit"
   | "star"
-  | "compass";
+  | "compass"
+  | "sidebar"
+  | "newSession";
 
 const iconPaths: Record<IconName, ReactNode> = {
   star: (
@@ -233,6 +235,25 @@ const iconPaths: Record<IconName, ReactNode> = {
       <path d="m15 9-2 5-4 1 2-5z" />
     </>
   ),
+  /**
+   * Rail collapse/expand: a panel outline with a filled rail column on the
+   * left (the reference UI's own control). The rail reads as "the part that
+   * goes away", so one icon serves both directions.
+   */
+  sidebar: (
+    <>
+      <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+      <path d="M9.2 4.5v15" />
+      <path d="M5.6 8.2h1.6M5.6 11.4h1.6" />
+    </>
+  ),
+  /** "New session": a plus inside a speech bubble. */
+  newSession: (
+    <>
+      <path d="M20.5 11.4a8.2 8.2 0 0 1-11.9 7.3L4 20l1.3-4.6A8.2 8.2 0 1 1 20.5 11.4Z" />
+      <path d="M12 8.6v5.6M9.2 11.4h5.6" />
+    </>
+  ),
   stop: (
     <>
       <rect x="7" y="7" width="10" height="10" rx="1.5" />
@@ -240,10 +261,20 @@ const iconPaths: Record<IconName, ReactNode> = {
   ),
 };
 
-export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
+export function Icon({
+  name,
+  size = 16,
+  className,
+}: {
+  name: IconName;
+  size?: number;
+  /** An extra class for the few places that treat one icon differently (a
+   *  workspace's folder, a collapsing chevron). */
+  className?: string;
+}) {
   return (
     <svg
-      className="icon"
+      className={className ? `icon ${className}` : "icon"}
       width={size}
       height={size}
       viewBox="0 0 24 24"

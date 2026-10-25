@@ -1,8 +1,9 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { Icon, IconName } from "./components";
-import { LanguageContext, useI18n, useLanguageState } from "./i18n-react";
-import type { Language, MessageKey } from "./i18n";
+import { LanguageContext, useLanguageState } from "./i18n-react";
+import type { MessageKey } from "./i18n";
 import { navigate, parsePath, usePath, type Route, type SettingsSection } from "./router";
+import { BrandMark } from "./brand";
 import { WorkspaceTaskList } from "./views/WorkspaceTaskList";
 import { RailMenu } from "./views/RailMenu";
 
@@ -126,17 +127,6 @@ const SIDEBAR_COLLAPSED_KEY = "agentfabric.sidebarCollapsed";
  * there so an old bookmark lands on the section instead of the task list.
  */
 /** The sidebar's language switch: one click between the two dictionaries. */
-function LanguageToggle() {
-  const { language, setLanguage } = useI18n();
-  const next: Language = language === "zh" ? "en" : "zh";
-  const label = next === "zh" ? "切换到中文" : "Switch to English";
-  return (
-    <button className="icon-btn" title={label} aria-label={label} onClick={() => setLanguage(next)}>
-      <Icon name="compass" size={15} />
-    </button>
-  );
-}
-
 /** Where closing the settings panel returns to (its opener, else the task list). */
 function closeSettings(): void {
   navigate("/tasks");
@@ -201,31 +191,15 @@ export function App() {
       <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
         <div className="brand">
           <button className="brand-btn" onClick={() => navigate("/tasks")} title={t("nav.tasks")}>
-            {sidebarCollapsed && <span className="brand-mark">AF</span>}
+            {/* The app icon in both states: the full tile when the rail is an
+                icon column, the "A" alone beside the product name otherwise. */}
+            <BrandMark variant={sidebarCollapsed ? "tile" : "glyph"} size={sidebarCollapsed ? 26 : 22} />
             {!sidebarCollapsed && <span className="brand-name">AgentFabric</span>}
           </button>
-          <span className="brand-actions">
-            {!sidebarCollapsed && (
-              <>
-                <button className="icon-btn" title={t("nav.search")}>
-                  <Icon name="search" />
-                </button>
-                <button className="icon-btn" title={t("nav.notifications")}>
-                  <Icon name="bell" />
-                </button>
-                <LanguageToggle />
-              </>
-            )}
-            <button
-              className={`icon-btn sidebar-toggle ${sidebarCollapsed ? "" : "expanded"}`}
-              title={sidebarCollapsed ? t("nav.expand") : t("nav.collapse")}
-              aria-label={sidebarCollapsed ? t("nav.expand") : t("nav.collapse")}
-              aria-expanded={!sidebarCollapsed}
-              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
-            >
-              <Icon name="chevron" size={15} />
-            </button>
-          </span>
+          {/* The collapse control is not here: it sits in the workspace header
+              below, where the panel it controls starts, and it stays in the
+              collapsed rail's icon column so the rail can be reopened. The
+              language switch lives in Settings → General. */}
         </div>
 
         {/* The rail is the app's primary navigation: Tasks, grouped by the
@@ -243,6 +217,15 @@ export function App() {
               <span>{t("sidebar.newSession")}</span>
             </button>
             <div className="rail-head">
+              <button
+                className="icon-btn sidebar-toggle expanded"
+                title={t("nav.collapse")}
+                aria-label={t("nav.collapse")}
+                aria-expanded
+                onClick={() => setSidebarCollapsed(true)}
+              >
+                <Icon name="sidebar" size={16} />
+              </button>
               <span className="rail-head-title">{t("sidebar.workspaces")}</span>
               <span className="rail-head-actions">
                 <button
@@ -262,13 +245,16 @@ export function App() {
                 >
                   <Icon name="grid" size={15} />
                 </button>
+                {/* The one action that creates work, given a `+` like the
+                    reference UI. It used to be a folder icon, which read as
+                    "open a folder" rather than "start a session". */}
                 <button
                   className="icon-btn"
                   title={t("sidebar.newInWorkspace")}
                   aria-label={t("sidebar.newInWorkspace")}
                   onClick={() => navigate("/new")}
                 >
-                  <Icon name="folderOpen" size={15} />
+                  <Icon name="plus" size={16} />
                 </button>
               </span>
             </div>
@@ -294,20 +280,35 @@ export function App() {
           </>
         )}
         {sidebarCollapsed && (
-          <button
-            className={`nav-item ${route.view === "new-task" ? "active" : ""}`}
-            onClick={() => navigate("/new")}
-            title={t("nav.newTask")}
-          >
-            <Icon name="compose" size={15} />
-            <span>{t("nav.newTask")}</span>
-          </button>
+          /* Collapsed rail: the same two controls as the expanded header, in the
+             same order and the same place — collapse/expand first, then the
+             icon that starts a new session (what the full-width 新会话 button
+             does). Both stay on the panel's own top row. */
+          <div className="rail-head rail-head-collapsed">
+            <button
+              className="icon-btn sidebar-toggle"
+              title={t("nav.expand")}
+              aria-label={t("nav.expand")}
+              aria-expanded={false}
+              onClick={() => setSidebarCollapsed(false)}
+            >
+              <Icon name="sidebar" size={16} />
+            </button>
+            <button
+              className={`icon-btn rail-new-icon ${route.view === "new-task" ? "active" : ""}`}
+              title={t("sidebar.newSession")}
+              aria-label={t("sidebar.newSession")}
+              onClick={() => navigate("/new")}
+            >
+              <Icon name="newSession" size={16} />
+            </button>
+          </div>
         )}
 
         <RailMenu currentPath={path} />
 
         <div className="foot" title={`${t("nav.localServer")} — ${t("nav.api")}: ${health}`}>
-          <span className="avatar">AF</span>
+          <BrandMark variant="tile" size={28} className="avatar" />
           <span className="foot-text">
             <span className="foot-title">{t("nav.localServer")}</span>
             <span className="foot-sub">

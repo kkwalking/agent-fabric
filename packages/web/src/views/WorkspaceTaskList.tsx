@@ -457,6 +457,10 @@ export function WorkspaceTaskList({
               ref={groupMenuOpen ? groupMenuRef : undefined}
               className={`ws-group-head ${isCollapsed ? "collapsed" : ""} ${groupMenuOpen ? "menu-open" : ""}`}
             >
+              {/* A workspace heading is a *folder*, not a session: it carries a
+                  folder icon (as the reference UI does) and the chevron that
+                  says whether it is open, so the eye can tell the two levels
+                  apart at a glance. Sessions below stay icon-less and indented. */}
               <button
                 className="ws-group-toggle"
                 onClick={() => {
@@ -466,7 +470,11 @@ export function WorkspaceTaskList({
                 aria-expanded={!isCollapsed}
                 title={isCollapsed ? t("sidebar.expandGroup") : t("sidebar.collapseGroup")}
               >
-                <Icon name="chevron" size={12} />
+                {/* The folder icon is the disclosure affordance: open folder
+                    when the group is expanded, closed when collapsed. A
+                    separate chevron beside it was a second arrow saying the
+                    same thing. */}
+                <Icon name={isCollapsed ? "folder" : "folderOpen"} size={14} className="ws-group-folder" />
                 <span className="ws-group-name">{group.label}</span>
                 <span className="ws-group-count">{group.tasks.length}</span>
               </button>
