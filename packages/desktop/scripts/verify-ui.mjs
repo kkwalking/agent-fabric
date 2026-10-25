@@ -444,6 +444,41 @@ try {
   check(!home.dashboardChunkLoaded, "no Dashboard chunk is loaded");
   check(home.settingsClosed, "navigating away closes the settings panel");
 
+  // 9b. Every page renders inside the packaged app. A page that throws or
+  //     never paints is invisible to a check that only visits the rail, and it
+  //     is the most common way a build ships a broken screen.
+  const pages = [
+    ["/tasks", "Tasks"],
+    ["/runs", "Runs"],
+    ["/usage", "Usage"],
+    ["/handoffs", "Handoffs"],
+    ["/projects", "Projects"],
+    ["/runtimes", "Runtimes"],
+    ["/sessions", "Native sessions"],
+    ["/trash", "Deleted tasks"],
+    ["/kanban", "Board"],
+  ];
+  for (const [path, label] of pages) {
+    const verdict = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", ${JSON.stringify(path)});
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+         const main = document.querySelector("main");
+         return {
+           heading: main?.querySelector("h1")?.textContent?.trim() ?? null,
+           textLen: (main?.innerText ?? "").length,
+           errorText: document.querySelector(".error-box, [role='alert']")?.textContent?.slice(0, 80) ?? null,
+         };
+       })()`
+    );
+    check(
+      verdict.heading !== null && verdict.textLen > 40 && !verdict.errorText,
+      `${label} renders (${verdict.heading ?? "no heading"}, ${verdict.textLen} chars${verdict.errorText ? `, error: ${verdict.errorText}` : ""})`
+    );
+  }
+
   // 10. A terminal session actually spawns a PTY process inside the bundle.
   //     (The UI half: the board's session list must reach the API.)
   const board = await evaluate(
