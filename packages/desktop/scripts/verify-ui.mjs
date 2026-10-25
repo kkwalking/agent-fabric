@@ -485,6 +485,53 @@ try {
       empty.pageErrors.length === 0,
       `every page opens clean on an empty install (${empty.pageErrors.join("; ") || "none"})`
     );
+
+    // The first-use path has to be walkable: the composer is blocked (no
+    // workspace), and its message must point somewhere that actually opens.
+    const firstUse = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/new");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1800));
+         const main = () => document.querySelector("main");
+         const sendBtn = [...document.querySelectorAll("main button")]
+           .find((b) => b.className.includes("send"));
+         const hint = [...document.querySelectorAll("main .card")]
+           .map((c) => c.textContent.trim())
+           .find((t) => t.includes("Workspace")) ?? "";
+         const out = {
+           sendDisabled: sendBtn ? sendBtn.disabled : null,
+           hintMentionsPath: /更多/.test(hint) && /项目/.test(hint),
+           hintText: hint,
+         };
+         // Follow the path the hint describes.
+         history.pushState({}, "", "/projects");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1400));
+         const trigger = [...document.querySelectorAll("main a, main button")]
+           .find((el) => /New project/.test(el.textContent));
+         out.hasCreateEntry = Boolean(trigger);
+         if (trigger) {
+           trigger.click();
+           await new Promise((r) => setTimeout(r, 700));
+           out.dialogOpened = [...document.querySelectorAll(".modal, [role=dialog]")]
+             .some((m) => /project/i.test(m.innerText));
+         }
+         return out;
+       })()`
+    );
+    check(firstUse.sendDisabled === true, "a fresh install blocks the composer until a workspace exists");
+    check(firstUse.hintMentionsPath === true, "the block message names a path that exists (更多 → 项目)");
+    // The message must not send the user to a page that does not exist: there is
+    // no workspace-creation entry in the UI, and the platform creates a task's
+    // working copy itself, so "go create a Workspace" is a dead end.
+    check(
+      !/前往 Workspaces|新建一个 Workspace|Workspaces 页面/.test(firstUse.hintText ?? ""),
+      `the block message does not send the user to a page that cannot exist (${JSON.stringify((firstUse.hintText ?? "").slice(0, 60))})`
+    );
+    check(firstUse.hasCreateEntry === true, "the projects page offers a way to create the first project");
+    check(firstUse.dialogOpened === true, "clicking it opens the create dialog");
   }
 
   // 6. The "More" panel reaches the pages that have no nav row.

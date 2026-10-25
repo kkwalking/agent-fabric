@@ -234,7 +234,7 @@ export function NewTaskView() {
         <ErrorBox message="尚未配置任何 LLM 模型 — 请先在左下角「更多」→ 设置 → 模型里添加 Provider 与模型，再回来发起任务（或在 Runtime 选择 Codex / Claude Code，使用其自有登录）" />
       )}
       {missingWorkspace && (
-        <ErrorBox message="尚未配置 Workspace — 请先在左下角「更多」→ 项目里新建一个项目（git 仓库或本地目录），再回来选择；也可以改用 Project 模式直接指定项目" />
+        <ErrorBox message="还没有可用于任务的工作目录 — 最直接的方式：在左下角「更多」→ 项目里新建一个项目（git 仓库或本地目录），然后在这里选中它；平台会为每个任务自动创建独立的工作副本，不需要你手工建 Workspace。注意 Project 任务需要容器化隔离 Runtime：如果本机没有安装 Docker，请先在「更多」→ 运行时 里确认可用项，或安装 Docker 后重启应用。" />
       )}
       {missingProjectRuntime && (
         <ErrorBox message="没有可用于 Project Task 的隔离 Runtime — Project Coding Task 必须运行在 isolated Runtime 中（v11 hardening §4），不会降级到 Host。请先在左下角「更多」→ 运行时里启用一个 containerized Runtime，或把 Project 改选为 none 走 Workspace 模式" />
