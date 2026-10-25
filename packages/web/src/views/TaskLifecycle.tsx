@@ -338,7 +338,11 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
                 <td className="actions">
                   <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>inspect</button>
                   {["pending", "starting", "running"].includes(run.status) && (
-                    <> <button className="small danger" onClick={() => act("cancel", "cancel")}>cancel</button></>
+                    // Same guard as the task-level Cancel button: `busy` is one
+                    // value for the whole view, so a second click would clear
+                    // it for whichever action finishes first and re-enable the
+                    // rest while that request is still in flight.
+                    <> <button className="small danger" disabled={busy !== null} onClick={() => act("cancel", "cancel")}>cancel</button></>
                   )}
                 </td>
               </tr>
