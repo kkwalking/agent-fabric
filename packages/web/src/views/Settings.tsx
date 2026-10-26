@@ -761,7 +761,32 @@ function parseHeaderLines(text: string): Record<string, string> | null {
   return entries.length > 0 ? Object.fromEntries(entries) : null;
 }
 
-/** Each harness CLI's path override: one row per CLI, empty means "from PATH". */
+/** What `/api/harness/clis` answers. */
+interface HarnessCliRow {
+  id: string;
+  command: string;
+  path?: string;
+  version?: string;
+  source?: "configured" | "path" | "user-dirs" | "login-shell";
+  offPath: boolean;
+  problem?: string;
+}
+
+interface HarnessCliReport {
+  clis: HarnessCliRow[];
+  shell: { command: string | null; pathFound: boolean };
+}
+
+/**
+ * Each harness CLI's path override, with what detection found on this machine.
+ *
+ * The override is the exception, not the rule: an empty field means "detect it",
+ * and detection looks past PATH (the folders npm/bun/nvm/Homebrew install into,
+ * then the login shell's PATH) because the server may be a Dock-launched app
+ * whose PATH is launchd's. The row therefore shows the resolved path, its
+ * version, and — when the folder is not on a terminal's PATH — why a terminal's
+ * `which` misses a CLI that runs perfectly here.
+ */
 function HarnessSection(props: { config: Record<string, unknown>; save: SaveSection }) {
   const { t } = useI18n();
   const read = (key: string) => {
@@ -772,17 +797,37 @@ function HarnessSection(props: { config: Record<string, unknown>; save: SaveSect
     opencode: read("opencode"),
     pi: read("pi"),
     codex: read("codex"),
+    dsh: read("dsh"),
     claude: read("claudeCode"),
   };
   const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<HarnessCliReport | null>(null);
+  const [detecting, setDetecting] = useState(false);
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
-  const rows: Array<{ key: keyof typeof form; label: string; placeholder: string }> = [
-    { key: "opencode", label: "opencode", placeholder: "opencode" },
-    { key: "pi", label: "pi", placeholder: "pi" },
-    { key: "codex", label: "codex", placeholder: "codex" },
-    { key: "claude", label: "claude (Claude Code)", placeholder: "claude" },
+  const rows: Array<{ key: keyof typeof form; label: string; command: string }> = [
+    { key: "opencode", label: "opencode", command: "opencode" },
+    { key: "pi", label: "pi", command: "pi" },
+    { key: "codex", label: "codex", command: "codex" },
+    { key: "dsh", label: "dsh (DSH)", command: "dsh" },
+    { key: "claude", label: "claude (Claude Code)", command: "claude" },
   ];
+  const detect = useCallback(async (refresh: boolean) => {
+    setDetecting(true);
+    try {
+      setReport(await get<HarnessCliReport>(`/api/harness/clis${refresh ? "?refresh=1" : ""}`, undefined, true));
+    } catch {
+      // Detection is informational: a failed probe must not hide the form.
+      setReport(null);
+    } finally {
+      setDetecting(false);
+    }
+  }, []);
+  useEffect(() => {
+    void detect(false);
+  }, [detect]);
+  const found = (command: string): HarnessCliRow | undefined =>
+    report?.clis.find((cli) => cli.command === command || cli.id === command);
   const save = async () => {
     setBusy(true);
     try {
@@ -790,29 +835,76 @@ function HarnessSection(props: { config: Record<string, unknown>; save: SaveSect
         opencode: { bin: form.opencode.trim() },
         pi: { bin: form.pi.trim() },
         codex: { bin: form.codex.trim() },
+        dsh: { bin: form.dsh.trim() },
         claudeCode: {
           bin: form.claude.trim(),
           projectsDir: ((props.config.claudeCode ?? {}) as { projectsDir?: string }).projectsDir ?? "",
         },
       });
+      // The saved override changes what detection answers, so look again.
+      void detect(true);
     } finally {
       setBusy(false);
     }
   };
   return (
     <Page title="settings.nav.harness" description={t("harness.description")}>
-      {rows.map((row) => (
-        <Field key={row.key} label={row.label}>
-          <input
-            className="mono"
-            value={form[row.key]}
-            placeholder={row.placeholder}
-            onChange={(e) => setForm({ ...form, [row.key]: e.target.value })}
-          />
-        </Field>
-      ))}
+      {rows.map((row) => {
+        const detected = found(row.command);
+        return (
+          <Field key={row.key} label={row.label}>
+            <input
+              className="mono"
+              value={form[row.key]}
+              // The command name, not the detected path: the path is on the line
+              // below with its version, and a placeholder that looks like a
+              // stored value is the one thing this page must not do — an empty
+              // field means "detect it".
+              placeholder={row.command}
+              onChange={(e) => setForm({ ...form, [row.key]: e.target.value })}
+            />
+            <HarnessCliState row={detected} detecting={detecting} />
+          </Field>
+        );
+      })}
+      {report && (
+        <div className="settings-hint">
+          {report.shell.pathFound
+            ? t("harness.shellOk", { shell: report.shell.command ?? "" })
+            : t("harness.shellUnknown", { shell: report.shell.command ?? "" })}
+          <div style={{ marginTop: 6 }}>
+            <button className="btn-outline" disabled={detecting} onClick={() => void detect(true)}>
+              {detecting ? t("harness.checking") : t("harness.recheck")}
+            </button>
+          </div>
+        </div>
+      )}
       <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" />
     </Page>
+  );
+}
+
+/** One line under a CLI field: what detection found, or why it found nothing. */
+function HarnessCliState(props: { row?: HarnessCliRow; detecting: boolean }) {
+  const { t } = useI18n();
+  if (props.detecting && !props.row) return <div className="settings-hint">{t("harness.checking")}</div>;
+  if (!props.row) return null;
+  const { row } = props;
+  if (!row.path) {
+    return (
+      <div className="settings-hint settings-field-hint">
+        {row.problem ? t("harness.configuredProblem", { problem: row.problem }) : t("harness.missing")}
+      </div>
+    );
+  }
+  const source = row.source ? t(`harness.source.${row.source}` as MessageKey) : "";
+  return (
+    <div className="settings-hint settings-field-hint">
+      <span className="mono">{row.path}</span>
+      {row.version && <span> · {row.version}</span>}
+      {source && <span> · {source}</span>}
+      {row.offPath && <div className="settings-warn">{t("harness.offPath")}</div>}
+    </div>
   );
 }
 

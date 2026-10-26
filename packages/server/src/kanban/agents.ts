@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { DomainError } from "@agentfabric/core";
 import type { KanbanAgentKind, KanbanCard, KanbanSessionTransport, Project } from "@agentfabric/core";
+import { detectHarnessCli, harnessCliSpec } from "../harnessCli.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -206,6 +207,30 @@ async function binaryAvailable(binary: string): Promise<boolean> {
   }
 }
 
+/**
+ * Whether the agent's CLI is on this machine, and where.
+ *
+ * Detection (`../harnessCli.ts`) rather than `which`: the server may run from a
+ * Dock-launched app whose PATH is launchd's, in which case every npm/bun/nvm/
+ * Homebrew-installed CLI is invisible to `which` while it is installed and
+ * runnable. The row also carries the resolved path so the launch uses exactly
+ * the binary the board said was there.
+ */
+async function locate(binary: string): Promise<{ installed: boolean; path?: string; offPath: boolean; problem?: string }> {
+  const spec = harnessCliSpec(binary);
+  if (!spec) {
+    const installed = await binaryAvailable(binary);
+    return { installed, offPath: false };
+  }
+  const detection = await detectHarnessCli(spec);
+  return {
+    installed: detection.path !== undefined,
+    ...(detection.path ? { path: detection.path } : {}),
+    offPath: detection.offPath,
+    ...(detection.problem ? { problem: detection.problem } : {}),
+  };
+}
+
 export interface KanbanAgentView {
   id: KanbanAgentKind;
   label: string;
@@ -215,12 +240,21 @@ export interface KanbanAgentView {
   transport: KanbanSessionTransport;
   modelFlag: string | null;
   permissionModes: Array<{ id: string; label: string; risky: boolean }>;
+  /** Absolute path of the CLI detection found; absent when not installed. */
+  cliPath?: string;
+  /**
+   * The CLI is installed in a folder the terminal's PATH does not have, so
+   * `which <command>` there finds nothing — the case where a user is sure the
+   * tool is missing. False when the terminal's PATH could not be read.
+   */
+  cliOffPath: boolean;
 }
 
 export async function listKanbanAgents(): Promise<KanbanAgentView[]> {
   return Promise.all(
     KANBAN_AGENTS.map(async (entry) => {
-      const installed = await binaryAvailable(entry.binary);
+      const located = await locate(entry.binary);
+      const installed = located.installed;
       const extra = installed ? await entry.availability?.() : undefined;
       const available = installed && (extra?.available ?? true);
       return {
@@ -232,6 +266,8 @@ export async function listKanbanAgents(): Promise<KanbanAgentView[]> {
         transport: entry.transport,
         modelFlag: entry.modelFlag,
         permissionModes: entry.permissionModes.map(({ id, label, risky }) => ({ id, label, risky })),
+        ...(located.path ? { cliPath: located.path } : {}),
+        cliOffPath: located.offPath,
       };
     })
   );
@@ -249,13 +285,21 @@ export interface KanbanLaunch {
  * Builds the argv/env for one card. The prompt is always one argv element —
  * never interpolated into a shell string — except for the ACP transport,
  * where the session runtime sends it over the protocol after the handshake.
+ *
+ * `file` is the executable to run: the one the caller resolved (`executable`,
+ * from `resolveKanbanAgentExecutable`) when it has one, else the bare command
+ * name, which the spawn resolves against PATH. The caller passing it in is what
+ * keeps the process that starts identical to the one the availability check
+ * approved — reading a process-wide cache here instead let a stale entry from an
+ * earlier check decide which binary ran.
  */
 export function buildKanbanLaunch(
   card: KanbanCard,
   project: Project,
-  options: { resumeSessionId?: string } = {}
+  options: { resumeSessionId?: string; executable?: string } = {}
 ): KanbanLaunch {
   const entry = getKanbanAgent(card.agentId);
+  const file = options.executable ?? entry.binary;
   const modes = entry.permissionModes;
   const selected =
     modes.find((mode) => mode.id === card.permissionModeId) ??
@@ -271,7 +315,7 @@ export function buildKanbanLaunch(
   if (options.resumeSessionId && entry.resumeArgs) {
     args.push(...entry.resumeArgs(options.resumeSessionId));
     return {
-      file: entry.binary,
+      file,
       args,
       env: {
         ...(selected.env ?? {}),
@@ -304,7 +348,7 @@ export function buildKanbanLaunch(
     AGENTFABRIC_KANBAN_PROJECT_ID: project.id,
   };
 
-  return { file: entry.binary, args, env, interactiveTui: entry.interactiveTui, transport: entry.transport };
+  return { file, args, env, interactiveTui: entry.interactiveTui, transport: entry.transport };
 }
 
 /** Absolute $DSH_HOME, mirroring the harness's own launcher. */
@@ -317,17 +361,28 @@ export function dshAcpProfileDir(): string {
   return join(dshHome(), "profiles", "acp");
 }
 
-/** Throw the right loud error before spawning a process that cannot start. */
-export async function assertKanbanAgentAvailable(card: KanbanCard): Promise<void> {
+/**
+ * Throw the right loud error before spawning a process that cannot start, and
+ * hand back the executable that was approved.
+ *
+ * The check is detection's, not `which`'s: a CLI installed in `~/.local/bin`
+ * or an nvm Node folder is runnable from the server (its PATH has those
+ * folders) even when the terminal that starts the board would not find it. The
+ * returned path is what `buildKanbanLaunch` must run: resolving twice would let
+ * the two answers differ.
+ */
+export async function assertKanbanAgentAvailable(card: KanbanCard): Promise<{ executable?: string }> {
   const entry = getKanbanAgent(card.agentId);
-  if (!(await binaryAvailable(entry.binary))) {
+  const located = await locate(entry.binary);
+  if (!located.installed) {
     throw new DomainError(
       "kanban-agent-not-installed",
-      `${entry.label} (${entry.binary}) is not on PATH — ${entry.installHint}`
+      `${entry.label} (${entry.binary}) is not on PATH — ${located.problem ?? entry.installHint}`
     );
   }
   const extra = await entry.availability?.();
   if (extra && !extra.available) {
     throw new DomainError("kanban-agent-profile-missing", `${entry.label}: ${extra.hint ?? "profile is missing"}`);
   }
+  return located.path ? { executable: located.path } : {};
 }

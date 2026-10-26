@@ -79,6 +79,13 @@ import {
   dockerBin,
   execDocker,
 } from "@agentfabric/runtimes";
+import {
+  applyConfiguredHarnessBins,
+  detectHarnessClis,
+  ensureUserPath,
+  forgetDetection,
+  type HarnessCliReport,
+} from "./harnessCli.js";
 
 export interface ServerOptions {
   dataDir: string;
@@ -357,6 +364,20 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   const store = await Store.open(options.dataDir);
   await seedDefaults(store);
 
+  /* ---------------- where the harness CLIs are ---------------- */
+
+  // Detection, before anything can spawn a CLI (`./harnessCli.ts`). Two writes,
+  // both process-wide and both idempotent:
+  //
+  // - the folders user tools are installed in are appended to PATH, so the
+  //   board's PTY, a run's harness and the docker client all resolve the same
+  //   binaries — a Dock-launched app has launchd's PATH and none of them;
+  // - a configured `codex.bin` (and the other overrides) becomes the
+  //   `AGENTFABRIC_*_BIN` variable the adapters already read, unless the
+  //   environment set it — an operator's value is never overwritten by the file.
+  ensureUserPath();
+  for (const line of applyConfiguredHarnessBins(store.config())) console.log(`[agent-fabric] harness CLI from the config file: ${line}`);
+
   /* ---------------- configuration file ---------------- */
 
   // See `./settings.ts`. The file is created **only when missing**, so a host
@@ -567,6 +588,27 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /* ---------------- health ---------------- */
 
   app.get("/api/health", (_req, res) => ok(res, { status: "ok", time: new Date().toISOString() }));
+
+  /**
+   * Where each harness CLI is on this machine.
+   *
+   * The Settings page shows this under the CLI path overrides, and the board's
+   * agent chips are built from the same detection. It exists because the honest
+   * answer is not `which <name>`: a Dock-launched app has launchd's PATH, so a
+   * CLI installed by npm/bun/nvm/Homebrew is missing from it while being
+   * perfectly runnable — the case where the board used to claim "本机没有安装任何
+   * agent CLI". `?refresh=1` drops the kept answers (a CLI installed while the
+   * server runs) and looks again.
+   */
+  app.get(
+    "/api/harness/clis",
+    ah(async (req, res) => {
+      const refresh = req.query.refresh === "1";
+      if (refresh) forgetDetection();
+      const report: HarnessCliReport = await detectHarnessClis({ config: store.config(), refresh });
+      ok(res, report);
+    })
+  );
 
   /**
    * Can this machine run a containerized runtime?
@@ -1711,6 +1753,12 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
         await store.updateConfig(stored as AppConfig);
         appliedConfig = { revision: revisionOf((await readConfigFile(configFile)).text), at };
         recordSettingsChange("ui", changedConfigKeys(before, stored as AppConfig), at);
+        // A saved CLI path changes what detection answers (and what the adapters
+        // spawn), so the kept answers and the environment copy are both redone.
+        for (const line of applyConfiguredHarnessBins(stored as AppConfig)) {
+          console.log(`[agent-fabric] harness CLI from the config file: ${line}`);
+        }
+        forgetDetection();
       } catch (e) {
         return failDomain(res, e);
       }
@@ -1818,6 +1866,16 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
         }
         changed = changedConfigKeys(before, file.parsed);
         recordSettingsChange("file", changed, at);
+        // A hand-edited `codex.bin` (and the rest) reaches the adapters here, on
+        // a host that cannot restart itself: the environment copy and the kept
+        // detection answers are both redone. A host that *can* restart does the
+        // same in the fresh process's boot.
+        if (options.restart === undefined) {
+          for (const line of applyConfiguredHarnessBins(file.parsed)) {
+            console.log(`[agent-fabric] harness CLI from the config file: ${line}`);
+          }
+          forgetDetection();
+        }
       } catch (e) {
         return failDomain(res, e);
       }

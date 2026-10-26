@@ -235,6 +235,15 @@ Settings 是一个带左侧导航的弹窗，按分区呈现，而不是把原�
 
 凡是全局设置都在这里：**代码源凭据**（Git 的 HTTPS token 或 SSH 私钥）不挂在任何项目下，项目只按 id 引用一个凭据。凭据值写入 Secret store 后只显示掩码，只在单次 Git 操作期间临时落地，不会进入远端 URL、命令行参数、日志或 agent 的运行环境。
 
+* **Harness CLI 自动检测**：`opencode` / `pi` / `codex` / `dsh` / `claude` 五个 CLI 的路径默认**自动检测**，配置文件里对应的 `bin` 留空即可。检测不是 `which`——macOS 上从 Dock 启动的 App 拿到的是 launchd 的 `PATH`（只有 `/usr/bin:/bin:/usr/sbin:/sbin`），npm、bun、nvm、pnpm、asdf、mise、Homebrew 装的 CLI 全都不在里面，于是「装了五个 agent」的机器会被告知「本机没有安装任何 agent CLI」。检测按四条规则依次找，命中即止：
+
+  1. **显式指定**：环境变量 `AGENTFABRIC_<NAME>_BIN` 优先于配置文件里的 `bin`；显式指定的路径**不会被猜**——路径不存在就报错说明，不会悄悄换一个二进制；
+  2. 服务器进程自己的 `PATH`；
+  3. **包管理器/版本管理器的安装目录**（`~/.local/bin`、`~/.npm-global/bin`、`~/.npmrc` 的 prefix、`~/.bun/bin`、`~/.volta/bin`、`~/.asdf/shims`、mise/fnm/nvm 的 Node 目录、`~/.opencode/bin`、Homebrew 等；nvm 取 `alias/default` 那个版本，没设则取最高版本）。启动时这些目录会**追加到进程 PATH**，所以看板 PTY、Run 的 harness、docker 客户端解析到的都是同一个二进制；
+  4. **登录 shell 的 `PATH`**：用 `$SHELL -ilc`（失败再 `-lc`）问一次，覆盖 `nvm use`、自定义 prefix 这类固定清单猜不到的目录；答案缓存一分钟，超时不影响请求。
+
+  设置页每个 CLI 下面显示检测到的**绝对路径 + 版本 + 来源**，找不到则显示「未找到」。CLI 装在一个**终端 `PATH` 里没有的目录**时会额外标注——这正是「我明明装了，终端里 `which` 却找不到」的情形。看板的新建任务表单同样用这套检测：chip 的可用性、启动时用的二进制都来自它，所以不会因为 App 的 `PATH` 不同而把已安装的 CLI 判成未安装。`GET /api/harness/clis?refresh=1` 丢弃缓存重新检测（运行期新装的 CLI 用得上）。
+
 * **模型也在配置文件里**：`providers` 段就是供应商与模型的声明，形如
 
   ```json

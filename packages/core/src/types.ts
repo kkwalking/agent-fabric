@@ -1666,6 +1666,9 @@ export interface AppConfig {
   codex?: {
     bin?: string;
   };
+  dsh?: {
+    bin?: string;
+  };
   claudeCode?: {
     bin?: string;
     /** Override for the ~/.claude/projects transcript root (tests). */

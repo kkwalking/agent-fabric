@@ -424,6 +424,12 @@ export function TaskCreateForm({
               })}
             </div>
           )}
+          {selectedAgent?.available && selectedAgent.cliPath && (
+            <div className="board-hint">
+              {t("board.form.agentFoundAt", { path: selectedAgent.cliPath })}
+              {selectedAgent.cliOffPath && <> · {t("board.form.agentOffPath")}</>}
+            </div>
+          )}
           {agents.length > 0 && !agents.some((agent) => agent.available) && (
             <div className="board-hint warn">{t("board.form.noAgents")}</div>
           )}

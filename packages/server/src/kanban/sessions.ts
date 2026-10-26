@@ -191,7 +191,7 @@ export class KanbanSessionRuntime {
       throw new DomainError("kanban-session-not-startable", "This card already has a running session");
     }
 
-    await assertKanbanAgentAvailable(card);
+    const approved = await assertKanbanAgentAvailable(card);
 
     // A card whose last session recorded a harness session id (and whose
     // process is gone) continues that conversation instead of starting over:
@@ -199,7 +199,10 @@ export class KanbanSessionRuntime {
     const resumeId =
       previous && previous.agentId === card.agentId && previous.nativeSessionId ? previous.nativeSessionId : undefined;
 
-    const launch = buildKanbanLaunch(card, project, resumeId ? { resumeSessionId: resumeId } : {});
+    const launch = buildKanbanLaunch(card, project, {
+      ...(resumeId ? { resumeSessionId: resumeId } : {}),
+      ...approved,
+    });
     const pendingWorktree = card.executionMode === "worktree";
     let cwd = this.kanban.rootOf(project);
     const rootPath = cwd;
@@ -1091,9 +1094,9 @@ export class KanbanSessionRuntime {
     state.resuming = true;
     this.broadcastStatus(state);
     try {
-      await assertKanbanAgentAvailable(card);
+      const approved = await assertKanbanAgentAvailable(card);
       const project = this.kanban.getProject(card.projectId);
-      const launch = buildKanbanLaunch(card, project);
+      const launch = buildKanbanLaunch(card, project, approved);
       const acp = new AcpSession({
         file: launch.file,
         args: launch.args,
@@ -1177,9 +1180,9 @@ export class KanbanSessionRuntime {
     this.broadcastStatus(state);
     this.broadcastComposer(state);
     try {
-      await assertKanbanAgentAvailable(card);
+      const approved = await assertKanbanAgentAvailable(card);
       const project = this.kanban.getProject(card.projectId);
-      const launch = buildKanbanLaunch(card, project);
+      const launch = buildKanbanLaunch(card, project, approved);
       const acp = new AcpSession({
         file: launch.file,
         args: launch.args,

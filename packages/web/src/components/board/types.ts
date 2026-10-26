@@ -70,6 +70,10 @@ export interface KanbanAgent {
   transport: "pty" | "acp";
   permissionModes: KanbanAgentPermissionMode[];
   modelFlag: string | null;
+  /** Absolute path detection found the CLI at; absent when it is not installed. */
+  cliPath?: string;
+  /** Installed in a folder the terminal's PATH lacks — a terminal's `which` misses it. */
+  cliOffPath?: boolean;
 }
 
 export type ColumnCounts = Record<BoardColumnId, number>;

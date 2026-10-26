@@ -912,6 +912,32 @@ try {
   check(settings.sections.some((s) => /凭据|credential/i.test(s)), "the settings nav includes source credentials");
   check(settings.credentialsHeading !== null, `the credentials page renders ("${settings.credentialsHeading}")`);
 
+  // 7b. The Harness CLI page shows what detection found on this machine — the
+  //     whole point of the page: the app's PATH is launchd's, so a CLI installed
+  //     by npm/bun/nvm/Homebrew is invisible to `which` and the board used to
+  //     report "no agent CLI installed" on a machine full of them.
+  const harnessPage = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/settings/harness");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 2500));
+       return {
+         // One line under each CLI field: its resolved path + version, or "not found".
+         states: [...document.querySelectorAll(".settings-page .settings-field-hint")]
+           .map((el) => (el.textContent ?? "").trim())
+           .filter(Boolean),
+         recheck: [...document.querySelectorAll(".settings-body button")]
+           .some((b) => /重新检测|Detect again/.test(b.textContent)),
+       };
+     })()`
+  );
+  check(
+    harnessPage.states.length >= 3,
+    `the Harness CLI page reports detection for ${harnessPage.states.length} CLI(s): ${harnessPage.states.slice(0, 3).join(" | ")}`
+  );
+  check(harnessPage.recheck, "the Harness CLI page can detect again");
+
   // 8. Language switch: the shell and the rail both follow it.
   //    The switch lives in Settings → General (a segmented control), not in the
   //    brand row — the toolbar keeps only the controls for the rail itself.
