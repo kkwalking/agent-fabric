@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../components";
 import { Markdown } from "../markdown";
+import { useT } from "../i18n-react";
+import type { MessageKey } from "../i18n";
 import type { AcpConfigOption, ChatItem, PermissionRequest } from "./board/types";
 
 /**
@@ -30,16 +32,16 @@ type PillState =
   | "disconnected"
   | "error";
 
-const PILL_LABEL: Record<PillState, string> = {
-  connecting: "connecting…",
-  live: "live",
-  working: "working",
-  idle: "idle",
-  attention: "needs attention",
-  paused: "paused",
-  exited: "exited",
-  disconnected: "disconnected",
-  error: "error",
+const PILL_LABEL_KEY: Record<PillState, MessageKey> = {
+  connecting: "board.acp.connecting",
+  live: "board.acp.live",
+  working: "board.acp.working",
+  idle: "board.acp.idle",
+  attention: "board.acp.attention",
+  paused: "board.acp.paused",
+  exited: "board.acp.exited",
+  disconnected: "board.acp.disconnected",
+  error: "board.acp.error",
 };
 
 type ClientFrame =
@@ -220,6 +222,7 @@ function ConfigPicker({
   disabled: boolean;
   onChange: (value: string) => void;
 }) {
+  const t = useT();
   const entries = optionEntries(option);
   if (entries.length === 0) {
     // A free-form option we cannot render as a list still shows its value.
@@ -230,6 +233,7 @@ function ConfigPicker({
     );
   }
   const grouped = entries.some((entry) => entry.group !== undefined);
+  const ungrouped = t("board.acp.other");
   return (
     <label className="acp-config" title={option.description ?? option.name}>
       <select
@@ -240,10 +244,10 @@ function ConfigPicker({
         onChange={(event) => onChange(event.target.value)}
       >
         {grouped ? (
-          Array.from(new Set(entries.map((entry) => entry.group ?? "Other"))).map((group) => (
+          Array.from(new Set(entries.map((entry) => entry.group ?? ungrouped))).map((group) => (
             <optgroup key={group} label={group}>
               {entries
-                .filter((entry) => (entry.group ?? "Other") === group)
+                .filter((entry) => (entry.group ?? ungrouped) === group)
                 .map((entry) => (
                   <option key={entry.value} value={entry.value}>
                     {entry.name}
@@ -276,6 +280,10 @@ export interface AcpChatProps {
 }
 
 export function AcpChat({ sessionId }: AcpChatProps) {
+  const t = useT();
+  /** The socket effect is created once; its handlers read the live translator. */
+  const tRef = useRef(t);
+  tRef.current = t;
   const [link, setLink] = useState<LinkState>("connecting");
   /** Server-side session status (starting/running/awaiting_review/…). */
   const [status, setStatus] = useState<string | null>(null);
@@ -419,7 +427,7 @@ export function AcpChat({ sessionId }: AcpChatProps) {
       if (disposed) return;
       // The browser hides the reason; surface a failed attach instead of
       // showing an empty chat as if the session were healthy.
-      showError(errorRef.current ?? "chat connection failed");
+      showError(errorRef.current ?? tRef.current("board.acp.connectionFailed"));
       setLink("error");
     };
 
@@ -517,9 +525,9 @@ export function AcpChat({ sessionId }: AcpChatProps) {
   return (
     <div className="acp-chat">
       <div className="acp-bar">
-        <span className={`acp-state ${pill}`}>{PILL_LABEL[pill]}</span>
+        <span className={`acp-state ${pill}`}>{t(PILL_LABEL_KEY[pill])}</span>
         {running && <span className="spinner" aria-hidden />}
-        <span className="acp-note">DSH · interactive session</span>
+        <span className="acp-note">{t("board.acp.sessionNote")}</span>
         {configOptions.map((option) => (
           <ConfigPicker
             key={option.id}
@@ -531,7 +539,10 @@ export function AcpChat({ sessionId }: AcpChatProps) {
         {usage && (
           <span
             className="acp-usage mono"
-            title={`${usage.used.toLocaleString()} of ${usage.size.toLocaleString()} tokens in context`}
+            title={t("board.acp.usageTitle", {
+              used: usage.used.toLocaleString(),
+              total: usage.size.toLocaleString(),
+            })}
           >
             {formatUsage(usage)}
           </span>
@@ -540,25 +551,25 @@ export function AcpChat({ sessionId }: AcpChatProps) {
         {liveNow && (
           <button
             className="small"
-            title="Stop the agent process for this card"
+            title={t("board.acp.stopTooltip")}
             disabled={stopping}
             onClick={() => {
               setStopping(true);
               send({ type: "stop" });
             }}
           >
-            {stopping ? "Stopping…" : "Stop"}
+            {stopping ? t("board.acp.stopping") : t("board.acp.stop")}
           </button>
         )}
       </div>
 
       <div className="acp-log" ref={logRef} onScroll={onLogScroll}>
         {timeline.length === 0 && link === "connecting" && (
-          <div className="acp-empty muted">Connecting to the session…</div>
+          <div className="acp-empty muted">{t("board.acp.connectingSession")}</div>
         )}
         {timeline.length === 0 && link === "open" && (
           <div className="acp-empty muted">
-            {paused ? "No saved messages for this session." : "No messages yet."}
+            {paused ? t("board.acp.noSavedMessages") : t("board.acp.noMessages")}
           </div>
         )}
         {timeline.map((entry) =>
@@ -584,22 +595,20 @@ export function AcpChat({ sessionId }: AcpChatProps) {
         )}
         {dead && (
           <div className="acp-dead">
-            The chat connection closed — reopen the card to see this session again.
+            {t("board.acp.dead")}
           </div>
         )}
         {paused && (
           <div className="acp-paused">
             <span>
               {resuming
-                ? "Attaching the agent… your message will be sent when it is ready."
-                : resumable
-                  ? "This session is paused (the server restarted, or the agent exited). Just type: sending resumes the same conversation and keeps the agent's context."
-                  : "This session is not live and has no saved agent session — sending starts a fresh one."}
-              {!hasTranscript && !resuming && " No conversation was saved for it."}
+                ? t("board.acp.attaching")
+                : t(resumable ? "board.acp.resumable" : "board.acp.notLive")}
+              {!hasTranscript && !resuming && t("board.acp.noTranscript")}
             </span>
             {resumable && (
               <button className="small primary" disabled={resuming} onClick={requestResume}>
-                {resuming ? "Resuming…" : "Resume now"}
+                {resuming ? t("board.acp.resuming") : t("board.acp.resumeNow")}
               </button>
             )}
           </div>
@@ -610,12 +619,12 @@ export function AcpChat({ sessionId }: AcpChatProps) {
           rows={3}
           placeholder={
             liveNow
-              ? "Reply to the agent…"
+              ? t("board.acp.replyPlaceholder")
               : paused
-                ? "Type a message — sending resumes this session"
+                ? t("board.acp.pausedPlaceholder")
                 : dead
-                  ? "Chat is disconnected"
-                  : "Waiting for the session…"
+                  ? t("board.acp.deadPlaceholder")
+                  : t("board.acp.waitingPlaceholder")
           }
           disabled={!canType}
           onChange={(event) => setDraft(event.target.value)}
@@ -624,14 +633,12 @@ export function AcpChat({ sessionId }: AcpChatProps) {
         <div className="acp-actions">
           <span className="acp-hint">
             {running
-              ? "The agent is working…"
+              ? t("board.acp.agentWorking")
               : paused
-                ? resuming
-                  ? "Attaching the agent…"
-                  : "Enter to send · resumes the saved session first"
+                ? t(resuming ? "board.acp.attachingShort" : "board.acp.enterResumes")
                 : dead
                   ? ""
-                  : "Enter to send · Shift+Enter for a new line"}
+                  : t("board.acp.enterNewline")}
           </span>
           {running ? (
             <button
@@ -641,13 +648,13 @@ export function AcpChat({ sessionId }: AcpChatProps) {
                 setStopping(true);
                 send({ type: "cancel" });
               }}
-              title="Cancel the running turn"
+              title={t("board.acp.cancelTooltip")}
             >
-              {stopping ? "Cancelling…" : "Cancel"}
+              {stopping ? t("board.acp.cancelling") : t("board.acp.cancel")}
             </button>
           ) : (
             <button className="primary" disabled={!canPrompt} onClick={submit}>
-              Send
+              {t("board.acp.send")}
             </button>
           )}
         </div>
@@ -661,6 +668,7 @@ export function AcpChat({ sessionId }: AcpChatProps) {
 /* ------------------------------------------------------------------ */
 
 function ChatItemRow({ item }: { item: ChatItem }) {
+  const t = useT();
   switch (item.kind) {
     case "user":
       return (
@@ -678,7 +686,7 @@ function ChatItemRow({ item }: { item: ChatItem }) {
       // Collapsed by default: reasoning is context, not the answer.
       return (
         <details className="acp-reasoning">
-          <summary>Thinking</summary>
+          <summary>{t("board.acp.thinking")}</summary>
           <Markdown text={item.text} />
         </details>
       );
@@ -690,6 +698,7 @@ function ChatItemRow({ item }: { item: ChatItem }) {
 }
 
 function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
+  const t = useT();
   const input = item.input == null ? "" : jsonText(item.input);
   const hasDetail = input !== "" || Boolean(item.output) || Boolean(item.error);
 
@@ -719,19 +728,19 @@ function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
       <div className="acp-tool-body">
         {input !== "" && (
           <>
-            <div className="acp-tool-label">Input</div>
+            <div className="acp-tool-label">{t("board.acp.input")}</div>
             <pre>{input}</pre>
           </>
         )}
         {item.output && (
           <>
-            <div className="acp-tool-label">Output</div>
+            <div className="acp-tool-label">{t("board.acp.output")}</div>
             <pre>{item.output}</pre>
           </>
         )}
         {item.error && (
           <>
-            <div className="acp-tool-label">Error</div>
+            <div className="acp-tool-label">{t("board.acp.errorLabel")}</div>
             <pre className="err">{item.error}</pre>
           </>
         )}
@@ -751,6 +760,7 @@ function PermissionCard({
   disabled: boolean;
   onAnswer: (optionId: string) => void;
 }) {
+  const t = useT();
   return (
     <div className={`acp-permission${answered ? " answered" : ""}`}>
       <div className="acp-permission-title">
@@ -772,7 +782,11 @@ function PermissionCard({
         ))}
       </div>
       <div className="acp-permission-note">
-        {answered ? "Answer sent." : disabled ? "Session is not live." : "Waiting for your answer."}
+        {answered
+          ? t("board.acp.answered")
+          : disabled
+            ? t("board.acp.notLiveShort")
+            : t("board.acp.waitingAnswer")}
       </div>
     </div>
   );

@@ -10,13 +10,14 @@ import {
   type CommandActivity,
   type ErrorItem,
   type FileActivity,
-  HANDOFF_TRIGGERS,
   type HandoffActivity,
   type RawEvent,
   type ThinkingItem,
   type TimelineItem,
   type ToolActivity,
 } from "../presentation";
+import { statusLabel, type MessageKey } from "../i18n";
+import { useT } from "../i18n-react";
 import { navigate } from "../router";
 
 /**
@@ -32,6 +33,8 @@ import { navigate } from "../router";
 
 const LIVE_STATUSES = new Set(["pending", "starting", "running"]);
 const TERMINAL_EVENTS = new Set(["run.completed", "run.failed", "run.cancelled", "run.timeout"]);
+/** Handoff triggers the timeline knows how to label (see `thread.handoffTrigger.*`). */
+const TRIGGER_KEYS = ["explicit", "targeted", "continuation", "harness"];
 
 interface ThreadTurn {
   run: any;
@@ -97,6 +100,7 @@ function writeDraft(taskId: string, text: string): void {
 }
 
 export function TaskThreadView({ taskId }: { taskId: string }) {
+  const t = useT();
   const [thread, setThread] = useState<ThreadData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
@@ -272,11 +276,11 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
     return (
       <div className="page-pad">
         <ErrorBox message={error} />
-        <p><a onClick={() => navigate("/tasks")}>← back to tasks</a></p>
+        <p><a onClick={() => navigate("/tasks")}>{t("thread.backToTasks")}</a></p>
       </div>
     );
   }
-  if (!thread) return <div className="page-pad muted">Loading task…</div>;
+  if (!thread) return <div className="page-pad muted">{t("thread.loading")}</div>;
 
   const taskStatus = isLive ? "running" : (lastTurn?.run.status ?? "pending");
 
@@ -293,7 +297,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
       await post(`/api/runs/${runId}/cancel`);
       setError(null);
     } catch (e) {
-      setError(`Could not stop the run: ${e instanceof Error ? e.message : String(e)}`);
+      setError(t("thread.stopFailed", { error: e instanceof Error ? e.message : String(e) }));
     } finally {
       bump();
     }
@@ -360,7 +364,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           <span className="right thread-actions">
             <button
               className="icon-btn"
-              title={thread.task.metadata?.importedFromHarness ? "Refresh — re-reads the adopted native session first" : "Refresh"}
+              title={thread.task.metadata?.importedFromHarness ? t("thread.refreshAdopted") : t("thread.refresh")}
               onClick={refresh}
             >
               <Icon name="refresh" />
@@ -368,15 +372,15 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           </span>
         </div>
         <div className="thread-meta">
-          <span className="meta-chip" title={`Workspace ${thread.workspace?.path ?? ""}`}>
-            <Icon name="folder" size={13} /> {thread.workspace?.name ?? "no workspace"}
+          <span className="meta-chip" title={t("thread.workspaceTitle", { path: thread.workspace?.path ?? "" })}>
+            <Icon name="folder" size={13} /> {thread.workspace?.name ?? t("thread.noWorkspace")}
           </span>
           <span className="meta-chip"><Icon name="box" size={13} /> {lastTurn?.run.runtimeName ?? "—"}</span>
           <span className="meta-chip" title={lastModelLabel ?? "—"}>
             <Icon name="cpu" size={13} /> {lastModelLabel ?? "—"}
           </span>
           <a className="switch-link" onClick={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}>
-            <Icon name="refresh" size={12} /> Switch runtime
+            <Icon name="refresh" size={12} /> {t("thread.switchRuntime")}
           </a>
           {/* Project Coding Tasks answer "developing, testing, committing or
               pushing?" on the lifecycle page (v11 §40). It is a detail view
@@ -384,7 +388,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               the page the composer lands on. */}
           {thread.task.projectId && (
             <a className="switch-link" onClick={() => navigate(`/tasks/${thread.task.id}/lifecycle`)}>
-              <Icon name="box" size={12} /> Lifecycle
+              <Icon name="box" size={12} /> {t("thread.lifecycle")}
             </a>
           )}
           {/* A board card's Task keeps living on the board it came from: the
@@ -392,20 +396,20 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               link the board conversation would be a dead end from the task
               side, since the thread only shows run events. */}
           {boardCardId && (
-            <a className="switch-link" onClick={() => navigate("/kanban")} title="Open this task's card on the board">
-              <Icon name="grid" size={12} /> Board card
+            <a className="switch-link" onClick={() => navigate("/kanban")} title={t("thread.boardCardTitle")}>
+              <Icon name="grid" size={12} /> {t("thread.boardCard")}
             </a>
           )}
         </div>
-        {syncError && <ErrorBox message={`Native session sync failed: ${syncError}`} />}
-        {handoffError && <ErrorBox message={`Handoff generation failed: ${handoffError}`} />}
+        {syncError && <ErrorBox message={t("thread.syncFailed", { error: syncError })} />}
+        {handoffError && <ErrorBox message={t("thread.handoffFailed", { error: handoffError })} />}
       </header>
 
       {/* ---------- Timeline (v5 §11: each run is one assistant turn) ---------- */}
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="thread-list">
           {thread.runs.length === 0 && (
-            <div className="muted" style={{ padding: "24px 0" }}>No activity yet.</div>
+            <div className="muted" style={{ padding: "24px 0" }}>{t("thread.noActivity")}</div>
           )}
           {thread.runs.map((turn) => (
             <TurnView
@@ -431,21 +435,20 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
             <div className="handoff-banner handoff-pending" aria-live="polite">
               <div className="handoff-line">
                 <span className="handoff-mark">
-                  <span className="handoff-done">✓</span> Handoff
+                  <span className="handoff-done">✓</span> {t("thread.handoff")}
                 </span>
                 <span
                   className="muted"
-                  title="context summary ready — your next message, on any harness, starts a fresh session seeded with it as the only context"
+                  title={t("thread.handoffReady")}
                 >
-                  context summary ready — your next message, on any harness, starts a fresh session seeded with it
-                  as the only context
+                  {t("thread.handoffReady")}
                 </span>
                 <button
                   className="handoff-view"
-                  title="See the context the next session will receive"
+                  title={t("thread.viewHandoffTitle")}
                   onClick={() => setViewHandoffId(armedHandoff.id)}
                 >
-                  View handoff
+                  {t("thread.viewHandoff")}
                 </button>
               </div>
             </div>
@@ -457,36 +460,36 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
               <div className="handoff-line">
                 <span className="handoff-mark">
                   {pendingHandoff.stage === "generating" ? <span className="spinner" /> : <span className="handoff-done">✓</span>}
-                  Handoff
+                  {t("thread.handoff")}
                 </span>
                 <span
                   className="muted"
                   title={
                     pendingHandoff.stage === "generating"
-                      ? "generating context summary from this thread…"
-                      : "context summary ready — your next message, on any harness, starts a fresh session seeded with it as the only context"
+                      ? t("thread.handoffGenerating")
+                      : t("thread.handoffReady")
                   }
                 >
                   {pendingHandoff.stage === "generating"
-                    ? "generating context summary from this thread…"
-                    : "context summary ready — your next message, on any harness, starts a fresh session seeded with it as the only context"}
+                    ? t("thread.handoffGenerating")
+                    : t("thread.handoffReady")}
                 </span>
                 {pendingHandoff.stage === "generating" && pendingHandoff.cancellable && (
                   <button
                     className="handoff-cancel"
-                    title="Cancel handoff generation"
+                    title={t("thread.cancelHandoffTitle")}
                     onClick={() => handoffCancelRef.current()}
                   >
-                    Cancel
+                    {t("thread.cancelHandoff")}
                   </button>
                 )}
                 {pendingHandoff.stage === "ready" && pendingHandoff.handoffId && (
                   <button
                     className="handoff-view"
-                    title="See the context the next session will receive"
+                    title={t("thread.viewHandoffTitle")}
                     onClick={() => setViewHandoffId(pendingHandoff.handoffId!)}
                   >
-                    View handoff
+                    {t("thread.viewHandoff")}
                   </button>
                 )}
               </div>
@@ -497,7 +500,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
 
       {/* Floating scroll-to-bottom (Codex style) */}
       {showJump && (
-        <button className="jump-down" title="Scroll to latest" onClick={jumpToBottom}>
+        <button className="jump-down" title={t("thread.jumpLatest")} onClick={jumpToBottom}>
           <Icon name="arrowDown" size={16} />
         </button>
       )}
@@ -541,36 +544,37 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
  * consumed-by runs — stays one link away.
  */
 function HandoffQuickView({ handoffId, onClose }: { handoffId: string; onClose: () => void }) {
+  const t = useT();
   const { data, error } = useAsync<any>(() => get(`/api/handoffs/${handoffId}`), [handoffId]);
   const generation = data?.generation as { method?: string; detail?: string; chunks?: number } | undefined;
   const degraded = generation?.method === "heuristic";
   return (
-    <Modal title="Handoff context" onClose={onClose}>
+    <Modal title={t("thread.handoffContext")} onClose={onClose}>
       <div className="handoff-quickview">
         {error && <ErrorBox message={error} />}
-        {!data && !error && <div className="muted">Loading…</div>}
+        {!data && !error && <div className="muted">{t("common.loading")}</div>}
         {data && (
           <>
             <p className="sub" style={{ margin: "0 0 10px" }}>
-              {data.fromRuntimeName ?? data.fromRuntimeKind ?? "previous agent"} →{" "}
-              {data.toRuntimeName ?? data.toRuntimeKind ?? "(next agent picks)"} · {fmtTime(data.createdAt)}
+              {data.fromRuntimeName ?? data.fromRuntimeKind ?? t("thread.previousAgent")} →{" "}
+              {data.toRuntimeName ?? data.toRuntimeKind ?? t("thread.nextAgentPicks")} · {fmtTime(data.createdAt)}
               {generation?.method ? (
                 <>
-                  {" "}· context: <span className="mono">{generation.method}</span>
-                  {generation.chunks && generation.chunks > 1 ? <> ({generation.chunks} chunks)</> : null}
+                  {" · "}{t("thread.contextMethod")} <span className="mono">{generation.method}</span>
+                  {generation.chunks && generation.chunks > 1 ? <> {t("thread.contextChunks", { n: generation.chunks })}</> : null}
                 </>
               ) : null}
             </p>
             {degraded && (
               <p className="handoff-degraded-detail" style={{ margin: "0 0 10px" }}>
-                ⚠ Degraded context — not a model summary.{" "}
-                {generation?.detail ?? "The summarization model was unavailable."}
+                {t("thread.degradedBanner")}{" "}
+                {generation?.detail ?? t("thread.degradedNoModel")}
               </p>
             )}
             <pre className="handoff-quickview-body">{data.renderedPrompt}</pre>
             <p className="muted" style={{ margin: "10px 0 0" }}>
-              This is what the next session receives; your message is appended under{" "}
-              <span className="mono"># Your instruction</span> when you send it.
+              {t("thread.quickviewNote")}{" "}
+              <span className="mono"># Your instruction</span> {t("thread.quickviewNoteAfter")}
             </p>
             <div className="modal-actions">
               <button
@@ -579,10 +583,10 @@ function HandoffQuickView({ handoffId, onClose }: { handoffId: string; onClose: 
                   navigate(`/handoffs/${handoffId}`);
                 }}
               >
-                Open full page ↗
+                {t("thread.openFull")}
               </button>
               <button className="primary" autoFocus onClick={onClose}>
-                Close
+                {t("common.close")}
               </button>
             </div>
           </>
@@ -608,28 +612,28 @@ function HandoffConfirmModal({
   thenSubmit?: boolean;
   targetName?: string;
 }) {
+  const t = useT();
+  // The sentence lives in the dictionary; only the emphasised fragments are laid
+  // out here, so word order stays the translator's choice.
+  const sendPrefix = t("thread.confirmHandoffSendPrefix");
+  const sendSuffix = t("thread.confirmHandoffSendSuffix");
   return (
-    <Modal title={thenSubmit ? "Generate a handoff for this message?" : "Generate handoff context?"} onClose={onClose}>
+    <Modal title={thenSubmit ? t("thread.confirmHandoffForMessage") : t("thread.confirmHandoff")} onClose={onClose}>
       <div className="handoff-confirm">
         {thenSubmit ? (
           <p>
-            Sending this message starts a <b>new native session</b>
-            {targetName ? <> on <b>{targetName}</b></> : null}, because the current one cannot be resumed. That
-            needs a handoff context — and a handoff is an <b>explicit action</b>: confirm to summarize this thread,
-            then your message is sent into the new session with that summary as its only context. The workspace is
-            preserved.
+            {sendPrefix}
+            <b>{t("thread.confirmHandoffNewSession")}</b>
+            {targetName ? t("thread.confirmHandoffSendTarget", { name: targetName }) : ""}
+            {sendSuffix}
           </p>
         ) : (
-          <p>
-            This generates a context summary of the task so far as a standalone action — it is not tied to any
-            harness. Once ready it stays in this thread: your next message, on any harness including the current
-            one, starts a fresh session that uses this summary as its only context. The workspace is preserved.
-          </p>
+          <p>{t("thread.confirmHandoffBody")}</p>
         )}
         <div className="modal-actions">
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t("common.cancel")}</button>
           <button className="primary" autoFocus onClick={onConfirm}>
-            {thenSubmit ? "Generate handoff and send" : "Generate handoff"}
+            {thenSubmit ? t("thread.generateHandoffAndSend") : t("thread.generateHandoff")}
           </button>
         </div>
       </div>
@@ -651,20 +655,20 @@ function DegradedHandoffModal({
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const t = useT();
   return (
-    <Modal title="Handoff summary unavailable" onClose={onClose}>
+    <Modal title={t("thread.degradedTitle")} onClose={onClose}>
       <div className="handoff-confirm">
         <p className="handoff-degraded-reason">{message}</p>
         <p>
-          You can still continue in a new native session, but the next agent would receive a{" "}
-          <b>structured digest</b> instead of a model-written summary: the original task, the files that changed,
-          the tools used and the last agent message — without synthesized decisions or a coherent progress
-          narrative. This handoff is marked as degraded so it is never mistaken for a summary.
+          {t("thread.degradedPrefix")}
+          <b>{t("thread.degradedDigest")}</b>
+          {t("thread.degradedSuffix")}
         </p>
         <div className="modal-actions">
-          <button onClick={onClose}>Cancel</button>
+          <button onClick={onClose}>{t("common.cancel")}</button>
           <button className="primary" autoFocus onClick={onConfirm}>
-            Continue with degraded context
+            {t("thread.continueDegraded")}
           </button>
         </div>
       </div>
@@ -706,13 +710,15 @@ function TurnView({
   switchTargets: Array<{ id: string; name: string; kind: string }>;
   onStop: (runId: string) => void;
 }) {
+  const t = useT();
   const run = turn.run;
   const live = LIVE_STATUSES.has(run.status);
   const runtimeKindOfRun = run.runtimeId ? runtimeKinds[run.runtimeId] : undefined;
   const otherHarnessTargets = switchTargets.filter((t) => t.kind !== runtimeKindOfRun);
   const items = useMemo(
-    () => projectTimeline(turn.events, { live }),
-    [turn.events, live]
+    () => projectTimeline(t, turn.events, { live }),
+    // `t` changes with the language, so the labels have to be rebuilt then.
+    [t, turn.events, live]
   );
   const userPrompt = displayUserPrompt(run, task);
   const turnModelLabel = modelLabel(providers, run);
@@ -740,16 +746,16 @@ function TurnView({
 
       {/* Agent turn */}
       <div className="agent-turn">
-        <div className="agent-name" title={run.runtimeName ?? "agent"}>
-          <span className="agent-badge">{run.runtimeName ?? "Agent"}</span>
+        <div className="agent-name" title={run.runtimeName ?? t("thread.agentFallback")}>
+          <span className="agent-badge">{run.runtimeName ?? t("thread.agentFallback")}</span>
         </div>
         <div className="agent-body">
           {/* Lightweight resume status (v5 §19) */}
           {run.continuity === "resume" && (
-            <div className="resume-chip">▶ {run.runtimeName ?? "agent"} · resumed native session</div>
+            <div className="resume-chip">▶ {t("thread.resumed", { name: run.runtimeName ?? t("thread.agentFallback") })}</div>
           )}
 
-          {items.length === 0 && live && <div className="live-row"><span className="spinner" /> Starting…</div>}
+          {items.length === 0 && live && <div className="live-row"><span className="spinner" /> {t("thread.starting")}</div>}
 
           {items.map((item) => (
             <ActivityRow
@@ -762,18 +768,18 @@ function TurnView({
           ))}
 
           {live && items.length > 0 && (
-            <div className="live-row"><span className="spinner" /> Working…</div>
+            <div className="live-row"><span className="spinner" /> {t("thread.working")}</div>
           )}
 
           {/* Failure surface (v5 §29) */}
           {(run.status === "failed" || run.status === "timeout") && run.errorKind !== "usage-limit" && (
             <div className="fail-box">
-              <div className="fail-title">Agent run failed{run.status === "timeout" ? " (timeout)" : ""}</div>
+              <div className="fail-title">{run.status === "timeout" ? t("thread.agentRunFailedTimeout") : t("thread.agentRunFailed")}</div>
               {run.error && <div className="fail-reason">{run.error}</div>}
               <div className="row fail-actions">
-                <button className="small" onClick={onContinue}>Continue</button>
-                <button className="small" onClick={onSwitchRuntime}>Switch runtime</button>
-                <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>View run</button>
+                <button className="small" onClick={onContinue}>{t("thread.continue")}</button>
+                <button className="small" onClick={onSwitchRuntime}>{t("thread.switchRuntime")}</button>
+                <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>{t("thread.viewRun")}</button>
               </div>
             </div>
           )}
@@ -782,34 +788,32 @@ function TurnView({
               session survive, so offer the other harnesses directly. */}
           {(run.status === "failed" || run.status === "timeout") && run.errorKind === "usage-limit" && (
             <div className="fail-box quota-box">
-              <div className="fail-title">{run.runtimeName ?? "Harness"} usage limit reached.</div>
+              <div className="fail-title">{t("thread.usageLimit", { name: run.runtimeName ?? t("thread.harnessFallback") })}</div>
               {run.error && <div className="fail-reason">{run.error}</div>}
               <p className="muted">
-                The workspace and the {run.runtimeName ?? "harness"} session are preserved. Continue on another
-                harness: after you confirm, a handoff summary is generated (an explicit action — it is never
-                produced implicitly) and the new agent continues in a new native session.
+                {t("thread.quotaHint", { name: run.runtimeName ?? t("thread.harnessFallback") })}
               </p>
               <div className="row fail-actions">
-                {otherHarnessTargets.map((t) => (
-                  <button key={t.id} className="small primary" onClick={() => onHandoffRequest(t.id)}>
-                    Continue with {t.name}
+                {otherHarnessTargets.map((target) => (
+                  <button key={target.id} className="small primary" onClick={() => onHandoffRequest(target.id)}>
+                    {t("thread.continueWith", { name: target.name })}
                   </button>
                 ))}
                 {otherHarnessTargets.length === 0 && (
-                  <span className="muted">No other coding harness is enabled — enable a Codex, Claude Code, Pi or OpenCode runtime first.</span>
+                  <span className="muted">{t("thread.noOtherHarness")}</span>
                 )}
-                <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>View run</button>
+                <button className="small" onClick={() => navigate(`/runs/${run.id}`)}>{t("thread.viewRun")}</button>
               </div>
             </div>
           )}
           {run.status === "cancelled" && (
-            <div className="cancelled-note">Stopped — the task stays open; send a new instruction below.</div>
+            <div className="cancelled-note">{t("thread.stopped")}</div>
           )}
 
           {/* Artifacts (v5 §31) */}
           {turn.artifacts.length > 0 && (
             <div className="artifact-row">
-              <span className="muted artifact-label">Created:</span>
+              <span className="muted artifact-label">{t("thread.created")}</span>
               {turn.artifacts.map((a) => <ArtifactChip key={a.id} artifact={a} />)}
             </div>
           )}
@@ -821,7 +825,7 @@ function TurnView({
                 <StatusBadge status={run.status} />
                 <span>{run.runtimeName ?? "—"}</span>
                 <button className="small danger stop-btn" onClick={() => onStop(run.id)}>
-                  <Icon name="stop" size={11} /> Stop
+                  <Icon name="stop" size={11} /> {t("thread.stop")}
                 </button>
               </>
             ) : (
@@ -831,17 +835,17 @@ function TurnView({
                 {turnModelLabel && <span>{turnModelLabel}</span>}
                 {run.usage?.durationMs != null && <span>{fmtDuration(run.usage.durationMs)}</span>}
                 {run.usage && (
-                  <span>{fmtTokens((run.usage.inputTokens ?? 0) + (run.usage.outputTokens ?? 0))} tokens</span>
+                  <span>{t("thread.tokens", { n: fmtTokens((run.usage.inputTokens ?? 0) + (run.usage.outputTokens ?? 0)) })}</span>
                 )}
                 {run.cost ? <span>{fmtCostShort(run.cost)}</span> : null}
-                {turn.artifacts.length > 0 && <span>{turn.artifacts.length} artifact{turn.artifacts.length > 1 ? "s" : ""}</span>}
+                {turn.artifacts.length > 0 && <span>{t("thread.artifacts", { n: turn.artifacts.length })}</span>}
                 <button
                   className="turn-handoff"
-                  title="Generate a handoff summary so a new native session can continue this task"
+                  title={t("thread.handoffBtnTitle")}
                   disabled={handoffDisabled}
                   onClick={onHandoff}
                 >
-                  ⇄ Handoff
+                  ⇄ {t("thread.handoff")}
                 </button>
               </>
             )}
@@ -857,6 +861,7 @@ function TurnView({
 /* ================================================================== */
 
 function HandoffBanner({ handoff }: { handoff: any }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const c = handoff.content ?? {};
   // A degraded handoff (`generation.method: "heuristic"`) is a structured
@@ -873,36 +878,36 @@ function HandoffBanner({ handoff }: { handoff: any }) {
   return (
     <div className="handoff-banner">
       <div className="handoff-line">
-        <span className="handoff-mark">⇄ Handoff</span>
+        <span className="handoff-mark">⇄ {t("thread.handoff")}</span>
         {degraded ? (
           <span className="handoff-degraded" title={handoff.generation?.detail ?? undefined}>
-            ⚠ 结构化降级（非模型摘要）
+            {t("thread.handoffDegraded")}
           </span>
         ) : (
-          <span className="muted">workspace preserved · new native session</span>
+          <span className="muted">{t("thread.handoffWorkspaceKept")}</span>
         )}
-        <button className="small right" onClick={() => setOpen(!open)}>{open ? "Hide handoff" : "View handoff"}</button>
+        <button className="small right" onClick={() => setOpen(!open)}>{open ? t("common.hide") : t("thread.viewHandoff")}</button>
       </div>
       {degraded && handoff.generation?.detail && (
-        <div className="handoff-degraded-detail">原因：{handoff.generation.detail}</div>
+        <div className="handoff-degraded-detail">{t("thread.handoffReason", { detail: handoff.generation.detail })}</div>
       )}
       {open && (
         <div className="handoff-detail">
-          <Section title="Current progress">{c.progressSummary}</Section>
-          <Section title="Completed work">
+          <Section title={t("thread.handoffProgress")}>{c.progressSummary}</Section>
+          <Section title={t("thread.handoffCompleted")}>
             {(c.completedWork ?? []).map((w: string, i: number) => <div key={i}>✓ {w}</div>)}
           </Section>
-          <Section title="Remaining work">
+          <Section title={t("thread.handoffRemaining")}>
             {(c.remainingWork ?? []).map((w: string, i: number) => <div key={i}>• {w}</div>)}
           </Section>
-          <Section title="Important decisions">
+          <Section title={t("thread.handoffDecisions")}>
             {(c.importantDecisions ?? []).map((w: string, i: number) => <div key={i}>• {w}</div>)}
           </Section>
-          <Section title="Relevant files">
+          <Section title={t("thread.handoffFiles")}>
             {(c.relevantFiles ?? []).map((w: string, i: number) => <code key={i}>{w}</code>)}
           </Section>
           {handoff.userNotes && (
-            <Section title="Notes from the user">{handoff.userNotes}</Section>
+            <Section title={t("thread.handoffNotes")}>{handoff.userNotes}</Section>
           )}
         </div>
       )}
@@ -962,13 +967,14 @@ function AgentMessage({ item }: { item: AgentMessageItem }) {
  * is finished reasoning and shows ◍.
  */
 function ThinkingRow({ item, active }: { item: ThinkingItem; active: boolean }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <div className={`activity thinking${item.content ? " clickable" : ""}`} onClick={() => item.content && setOpen(!open)}>
       <div className="act-head">
         <span className="act-icon">{active ? <span className="spinner" /> : "◍"}</span>
-        <span className="act-label">Thinking…</span>
-        {item.content && <span className="act-detail-hint">{open ? "hide" : "reasoning"}</span>}
+        <span className="act-label">{t("thread.thinking")}</span>
+        {item.content && <span className="act-detail-hint">{open ? t("common.hide") : t("thread.reasoning")}</span>}
       </div>
       {open && item.content && <pre className="act-detail">{item.content}</pre>}
     </div>
@@ -976,6 +982,7 @@ function ThinkingRow({ item, active }: { item: ThinkingItem; active: boolean }) 
 }
 
 function ToolRow({ item, open, onToggle }: { item: ToolActivity; open: boolean; onToggle: () => void }) {
+  const t = useT();
   return (
     <div className={`activity clickable ${item.status}`} onClick={onToggle}>
       <div className="act-head">
@@ -989,24 +996,24 @@ function ToolRow({ item, open, onToggle }: { item: ToolActivity; open: boolean; 
         <div className="act-detail" onClick={(e) => e.stopPropagation()}>
           {item.args == null && item.result == null && item.error == null && (
             <div className="muted detail-title" style={{ textTransform: "none", letterSpacing: 0 }}>
-              (no arguments or result recorded for this tool call)
+              {t("thread.toolNoDetail")}
             </div>
           )}
           {item.args != null && (
             <>
-              <div className="detail-title">Arguments</div>
+              <div className="detail-title">{t("thread.arguments")}</div>
               <pre>{typeof item.args === "string" ? item.args : JSON.stringify(item.args, null, 2)}</pre>
             </>
           )}
           {item.result != null && (
             <>
-              <div className="detail-title">Result</div>
+              <div className="detail-title">{t("thread.result")}</div>
               <pre>{typeof item.result === "string" ? item.result : JSON.stringify(item.result, null, 2)}</pre>
             </>
           )}
           {item.error && (
             <>
-              <div className="detail-title">Error</div>
+              <div className="detail-title">{t("thread.errorLabel")}</div>
               <pre className="err">{String(item.error)}</pre>
             </>
           )}
@@ -1017,11 +1024,12 @@ function ToolRow({ item, open, onToggle }: { item: ToolActivity; open: boolean; 
 }
 
 function CommandRow({ item, open, onToggle }: { item: CommandActivity; open: boolean; onToggle: () => void }) {
+  const t = useT();
   return (
     <div className={`activity clickable command`} onClick={onToggle}>
       <div className="act-head">
         <span className="act-icon">{item.running ? <span className="spinner" /> : <Icon name="terminal" size={13} />}</span>
-        <span className="act-label mono-target">Ran <code>{item.command}</code></span>
+        <span className="act-label mono-target">{t("thread.ranPre")}<code>{item.command}</code></span>
         {item.summary && (
           <span className={`cmd-summary ${item.summaryOk === false ? "bad" : "good"}`}>{item.summary}</span>
         )}
@@ -1029,13 +1037,13 @@ function CommandRow({ item, open, onToggle }: { item: CommandActivity; open: boo
       {open && (
         <div className="act-detail" onClick={(e) => e.stopPropagation()}>
           <div className="detail-title">
-            Command {item.cwd ? `· ${item.cwd}` : ""} {item.backend ? `· ${item.backend}` : ""}
+            {t("thread.command")} {item.cwd ? `· ${item.cwd}` : ""} {item.backend ? `· ${item.backend}` : ""}
           </div>
           <pre>{item.command}</pre>
           <div className="detail-title">
-            Output {item.cwd ? `· ${item.cwd}` : ""} {item.backend ? `· ${item.backend}` : ""}
+            {t("thread.output")} {item.cwd ? `· ${item.cwd}` : ""} {item.backend ? `· ${item.backend}` : ""}
           </div>
-          <pre>{item.outputs.length ? item.outputs.join("\n") : "(no output)"}</pre>
+          <pre>{item.outputs.length ? item.outputs.join("\n") : t("thread.noOutput")}</pre>
         </div>
       )}
     </div>
@@ -1043,11 +1051,12 @@ function CommandRow({ item, open, onToggle }: { item: CommandActivity; open: boo
 }
 
 function FileRow({ item }: { item: FileActivity }) {
+  const t = useT();
   return (
     <div className="activity file">
       <div className="act-head">
         <span className="act-icon">{item.action === "created" ? "+" : "±"}</span>
-        <span className="act-label">{item.action === "created" ? "Created" : "Modified"} <code>{item.path}</code></span>
+        <span className="act-label">{item.action === "created" ? t("thread.fileCreated") : t("thread.fileModified")} <code>{item.path}</code></span>
       </div>
     </div>
   );
@@ -1070,26 +1079,31 @@ function ErrorRow({ item }: { item: ErrorItem }) {
  * it cost) and the way into its full text.
  */
 function HandoffRow({ item, onView }: { item: HandoffActivity; onView: () => void }) {
+  const t = useT();
   const facts: string[] = [];
-  if (item.trigger) facts.push(HANDOFF_TRIGGERS[item.trigger] ?? item.trigger);
-  facts.push(item.fromHarness ? "harness-generated" : item.method);
+  // An unknown trigger value is data, not a missing translation: show it as-is.
+  if (item.trigger) {
+    const triggerKey = `thread.handoffTrigger.${item.trigger}`;
+    facts.push(TRIGGER_KEYS.includes(item.trigger) ? t(triggerKey as MessageKey) : item.trigger);
+  }
+  facts.push(item.fromHarness ? t("thread.harnessGenerated") : item.method);
   if (item.model) facts.push(item.model);
   if (item.coveredRunIds?.length) {
-    facts.push(`covers ${item.coveredRunIds.length} run${item.coveredRunIds.length === 1 ? "" : "s"}`);
+    facts.push(t("thread.handoffCovers", { n: item.coveredRunIds.length }));
   }
-  if (item.chunks && item.chunks > 1) facts.push(`${item.chunks} chunks`);
-  if (item.usage) facts.push(`${(item.usage.inputTokens + item.usage.outputTokens).toLocaleString()} tok`);
+  if (item.chunks && item.chunks > 1) facts.push(t("thread.handoffChunks", { n: item.chunks }));
+  if (item.usage) facts.push(t("thread.handoffTokens", { n: (item.usage.inputTokens + item.usage.outputTokens).toLocaleString() }));
   if (item.durationMs) facts.push(`${(item.durationMs / 1000).toFixed(1)}s`);
   if (item.toRuntime) facts.push(`→ ${item.toRuntime}`);
-  if (item.detail) facts.push("⚠ degraded");
-  const title = [facts.join(" · "), item.detail ? `Degraded: ${item.detail}` : ""].filter(Boolean).join("\n");
+  if (item.detail) facts.push(t("thread.handoffDegradedFact"));
+  const title = [facts.join(" · "), item.detail ? t("thread.handoffDegradedTitle", { detail: item.detail }) : ""].filter(Boolean).join("\n");
   return (
     <div className="activity handoff">
       <div className="act-head">
         <span className="act-icon">⇄</span>
-        <span className="act-label">Handoff generated</span>
+        <span className="act-label">{t("thread.handoffGenerated")}</span>
         <span className="handoff-facts" title={title}>{facts.join(" · ")}</span>
-        <button className="small" onClick={onView}>view</button>
+        <button className="small" onClick={onView}>{t("common.view")}</button>
       </div>
     </div>
   );
@@ -1100,6 +1114,7 @@ function HandoffRow({ item, onView }: { item: HandoffActivity; onView: () => voi
 /* ================================================================== */
 
 function ArtifactChip({ artifact }: { artifact: any }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const toggle = async () => {
@@ -1110,13 +1125,13 @@ function ArtifactChip({ artifact }: { artifact: any }) {
         const c = await get<any>(`/api/artifacts/${artifact.id}/content`);
         setContent(typeof c === "string" ? c : JSON.stringify(c, null, 2));
       } catch {
-        setContent("(content unavailable)");
+        setContent(t("thread.artifactUnavailable"));
       }
     }
   };
   return (
     <span className="artifact-chip-wrap">
-      <button className="artifact-chip" onClick={toggle} title={`${artifact.kind} artifact`}>
+      <button className="artifact-chip" onClick={toggle} title={t("thread.artifactTitle", { kind: artifact.kind })}>
         <Icon name="archive" size={12} /> <code>{artifact.name}</code>
       </button>
       {open && content !== null && <pre className="artifact-detail">{content}</pre>}
@@ -1158,6 +1173,7 @@ function Composer({
   /** Armed/generating handoff lifecycle, so the resume-vs-handoff preview stays truthful. */
   handoffState?: "generating" | "ready";
 }) {
+  const t = useT();
   // The composer's runtime list is served, not derived: `?usableInTask=true`
   // returns the enabled runtimes the product allows to execute a task.
   // Submit and continue enforce the same rule server-side.
@@ -1364,7 +1380,7 @@ function Composer({
         <textarea
           ref={promptRef}
           rows={2}
-          placeholder={live ? "Agent 正在工作 — 可先停止或等待后再继续…" : "随心输入，继续这个任务…"}
+          placeholder={live ? t("thread.placeholderLive") : t("thread.placeholderIdle")}
           value={prompt}
           onChange={(e) => {
             setPrompt(e.target.value);
@@ -1391,33 +1407,33 @@ function Composer({
             className="pill"
             value={effectiveRuntimeId}
             onChange={(e) => selectRuntime(e.target.value)}
-            title="Target runtime for the next message"
+            title={t("thread.runtimeTitle")}
           >
             {runtimeList.map((r: any) => (
-              <option key={r.id} value={r.id}>Runtime: {r.name} ({r.kind})</option>
+              <option key={r.id} value={r.id}>{r.name} ({r.kind})</option>
             ))}
           </select>
           {harnessNativeTarget ? (
             <span
               className="pill harness-native-note"
-              title="Harness-native credentials (v6): this runtime runs on its own logged-in account (Codex + ChatGPT) and its own default model."
+              title={t("thread.modelHarnessTitle")}
             >
-              Model: harness account (no AgentFabric model)
+              {t("thread.modelHarness")}
             </span>
           ) : (
             <select
               className="pill"
               value={effectiveModelId}
               onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
-              title="Model"
+              title={t("thread.modelLabel")}
             >
               {modelList.map((m: any) => (
-                <option key={m.id} value={m.id}>Model: {modelOptionLabel(providerList, m)}</option>
+                <option key={m.id} value={m.id}>{modelOptionLabel(providerList, m)}</option>
               ))}
             </select>
           )}
           {/* AGENT_UI_HIDDEN: Agent Profile 选择器，恢复入口时取消注释。
-          <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title="Agent profile">
+          <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title={t("common.agentProfile")}>
             <option value="">Agent: none</option>
             {(profiles.data ?? []).map((p) => (
               <option key={p.id} value={p.id}>Agent: {p.name}</option>
@@ -1425,11 +1441,11 @@ function Composer({
           </select>
           */}
           {live && liveRunId && (
-            <button className="small danger" onClick={() => onStop(liveRunId)} title="Stop the current run — the task stays open">
-              <Icon name="stop" size={11} /> Stop
+            <button className="small danger" onClick={() => onStop(liveRunId)} title={t("thread.stopTitle")}>
+              <Icon name="stop" size={11} /> {t("thread.stop")}
             </button>
           )}
-          <button className="send" title="Continue task (⌘↵)" disabled={busy || live || !prompt.trim()} onClick={() => submit()}>
+          <button className="send" title={t("thread.sendTitle")} disabled={busy || live || !prompt.trim()} onClick={() => submit()}>
             {busy ? <span className="spinner" /> : <Icon name="arrowUp" size={16} />}
           </button>
         </div>

@@ -7,7 +7,9 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { ApiError, del, fmtTime, get, patch, post, put, shortId } from "../api";
-import { ErrorBox, Icon, Modal, StatusBadge } from "../components";
+import { ErrorBox, Icon, Modal } from "../components";
+import { useT } from "../i18n-react";
+import type { MessageKey } from "../i18n";
 import { navigate } from "../router";
 import { AcpChat } from "../components/AcpChat";
 import { BoardTerminal } from "../components/BoardTerminal";
@@ -58,19 +60,46 @@ import type {
  * side.
  */
 
-const COLUMNS: { id: BoardColumnId; label: string; hint: string }[] = [
-  { id: "backlog", label: "Backlog", hint: "Queued cards" },
-  { id: "in_progress", label: "In Progress", hint: "Agent sessions running" },
-  { id: "review", label: "Review", hint: "Awaiting your review" },
-  { id: "trash", label: "Done", hint: "Stopped and trashed" },
+/** Column ids are the server's values; only the labels are translated. */
+const COLUMNS: { id: BoardColumnId; labelKey: MessageKey; hintKey: MessageKey }[] = [
+  { id: "backlog", labelKey: "board.column.backlog", hintKey: "board.column.backlog.hint" },
+  {
+    id: "in_progress",
+    labelKey: "board.column.in_progress",
+    hintKey: "board.column.in_progress.hint",
+  },
+  { id: "review", labelKey: "board.column.review", hintKey: "board.column.review.hint" },
+  { id: "trash", labelKey: "board.column.trash", hintKey: "board.column.trash.hint" },
 ];
 
-const COLUMN_LABEL: Record<BoardColumnId, string> = {
-  backlog: "Backlog",
-  in_progress: "In Progress",
-  review: "Review",
-  trash: "Done",
+const COLUMN_LABEL_KEY: Record<BoardColumnId, MessageKey> = {
+  backlog: "board.column.backlog",
+  in_progress: "board.column.in_progress",
+  review: "board.column.review",
+  trash: "board.column.trash",
 };
+
+/** Session statuses as the badge shows them; the stored values are unchanged. */
+const STATUS_LABEL_KEY: Record<string, MessageKey> = {
+  starting: "board.status.starting",
+  running: "board.status.running",
+  awaiting_review: "board.status.awaiting_review",
+  needs_attention: "board.status.needs_attention",
+  failed: "board.status.failed",
+  interrupted: "board.status.interrupted",
+  stopped: "board.status.stopped",
+  pending: "board.status.pending",
+  completed: "board.status.completed",
+  timeout: "board.status.timeout",
+  cancelled: "board.status.cancelled",
+};
+
+/** The badge keeps the raw status as its class and only translates the text. */
+function SessionStatusBadge({ status }: { status: string }) {
+  const t = useT();
+  const key = STATUS_LABEL_KEY[status];
+  return <span className={`badge ${status}`}>{key ? t(key) : status}</span>;
+}
 
 /** Letters used by the project-list count badges (fork uses B / IP / R / D). */
 const COUNT_KEY: Record<BoardColumnId, string> = {
@@ -80,11 +109,11 @@ const COUNT_KEY: Record<BoardColumnId, string> = {
   trash: "D",
 };
 
-const WORKSPACE_LABEL: Record<WorkspaceType, string> = {
-  none: "plain folder",
-  git: "git",
-  "multi-git": "multi-git",
-  "google-repo": "google repo",
+const WORKSPACE_LABEL_KEY: Record<WorkspaceType, MessageKey> = {
+  none: "board.workspace.none",
+  git: "board.workspace.git",
+  "multi-git": "board.workspace.multiGit",
+  "google-repo": "board.workspace.googleRepo",
 };
 
 /** What `<select>` offers for a project's board settings. */
@@ -219,6 +248,7 @@ function writeTaskDefaults(projectId: string, draft: TaskDraft): void {
 }
 
 export function BoardView() {
+  const t = useT();
   const [projects, setProjects] = useState<BoardProject[] | null>(null);
   const [projectId, setProjectId] = useState<string | null>(() =>
     window.localStorage.getItem(PROJECT_STORAGE_KEY)
@@ -354,7 +384,7 @@ export function BoardView() {
         }
       })
       .catch((error) => {
-        if (alive) setAgentsError(`agent catalog unavailable: ${errText(error)}`);
+        if (alive) setAgentsError(t("board.agentCatalogUnavailable", { error: errText(error) }));
       });
     return () => {
       alive = false;
@@ -412,9 +442,9 @@ export function BoardView() {
     for (const result of results) if (result) next[result[0]] = result[1];
     setSessions(next);
     setSessionStatusError(
-      failures.length > 0 ? `session status unavailable: ${failures[0]}` : null
+      failures.length > 0 ? t("board.sessionStatusUnavailable", { error: failures[0]! }) : null
     );
-  }, []);
+  }, [t]);
 
   const refreshNow = useCallback(async () => {
     if (!projectId) return;
@@ -555,7 +585,11 @@ export function BoardView() {
         await refreshNow();
         return true;
       }
-      setActionError(`${restart ? "Restart" : "Start"} failed: ${errText(error)}`);
+      setActionError(
+        t(restart ? "board.action.restartFailed" : "board.action.startFailed", {
+          error: errText(error),
+        })
+      );
       return false;
     }
   };
@@ -571,7 +605,9 @@ export function BoardView() {
       await refreshNow();
       return true;
     } catch (error) {
-      setActionError(`Move to ${COLUMN_LABEL[column]} failed: ${errText(error)}`);
+      setActionError(
+        t("board.action.moveFailed", { column: t(COLUMN_LABEL_KEY[column]), error: errText(error) })
+      );
       await refreshNow();
       return false;
     }
@@ -588,7 +624,7 @@ export function BoardView() {
       try {
         await post(`/api/kanban/cards/${encodeURIComponent(card.id)}/stop`, {});
       } catch (error) {
-        setActionError(`Stop failed before moving to Done: ${errText(error)}`);
+        setActionError(t("board.action.stopBeforeDone", { error: errText(error) }));
       }
     }
     return moveCard(card, "trash");
@@ -602,7 +638,7 @@ export function BoardView() {
       await refreshNow();
       return true;
     } catch (error) {
-      setActionError(`Delete failed: ${errText(error)}`);
+      setActionError(t("board.action.deleteCardFailed", { error: errText(error) }));
       return false;
     }
   };
@@ -625,7 +661,7 @@ export function BoardView() {
       }
       await loadProjects();
     } catch (error) {
-      setActionError(`Delete project failed: ${errText(error)}`);
+      setActionError(t("board.action.deleteProjectFailed", { error: errText(error) }));
       setDeletingProject(null);
     } finally {
       setDeletingProjectBusy(false);
@@ -645,7 +681,7 @@ export function BoardView() {
       setSettingsProject(null);
       await loadProjects();
     } catch (error) {
-      setSettingsError(`Save failed: ${errText(error)}`);
+      setSettingsError(t("board.action.saveFailed", { error: errText(error) }));
     } finally {
       setSettingsBusy(false);
     }
@@ -661,7 +697,7 @@ export function BoardView() {
       setClearTrashOpen(false);
       await refreshNow();
     } catch (error) {
-      setActionError(`Clear Done failed: ${errText(error)}`);
+      setActionError(t("board.action.clearDoneFailed", { error: errText(error) }));
       setClearTrashOpen(false);
     } finally {
       setClearTrashBusy(false);
@@ -711,7 +747,7 @@ export function BoardView() {
       }
       await refreshNow();
       if (startFailures.length > 0) {
-        setActionError(`Card created, but starting failed — ${startFailures[0]}`);
+        setActionError(t("board.action.startCardFailed", { error: startFailures[0]! }));
         setTaskDialogOpen(false);
         return;
       }
@@ -738,7 +774,7 @@ export function BoardView() {
   const saveCardEdit = async (card: KanbanCard, draft: TaskDraft) => {
     const prompt = draft.prompts[0]?.trim();
     if (!prompt) {
-      setEditError("A card needs a prompt.");
+      setEditError(t("board.cardNeedsPrompt"));
       return;
     }
     setEditBusy(true);
@@ -757,7 +793,7 @@ export function BoardView() {
       setEditingCardId(null);
       await refreshNow();
     } catch (error) {
-      setEditError(`Save failed: ${errText(error)}`);
+      setEditError(t("board.action.saveFailed", { error: errText(error) }));
     } finally {
       setEditBusy(false);
     }
@@ -877,7 +913,7 @@ export function BoardView() {
   if (loading) {
     return (
       <div className="board">
-        <div className="board-loading muted">Loading board…</div>
+        <div className="board-loading muted">{t("board.loading")}</div>
       </div>
     );
   }
@@ -904,17 +940,21 @@ export function BoardView() {
     <div className="board">
       <aside className="board-projects">
         <div className="board-projects-head">
-          <span className="board-projects-title">Kanban projects</span>
-          <button className="icon-btn" title="Add project" onClick={() => setAddProjectOpen(true)}>
+          <span className="board-projects-title">{t("board.projects")}</span>
+          <button
+            className="icon-btn"
+            title={t("board.addProject")}
+            onClick={() => setAddProjectOpen(true)}
+          >
             <Icon name="plus" />
           </button>
         </div>
         <div className="board-projects-list">
-          {projects === null && <div className="muted board-projects-empty">Loading…</div>}
+          {projects === null && (
+            <div className="muted board-projects-empty">{t("board.loadingShort")}</div>
+          )}
           {projects?.length === 0 && (
-            <div className="muted board-projects-empty">
-              No projects yet. A project is any folder or Git repository — Git is optional.
-            </div>
+            <div className="muted board-projects-empty">{t("board.noProjects")}</div>
           )}
           {(projects ?? []).map((project) => {
             const counts = countsFor(project);
@@ -939,7 +979,7 @@ export function BoardView() {
               >
                 <span className="board-project-top">
                   {board.workspaceType === "git" && (
-                    <span className="board-project-git" title="Git repository at the project root">
+                    <span className="board-project-git" title={t("board.gitRepoTitle")}>
                       git
                     </span>
                   )}
@@ -949,7 +989,7 @@ export function BoardView() {
                   className="board-project-path mono"
                   title={root ?? project.source.remoteUrl ?? undefined}
                 >
-                  {root ?? project.source.remoteUrl ?? "no folder yet"}
+                  {root ?? project.source.remoteUrl ?? t("board.noFolder")}
                 </span>
                 {total > 0 && counts && (
                   <span className="board-project-counts">
@@ -957,7 +997,10 @@ export function BoardView() {
                       <span
                         key={column.id}
                         className={`board-count ${column.id}`}
-                        title={`${COLUMN_LABEL[column.id]}: ${counts[column.id]}`}
+                        title={t("board.columnCount", {
+                          column: t(column.labelKey),
+                          n: counts[column.id]!,
+                        })}
                       >
                         <span className="board-count-key">{COUNT_KEY[column.id]}</span>
                         <span className="board-count-sep">|</span>
@@ -968,8 +1011,8 @@ export function BoardView() {
                 )}
                 <button
                   className="board-project-del"
-                  title="Delete this project (the folder itself is not touched)"
-                  aria-label={`Delete project ${project.name}`}
+                  title={t("board.deleteProjectTooltip")}
+                  aria-label={t("board.deleteProjectAria", { name: project.name })}
                   onClick={(event) => {
                     event.stopPropagation();
                     setDeletingProject(project);
@@ -982,7 +1025,7 @@ export function BoardView() {
           })}
         </div>
         <button className="board-add-project" onClick={() => setAddProjectOpen(true)}>
-          <Icon name="plus" size={12} /> Add project
+          <Icon name="plus" size={12} /> {t("board.addProject")}
         </button>
       </aside>
 
@@ -990,15 +1033,15 @@ export function BoardView() {
         <header className="board-head">
           <div className="board-head-main">
             <div className="board-head-title">
-              <h1>{selectedProject?.name ?? "Kanban"}</h1>
+              <h1>{selectedProject?.name ?? t("board.title")}</h1>
               {selectedBoard && (
                 <span className="board-workspace-chip">
-                  {WORKSPACE_LABEL[selectedBoard.workspaceType]}
+                  {t(WORKSPACE_LABEL_KEY[selectedBoard.workspaceType])}
                 </span>
               )}
             </div>
             <div className="board-head-path mono">
-              {selectedRoot ?? "Select or create a project to load this board"}
+              {selectedRoot ?? t("board.selectProjectHint")}
             </div>
             {selectedBoard?.discoveryWarning && (
               <div className="board-hint warn">{selectedBoard.discoveryWarning}</div>
@@ -1009,16 +1052,16 @@ export function BoardView() {
             <button
               className="small"
               disabled={!selectedProject}
-              title="Board settings (folder shape, default agent, execution mode)"
+              title={t("board.boardSettingsTooltip")}
               onClick={() => {
                 setSettingsError(null);
                 setSettingsProject(selectedProject);
               }}
             >
-              board settings
+              {t("board.boardSettings")}
             </button>
             <button className="small primary" disabled={!selectedProject} onClick={openTaskDialog}>
-              <Icon name="plus" size={12} /> New task
+              <Icon name="plus" size={12} /> {t("board.newTask")}
             </button>
           </div>
         </header>
@@ -1033,9 +1076,9 @@ export function BoardView() {
 
         {!selectedProject ? (
           <div className="board-empty muted">
-            <p>No project selected.</p>
+            <p>{t("board.noProjectSelected")}</p>
             <button className="small primary" onClick={() => setAddProjectOpen(true)}>
-              <Icon name="plus" size={12} /> Add project
+              <Icon name="plus" size={12} /> {t("board.addProject")}
             </button>
           </div>
         ) : (
@@ -1047,17 +1090,13 @@ export function BoardView() {
                 <div className="board-column" key={column.id}>
                   <div className="board-column-head">
                     <ColumnIndicator columnId={column.id} />
-                    <span className="board-column-label">{column.label}</span>
+                    <span className="board-column-label">{t(column.labelKey)}</span>
                     <span className="board-column-count">{columnCards.length}</span>
                     {column.id === "trash" && (
                       <button
                         className="board-column-clear"
-                        title={
-                          columnCards.length > 0
-                            ? "Clear Done permanently (records only)"
-                            : "Done is empty"
-                        }
-                        aria-label="Clear Done"
+                        title={t(columnCards.length > 0 ? "board.done.clearTooltip" : "board.done.empty")}
+                        aria-label={t("board.done.clearAria")}
                         disabled={columnCards.length === 0}
                         onClick={() => setClearTrashOpen(true)}
                       >
@@ -1090,9 +1129,9 @@ export function BoardView() {
                       <button
                         className="board-create-task-btn"
                         onClick={openTaskDialog}
-                        title="Create a task on this Kanban board"
+                        title={t("board.createTaskTooltip")}
                       >
-                        <Icon name="plus" size={13} /> Create task
+                        <Icon name="plus" size={13} /> {t("board.createTask")}
                         <span className="board-create-task-key">c</span>
                       </button>
                     )}
@@ -1115,7 +1154,7 @@ export function BoardView() {
                       />
                     ))}
                     {columnCards.length === 0 && !canCreateTask && (
-                      <div className="board-column-empty muted">{column.hint}</div>
+                      <div className="board-column-empty muted">{t(column.hintKey)}</div>
                     )}
                   </div>
                 </div>
@@ -1184,44 +1223,41 @@ export function BoardView() {
       )}
 
       {deletingProject && (
-        <Modal title="Delete project" onClose={() => setDeletingProject(null)}>
+        <Modal title={t("board.deleteProjectTitle")} onClose={() => setDeletingProject(null)}>
           <p>
-            Delete project <strong>{deletingProject.name}</strong>?
+            {t("board.deleteProjectBody1")} <strong>{deletingProject.name}</strong>
+            {t("board.deleteProjectBody2")}
           </p>
           <p className="muted">
-            This is the project record itself — it disappears from the Projects page too. The folder{" "}
+            {t("board.deleteProjectNote")}{" "}
             <span className="mono">
-              {projectRoot(deletingProject, workspaces) ?? deletingProject.source.remoteUrl ?? "(no folder)"}
+              {projectRoot(deletingProject, workspaces) ??
+                deletingProject.source.remoteUrl ??
+                t("board.noFolder")}
             </span>{" "}
-            and your files stay untouched; tasks that already ran keep their own working copies.
+            {t("board.deleteProjectNote2")}
           </p>
           <div className="modal-actions">
-            <button onClick={() => setDeletingProject(null)}>Cancel</button>
+            <button onClick={() => setDeletingProject(null)}>{t("board.form.cancel")}</button>
             <button className="danger" disabled={deletingProjectBusy} onClick={() => void deleteProject()}>
-              {deletingProjectBusy ? "Deleting…" : "Delete"}
+              {t("board.deleteProject")}
             </button>
           </div>
         </Modal>
       )}
 
       {clearTrashOpen && (
-        <Modal title="Clear Done" onClose={() => setClearTrashOpen(false)}>
+        <Modal title={t("board.done.clearTitle")} onClose={() => setClearTrashOpen(false)}>
           <p>
-            Permanently delete{" "}
-            <strong>
-              {cards.filter((card) => card.column === "trash").length} Done card
-              {cards.filter((card) => card.column === "trash").length === 1 ? "" : "s"}
-            </strong>
-            ?
+            {t("board.done.clearConfirm", {
+              n: cards.filter((card) => card.column === "trash").length,
+            })}
           </p>
-          <p className="muted">
-            Only the AgentFabric records (cards and their sessions) are removed. The project folder,
-            worktrees and your files stay untouched.
-          </p>
+          <p className="muted">{t("board.done.clearNote")}</p>
           <div className="modal-actions">
-            <button onClick={() => setClearTrashOpen(false)}>Cancel</button>
+            <button onClick={() => setClearTrashOpen(false)}>{t("board.form.cancel")}</button>
             <button className="danger" disabled={clearTrashBusy} onClick={() => void clearTrash()}>
-              {clearTrashBusy ? "Clearing…" : "Clear Done"}
+              {clearTrashBusy ? t("board.done.clearing") : t("board.done.clear")}
             </button>
           </div>
         </Modal>
@@ -1352,6 +1388,7 @@ function CardTile({
   onDragStart: (event: DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
 }) {
+  const t = useT();
   const isTrash = card.column === "trash";
   return (
     <div
@@ -1373,8 +1410,8 @@ function CardTile({
       {isTrash && onRestore && (
         <button
           className="board-card-restore"
-          title="Restore to Review"
-          aria-label="Restore card to Review"
+          title={t("board.card.restore")}
+          aria-label={t("board.card.restoreAria")}
           onClick={(event) => {
             event.stopPropagation();
             onRestore();
@@ -1387,10 +1424,10 @@ function CardTile({
       <div className="board-card-meta">
         <span className="board-chip">{agentLabel}</span>
         <span className={`board-chip ${card.executionMode}`}>
-          {card.executionMode === "direct" ? "Direct" : "Worktree"}
+          {t(card.executionMode === "direct" ? "board.execution.direct" : "board.execution.worktree")}
         </span>
         {card.executionMode === "worktree" && card.baseRef && (
-          <span className="board-chip mono" title={`Worktree base ref: ${card.baseRef}`}>
+          <span className="board-chip mono" title={t("board.card.baseRef", { ref: card.baseRef })}>
             {card.baseRef}
           </span>
         )}
@@ -1404,9 +1441,9 @@ function CardTile({
       {!isTrash && card.taskId && (
         <div className="board-card-foot">
           {session ? (
-            <StatusBadge status={session.status} />
+            <SessionStatusBadge status={session.status} />
           ) : (
-            <span className="board-chip">task {shortId(card.taskId)}</span>
+            <span className="board-chip">{t("board.card.task", { id: shortId(card.taskId) })}</span>
           )}
         </div>
       )}
@@ -1448,6 +1485,7 @@ function CardDetail({
   onRestore: () => void;
   onDelete: () => void;
 }) {
+  const t = useT();
   // A recorded harness session id means "start" continues that conversation
   // instead of opening a blank one; the button says so.
   const canResume = Boolean(session?.nativeSessionId) && !sessionLive;
@@ -1506,7 +1544,7 @@ function CardDetail({
       .find((agent) => agent.id === card.agentId)
       ?.permissionModes.find((mode) => mode.id === card.permissionModeId)?.label ??
     card.permissionModeId ??
-    "agent default";
+    t("board.detail.agentDefault");
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1522,8 +1560,8 @@ function CardDetail({
         <header className="board-detail-head">
           <button
             className="board-detail-back"
-            title="Back to board"
-            aria-label="Back to board"
+            title={t("board.detail.back")}
+            aria-label={t("board.detail.back")}
             onClick={onClose}
           >
             <Icon name="arrowLeft" size={16} />
@@ -1540,53 +1578,52 @@ function CardDetail({
               <button
                 className="small"
                 disabled={busy}
-                title={`Open task ${taskId}`}
+                title={t("board.detail.openTaskTitle", { id: taskId })}
                 onClick={() => navigate(`/tasks/${encodeURIComponent(taskId)}`)}
               >
-                <Icon name="compose" size={12} /> Open task
+                <Icon name="compose" size={12} /> {t("board.detail.openTask")}
               </button>
             )}
             {card.column === "backlog" && (
               <button className="primary" disabled={busy} onClick={onStart}>
-                Start
+                {t("board.detail.start")}
               </button>
             )}
-            {card.column === "review" && !sessionLive && (
+            {(card.column === "review" || card.column === "in_progress") && !sessionLive && (
               <button className="primary" disabled={busy} onClick={onRestart}>
-                {canResume ? "Resume session" : "Start new session"}
-              </button>
-            )}
-            {card.column === "in_progress" && !sessionLive && (
-              <button className="primary" disabled={busy} onClick={onRestart}>
-                {canResume ? "Resume session" : "Start new session"}
+                {t(canResume ? "board.detail.resumeSession" : "board.detail.startNew")}
               </button>
             )}
             {card.column === "in_progress" && (
-              <button disabled={busy} onClick={onMarkReview} title="Has the agent finished this round?">
-                Mark for review
+              <button
+                disabled={busy}
+                onClick={onMarkReview}
+                title={t("board.detail.markReviewHint")}
+              >
+                {t("board.detail.markReview")}
               </button>
             )}
             {card.column === "trash" ? (
               <>
                 <button className="primary" disabled={busy} onClick={onRestore}>
-                  Restore to Review
+                  {t("board.detail.restoreToReview")}
                 </button>
                 {confirmDelete ? (
                   <button className="danger-prominent" disabled={busy} onClick={onDelete}>
-                    Confirm delete
+                    {t("board.detail.confirmDelete")}
                   </button>
                 ) : (
                   <button className="danger" disabled={busy} onClick={() => setConfirmDelete(true)}>
-                    Delete permanently
+                    {t("board.detail.deletePermanently")}
                   </button>
                 )}
               </>
             ) : (
               <button className="danger" disabled={busy} onClick={onTrash}>
-                Move to Done
+                {t("board.detail.moveToDone")}
               </button>
             )}
-            <button className="board-close" title="Close" onClick={onClose}>
+            <button className="board-close" title={t("board.detail.close")} onClick={onClose}>
               ✕
             </button>
           </div>
@@ -1595,7 +1632,11 @@ function CardDetail({
         {(actionError || sessionError) && (
           <div className="board-banners">
             <ErrorBox message={actionError} />
-            {sessionError && <div className="board-hint warn">session status unavailable: {sessionError}</div>}
+            {sessionError && (
+              <div className="board-hint warn">
+                {t("board.sessionStatusUnavailable", { error: sessionError })}
+              </div>
+            )}
           </div>
         )}
 
@@ -1604,107 +1645,115 @@ function CardDetail({
             <>
               <aside className="board-detail-side" style={{ width: sideWidth }}>
                 <div className="board-detail-side-head">
-                  <span className="board-detail-side-title">Task details</span>
+                  <span className="board-detail-side-title">{t("board.detail.taskDetails")}</span>
                   <button
                     className="board-detail-side-collapse"
-                    title="Collapse task details"
-                    aria-label="Collapse task details"
+                    title={t("board.detail.collapse")}
+                    aria-label={t("board.detail.collapse")}
                     onClick={() => setSideOpen(false)}
                   >
                     <Icon name="chevron" size={14} />
                   </button>
                 </div>
-                <div className="board-field-label">Prompt</div>
+                <div className="board-field-label">{t("board.detail.field.prompt")}</div>
               <pre className="board-prompt">{card.prompt}</pre>
 
               <dl className="board-meta">
                 <div className="board-meta-row">
-                  <dt>Column</dt>
-                  <dd>{COLUMN_LABEL[card.column]}</dd>
+                  <dt>{t("board.detail.field.column")}</dt>
+                  <dd>{t(COLUMN_LABEL_KEY[card.column])}</dd>
                 </div>
                 <div className="board-meta-row">
-                  <dt>Agent</dt>
+                  <dt>{t("board.detail.field.agent")}</dt>
                   <dd>{agentLabel}</dd>
                 </div>
                 <div className="board-meta-row">
-                  <dt>Model</dt>
-                  <dd className="mono">{sessionModelLabel ?? card.model ?? "agent default"}</dd>
+                  <dt>{t("board.detail.field.model")}</dt>
+                  <dd className="mono">{sessionModelLabel ?? card.model ?? t("board.detail.agentDefault")}</dd>
                 </div>
                 {session?.reasoningEffort && (
                   <div className="board-meta-row">
-                    <dt>Reasoning</dt>
+                    <dt>{t("board.detail.field.reasoning")}</dt>
                     <dd className="mono">{session.reasoningEffort}</dd>
                   </div>
                 )}
                 <div className="board-meta-row">
-                  <dt>Permission</dt>
+                  <dt>{t("board.detail.field.permission")}</dt>
                   <dd>{permissionLabel}</dd>
                 </div>
                 <div className="board-meta-row">
-                  <dt>Execution</dt>
-                  <dd>{card.executionMode === "direct" ? "Direct" : "Worktree"}</dd>
+                  <dt>{t("board.detail.field.execution")}</dt>
+                  <dd>
+                    {t(
+                      card.executionMode === "direct"
+                        ? "board.execution.direct"
+                        : "board.execution.worktree"
+                    )}
+                  </dd>
                 </div>
                 {card.executionMode === "worktree" && (
                   <div className="board-meta-row">
-                    <dt>Base ref</dt>
+                    <dt>{t("board.detail.field.baseRef")}</dt>
                     <dd className="mono">{card.baseRef ?? "HEAD"}</dd>
                   </div>
                 )}
                 <div className="board-meta-row">
-                  <dt>Project</dt>
+                  <dt>{t("board.detail.field.project")}</dt>
                   <dd className="mono" title={projectRootPath ?? undefined}>
                     {projectRootPath ?? "—"}
                   </dd>
                 </div>
                 <div className="board-meta-row">
-                  <dt>Card</dt>
+                  <dt>{t("board.detail.field.card")}</dt>
                   <dd className="mono">{card.id}</dd>
                 </div>
                 <div className="board-meta-row">
-                  <dt>Task</dt>
+                  <dt>{t("board.detail.field.task")}</dt>
                   <dd className="mono">
                     {taskId ? (
                       <a onClick={() => navigate(`/tasks/${encodeURIComponent(taskId)}`)}>
                         {taskId}
                       </a>
                     ) : (
-                      "not started yet"
+                      t("board.detail.notStarted")
                     )}
                   </dd>
                 </div>
                 <div className="board-meta-row">
-                  <dt>Run</dt>
+                  <dt>{t("board.detail.field.run")}</dt>
                   <dd className="mono">{session?.runId ?? card.runId ?? "—"}</dd>
                 </div>
                 {session && (
                   <>
                     <div className="board-meta-row">
-                      <dt>Status</dt>
-                      <dd>{session.status}</dd>
+                      <dt>{t("board.detail.field.status")}</dt>
+                      <dd>
+                        <SessionStatusBadge status={session.status} />
+                      </dd>
                     </div>
                     <div className="board-meta-row">
-                      <dt>Working dir</dt>
+                      <dt>{t("board.detail.field.cwd")}</dt>
                       <dd className="mono">{session.cwd}</dd>
                     </div>
                     <div className="board-meta-row">
-                      <dt>Started</dt>
+                      <dt>{t("board.detail.field.started")}</dt>
                       <dd>{fmtTime(session.startedAt)}</dd>
                     </div>
                     {session.endedAt && (
                       <div className="board-meta-row">
-                        <dt>Ended</dt>
+                        <dt>{t("board.detail.field.ended")}</dt>
                         <dd>{fmtTime(session.endedAt)}</dd>
                       </div>
                     )}
                     {session.exitCode != null && (
                       <div className="board-meta-row">
-                        <dt>Exit code</dt>
+                        <dt>{t("board.detail.field.exitCode")}</dt>
                         <dd className="mono">{session.exitCode}</dd>
                       </div>
                     )}
                     {session.nativeSessionId && (
                       <div className="board-meta-row">
-                        <dt>Native session</dt>
+                        <dt>{t("board.detail.field.nativeSession")}</dt>
                         <dd className="mono">{session.nativeSessionId}</dd>
                       </div>
                     )}
@@ -1712,17 +1761,17 @@ function CardDetail({
                 )}
               </dl>
 
-              {session?.error && <div className="board-session-error">Session error: {session.error}</div>}
+              {session?.error && (
+                <div className="board-session-error">
+                  {t("board.detail.sessionError", { error: session.error })}
+                </div>
+              )}
 
               {card.column === "review" && (
                 <div className="board-hint">
                   {sessionLive
-                    ? acpSession
-                      ? "This card is in Review. Continue the agent in the chat — a new turn moves it back to In Progress automatically."
-                      : "This card is in Review. Continue the agent in the terminal — a new turn moves it back to In Progress automatically."
-                    : acpSession
-                      ? "This card is in Review. Resume the saved session in the chat to keep the agent's context, or start a new session; the card moves back to In Progress."
-                      : "This card is in Review. Start a new session to keep working on it; the card moves back to In Progress."}
+                    ? t(acpSession ? "board.review.liveChat" : "board.review.liveTerm")
+                    : t(acpSession ? "board.review.chat" : "board.review.term")}
                 </div>
               )}
               </aside>
@@ -1730,7 +1779,7 @@ function CardDetail({
                 className="board-detail-resizer"
                 role="separator"
                 aria-orientation="vertical"
-                aria-label="Resize task details"
+                aria-label={t("board.detail.resize")}
                 onPointerDown={beginResize}
               />
             </>
@@ -1738,13 +1787,13 @@ function CardDetail({
             <aside className="board-detail-rail">
               <button
                 className="board-detail-rail-btn"
-                title="Show task details"
-                aria-label="Show task details"
+                title={t("board.detail.show")}
+                aria-label={t("board.detail.show")}
                 onClick={() => setSideOpen(true)}
               >
                 <Icon name="chevron" size={14} />
               </button>
-              <span className="board-detail-rail-label">Details</span>
+              <span className="board-detail-rail-label">{t("board.detail.details")}</span>
             </aside>
           )}
 
@@ -1753,10 +1802,8 @@ function CardDetail({
               // Done frees the process. Say what happened and what Restore does,
               // so a stopped terminal does not read as "this card is broken".
               <div className="board-detail-notice">
-                Moved to Done: this session was closed to free the process.
-                {canResume
-                  ? " Restore to Review continues the same conversation where it stopped."
-                  : " Restore to Review starts a fresh session."}
+                {t("board.detail.doneNotice")}{" "}
+                {t(canResume ? "board.detail.doneResumable" : "board.detail.doneFresh")}
               </div>
             )}
             {session ? (
@@ -1771,23 +1818,26 @@ function CardDetail({
               )
             ) : (
               <div className="board-term-empty">
-                <div className="board-term-empty-title">No session for this card yet.</div>
+                <div className="board-term-empty-title">{t("board.detail.noSession")}</div>
                 {card.column === "backlog" ? (
                   <>
                     <p className="muted">
                       {card.executionMode === "direct"
-                        ? `Starting spawns ${agentLabel} directly in the project folder with this prompt.`
-                        : `Starting creates a detached git worktree from ${card.baseRef ?? "HEAD"} and spawns ${agentLabel} there.`}
+                        ? t("board.detail.startDirect", { agent: agentLabel })
+                        : t("board.detail.startWorktree", {
+                            ref: card.baseRef ?? "HEAD",
+                            agent: agentLabel,
+                          })}
                     </p>
                     <button className="primary" disabled={busy} onClick={onStart}>
-                      Start session
+                      {t("board.detail.startSession")}
                     </button>
                   </>
                 ) : (
                   <p className="muted">
                     {card.column === "trash"
-                      ? "Restore the card to Review before starting a new session."
-                      : "This card has no replayable terminal. Move it to Done and restore it to Review to start a new session."}
+                      ? t("board.detail.trashNeedsRestore")
+                      : t("board.detail.noTerminal")}
                   </p>
                 )}
               </div>
@@ -1828,6 +1878,7 @@ function BoardSettingsDialog({
   onSubmit: (next: ProjectBoardSettings) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const current = boardSettingsOf(project);
   const [workspaceType, setWorkspaceType] = useState<WorkspaceType>(current.workspaceType);
   const [agentId, setAgentId] = useState(current.defaultAgentId ?? "");
@@ -1846,14 +1897,14 @@ function BoardSettingsDialog({
   const available = agents.filter((agent) => agent.available);
 
   return (
-    <Modal title="Board settings" onClose={onClose}>
+    <Modal title={t("board.settings.title")} onClose={onClose}>
       <p className="muted">
         <strong>{project.name}</strong> ·{" "}
-        <span className="mono">{root ?? project.source.remoteUrl ?? "(no folder yet)"}</span>
+        <span className="mono">{root ?? project.source.remoteUrl ?? t("board.noFolderYet")}</span>
       </p>
       <div className="form-grid-2">
         <label className="board-dialog-field">
-          <span className="board-dialog-label">Folder shape</span>
+          <span className="board-dialog-label">{t("board.settings.folderShape")}</span>
           <select
             value={workspaceType}
             disabled={busy}
@@ -1861,19 +1912,19 @@ function BoardSettingsDialog({
           >
             {BOARD_WORKSPACE_TYPES.map((type) => (
               <option key={type} value={type}>
-                {WORKSPACE_LABEL[type]}
+                {t(WORKSPACE_LABEL_KEY[type])}
               </option>
             ))}
           </select>
         </label>
         <label className="board-dialog-field">
-          <span className="board-dialog-label">Default agent</span>
+          <span className="board-dialog-label">{t("board.settings.defaultAgent")}</span>
           <select
             value={agentId}
             disabled={busy}
             onChange={(event) => setAgentId(event.target.value)}
           >
-            <option value="">(first available)</option>
+            <option value="">{t("board.settings.firstAvailable")}</option>
             {available.map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {agent.label}
@@ -1882,24 +1933,22 @@ function BoardSettingsDialog({
           </select>
         </label>
         <label className="board-dialog-field">
-          <span className="board-dialog-label">Default execution mode</span>
+          <span className="board-dialog-label">{t("board.settings.defaultExecution")}</span>
           <select
             value={executionMode}
             disabled={busy}
             onChange={(event) => setExecutionMode(event.target.value as ExecutionMode)}
           >
-            <option value="direct">Direct — run in the project folder</option>
-            <option value="worktree">Worktree — a detached copy per card</option>
+            <option value="direct">{t("board.execution.directOption")}</option>
+            <option value="worktree">{t("board.execution.worktreeOption")}</option>
           </select>
         </label>
       </div>
-      <p className="board-hint">
-        These become the defaults of a new card on this board; every card can still override them.
-      </p>
+      <p className="board-hint">{t("board.settings.hint")}</p>
       {error && <div className="board-hint warn board-dialog-error">{error}</div>}
       <div className="modal-actions">
         <button onClick={onClose} disabled={busy}>
-          Cancel
+          {t("board.form.cancel")}
         </button>
         <button
           className="primary"
@@ -1915,7 +1964,7 @@ function BoardSettingsDialog({
             })
           }
         >
-          {busy ? "Saving…" : "Save"}
+          {busy ? t("board.settings.saving") : t("board.settings.save")}
         </button>
       </div>
     </Modal>

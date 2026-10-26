@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { del, get, post } from "../api";
 import { ErrorBox, Field, Modal, useAsync } from "../components";
+import { useT } from "../i18n-react";
 
 /**
  * Source Credentials (v11 §4) — a section of the settings panel.
@@ -15,6 +16,7 @@ import { ErrorBox, Field, Modal, useAsync } from "../components";
  * top-level page of its own.
  */
 export function CredentialsSection() {
+  const t = useT();
   const credentials = useAsync<any[]>(() => get("/api/source-credentials"), []);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,21 +75,23 @@ export function CredentialsSection() {
     <div>
       <div className="row" style={{ marginBottom: 8 }}>
         <span className="right">
-          <button className="small" onClick={() => credentials.reload()}>refresh</button>{" "}
-          <button className="small primary" onClick={() => setAdding(true)}>Add credential</button>
+          <button className="small" onClick={() => credentials.reload()}>{t("common.refresh")}</button>{" "}
+          <button className="small primary" onClick={() => setAdding(true)}>{t("credentials.add")}</button>
         </span>
       </div>
       <ErrorBox message={error} />
 
       {(credentials.data ?? []).length === 0 ? (
-        <div className="card muted">
-          No credentials yet. Public repositories need none — create a Project straight away.
-        </div>
+        <div className="card muted">{t("credentials.empty")}</div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Name</th><th>Type</th><th>Host</th><th>Username</th><th>Secret</th><th /></tr>
+              <tr>
+                <th>{t("credentials.col.name")}</th><th>{t("credentials.col.type")}</th>
+                <th>{t("credentials.col.host")}</th><th>{t("credentials.col.username")}</th>
+                <th>{t("credentials.col.secret")}</th><th />
+              </tr>
             </thead>
             <tbody>
               {(credentials.data ?? []).map((c) => (
@@ -99,7 +103,7 @@ export function CredentialsSection() {
                   <td className="muted">{c.secretMasked ?? "-"}</td>
                   <td className="actions">
                     <button className="small danger" onClick={() => setPendingRemove({ id: c.id, name: c.name })}>
-                      remove
+                      {t("credentials.removeRow")}
                     </button>
                   </td>
                 </tr>
@@ -110,21 +114,21 @@ export function CredentialsSection() {
       )}
 
       {adding && (
-        <Modal title="Add source credential" onClose={() => setAdding(false)}>
+        <Modal title={t("credentials.addTitle")} onClose={() => setAdding(false)}>
           <div className="form-grid-2">
-            <Field label="Name">
-              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Personal GitHub" />
+            <Field label={t("credentials.f.name")}>
+              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t("credentials.f.namePh")} />
             </Field>
-            <Field label="Type">
+            <Field label={t("credentials.f.type")}>
               <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
-                <option value="https-token">HTTPS token</option>
-                <option value="ssh-key">SSH private key</option>
+                <option value="https-token">{t("credentials.type.token")}</option>
+                <option value="ssh-key">{t("credentials.type.ssh")}</option>
               </select>
             </Field>
-            <Field label="Host (optional)">
+            <Field label={t("credentials.f.host")}>
               <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="github.com" />
             </Field>
-            <Field label="Username (optional)">
+            <Field label={t("credentials.f.username")}>
               <input
                 value={form.username}
                 onChange={(e) => setForm({ ...form, username: e.target.value })}
@@ -132,7 +136,7 @@ export function CredentialsSection() {
               />
             </Field>
           </div>
-          <Field label={form.type === "ssh-key" ? "Private key (PEM)" : "Token"}>
+          <Field label={form.type === "ssh-key" ? t("credentials.f.valueSsh") : t("credentials.f.valueToken")}>
             <textarea
               rows={form.type === "ssh-key" ? 6 : 2}
               value={form.value}
@@ -142,32 +146,26 @@ export function CredentialsSection() {
           </Field>
           {form.type === "ssh-key" && (
             <>
-              <Field label="Key passphrase (optional)">
+              <Field label={t("credentials.f.passphrase")}>
                 <input type="password" value={form.passphrase} onChange={(e) => setForm({ ...form, passphrase: e.target.value })} />
               </Field>
-              <Field label="known_hosts (optional — host keys are always verified)">
+              <Field label={t("credentials.f.knownHosts")}>
                 <textarea rows={2} value={form.knownHosts} onChange={(e) => setForm({ ...form, knownHosts: e.target.value })} />
               </Field>
             </>
           )}
-          <p className="muted">
-            The value is written to Secrets immediately and is never shown again — only its mask appears in
-            this list.
-          </p>
+          <p className="muted">{t("credentials.createNote")}</p>
           <div className="modal-actions">
-            <button onClick={() => setAdding(false)}>Cancel</button>
-            <button className="primary" disabled={busy || !form.name || !form.value} onClick={create}>Create</button>
+            <button onClick={() => setAdding(false)}>{t("common.cancel")}</button>
+            <button className="primary" disabled={busy || !form.name || !form.value} onClick={create}>{t("common.create")}</button>
           </div>
         </Modal>
       )}
       {pendingRemove && (
-        <Modal title="Remove credential" onClose={() => setPendingRemove(null)}>
-          <p>
-            Remove <strong>{pendingRemove.name}</strong>? The stored secret is deleted and the API never returns
-            it again — you would have to re-issue the token or key at the provider.
-          </p>
+        <Modal title={t("credentials.remove")} onClose={() => setPendingRemove(null)}>
+          <p>{t("credentials.removeQuestion", { name: pendingRemove.name })}</p>
           <div className="row-end">
-            <button onClick={() => setPendingRemove(null)}>Cancel</button>
+            <button onClick={() => setPendingRemove(null)}>{t("common.cancel")}</button>
             <button
               className="danger"
               onClick={() => {
@@ -176,7 +174,7 @@ export function CredentialsSection() {
                 void remove(target.id);
               }}
             >
-              Remove credential
+              {t("credentials.remove")}
             </button>
           </div>
         </Modal>

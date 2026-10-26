@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { get } from "../../api";
 import { Icon } from "../../components";
+import { useT } from "../../i18n-react";
 import type { KanbanDirectoryEntry, KanbanDirectoryListing } from "./types";
 
 /**
@@ -32,6 +33,7 @@ export function DirectoryAutocomplete({
   onSubmit?: () => void;
   inputRef?: RefObject<HTMLInputElement>;
 }) {
+  const t = useT();
   const [entries, setEntries] = useState<KanbanDirectoryEntry[]>([]);
   const [open, setOpen] = useState(false);
   const [highlighted, setHighlighted] = useState(-1);
@@ -158,8 +160,8 @@ export function DirectoryAutocomplete({
           onMouseDown={() => {
             interactedRef.current = true;
           }}
-          placeholder={placeholder ?? "/absolute/path/to/folder"}
-          aria-label={ariaLabel ?? "Folder path"}
+          placeholder={placeholder ?? t("board.dir.defaultPlaceholder")}
+          aria-label={ariaLabel ?? t("board.dir.label")}
           autoFocus={autoFocus}
           disabled={disabled}
           spellCheck={false}
@@ -167,7 +169,7 @@ export function DirectoryAutocomplete({
         {loading && <span className="dir-input-busy">…</span>}
       </div>
       {open && entries.length > 0 && (
-        <div className="dir-menu" role="listbox" aria-label="Matching folders">
+        <div className="dir-menu" role="listbox" aria-label={t("board.dir.matches")}>
           {entries.slice(0, 100).map((entry, index) => (
             <button
               type="button"

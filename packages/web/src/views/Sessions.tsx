@@ -2,7 +2,13 @@ import { useState } from "react";
 import { get, post, fmtRelative } from "../api";
 import { ErrorBox, Modal, useAsync } from "../components";
 import { HARNESS_THREAD_LIMIT, HARNESS_THREAD_SOURCES, type HarnessThreadSourceMeta } from "../harness";
+import { useI18n } from "../i18n-react";
 import { navigate } from "../router";
+
+/** What a harness calls its local work: Codex "Threads", everything else "Sessions". */
+function nounKey(noun: string): "sessions.noun.codex" | "sessions.noun.session" {
+  return noun === "Threads" ? "sessions.noun.codex" : "sessions.noun.session";
+}
 
 /** Directory segments of a workspace path, ignoring a trailing slash. */
 function workspaceDirSegments(ws: any): string[] {
@@ -16,11 +22,11 @@ function workspaceDirSegments(ws: any): string[] {
  * ("code-vision-workspace/agent" versus "code-vision-workspace"). The full
  * path is the option's title.
  */
-export function workspaceLabels(workspaces: any[]): Map<string, string> {
+export function workspaceLabels(workspaces: any[], fallback = "workspace"): Map<string, string> {
   return new Map(
     workspaces.map((w: any) => {
       const segments = workspaceDirSegments(w);
-      return [w.id, segments.slice(-2).join("/") || w?.name || "workspace"];
+      return [w.id, segments.slice(-2).join("/") || w?.name || fallback];
     })
   );
 }
@@ -38,6 +44,7 @@ export function workspaceLabels(workspaces: any[]): Map<string, string> {
  * found and taken over, not where a task is described.
  */
 export function SessionsView() {
+  const { t } = useI18n();
   const [kind, setKind] = useState<string>(HARNESS_THREAD_SOURCES[0].kind);
   const [workspaceChoice, setWorkspaceChoice] = useState("");
   /** 递增触发当前 tab 的 threads / auth 重新读取。 */
@@ -54,16 +61,12 @@ export function SessionsView() {
 
   const active = HARNESS_THREAD_SOURCES.find((s) => s.kind === kind) ?? HARNESS_THREAD_SOURCES[0];
   const enabledFor = (k: string) => runtimeList.some((r: any) => r.kind === k && r.enabled);
-  const labels = workspaceLabels(workspaceList);
+  const labels = workspaceLabels(workspaceList, t("sessions.filter.workspaceFallback"));
 
   return (
     <div className="new-task">
-      <h1>Native sessions</h1>
-      <p className="sub">
-        Work that started outside AgentFabric, in a harness installed on this machine. Adopting a session reads
-        its history — it never re-runs the model — so you can continue it here, and generate a handoff explicitly
-        when it needs a new native session.
-      </p>
+      <h1>{t("sessions.title")}</h1>
+      <p className="sub">{t("sessions.subtitle")}</p>
 
       <div className="tab-bar">
         {HARNESS_THREAD_SOURCES.map((src) => (
@@ -72,7 +75,7 @@ export function SessionsView() {
             className={`tab ${src.kind === active.kind ? "active" : ""}`}
             onClick={() => setKind(src.kind)}
           >
-            {src.label} {src.noun}
+            {src.label} {t(nounKey(src.noun))}
           </button>
         ))}
       </div>
@@ -82,9 +85,9 @@ export function SessionsView() {
           className="pill"
           value={workspaceId}
           onChange={(e) => setWorkspaceChoice(e.target.value)}
-          title="Narrow discovery to one workspace's directory"
+          title={t("sessions.filter.title")}
         >
-          <option value="">All workspaces</option>
+          <option value="">{t("sessions.filter.all")}</option>
           {workspaceList.map((w: any) => (
             // The directory is the identity here (discovery filters on its
             // path), so label options by it and keep the full path in the
@@ -96,7 +99,7 @@ export function SessionsView() {
           ))}
         </select>
         <span className="right">
-          <button className="small" onClick={() => setReloadSeq((s) => s + 1)}>Refresh</button>
+          <button className="small" onClick={() => setReloadSeq((s) => s + 1)}>{t("common.refresh")}</button>
         </span>
       </div>
 
@@ -134,6 +137,7 @@ function HarnessThreadsPanel({
   reloadSeq: number;
   onAdopted: () => void;
 }) {
+  const { t } = useI18n();
   const { kind, label, noun } = source;
   const [importing, setImporting] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -156,8 +160,7 @@ function HarnessThreadsPanel({
   if (!enabled) {
     return (
       <div className="card muted">
-        No enabled {label} runtime — enable it on the Runtimes page to discover local {noun.toLowerCase()} on this
-        machine.
+        {t("sessions.disabled", { label, noun: t(nounKey(noun)).toLowerCase() })}
       </div>
     );
   }
@@ -189,48 +192,61 @@ function HarnessThreadsPanel({
       {/* Harness-native auth availability — detection only, never credentials. */}
       {auth.data && !auth.data.ok && (
         <div className="card auth-hint">
-          <strong>{auth.data.installed ? `${label} CLI not logged in` : `${label} CLI not installed`}</strong>
-          <div className="muted">{auth.data.hint ?? `Install the ${label} CLI and sign in to use ${label} Local.`}</div>
+          <strong>
+            {auth.data.installed
+              ? t("sessions.auth.notLoggedIn", { label })
+              : t("sessions.auth.notInstalled", { label })}
+          </strong>
+          <div className="muted">{auth.data.hint ?? t("sessions.auth.hint", { label })}</div>
         </div>
       )}
-      <ErrorBox message={threads.error ? `${label} thread discovery failed: ${threads.error}` : null} />
+      <ErrorBox message={threads.error ? t("sessions.error.discovery", { label, error: threads.error }) : null} />
       <ErrorBox message={importError} />
 
       {threads.loading ? (
-        <div className="muted">Loading local {label} {noun.toLowerCase()}…</div>
+        <div className="muted">{t("sessions.loading", { label, noun: t(nounKey(noun)).toLowerCase() })}</div>
       ) : list.length === 0 && !threads.error ? (
         <div className="muted">
-          No local {label} {noun.toLowerCase()} found{workspaceId ? " in this workspace" : ""}.
+          {workspaceId
+            ? t("sessions.empty.inWorkspace", { label, noun: t(nounKey(noun)).toLowerCase() })
+            : t("sessions.empty", { label, noun: t(nounKey(noun)).toLowerCase() })}
         </div>
       ) : (
         <div className="thread-items">
-          {list.map((t: any) => (
-            <div key={t.id} className={`thread-item${t.adopted ? " adopted" : ""}`}>
+          {list.map((item: any) => (
+            <div key={item.id} className={`thread-item${item.adopted ? " adopted" : ""}`}>
               <div className="thread-item-main">
-                <div className="thread-item-title" title={t.preview ?? t.title ?? t.id}>
-                  {t.title ?? t.id}
+                <div className="thread-item-title" title={item.preview ?? item.title ?? item.id}>
+                  {item.title ?? item.id}
                 </div>
                 <div className="thread-item-meta muted">
-                  {t.cwd ? <span title={t.cwd}>{t.cwd.split("/").slice(-2).join("/")}</span> : <span>no workspace</span>}
-                  {t.updatedAt && <span> · updated {fmtRelative(t.updatedAt)}</span>}
-                  {t.turnCount != null && <span> · {t.turnCount} turn{t.turnCount === 1 ? "" : "s"}</span>}
-                  {t.model && <span> · {t.model}</span>}
-                  {t.source && <span> · {t.source}</span>}
+                  {item.cwd ? <span title={item.cwd}>{item.cwd.split("/").slice(-2).join("/")}</span> : <span>{t("sessions.row.noWorkspace")}</span>}
+                  {item.updatedAt && <span> · {t("sessions.row.updated", { when: fmtRelative(t, item.updatedAt) })}</span>}
+                  {item.turnCount != null && (
+                    <span>
+                      {" · "}
+                      {item.turnCount === 1
+                        ? t("sessions.row.turns", { n: item.turnCount })
+                        : t("sessions.row.turnsPlural", { n: item.turnCount })}
+                    </span>
+                  )}
+                  {item.model && <span> · {item.model}</span>}
+                  {item.source && <span> · {item.source}</span>}
                 </div>
               </div>
               <div className="thread-item-actions">
-                {t.adopted ? (
-                  <button className="small" onClick={() => navigate(`/tasks/${t.adoptedTaskId}`)}>
-                    In AgentFabric ↗
+                {item.adopted ? (
+                  <button className="small" onClick={() => navigate(`/tasks/${item.adoptedTaskId}`)}>
+                    {t("sessions.row.inFabric")}
                   </button>
                 ) : (
                   <button
                     className="small primary"
                     disabled={importing !== null}
-                    title="Read this session, choose its workspace and continue it as an AgentFabric task"
-                    onClick={() => setAdopting(t)}
+                    title={t("sessions.row.continueTip")}
+                    onClick={() => setAdopting(item)}
                   >
-                    {importing === t.id ? <span className="spinner" /> : "Continue in AgentFabric"}
+                    {importing === item.id ? <span className="spinner" /> : t("sessions.row.continue")}
                   </button>
                 )}
               </div>
@@ -276,6 +292,7 @@ function AdoptThreadModal({
   onCancel: () => void;
   onConfirm: (choice: { create: boolean; workspaceId?: string; name?: string }) => void;
 }) {
+  const { t } = useI18n();
   const cwd: string | undefined = typeof thread.cwd === "string" && thread.cwd ? thread.cwd : undefined;
   const segments = cwd ? cwd.split("/").filter(Boolean) : [];
   const takenNames = new Set(workspaces.map((w: any) => w.name));
@@ -287,7 +304,7 @@ function AdoptThreadModal({
   const [mode, setMode] = useState<"create" | "reuse" | "none">(exact ? "reuse" : "create");
   const [reuseId, setReuseId] = useState<string>(exact?.id ?? workspaces[0]?.id ?? "");
 
-  const labels = workspaceLabels(workspaces);
+  const labels = workspaceLabels(workspaces, t("sessions.filter.workspaceFallback"));
   const reuse = workspaces.find((w: any) => w.id === reuseId);
   // The server takes `workspaceId` for reuse and `createWorkspaceName` for a
   // new record; neither means "adopt without a workspace".
@@ -299,13 +316,16 @@ function AdoptThreadModal({
         : { create: false };
 
   return (
-    <Modal title={`Continue ${source.label} ${source.noun.toLowerCase()}`} onClose={onCancel}>
+    <Modal
+      title={t("sessions.adopt.title", { label: source.label, noun: t(nounKey(source.noun)).toLowerCase() })}
+      onClose={onCancel}
+    >
       <div className="adopt-thread">
         <div className="adopt-thread-title">{thread.title ?? thread.id}</div>
         {thread.preview && <div className="muted adopt-thread-preview">{thread.preview}</div>}
         <div className="adopt-thread-cwd">
-          <span className="muted">Working directory</span>
-          {cwd ? <code title={cwd}>{cwd}</code> : <em>not recorded in this session's transcript</em>}
+          <span className="muted">{t("sessions.adopt.cwd")}</span>
+          {cwd ? <code title={cwd}>{cwd}</code> : <em>{t("sessions.adopt.cwdMissing")}</em>}
         </div>
 
         {cwd ? (
@@ -313,13 +333,13 @@ function AdoptThreadModal({
             <label className="adopt-choice">
               <input type="radio" checked={mode === "create"} onChange={() => setMode("create")} />
               <span>
-                New workspace
+                {t("sessions.adopt.newWorkspace")}
                 <input
                   type="text"
                   value={name}
                   disabled={mode !== "create"}
                   onChange={(e) => setName(e.target.value)}
-                  title="Name for the new workspace record — the directory itself is used in place"
+                  title={t("sessions.adopt.newWorkspaceTip")}
                 />
               </span>
             </label>
@@ -331,7 +351,7 @@ function AdoptThreadModal({
                 onChange={() => setMode("reuse")}
               />
               <span>
-                Existing workspace
+                {t("sessions.adopt.existing")}
                 <select
                   value={reuseId}
                   disabled={mode !== "reuse" || workspaces.length === 0}
@@ -347,33 +367,28 @@ function AdoptThreadModal({
             </label>
           </>
         ) : (
-          <p className="muted">
-            This session never recorded a working directory, so there is nothing to associate.
-          </p>
+          <p className="muted">{t("sessions.adopt.noCwd")}</p>
         )}
 
         <label className="adopt-choice">
           <input type="radio" checked={mode === "none"} onChange={() => setMode("none")} />
           <span>
-            No workspace
-            <span className="muted">
-              Adopt the history only. Continuing it later runs without a working directory.
-            </span>
+            {t("sessions.adopt.none")}
+            <span className="muted">{t("sessions.adopt.noneHint")}</span>
           </span>
         </label>
 
         {mode === "reuse" && reuse && reuse.path !== cwd && (
           <p className="muted adopt-note">
-            The session ran in {cwd ?? "—"}, this workspace points at {reuse.path}. Continuing it there keeps the
-            workspace's directory, not the session's.
+            {t("sessions.adopt.mismatch", { cwd: cwd ?? "—", path: reuse.path })}
           </p>
         )}
 
         <div className="row adopt-actions">
           <span className="right">
-            <button className="small" onClick={onCancel} disabled={busy}>Cancel</button>
+            <button className="small" onClick={onCancel} disabled={busy}>{t("common.cancel")}</button>
             <button className="small primary" onClick={() => onConfirm(choice)} disabled={busy || (mode === "create" && !name.trim())}>
-              {busy ? <span className="spinner" /> : "Continue"}
+              {busy ? <span className="spinner" /> : t("sessions.adopt.continue")}
             </button>
           </span>
         </div>

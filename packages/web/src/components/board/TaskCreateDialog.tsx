@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Icon } from "../../components";
+import { useT } from "../../i18n-react";
 import {
   TaskCreateForm,
   initialFromCard,
@@ -45,6 +46,7 @@ export function TaskCreateDialog({
   onSubmit: (draft: TaskDraft, options: TaskCreateSubmissionOptions) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onClose();
@@ -60,13 +62,23 @@ export function TaskCreateDialog({
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <div className="modal board-dialog task-create-dialog" role="dialog" aria-modal="true" aria-label="New task">
+      <div
+        className="modal board-dialog task-create-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("board.form.newTask")}
+      >
         <header className="board-dialog-head">
           <span className="board-dialog-title">
             <Icon name="compose" size={15} />
-            New task
+            {t("board.form.newTask")}
           </span>
-          <button className="board-dialog-close" onClick={onClose} disabled={busy} aria-label="Close">
+          <button
+            className="board-dialog-close"
+            onClick={onClose}
+            disabled={busy}
+            aria-label={t("board.detail.close")}
+          >
             ✕
           </button>
         </header>
@@ -119,6 +131,7 @@ export function TaskEditDialog({
   onSubmit: (draft: TaskDraft) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onClose();
@@ -134,13 +147,23 @@ export function TaskEditDialog({
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <div className="modal board-dialog task-create-dialog" role="dialog" aria-modal="true" aria-label="Edit task">
+      <div
+        className="modal board-dialog task-create-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("board.form.editTask")}
+      >
         <header className="board-dialog-head">
           <span className="board-dialog-title">
             <Icon name="compose" size={15} />
-            Edit task
+            {t("board.form.editTask")}
           </span>
-          <button className="board-dialog-close" onClick={onClose} disabled={busy} aria-label="Close">
+          <button
+            className="board-dialog-close"
+            onClick={onClose}
+            disabled={busy}
+            aria-label={t("board.detail.close")}
+          >
             ✕
           </button>
         </header>

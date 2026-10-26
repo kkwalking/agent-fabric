@@ -19,6 +19,8 @@
  * - The Core Event Schema is untouched.
  */
 
+import type { MessageKey, Translate } from "./i18n";
+
 export interface RawEvent {
   id: string;
   runId: string;
@@ -160,41 +162,48 @@ export function modelOptionLabel(
   return provider ? `${provider}/${m.alias ?? m.name}` : m.alias ?? m.name;
 }
 
-const TOOL_VERBS: Record<string, string> = {
-  read: "Read",
-  read_file: "Read",
-  cat: "Read",
-  view: "Read",
-  write: "Wrote",
-  write_file: "Wrote",
-  edit: "Edited",
-  edit_file: "Edited",
-  str_replace: "Edited",
-  apply_patch: "Applied patch to",
-  patch: "Patched",
-  bash: "Ran",
-  shell: "Ran",
-  run_command: "Ran",
-  terminal: "Ran",
-  exec: "Ran",
-  glob: "Listed",
-  list: "Listed",
-  ls: "Listed",
-  list_files: "Listed",
-  readdir: "Listed",
-  grep: "Searched",
-  search: "Searched",
-  search_files: "Searched",
-  find: "Searched",
-  todo: "Updated the task list",
-  todos: "Updated the task list",
-  task_list: "Updated the task list",
-  fetch: "Fetched",
-  webfetch: "Fetched",
-  web_fetch: "Fetched",
-  browser: "Opened",
-  websearch: "Searched the web",
-  web_search: "Searched the web",
+/**
+ * Tool name → the verb shown in the timeline, as a dictionary key.
+ *
+ * Keys, not strings: the timeline is shared by the task thread and the board's
+ * chat, and both must follow the UI language. The tool name itself is not
+ * translated (it is a platform identifier), only the verb is.
+ */
+const TOOL_VERB_KEYS: Record<string, MessageKey> = {
+  read: "tool.read",
+  read_file: "tool.read",
+  cat: "tool.read",
+  view: "tool.read",
+  write: "tool.wrote",
+  write_file: "tool.wrote",
+  edit: "tool.edited",
+  edit_file: "tool.edited",
+  str_replace: "tool.edited",
+  apply_patch: "tool.appliedPatch",
+  patch: "tool.patched",
+  bash: "tool.ran",
+  shell: "tool.ran",
+  run_command: "tool.ran",
+  terminal: "tool.ran",
+  exec: "tool.ran",
+  glob: "tool.listed",
+  list: "tool.listed",
+  ls: "tool.listed",
+  list_files: "tool.listed",
+  readdir: "tool.listed",
+  grep: "tool.searched",
+  search: "tool.searched",
+  search_files: "tool.searched",
+  find: "tool.searched",
+  todo: "tool.todoList",
+  todos: "tool.todoList",
+  task_list: "tool.todoList",
+  fetch: "tool.fetched",
+  webfetch: "tool.fetched",
+  web_fetch: "tool.fetched",
+  browser: "tool.opened",
+  websearch: "tool.webSearch",
+  web_search: "tool.webSearch",
 };
 
 function argsOf(data: Record<string, unknown> | undefined): Record<string, unknown> {
@@ -220,8 +229,14 @@ function toolTarget(tool: string, data: Record<string, unknown> | undefined): st
   return undefined;
 }
 
-export function toolLabel(tool: string, data: Record<string, unknown> | undefined): string {
-  const verb = TOOL_VERBS[tool.toLowerCase()] ?? `Used ${tool}`;
+export function toolLabel(
+  t: Translate,
+  tool: string,
+  data: Record<string, unknown> | undefined
+): string {
+  const key = TOOL_VERB_KEYS[tool.toLowerCase()];
+  // An unknown tool still says what happened; only the verb is generic.
+  const verb = key ? t(key) : t("tool.used", { tool });
   const target = toolTarget(tool, data);
   return target ? `${verb} ${target}` : verb;
 }
@@ -259,7 +274,14 @@ function eventText(data: Record<string, unknown> | undefined): string {
  * The input must be sorted by seq. `live` marks whether the run is still
  * executing: once terminal, open activities close instead of spinning.
  */
-export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {}): TimelineItem[] {
+export function projectTimeline(
+  t: Translate,
+  events: RawEvent[],
+  opts: { live?: boolean } = {}
+): TimelineItem[] {
+  // Tool rows are the only translated part of a timeline item, so the
+  // translator is captured here under a short name and threaded to toolLabel.
+  const tl = t;
   const items: TimelineItem[] = [];
   const toolsByKey = new Map<string, ToolActivity>();
   const filesByPath = new Map<string, FileActivity>();
@@ -320,7 +342,7 @@ export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {
           kind: "tool",
           key,
           tool,
-          label: toolLabel(tool, data),
+          label: toolLabel(tl, tool, data),
           status: "running",
           args: data.args,
         };
@@ -346,12 +368,12 @@ export function projectTimeline(events: RawEvent[], opts: { live?: boolean } = {
           const key = typeof (data.toolCallId ?? data.callID) === "string"
             ? String(data.toolCallId ?? data.callID)
             : nextKey("tool");
-          item = { kind: "tool", key, tool, label: toolLabel(tool, data), status: "done", args: data.input ?? data.args };
+          item = { kind: "tool", key, tool, label: toolLabel(tl, tool, data), status: "done", args: data.input ?? data.args };
           toolsByKey.set(key, item);
           items.push(item);
         }
         item.status = isError ? "error" : "done";
-        item.label = toolLabel(tool, { ...data, args: data.args ?? item.args ?? data.input });
+        item.label = toolLabel(tl, tool, { ...data, args: data.args ?? item.args ?? data.input });
         if (data.result !== undefined || data.output !== undefined) {
           item.result = data.result ?? data.output;
         }

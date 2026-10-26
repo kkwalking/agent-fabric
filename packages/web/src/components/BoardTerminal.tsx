@@ -4,6 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import "@xterm/xterm/css/xterm.css";
+import { useT } from "../i18n-react";
+import type { MessageKey } from "../i18n";
 
 /**
  * xterm terminal for one kanban session (v13 §五/§七).
@@ -69,12 +71,12 @@ const TERM_THEME = {
 
 type TermState = "connecting" | "live" | "exited" | "closed" | "error";
 
-const STATE_LABEL: Record<TermState, string> = {
-  connecting: "connecting…",
-  live: "live",
-  exited: "exited",
-  closed: "disconnected",
-  error: "error",
+const STATE_LABEL_KEY: Record<TermState, MessageKey> = {
+  connecting: "board.term.connecting",
+  live: "board.term.live",
+  exited: "board.term.exited",
+  closed: "board.term.disconnected",
+  error: "board.term.error",
 };
 
 /**
@@ -93,6 +95,7 @@ export interface BoardTerminalProps {
 }
 
 export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalProps) {
+  const t = useT();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<TermState>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -100,6 +103,9 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
   onExitRef.current = onExit;
   const interactiveRef = useRef(interactive);
   interactiveRef.current = interactive;
+  /** The effect's socket handlers are created once; they read the live translator. */
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -193,9 +199,13 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
       sawExit = true;
       setState("exited");
       term.options.disableStdin = true;
-      const code = exitCode == null ? "" : ` (code ${exitCode})`;
-      const sig = signal == null ? "" : ` (signal ${signal})`;
-      term.write(`\r\n\x1b[2m[process exited${code}${sig}]\x1b[0m\r\n`);
+      const code =
+        exitCode == null ? "" : tRef.current("board.term.exitedCode", { code: exitCode });
+      const sig =
+        signal == null ? "" : tRef.current("board.term.exitedSignal", { signal: String(signal) });
+      term.write(
+        `\r\n\x1b[2m${tRef.current("board.term.exitedLine", { code, signal: sig })}\x1b[0m\r\n`
+      );
       onExitRef.current?.({ exitCode, signal });
     };
 
@@ -237,7 +247,10 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
           );
         } else if (message.type === "error") {
           const code = typeof message.code === "string" ? message.code : undefined;
-          const text = typeof message.message === "string" ? message.message : "terminal error";
+          const text =
+            typeof message.message === "string"
+              ? message.message
+              : tRef.current("board.term.genericError");
           setError(code ? `${text} (${code})` : text);
           setState("error");
           term.options.disableStdin = true;
@@ -257,7 +270,7 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
 
     socket.onerror = () => {
       if (disposed) return;
-      setError("terminal connection failed");
+      setError(tRef.current("board.term.connectFailed"));
       setState("error");
     };
 
@@ -284,8 +297,8 @@ export function BoardTerminal({ sessionId, interactive, onExit }: BoardTerminalP
   return (
     <div className="board-term">
       <div className="board-term-bar">
-        <span className={`board-term-state ${state}`}>{STATE_LABEL[state]}</span>
-        {!interactive && <span className="board-term-note">output only — this agent has no interactive TUI</span>}
+        <span className={`board-term-state ${state}`}>{t(STATE_LABEL_KEY[state])}</span>
+        {!interactive && <span className="board-term-note">{t("board.term.outputOnly")}</span>}
         {error && <span className="board-term-err">{error}</span>}
       </div>
       <div className="board-term-host" ref={hostRef} />

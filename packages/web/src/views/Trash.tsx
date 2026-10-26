@@ -1,6 +1,8 @@
 import { useState } from "react";
-import { get, post, fmtRelative } from "../api";
+import { get, post } from "../api";
 import { useAsync, ErrorBox } from "../components";
+import { useT } from "../i18n-react";
+import type { Translate } from "../i18n";
 
 /**
  * Trash (deleted tasks): soft-deleted tasks live here for their 30-day
@@ -8,9 +10,26 @@ import { useAsync, ErrorBox } from "../components";
  * all of its runs and history. Once the window expires the server's
  * purge pass removes the task physically.
  */
+
+/** Relative timestamp in the interface language (`fmtRelative` is shared, so it is not translated in place). */
+function relativeLabel(t: Translate, iso?: string): string {
+  if (!iso) return "—";
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return "—";
+  const diff = Date.now() - at;
+  if (diff < 60_000) return t("status.justNow");
+  if (diff < 3_600_000) return t("status.minutesAgo", { n: Math.floor(diff / 60_000) });
+  if (diff < 86_400_000) return t("status.hoursAgo", { n: Math.floor(diff / 3_600_000) });
+  if (diff < 7 * 86_400_000) return t("status.daysAgo", { n: Math.floor(diff / 86_400_000) });
+  return new Date(at).toLocaleDateString();
+}
+
 export function TrashView() {
+  const t = useT();
   const tasks = useAsync<any[]>(() => get("/api/tasks?deleted=true"), []);
   const [error, setError] = useState<string | null>(null);
+  // A restore in flight; the row buttons stay disabled until it lands.
+  const [busy, setBusy] = useState<string | null>(null);
 
   if (tasks.error) return <ErrorBox message={tasks.error} />;
 
@@ -20,6 +39,7 @@ export function TrashView() {
 
   const restore = async (task: any) => {
     setError(null);
+    setBusy(task.id);
     try {
       await post(`/api/tasks/${task.id}/restore`);
       tasks.reload();
@@ -27,25 +47,26 @@ export function TrashView() {
       // A failed restore (e.g. the retention window expired mid-click)
       // must not look like nothing happened.
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
     }
   };
 
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}>
-        <h1>Deleted tasks</h1>
+        <h1>{t("trash.title")}</h1>
         <span className="right">
-          <button className="small" onClick={tasks.reload}>refresh</button>
+          <button className="small" onClick={tasks.reload}>{t("common.refresh")}</button>
         </span>
       </div>
       <p className="sub">
-        Deleted tasks are kept here for 30 days, then permanently removed together with their runs and history.
-        Restore puts a task back on the Tasks page with everything it had.
+        {t("trash.sub")}
       </p>
       <ErrorBox message={error} />
 
       {entries.length === 0 ? (
-        <div className="card muted">No deleted tasks.</div>
+        <div className="card muted">{t("trash.empty")}</div>
       ) : (
         <div className="task-list">
           {entries.map((task) => (
@@ -55,11 +76,11 @@ export function TrashView() {
                   <strong className="task-item-title">{task.title}</strong>
                 </div>
                 <div className="task-item-meta">
-                  <span className="meta-chip">deleted {fmtRelative(task.deletedAt)}</span>
+                  <span className="meta-chip">{t("trash.deletedAt", { when: relativeLabel(t, task.deletedAt) })}</span>
                 </div>
               </div>
               <div className="task-item-side">
-                <button className="small" onClick={() => restore(task)}>restore</button>
+                <button className="small" disabled={busy !== null} onClick={() => restore(task)}>{t("trash.restore")}</button>
               </div>
             </div>
           ))}

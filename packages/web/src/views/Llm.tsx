@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { del, get, post, put } from "../api";
 import { useAsync, clickableRow, ErrorBox, Icon, Modal } from "../components";
+import { useT } from "../i18n-react";
 
 interface ProviderRow {
   id: string;
@@ -50,6 +51,7 @@ const formatLabel = (value?: string) => API_FORMATS.find((f) => f.value === valu
  * list and the editor are the same components either way.
  */
 export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
+  const t = useT();
   const providers = useAsync<ProviderRow[]>(() => get("/api/providers"), []);
   const models = useAsync<ModelRow[]>(() => get("/api/models"), []);
   // null = 列表页；"new" = 新增；否则为正在编辑的 provider id
@@ -101,18 +103,18 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
   return (
     <div>
       <div className={embedded ? "row settings-llm-head" : "row"}>
-        {!embedded && <h1>LLM</h1>}
+        {!embedded && <h1>{t("llm.title")}</h1>}
         <span className="right">
-          <button className="primary" onClick={() => setEditing("new")}>+ 新增供应商</button>
+          <button className="primary" onClick={() => setEditing("new")}>{t("llm.addProvider")}</button>
         </span>
       </div>
       {!embedded && (
-        <p className="sub">统一配置模型供应商：在供应商内维护接口格式、API Key、Base URL 以及可用的模型列表。</p>
+        <p className="sub">{t("llm.subtitle")}</p>
       )}
       <ErrorBox message={error} />
 
       {(providers.data ?? []).length === 0 ? (
-        <div className="card muted">{providers.loading ? "Loading…" : "还没有供应商，点击右上角「新增供应商」创建。"}</div>
+        <div className="card muted">{providers.loading ? t("common.loading") : t("llm.empty")}</div>
       ) : (
         (providers.data ?? []).map((p) => {
           const modelCount = (models.data ?? []).filter((m) => m.providerId === p.id).length;
@@ -123,18 +125,18 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
                   <div className="provider-name">
                     {p.name}
                     <span className="badge">{formatLabel(p.type)}</span>
-                    <span className="badge">{modelCount} 个模型</span>
-                    {!p.enabled && <span className="badge cancelled">已停用</span>}
+                    <span className="badge">{t("llm.models.count", { n: modelCount })}</span>
+                    {!p.enabled && <span className="badge cancelled">{t("llm.disabled")}</span>}
                   </div>
                   <div className="muted provider-meta">
-                    {p.baseUrl ? <span className="mono">{p.baseUrl}</span> : <span>未配置 Base URL</span>}
-                    {p.apiKeyMasked ? <span> · Key <span className="mono">{p.apiKeyMasked}</span></span> : <span> · 未配置 API Key</span>}
+                    {p.baseUrl ? <span className="mono">{p.baseUrl}</span> : <span>{t("llm.noBaseUrl")}</span>}
+                    {p.apiKeyMasked ? <span> · Key <span className="mono">{p.apiKeyMasked}</span></span> : <span> · {t("llm.noApiKey")}</span>}
                     {p.remark ? <span> · {p.remark}</span> : null}
                   </div>
                 </div>
-                <button className="small" onClick={() => setEditing(p.id)}>编辑</button>
-                <button className="small" onClick={() => toggleProvider(p)}>{p.enabled ? "停用" : "启用"}</button>
-                <button className="small danger" onClick={() => setPendingProviderDelete(p)}>删除</button>
+                <button className="small" onClick={() => setEditing(p.id)}>{t("llm.edit")}</button>
+                <button className="small" onClick={() => toggleProvider(p)}>{p.enabled ? t("llm.disable") : t("llm.enable")}</button>
+                <button className="small danger" onClick={() => setPendingProviderDelete(p)}>{t("llm.delete")}</button>
               </div>
             </div>
           );
@@ -142,13 +144,11 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
       )}
       <ErrorBox message={providers.error} />
       {pendingProviderDelete && (
-        <Modal title="删除供应商" onClose={() => setPendingProviderDelete(null)}>
-          <p>
-            删除供应商 <strong>{pendingProviderDelete.name}</strong>？
-          </p>
-          <p className="muted">它下面的模型列表会一并删除，无法恢复。</p>
+        <Modal title={t("llm.delete.title")} onClose={() => setPendingProviderDelete(null)}>
+          <p>{t("llm.delete.question", { name: pendingProviderDelete.name })}</p>
+          <p className="muted">{t("llm.delete.body")}</p>
           <div className="modal-actions">
-            <button onClick={() => setPendingProviderDelete(null)}>取消</button>
+            <button onClick={() => setPendingProviderDelete(null)}>{t("common.cancel")}</button>
             <button
               className="danger"
               onClick={() => {
@@ -157,7 +157,7 @@ export function LlmView({ embedded = false }: { embedded?: boolean } = {}) {
                 void removeProvider(target);
               }}
             >
-              删除
+              {t("llm.delete")}
             </button>
           </div>
         </Modal>
@@ -180,6 +180,7 @@ function ProviderEditor({
   /** 新建保存成功后回调，父级据此记录新 provider id。 */
   onOpened: (id: string) => void;
 }) {
+  const t = useT();
   const isNew = !providerId;
   const existing = useAsync<ProviderRow | null>(
     () => (providerId ? get<ProviderRow>(`/api/providers/${providerId}`) : Promise.resolve(null)),
@@ -267,7 +268,7 @@ function ProviderEditor({
 
   const save = async () => {
     if (!form.name.trim()) {
-      setError("请填写供应商名称");
+      setError(t("llm.saveNameRequired"));
       return;
     }
     let headers: Record<string, string> | undefined;
@@ -278,7 +279,7 @@ function ProviderEditor({
           Object.entries(parsed).map(([k, v]) => [k, String(v)])
         );
       } catch {
-        setError("自定义 Headers 不是合法的 JSON 对象");
+        setError(t("llm.saveHeadersInvalid"));
         return;
       }
     }
@@ -316,13 +317,13 @@ function ProviderEditor({
       {/* 吸顶头：保存与结果反馈都在这一条上，滚到页面任何位置都可见。 */}
       <div className="editor-head">
         <div className="editor-head-bar">
-          <button className="back-btn" onClick={onBack} title="返回列表">
+          <button className="back-btn" onClick={onBack} title={t("llm.editor.back")}>
             <Icon name="arrowLeft" size={17} />
           </button>
-          <h1>{isNew ? "新增供应商" : "编辑供应商"}</h1>
+          <h1>{isNew ? t("llm.editor.new") : t("llm.editor.edit")}</h1>
           <span className="right">
-            {savedMsg && <span className="muted">已保存 ✓</span>}
-            <button className="primary" disabled={saving} onClick={save}>{saving ? "保存中…" : "保存"}</button>
+            {savedMsg && <span className="muted">{t("common.saved")}</span>}
+            <button className="primary" disabled={saving} onClick={save}>{saving ? t("common.saving") : t("common.save")}</button>
           </span>
         </div>
         <ErrorBox message={error} />
@@ -331,36 +332,38 @@ function ProviderEditor({
       <div className="card">
         <div className="form-grid-2">
           <label>
-            供应商名称
-            <input value={form.name} onChange={setField("name")} placeholder="例如：OpenAI、魔力方舟" />
+            {t("llm.f.name")}
+            <input value={form.name} onChange={setField("name")} placeholder={t("llm.f.namePh")} />
           </label>
           <label>
-            备注
-            <input value={form.remark} onChange={setField("remark")} placeholder="可选" />
+            {t("llm.f.remark")}
+            <input value={form.remark} onChange={setField("remark")} placeholder={t("llm.f.remarkPh")} />
           </label>
         </div>
         <label>
-          官网链接
-          <input value={form.website} onChange={setField("website")} placeholder="https://example.com（可选）" />
+          {t("llm.f.website")}
+          <input value={form.website} onChange={setField("website")} placeholder={t("llm.f.websitePh")} />
         </label>
         <label>
-          接口格式
+          {t("llm.f.format")}
           <select value={form.type} onChange={setField("type")}>
             {API_FORMATS.map((f) => (
               <option key={f.value} value={f.value}>{f.label}</option>
             ))}
           </select>
-          <div className="hint">选择 AI 服务的 API 接口格式</div>
+          <div className="hint">{t("llm.f.formatHint")}</div>
         </label>
         <label>
-          API Key
+          {t("llm.f.apiKey")}
           <span className="key-wrap">
             <input
               type={showKey ? "text" : "password"}
               value={form.apiKey}
               onChange={setApiKey}
               placeholder={
-                existing.data?.apiKeyMasked ? `已保存 ${existing.data.apiKeyMasked}，留空则不修改` : "sk-…"
+                existing.data?.apiKeyMasked
+                  ? t("llm.f.apiKeySaved", { masked: existing.data.apiKeyMasked })
+                  : "sk-…"
               }
               autoComplete="new-password"
             />
@@ -369,7 +372,7 @@ function ProviderEditor({
                 type="button"
                 className="eye"
                 onClick={() => void toggleShowKey()}
-                title={showKey ? "隐藏" : "显示"}
+                title={showKey ? t("llm.hide") : t("llm.show")}
               >
                 <Icon name={showKey ? "eyeOff" : "eye"} size={16} />
               </button>
@@ -377,12 +380,12 @@ function ProviderEditor({
           </span>
         </label>
         <label>
-          Base URL
+          {t("llm.f.baseUrl")}
           <input className="mono" value={form.baseUrl} onChange={setField("baseUrl")} placeholder="https://api.example.com/v1" />
-          <div className="hint">自定义 API 端点地址</div>
+          <div className="hint">{t("llm.f.baseUrlHint")}</div>
         </label>
         <label>
-          自定义 Headers
+          {t("llm.f.headers")}
           <textarea
             className="mono"
             rows={3}
@@ -391,16 +394,16 @@ function ProviderEditor({
               setForm((f) => ({ ...f, headers: e.target.value }));
               setSavedMsg(false);
             }}
-            placeholder={'{"X-Org-Tag": "value"}（可选，JSON 对象）'}
+            placeholder={t("llm.f.headersPh")}
           />
-          <div className="hint">随每个模型请求附加的 HTTP 头（支持的 Harness 会原样传递）</div>
+          <div className="hint">{t("llm.f.headersHint")}</div>
         </label>
       </div>
 
       {effectiveId ? (
         <ModelConfig providerId={effectiveId} />
       ) : (
-        <div className="card muted">保存供应商后即可配置模型列表。</div>
+        <div className="card muted">{t("llm.saveProviderFirst")}</div>
       )}
     </div>
   );
@@ -422,6 +425,7 @@ interface EditableModel {
 }
 
 function ModelConfig({ providerId }: { providerId: string }) {
+  const t = useT();
   const { data } = useAsync<ModelRow[]>(() => get("/api/models"), [providerId]);
   const [rows, setRowsState] = useState<EditableModel[] | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -493,7 +497,7 @@ function ModelConfig({ providerId }: { providerId: string }) {
     if (!row || !row.dirty) return;
     if (!row.name.trim()) {
       if (!row.modelId) return; // 新行还没填模型 ID，等填了再保存
-      setError("模型 ID 不能为空");
+      setError(t("llm.models.idRequired"));
       return;
     }
     let parameters: Record<string, unknown> | undefined;
@@ -501,7 +505,7 @@ function ModelConfig({ providerId }: { providerId: string }) {
       try {
         parameters = JSON.parse(row.parametersText);
       } catch {
-        setError(`模型 ${row.name} 的参数不是合法 JSON，未保存`);
+        setError(t("llm.models.paramsInvalid", { name: row.name }));
         return;
       }
     }
@@ -562,21 +566,21 @@ function ModelConfig({ providerId }: { providerId: string }) {
   return (
     <div className="card">
       <div className="section-head">
-        <strong>模型配置</strong>
+        <strong>{t("llm.models.title")}</strong>
         <span className="right">
-          <button className="small" onClick={addRow}><Icon name="plus" size={13} /> 添加模型</button>
+          <button className="small" onClick={addRow}><Icon name="plus" size={13} /> {t("llm.models.add")}</button>
         </span>
       </div>
 
       {rows === null ? (
-        <div className="muted">Loading…</div>
+        <div className="muted">{t("common.loading")}</div>
       ) : (
         <>
           {rows.length > 0 && (
             <div className="model-grid model-grid-head">
               <span />
-              <span>模型 ID</span>
-              <span>显示名称</span>
+              <span>{t("llm.models.col.id")}</span>
+              <span>{t("llm.models.col.displayName")}</span>
               <span />
             </div>
           )}
@@ -587,31 +591,31 @@ function ModelConfig({ providerId }: { providerId: string }) {
                   <button
                     className={`chev ${expanded[row.key] ? "open" : ""}`}
                     onClick={() => setExpanded((e) => ({ ...e, [row.key]: !e[row.key] }))}
-                    title="更多设置"
+                    title={t("llm.models.more")}
                   >
                     <Icon name="chevron" size={14} />
                   </button>
                   <input
                     className="mono"
                     value={row.name}
-                    placeholder="例如 gpt-4o"
+                    placeholder={t("llm.models.idPh")}
                     onChange={(e) => patchRow(row.key, { name: e.target.value })}
                     onBlur={() => saveByKeyAndMark(row.key)}
                   />
                   <input
                     value={row.alias}
-                    placeholder="显示名称"
+                    placeholder={t("llm.models.col.displayName")}
                     onChange={(e) => patchRow(row.key, { alias: e.target.value })}
                     onBlur={() => saveByKeyAndMark(row.key)}
                   />
-                  <button className="trash" onClick={() => removeRow(row)} title="删除模型">
+                  <button className="trash" onClick={() => removeRow(row)} title={t("llm.models.delete")}>
                     <Icon name="trash" size={15} />
                   </button>
                 </div>
                 {expanded[row.key] && (
                   <div className="model-detail">
                     <label>
-                      参数（JSON）
+                      {t("llm.models.params")}
                       <textarea
                         className="mono"
                         rows={3}
@@ -627,7 +631,7 @@ function ModelConfig({ providerId }: { providerId: string }) {
                         checked={row.enabled}
                         onChange={(e) => toggleEnabled(row, e.target.checked)}
                       />
-                      启用该模型
+                      {t("llm.models.enabled")}
                     </label>
                   </div>
                 )}
@@ -635,22 +639,20 @@ function ModelConfig({ providerId }: { providerId: string }) {
             ))}
           </div>
           {rows.length === 0 && (
-            <div className="muted">暂无模型，点击右上角「添加模型」手动添加。</div>
+            <div className="muted">{t("llm.models.empty")}</div>
           )}
-          <div className="hint">配置可用的模型及其显示名称；编辑后自动保存。</div>
+          <div className="hint">{t("llm.models.hint")}</div>
         </>
       )}
       <ErrorBox message={error} />
       {pendingModelDelete && (
-        <Modal title="删除模型" onClose={() => setPendingModelDelete(null)}>
-          <p>
-            删除模型 <strong>{pendingModelDelete.name}</strong>？
-          </p>
-          <p className="muted">这条模型配置会被移除，无法恢复。</p>
+        <Modal title={t("llm.models.delete.title")} onClose={() => setPendingModelDelete(null)}>
+          <p>{t("llm.models.delete.question", { name: pendingModelDelete.name })}</p>
+          <p className="muted">{t("llm.models.delete.body")}</p>
           <div className="modal-actions">
-            <button onClick={() => setPendingModelDelete(null)}>取消</button>
+            <button onClick={() => setPendingModelDelete(null)}>{t("common.cancel")}</button>
             <button className="danger" onClick={() => void confirmModelDelete()}>
-              删除
+              {t("common.delete")}
             </button>
           </div>
         </Modal>

@@ -413,7 +413,7 @@ function FileCard(props: {
           </span>
         ) : (
           <span className="muted">
-            {t("settings.file.applied", { at: formatTime(info.applied.at) })} ·{" "}
+            {t("settings.file.appliedMark", { at: formatTime(info.applied.at) })} ·{" "}
             {t("settings.file.updated")} {info.file.mtimeMs ? formatTime(new Date(info.file.mtimeMs).toISOString()) : "—"}
           </span>
         )}
@@ -630,6 +630,7 @@ function ProxySection(props: { config: Record<string, unknown>; save: SaveSectio
  */
 function NotificationsSection(props: { config: Record<string, unknown>; save: SaveSection }) {
   const { t } = useI18n();
+  headerLineError = (line: string) => t("settings.notifications.badHeader", { line });
   const raw = (props.config.notifications ?? {}) as {
     enabled?: boolean;
     url?: string;
@@ -743,6 +744,9 @@ function headerLines(headers: Record<string, string>): string {
     .join("\n");
 }
 
+/** The message a malformed header line reports; set from the dictionary at render time. */
+let headerLineError = (line: string) => `Header line is not "name: value": ${line}`;
+
 /** Parses `name: value` lines; `null` when there are none (nothing to send). */
 function parseHeaderLines(text: string): Record<string, string> | null {
   const entries = text
@@ -751,7 +755,7 @@ function parseHeaderLines(text: string): Record<string, string> | null {
     .filter(Boolean)
     .map((line) => {
       const at = line.indexOf(":");
-      if (at < 0) throw new Error(`Header line is not "name: value": ${line}`);
+      if (at < 0) throw new Error(headerLineError(line));
       return [line.slice(0, at).trim(), line.slice(at + 1).trim()];
     });
   return entries.length > 0 ? Object.fromEntries(entries) : null;
@@ -974,13 +978,13 @@ function RetrySection(props: { config: Record<string, unknown>; save: SaveSectio
 /** Read-only facts: where things live, and the environment variables that override them. */
 function AboutSection({ config }: { config: Record<string, unknown> }) {
   const { t } = useI18n();
-  const envRows: Array<[string, string]> = [
-    ["AGENTFABRIC_API", "API base URL used by the CLI"],
-    ["AGENTFABRIC_DATA_DIR", "persistent data directory"],
-    ["AGENTFABRIC_HOST / AGENTFABRIC_PORT", "listen address for this launch"],
-    ["AGENTFABRIC_DOCKER_BIN", "docker CLI path override"],
-    ["AGENTFABRIC_OPENCODE_BIN", "opencode CLI path override"],
-    ["AGENTFABRIC_WEB_DIR", "directory holding the built web UI"],
+  const envRows: Array<[string, MessageKey]> = [
+    ["AGENTFABRIC_API", "settings.env.api"],
+    ["AGENTFABRIC_DATA_DIR", "settings.env.dataDir"],
+    ["AGENTFABRIC_HOST / AGENTFABRIC_PORT", "settings.env.hostPort"],
+    ["AGENTFABRIC_DOCKER_BIN", "settings.env.dockerBin"],
+    ["AGENTFABRIC_OPENCODE_BIN", "settings.env.opencodeBin"],
+    ["AGENTFABRIC_WEB_DIR", "settings.env.webDir"],
   ];
   const server = (config.server ?? {}) as { host?: string; port?: number };
   return (
@@ -997,7 +1001,7 @@ function AboutSection({ config }: { config: Record<string, unknown> }) {
           {envRows.map(([name, description]) => (
             <tr key={name}>
               <td className="mono">{name}</td>
-              <td className="muted">{description}</td>
+              <td className="muted">{t(description)}</td>
             </tr>
           ))}
         </tbody>

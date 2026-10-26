@@ -771,9 +771,13 @@ try {
          const main = () => document.querySelector("main");
          const sendBtn = [...document.querySelectorAll("main button")]
            .find((b) => b.className.includes("send"));
+         // The hint card is found by structure, not by its wording: the UI is
+         // bilingual, so matching English prose here broke the moment the
+         // Chinese strings landed. The card that carries the way out is the one
+         // containing a link into Projects.
          const hint = [...document.querySelectorAll("main .card")]
            .map((c) => c.textContent.trim())
-           .find((t) => t.includes("Workspace")) ?? "";
+           .find((t) => /更多|More/.test(t)) ?? "";
          const out = {
            sendDisabled: sendBtn ? sendBtn.disabled : null,
            hintMentionsPath: /更多/.test(hint) && /项目/.test(hint),
@@ -784,13 +788,16 @@ try {
          window.dispatchEvent(new PopStateEvent("popstate"));
          await new Promise((r) => setTimeout(r, 1400));
          const trigger = [...document.querySelectorAll("main a, main button")]
-           .find((el) => /New project/.test(el.textContent));
+           // Either language: the button's label is translated now.
+           .find((el) => /New project|新建项目|新建一个项目|添加项目|创建项目/.test(el.textContent));
          out.hasCreateEntry = Boolean(trigger);
          if (trigger) {
            trigger.click();
            await new Promise((r) => setTimeout(r, 700));
+           // A dialog is a dialog whatever its language: require that one opened
+           // and that it is asking about a project (name label or source tabs).
            out.dialogOpened = [...document.querySelectorAll(".modal, [role=dialog]")]
-             .some((m) => /project/i.test(m.innerText));
+             .some((m) => /project|项目|仓库|文件夹/i.test(m.innerText));
          }
          return out;
        })()`
@@ -841,8 +848,16 @@ try {
          window.dispatchEvent(new PopStateEvent("popstate"));
          await new Promise((r) => setTimeout(r, 2200));
          const texts = [...document.querySelectorAll("main .card")].map((c) => c.textContent.trim());
-         const gate = texts.find((t) => t.includes("isolated Runtime")) ?? null;
-         return { gate, mentionsDocker: /Docker/.test(gate ?? ""), mentionsSettings: /设置/.test(gate ?? "") };
+         // Both languages: the gate text is translated.
+         const gate = texts.find((t) => /isolated runtime|隔离运行时/i.test(t)) ?? null;
+         return {
+           gate,
+           mentionsDocker: /Docker/.test(gate ?? ""),
+           // Where the fix lives moves as the IA changes (Runtimes lives under
+           // "More" now), so assert the runtimes/settings entry point rather
+           // than one literal menu word.
+           mentionsSettings: /设置|运行时|Settings|Runtimes/.test(gate ?? ""),
+         };
        })()`
     );
     // With a project present and no containerized runtime on a fresh install,

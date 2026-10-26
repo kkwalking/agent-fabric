@@ -1,5 +1,7 @@
 import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useState } from "react";
 import { copyText, subscribeClock } from "./api";
+import { useT } from "./i18n-react";
+import { STATUS_KEYS, type MessageKey } from "./i18n";
 
 export type IconName =
   | "grid"
@@ -290,8 +292,11 @@ export function Icon({
   );
 }
 
+/** A run/task state: the label is translated, the status value itself is not. */
 export function StatusBadge({ status }: { status: string }) {
-  return <span className={`badge ${status}`}>{status}</span>;
+  const t = useT();
+  const key = STATUS_KEYS[status];
+  return <span className={`badge ${status}`}>{key ? t(key as MessageKey) : status}</span>;
 }
 
 /**
@@ -428,19 +433,20 @@ export function Pager({
   pageSize: number;
   onChange: (page: number) => void;
 }) {
+  const t = useT();
   if (pageCount <= 1) return null;
   const from = page * pageSize + 1;
   const to = Math.min(total, (page + 1) * pageSize);
   return (
     <div className="pager">
       <span className="muted">
-        {from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()}
+        {t("pager.range", { from: from.toLocaleString(), to: to.toLocaleString(), total: total.toLocaleString() })}
       </span>
       <span className="pager-actions">
-        <button className="small" disabled={page === 0} onClick={() => onChange(0)} title="First page">«</button>
-        <button className="small" disabled={page === 0} onClick={() => onChange(page - 1)}>Prev</button>
-        <button className="small" disabled={page >= pageCount - 1} onClick={() => onChange(page + 1)}>Next</button>
-        <button className="small" disabled={page >= pageCount - 1} onClick={() => onChange(pageCount - 1)} title="Last page">»</button>
+        <button className="small" disabled={page === 0} onClick={() => onChange(0)} title={t("pager.first")}>«</button>
+        <button className="small" disabled={page === 0} onClick={() => onChange(page - 1)}>{t("pager.prev")}</button>
+        <button className="small" disabled={page >= pageCount - 1} onClick={() => onChange(page + 1)}>{t("pager.next")}</button>
+        <button className="small" disabled={page >= pageCount - 1} onClick={() => onChange(pageCount - 1)} title={t("pager.last")}>»</button>
       </span>
     </div>
   );
@@ -486,8 +492,9 @@ export function Modal({
 }
 
 export function ErrorBox({ message }: { message: string | null }) {
+  const t = useT();
   if (!message) return null;
-  return <div className="card" style={{ borderColor: "var(--red)", color: "var(--red)" }}>Error: {message}</div>;
+  return <div className="card" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{t("common.error", { message })}</div>;
 }
 
 /**
@@ -501,6 +508,7 @@ export function CopyButton({ text, label, title, className = "small" }: {
   title?: string;
   className?: string;
 }) {
+  const t = useT();
   const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
   return (
     <button
@@ -512,13 +520,14 @@ export function CopyButton({ text, label, title, className = "small" }: {
         window.setTimeout(() => setState("idle"), 1500);
       }}
     >
-      {state === "ok" ? "copied ✓" : state === "fail" ? "copy failed" : label}
+      {state === "ok" ? t("common.copied") : state === "fail" ? t("common.copyFailed") : label}
     </button>
   );
 }
 
 export function emptyTableHint(loading: boolean, error: string | null) {
-  if (loading) return <div className="muted">Loading…</div>;
+  const t = useT();
+  if (loading) return <div className="muted">{t("common.loading")}</div>;
   if (error) return <div className="muted" style={{ color: "var(--red)" }}>{error}</div>;
-  return <div className="muted">No items yet.</div>;
+  return <div className="muted">{t("resources.empty")}</div>;
 }

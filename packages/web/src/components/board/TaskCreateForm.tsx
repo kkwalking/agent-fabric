@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../../components";
+import { useT } from "../../i18n-react";
 import type {
   ExecutionMode,
   KanbanAgent,
@@ -150,6 +151,7 @@ export function TaskCreateForm({
   onSubmit: (draft: TaskDraft, options: TaskCreateSubmissionOptions) => void;
   onCancel?: () => void;
 }) {
+  const t = useT();
   const [prompt, setPrompt] = useState(initial.prompt ?? "");
   const [title, setTitle] = useState(initial.title ?? "");
   const [agentId, setAgentId] = useState(initial.agentId ?? "");
@@ -291,12 +293,16 @@ export function TaskCreateForm({
     }
   };
 
-  const titlePlaceholder = deriveCardTitle(prompt) || "Auto-generated from the prompt";
+  const titlePlaceholder = deriveCardTitle(prompt) || t("board.form.titlePlaceholder");
   // The catalog's "default" mode has no extra args, which is exactly what
   // "Agent default" selects; listing both would be two names for one choice.
   const permissionModes = (selectedAgent?.permissionModes ?? []).filter((mode) => mode.id !== "default");
-  const startLabel = mode === "multi" ? `Start ${validTaskCount} tasks` : "Create & start";
-  const createLabel = mode === "multi" ? `Create ${validTaskCount} tasks` : "Create";
+  const startLabel =
+    mode === "multi"
+      ? t("board.form.startTasks", { n: validTaskCount })
+      : t("board.form.createAndStart");
+  const createLabel =
+    mode === "multi" ? t("board.form.createTasks", { n: validTaskCount }) : t("board.form.create");
 
   return (
     <div
@@ -315,19 +321,17 @@ export function TaskCreateForm({
             rows={3}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            placeholder="Describe the task…"
-            aria-label="Task prompt"
+            placeholder={t("board.form.describe")}
+            aria-label={t("board.form.promptAria")}
             autoFocus
           />
           <div className="task-create-prompt-foot">
             <span className="board-hint">
-              {editing
-                ? `${MODIFIER}+↵ to save`
-                : `${MODIFIER}+↵ to create · ⇧${MODIFIER}+↵ to create & start`}
+              {t(editing ? "board.form.toSave" : "board.form.toCreate", { modifier: MODIFIER })}
             </span>
             {detectedItems.length >= 2 && (
               <button type="button" className="task-create-split" onClick={splitIntoTasks}>
-                <Icon name="grid" size={11} /> Split into {detectedItems.length} tasks
+                <Icon name="grid" size={11} /> {t("board.form.split", { n: detectedItems.length })}
               </button>
             )}
           </div>
@@ -345,14 +349,14 @@ export function TaskCreateForm({
                 }}
                 onChange={(event) => updateTask(index, event.target.value)}
                 onKeyDown={(event) => handleMultiKeyDown(index, event)}
-                placeholder="Describe the task…"
-                aria-label={`Task ${index + 1}`}
+                placeholder={t("board.form.describe")}
+                aria-label={t("board.form.taskAria", { n: index + 1 })}
               />
               <button
                 type="button"
                 className="task-create-multi-remove"
                 onClick={() => removeTask(index)}
-                aria-label={`Remove task ${index + 1}`}
+                aria-label={t("board.form.removeTask", { n: index + 1 })}
                 disabled={taskPrompts.length <= 1}
               >
                 ✕
@@ -361,10 +365,10 @@ export function TaskCreateForm({
           ))}
           <div className="task-create-multi-actions">
             <button type="button" className="task-create-split" onClick={() => addTask()}>
-              <Icon name="plus" size={11} /> Add task
+              <Icon name="plus" size={11} /> {t("board.form.addTask")}
             </button>
             <button type="button" className="task-create-split" onClick={backToSingle}>
-              <Icon name="arrowLeft" size={11} /> Back to single prompt
+              <Icon name="arrowLeft" size={11} /> {t("board.form.backToSingle")}
             </button>
           </div>
         </div>
@@ -374,7 +378,8 @@ export function TaskCreateForm({
         {mode === "single" && (
           <div className="board-dialog-field">
             <label className="board-dialog-label" htmlFor="task-create-title">
-              Title <span className="task-create-optional">(optional)</span>
+              {t("board.form.title")}{" "}
+              <span className="task-create-optional">{t("board.form.optional")}</span>
             </label>
             <input
               id="task-create-title"
@@ -387,7 +392,7 @@ export function TaskCreateForm({
         )}
 
         <div className="board-dialog-field">
-          <span className="board-dialog-label">Agent</span>
+          <span className="board-dialog-label">{t("board.form.agent")}</span>
           <div className="task-agent-row">
             {agents.map((agent) => (
               <button
@@ -407,15 +412,20 @@ export function TaskCreateForm({
                 {agent.label}
               </button>
             ))}
-            {agents.length === 0 && <span className="board-hint">Loading agents…</span>}
+            {agents.length === 0 && (
+              <span className="board-hint">{t("board.form.loadingAgents")}</span>
+            )}
           </div>
           {selectedAgent && !selectedAgent.available && (
             <div className="board-hint warn">
-              {selectedAgent.label} is not installed — {selectedAgent.installHint}
+              {t("board.form.agentMissing", {
+                agent: selectedAgent.label,
+                hint: selectedAgent.installHint,
+              })}
             </div>
           )}
           {agents.length > 0 && !agents.some((agent) => agent.available) && (
-            <div className="board-hint warn">No agent CLI is installed on this machine.</div>
+            <div className="board-hint warn">{t("board.form.noAgents")}</div>
           )}
         </div>
 
@@ -423,7 +433,8 @@ export function TaskCreateForm({
           {(selectedAgent?.modelFlag || selectedAgent?.transport === "acp") && (
             <div className="board-dialog-field">
               <label className="board-dialog-label" htmlFor="task-create-model">
-                Model <span className="task-create-optional">(optional)</span>
+                {t("board.form.model")}{" "}
+                <span className="task-create-optional">{t("board.form.optional")}</span>
               </label>
               <input
                 id="task-create-model"
@@ -432,8 +443,8 @@ export function TaskCreateForm({
                 onChange={(event) => setModel(event.target.value)}
                 placeholder={
                   selectedAgent?.transport === "acp"
-                    ? "agent default — e.g. deepseek-v4-pro or DeepSeek-V4-Pro"
-                    : "agent default"
+                    ? t("board.form.modelAcpPlaceholder")
+                    : t("board.form.agentDefault")
                 }
                 disabled={busy}
               />
@@ -442,7 +453,8 @@ export function TaskCreateForm({
           {selectedAgent?.transport === "acp" && (
             <div className="board-dialog-field">
               <label className="board-dialog-label" htmlFor="task-create-effort">
-                Reasoning effort <span className="task-create-optional">(optional)</span>
+                {t("board.form.reasoningEffort")}{" "}
+                <span className="task-create-optional">{t("board.form.optional")}</span>
               </label>
               <select
                 id="task-create-effort"
@@ -450,7 +462,7 @@ export function TaskCreateForm({
                 onChange={(event) => setReasoningEffort(event.target.value)}
                 disabled={busy}
               >
-                <option value="">agent default</option>
+                <option value="">{t("board.form.agentDefault")}</option>
                 {["off", "low", "high", "max"].map((effort) => (
                   <option key={effort} value={effort}>
                     {effort}
@@ -464,7 +476,7 @@ export function TaskCreateForm({
           {permissionModes.length > 0 && (
             <div className="board-dialog-field">
               <label className="board-dialog-label" htmlFor="task-create-permission">
-                Permission mode
+                {t("board.form.permissionMode")}
               </label>
               <select
                 id="task-create-permission"
@@ -472,11 +484,11 @@ export function TaskCreateForm({
                 onChange={(event) => setPermissionModeId(event.target.value)}
                 disabled={busy}
               >
-                <option value="">Agent default</option>
+                <option value="">{t("board.form.agentDefault")}</option>
                 {permissionModes.map((permissionMode) => (
                   <option key={permissionMode.id} value={permissionMode.id}>
                     {permissionMode.label}
-                    {permissionMode.risky ? " (risky)" : ""}
+                    {permissionMode.risky ? t("board.form.risky") : ""}
                   </option>
                 ))}
               </select>
@@ -485,7 +497,7 @@ export function TaskCreateForm({
         </div>
 
         <div className="board-dialog-field">
-          <span className="board-dialog-label">Workspace</span>
+          <span className="board-dialog-label">{t("board.form.workspace")}</span>
           <div className="board-mode-row">
             <button
               type="button"
@@ -494,34 +506,28 @@ export function TaskCreateForm({
               disabled={busy}
               onClick={() => setExecutionMode("direct")}
             >
-              Direct
+              {t("board.execution.direct")}
             </button>
             <button
               type="button"
               className={`board-mode-option ${executionMode === "worktree" ? "active" : ""}`}
               aria-pressed={executionMode === "worktree"}
               disabled={busy || workspaceType !== "git"}
-              title={
-                workspaceType === "git"
-                  ? "Run in a detached Git worktree; the project tree stays untouched"
-                  : "Worktree mode needs a Git repository at the project root"
-              }
+              title={t(workspaceType === "git" ? "board.form.worktreeHint" : "board.form.worktreeNeedsGit")}
               onClick={() => setExecutionMode("worktree")}
             >
-              Worktree
+              {t("board.execution.worktree")}
             </button>
           </div>
           <div className="board-hint">
-            {workspaceType === "git"
-              ? executionMode === "direct"
-                ? "Runs in the project folder. Changes are live as the agent makes them."
-                : "Runs in a detached worktree checked out from the base ref; the project tree stays untouched."
-              : "This project has no Git repository at its root, so cards run Direct only."}
+            {workspaceType !== "git"
+              ? t("board.form.noGitHint")
+              : t(executionMode === "direct" ? "board.form.directHint" : "board.form.worktreeRunHint")}
           </div>
           {executionMode === "worktree" && git && (
             <div className="board-dialog-field task-create-base-ref">
               <label className="board-dialog-label" htmlFor="task-create-base-ref">
-                Worktree base ref
+                {t("board.form.baseRef")}
               </label>
               <select
                 id="task-create-base-ref"
@@ -530,18 +536,22 @@ export function TaskCreateForm({
                 disabled={busy}
               >
                 {git.branches.length === 0 ? (
-                  <option value="">Current HEAD</option>
+                  <option value="">{t("board.form.currentHead")}</option>
                 ) : (
                   git.branches.map((branch) => (
                     <option key={branch} value={branch}>
                       {branch}
-                      {branch === git.currentBranch ? " (current)" : ""}
-                      {branch !== git.currentBranch && branch === git.defaultBranch ? " (default)" : ""}
+                      {branch === git.currentBranch ? t("board.form.current") : ""}
+                      {branch !== git.currentBranch && branch === git.defaultBranch
+                        ? t("board.form.default")
+                        : ""}
                     </option>
                   ))
                 )}
               </select>
-              {missingBaseRef && <div className="board-hint warn">Pick a base ref for the worktree.</div>}
+              {missingBaseRef && (
+                <div className="board-hint warn">{t("board.form.pickBaseRef")}</div>
+              )}
             </div>
           )}
         </div>
@@ -552,7 +562,7 @@ export function TaskCreateForm({
       <div className="task-create-actions">
         {onCancel && (
           <button type="button" className="small" onClick={onCancel} disabled={busy}>
-            Cancel
+            {t("board.form.cancel")}
           </button>
         )}
         {allowCreateMore && (
@@ -563,7 +573,7 @@ export function TaskCreateForm({
               onChange={(event) => setCreateMore(event.target.checked)}
               disabled={busy}
             />
-            Create more
+            {t("board.form.createMore")}
           </label>
         )}
         <div className="task-create-buttons">
@@ -571,17 +581,17 @@ export function TaskCreateForm({
             // One card in, one card out: there is nothing to create and
             // nothing to start, so saving is the only action.
             <button type="button" className="small primary" onClick={() => submit(false)} disabled={!canSubmit}>
-              {busy ? "Saving…" : "Save changes"}
+              {busy ? t("board.form.saving") : t("board.form.saveChanges")}
               <span className="task-create-shortcut">{MODIFIER}+↵</span>
             </button>
           ) : (
             <>
               <button type="button" className="small" onClick={() => submit(false)} disabled={!canSubmit}>
-                {busy ? "Creating…" : createLabel}
+                {busy ? t("board.form.creating") : createLabel}
                 <span className="task-create-shortcut">{MODIFIER}+↵</span>
               </button>
               <button type="button" className="small primary" onClick={() => submit(true)} disabled={!canSubmit}>
-                {busy ? "Starting…" : startLabel}
+                {busy ? t("board.form.starting") : startLabel}
                 <span className="task-create-shortcut">⇧{MODIFIER}+↵</span>
               </button>
             </>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, get, post } from "../../api";
 import { Icon } from "../../components";
+import { useT } from "../../i18n-react";
 import { DirectoryAutocomplete } from "./DirectoryAutocomplete";
 import type { KanbanDirectoryListing, Project } from "./types";
 
@@ -51,6 +52,7 @@ export function AddProjectDialog({
   onClose: () => void;
   onAdded: (project: Project) => void;
 }) {
+  const t = useT();
   const [tab, setTab] = useState<AddProjectTab>("path");
   const [pathInput, setPathInput] = useState("");
   const [pendingGitInitPath, setPendingGitInitPath] = useState<string | null>(null);
@@ -111,7 +113,7 @@ export function AddProjectDialog({
   const submitPath = () => {
     const path = pathInput.trim();
     if (!path) {
-      setError("Choose a folder first.");
+      setError(t("board.addProject.needPath"));
       return;
     }
     void add({ path });
@@ -130,7 +132,7 @@ export function AddProjectDialog({
   const submitClone = () => {
     const url = gitUrl.trim();
     if (!url) {
-      setError("A Git repository URL is required.");
+      setError(t("board.addProject.needUrl"));
       return;
     }
     const folder = cloneFolder.trim() || deriveRepoNameFromUrl(url);
@@ -164,13 +166,23 @@ export function AddProjectDialog({
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
-      <div className="modal board-dialog add-project-dialog" role="dialog" aria-modal="true" aria-label="Add project">
+      <div
+        className="modal board-dialog add-project-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("board.addProject.title")}
+      >
         <header className="board-dialog-head">
           <span className="board-dialog-title">
             <Icon name="folderOpen" size={15} />
-            Add project
+            {t("board.addProject.title")}
           </span>
-          <button className="board-dialog-close" onClick={onClose} disabled={busy} aria-label="Close">
+          <button
+            className="board-dialog-close"
+            onClick={onClose}
+            disabled={busy}
+            aria-label={t("board.detail.close")}
+          >
             ✕
           </button>
         </header>
@@ -185,7 +197,7 @@ export function AddProjectDialog({
             disabled={busy}
           >
             <Icon name="search" size={12} />
-            Server path
+            {t("board.addProject.tabPath")}
           </button>
           <button
             type="button"
@@ -196,7 +208,7 @@ export function AddProjectDialog({
             disabled={busy}
           >
             <Icon name="branch" size={12} />
-            Git clone
+            {t("board.addProject.tabClone")}
           </button>
         </div>
 
@@ -210,7 +222,7 @@ export function AddProjectDialog({
               }}
             >
               <div className="board-dialog-field">
-                <span className="board-dialog-label">Folder path</span>
+                <span className="board-dialog-label">{t("board.addProject.folderPath")}</span>
                 <DirectoryAutocomplete
                   value={pathInput}
                   onChange={(next) => {
@@ -218,21 +230,16 @@ export function AddProjectDialog({
                     setPendingGitInitPath(null);
                   }}
                   disabled={busy}
-                  placeholder="Search or type an absolute path…"
+                  placeholder={t("board.addProject.searchPath")}
                   onSubmit={() => (pendingGitInitPath ? submitInitializeGit() : submitPath())}
                 />
               </div>
-              <p className="board-hint">
-                The folder is used as-is. Git is optional — a plain folder is a valid board project.
-              </p>
+              <p className="board-hint">{t("board.addProject.pathHint")}</p>
 
               {pendingGitInitPath && (
                 <div className="board-git-ask">
-                  <div className="board-git-ask-title">This folder is not a Git repository</div>
-                  <p className="board-git-ask-copy">
-                    That is fine — a board works with plain folders. You can add it as-is, or initialize a
-                    repository first if you want worktree cards for this project.
-                  </p>
+                  <div className="board-git-ask-title">{t("board.addProject.notGit")}</div>
+                  <p className="board-git-ask-copy">{t("board.addProject.notGitCopy")}</p>
                   <p className="mono board-git-ask-path">{pendingGitInitPath}</p>
                 </div>
               )}
@@ -246,7 +253,7 @@ export function AddProjectDialog({
             >
               <div className="board-dialog-field">
                 <label className="board-dialog-label" htmlFor="add-project-git-url">
-                  Git repository URL
+                  {t("board.addProject.gitUrl")}
                 </label>
                 <input
                   id="add-project-git-url"
@@ -260,18 +267,18 @@ export function AddProjectDialog({
               </div>
               <div className="board-clone-grid">
                 <div className="board-dialog-field">
-                  <span className="board-dialog-label">Clone into</span>
+                  <span className="board-dialog-label">{t("board.addProject.cloneInto")}</span>
                   <DirectoryAutocomplete
                     value={cloneDest}
                     onChange={setCloneDest}
                     disabled={busy}
-                    placeholder="Search or type a folder…"
-                    ariaLabel="Clone destination folder"
+                    placeholder={t("board.addProject.searchFolder")}
+                    ariaLabel={t("board.addProject.cloneDestAria")}
                   />
                 </div>
                 <div className="board-dialog-field">
                   <label className="board-dialog-label" htmlFor="add-project-folder-name">
-                    Folder name
+                    {t("board.addProject.folderName")}
                   </label>
                   <input
                     id="add-project-folder-name"
@@ -285,11 +292,9 @@ export function AddProjectDialog({
               </div>
               <p className="board-hint">
                 {clonePreview ? (
-                  <>
-                    Clones to <span className="mono">{clonePreview}</span>.
-                  </>
+                  <span className="mono">{t("board.addProject.clonesTo", { path: clonePreview })}</span>
                 ) : (
-                  "Paste a clone URL; the folder name defaults to the repository name."
+                  t("board.addProject.cloneHint")
                 )}
               </p>
             </form>
@@ -300,26 +305,26 @@ export function AddProjectDialog({
 
         <footer className="board-dialog-foot">
           <button className="small" onClick={onClose} disabled={busy}>
-            Cancel
+            {t("board.addProject.cancel")}
           </button>
           {isPathTab ? (
             pendingGitInitPath ? (
               <>
                 <button className="small" onClick={submitWithoutGit} disabled={busy}>
-                  Add without Git
+                  {t("board.addProject.addWithoutGit")}
                 </button>
                 <button className="small primary" onClick={submitInitializeGit} disabled={busy}>
-                  {busy ? "Initializing…" : "Initialize Git repository"}
+                  {busy ? t("board.addProject.initializing") : t("board.addProject.initGit")}
                 </button>
               </>
             ) : (
               <button className="small primary" onClick={submitPath} disabled={!canAddPath}>
-                {busy ? "Adding…" : "Add project"}
+                {busy ? t("board.addProject.adding") : t("board.addProject.add")}
               </button>
             )
           ) : (
             <button className="small primary" onClick={submitClone} disabled={!canClone}>
-              {busy ? "Cloning…" : "Clone & add"}
+              {busy ? t("board.addProject.cloning") : t("board.addProject.clone")}
             </button>
           )}
         </footer>

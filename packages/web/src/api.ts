@@ -1,8 +1,11 @@
+
 /**
  * HTTP error carrying the server's machine-readable code. A
  * `handoff-unavailable` error means the continuation is still possible if
  * the user explicitly accepts a degraded context (`allowDegraded`).
  */
+import type { Translate } from "./i18n";
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -217,17 +220,24 @@ export function fmtTokens(n?: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** Relative time for list views: "3m ago" / "2h ago" / date. */
-export function fmtRelative(iso?: string): string {
+/**
+ * Relative time for list views: "3m ago" / "2h ago" / a date beyond a week.
+ *
+ * Takes the translator rather than reading a global one, because every list
+ * view that shows a timestamp has to follow the UI language — an English
+ * "2h ago" inside a Chinese page is exactly the bug this signature prevents.
+ * The clock ticker that keeps these labels fresh lives in this module too.
+ */
+export function fmtRelative(t: Translate, iso?: string): string {
   if (!iso) return "-";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "-";
-  const diff = Date.now() - t;
-  if (diff < 60_000) return "just now";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`;
-  return new Date(t).toLocaleDateString();
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return "-";
+  const diff = Date.now() - at;
+  if (diff < 60_000) return t("rel.justNow");
+  if (diff < 3_600_000) return t("rel.minutesAgo", { n: Math.floor(diff / 60_000) });
+  if (diff < 86_400_000) return t("rel.hoursAgo", { n: Math.floor(diff / 3_600_000) });
+  if (diff < 7 * 86_400_000) return t("rel.daysAgo", { n: Math.floor(diff / 86_400_000) });
+  return new Date(at).toLocaleDateString();
 }
 
 export function shortId(id: string): string {

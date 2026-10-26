@@ -538,7 +538,7 @@ export function WorkspaceTaskList({
                       <Icon name="star" size={12} />
                     </span>
                   )}
-                  <span className="ws-task-time">{fmtRelative(taskStamp(task))}</span>
+                  <span className="ws-task-time">{fmtRelative(t, taskStamp(task))}</span>
                   <button
                     className="ws-task-more"
                     aria-label={t("sidebar.rowActions")}

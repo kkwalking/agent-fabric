@@ -1,16 +1,18 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { del, get, post, put, fmtTime, shortId } from "../api";
 import { StatusBadge, useAsync, ErrorBox, Field, Modal } from "../components";
+import { useI18n, useT } from "../i18n-react";
+import type { MessageKey, Translate } from "../i18n";
 
 interface Column {
   key: string;
-  label: string;
+  label: MessageKey;
   render?: (row: any) => ReactNode;
 }
 
 interface CreateField {
   key: string;
-  label: string;
+  label: MessageKey;
   type?: "text" | "password" | "textarea" | "select";
   options?: string[];
   placeholder?: string;
@@ -18,18 +20,20 @@ interface CreateField {
 }
 
 interface Config {
-  title: string;
+  /** The list's name; its singular is used in "Add …" and the description. */
+  title: MessageKey;
+  titleOne: MessageKey;
   path: string;
   columns: Column[];
   createFields: CreateField[];
-  rowActions?: (row: any, reload: () => void) => ReactNode;
+  rowActions?: (row: any, reload: () => void, t: Translate) => ReactNode;
   /**
    * Row click opens a detail modal — for resources whose attributes don't
    * fit the table. `reload` refreshes the list (the modal re-reads the row
    * by id, so toggles reflect in place); `close` dismisses it.
    */
-  detail?: (row: any, helpers: { reload: () => void; close: () => void }) => ReactNode;
-  detailTitle?: (row: any) => string;
+  detail?: (row: any, helpers: { reload: () => void; close: () => void; t: Translate }) => ReactNode;
+  detailTitle?: (row: any, t: Translate) => string;
 }
 
 /** Long mono values (ids, paths) clip to an ellipsis; the full value stays in the hover tooltip. */
@@ -58,20 +62,21 @@ function fmtSaved(iso?: string): string {
 
 const configs: Record<string, Config> = {
   runtimes: {
-    title: "Runtimes",
+    title: "resources.kind.runtimes",
+    titleOne: "resources.kind.runtimes.one",
     path: "/api/runtimes",
     columns: [
-      { key: "id", label: "ID", render: (r) => <Id value={r.id} /> },
-      { key: "name", label: "Name", render: (r) => <span className="nw">{r.name}</span> },
-      { key: "kind", label: "Kind" },
-      { key: "enabled", label: "Enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
-      { key: "usableInTask", label: "Usable in tasks", render: (r) => (r.usableInTask ? "yes" : "no") },
+      { key: "id", label: "resources.col.id", render: (r) => <Id value={r.id} /> },
+      { key: "name", label: "resources.col.name", render: (r) => <span className="nw">{r.name}</span> },
+      { key: "kind", label: "resources.col.kind" },
+      { key: "enabled", label: "resources.col.enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
+      { key: "usableInTask", label: "resources.col.usableInTask", render: (r) => (r.usableInTask ? "yes" : "no") },
       {
         // v11 hardening §4: Project Coding Tasks require an isolated runtime;
         // the column states the verdict so an operator can see which runtimes
         // are eligible without reading the record.
         key: "executionBackend",
-        label: "Isolation",
+        label: "resources.col.isolation",
         render: (r) =>
           (r.executionBackend ?? (r.containerized ? "isolated" : "host")) === "isolated" && r.image
             ? "isolated"
@@ -79,101 +84,104 @@ const configs: Record<string, Config> = {
       },
     ],
     createFields: [
-      { key: "name", label: "Name", required: true },
-      { key: "kind", label: "Kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "zcode", "dsh", "docker", "mock", "custom"] },
-      { key: "executionBackend", label: "Execution backend", type: "select", options: ["isolated", "host"] },
-      { key: "containerized", label: "Containerized", type: "select", options: ["true", "false"] },
-      { key: "image", label: "Docker image", placeholder: "node:22-alpine" },
-      { key: "command", label: "Container command (docker kind)", placeholder: "sh -c echo hello" },
-      { key: "usableInTask", label: "Usable in tasks", type: "select", options: ["true", "false"] },
-      { key: "description", label: "Description" },
+      { key: "name", label: "resources.f.name", required: true },
+      { key: "kind", label: "resources.f.kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "zcode", "dsh", "docker", "mock", "custom"] },
+      { key: "executionBackend", label: "resources.f.executionBackend", type: "select", options: ["isolated", "host"] },
+      { key: "containerized", label: "resources.f.containerized", type: "select", options: ["true", "false"] },
+      { key: "image", label: "resources.f.image", placeholder: "node:22-alpine" },
+      { key: "command", label: "resources.f.command", placeholder: "sh -c echo hello" },
+      { key: "usableInTask", label: "resources.f.usableInTask", type: "select", options: ["true", "false"] },
+      { key: "description", label: "resources.f.description" },
     ],
-    rowActions: (row, reload) => (
+    rowActions: (row, reload, t) => (
       <>
-        <button className="small" onClick={() => toggleRuntime(row, reload)}>{row.enabled ? "disable" : "enable"}</button>
-        <button className="small" onClick={() => toggleUsable(row, reload)}>{row.usableInTask ? "disallow in tasks" : "allow in tasks"}</button>
-        <button className="small danger" onClick={() => removeItem("/api/runtimes", row.id, reload)}>delete</button>
+        <button className="small" onClick={() => toggleRuntime(row, reload)}>{t(row.enabled ? "resources.a.disable" : "resources.a.enable")}</button>
+        <button className="small" onClick={() => toggleUsable(row, reload)}>{t(row.usableInTask ? "resources.a.disallow" : "resources.a.allow")}</button>
+        <button className="small danger" onClick={() => removeItem("/api/runtimes", row.id, reload)}>{t("resources.a.delete")}</button>
       </>
     ),
-    detailTitle: (r) => `Runtime: ${r.name}`,
-    detail: (r, { reload, close }) => (
+    detailTitle: (r, t) => t("resources.detail.title", { name: r.name }),
+    detail: (r, { reload, close, t }) => (
       <>
         <dl className="detail-list">
-          <dt>ID</dt><dd className="mono">{r.id}</dd>
-          <dt>Name</dt><dd>{r.name}</dd>
-          <dt>Kind</dt><dd>{r.kind}</dd>
-          <dt>Description</dt><dd>{r.description ?? "—"}</dd>
-          <dt>Credentials</dt><dd>{r.credentialSource === "harness-native" ? "Harness native" : "AgentFabric"}</dd>
-          <dt>Enabled</dt><dd>{r.enabled ? "yes" : "no"}</dd>
-          <dt>Usable in tasks</dt><dd>{r.usableInTask ? "yes" : "no"}</dd>
-          <dt>Execution backend</dt><dd>{r.executionBackend ?? (r.containerized ? "isolated" : "host")}</dd>
-          <dt>Containerized</dt><dd>{String(Boolean(r.containerized))}</dd>
-          <dt>Image</dt><dd>{r.image ?? "—"}</dd>
-          <dt>Project Coding Tasks</dt>
+          <dt>{t("resources.col.id")}</dt><dd className="mono">{r.id}</dd>
+          <dt>{t("resources.col.name")}</dt><dd>{r.name}</dd>
+          <dt>{t("resources.col.kind")}</dt><dd>{r.kind}</dd>
+          <dt>{t("resources.col.description")}</dt><dd>{r.description ?? "—"}</dd>
+          <dt>{t("resources.detail.credentials")}</dt>
+          <dd>{r.credentialSource === "harness-native" ? t("resources.detail.harnessNative") : "AgentFabric"}</dd>
+          <dt>{t("resources.col.enabled")}</dt><dd>{r.enabled ? t("resources.yes") : t("resources.no")}</dd>
+          <dt>{t("resources.col.usableInTask")}</dt><dd>{r.usableInTask ? t("resources.yes") : t("resources.no")}</dd>
+          <dt>{t("resources.f.executionBackend")}</dt><dd>{r.executionBackend ?? (r.containerized ? "isolated" : "host")}</dd>
+          <dt>{t("resources.f.containerized")}</dt><dd>{String(Boolean(r.containerized))}</dd>
+          <dt>{t("resources.f.image")}</dt><dd>{r.image ?? "—"}</dd>
+          <dt>{t("resources.detail.projectTasks")}</dt>
           <dd>
             {(r.executionBackend ?? (r.containerized ? "isolated" : "host")) === "isolated" && r.image
-              ? "allowed — runs in an isolated runtime"
-              : "refused — requires an isolated runtime (container + image)"}
+              ? t("resources.detail.projectAllowed")
+              : t("resources.detail.projectRefused")}
           </dd>
-          <dt>Command</dt><dd>{Array.isArray(r.command) && r.command.length > 0 ? r.command.join(" ") : "—"}</dd>
-          <dt>Working directory</dt><dd>{r.cwd ?? "—"}</dd>
-          <dt>Default model</dt><dd>{r.defaultModelId ?? "—"}</dd>
-          <dt>Context window</dt><dd>{r.contextWindow ?? "—"}</dd>
-          <dt>Env keys</dt><dd>{Object.keys(r.env ?? {}).join(", ") || "—"}</dd>
-          <dt>Created</dt><dd>{fmtSaved(r.createdAt)}</dd>
-          <dt>Updated</dt><dd>{fmtSaved(r.updatedAt)}</dd>
+          <dt>{t("resources.detail.command")}</dt><dd>{Array.isArray(r.command) && r.command.length > 0 ? r.command.join(" ") : "—"}</dd>
+          <dt>{t("resources.detail.cwd")}</dt><dd>{r.cwd ?? "—"}</dd>
+          <dt>{t("resources.detail.defaultModel")}</dt><dd>{r.defaultModelId ?? "—"}</dd>
+          <dt>{t("resources.detail.contextWindow")}</dt><dd>{r.contextWindow ?? "—"}</dd>
+          <dt>{t("resources.detail.envKeys")}</dt><dd>{Object.keys(r.env ?? {}).join(", ") || "—"}</dd>
+          <dt>{t("resources.detail.created")}</dt><dd>{fmtSaved(r.createdAt)}</dd>
+          <dt>{t("resources.detail.updated")}</dt><dd>{fmtSaved(r.updatedAt)}</dd>
         </dl>
         <div className="row">
           <span className="right">
-            <button className="small" onClick={() => toggleRuntime(r, reload)}>{r.enabled ? "disable" : "enable"}</button>
-            <button className="small" onClick={() => toggleUsable(r, reload)}>{r.usableInTask ? "disallow in tasks" : "allow in tasks"}</button>
-            <button className="small danger" onClick={() => { removeItem("/api/runtimes", r.id, reload); close(); }}>delete</button>
+            <button className="small" onClick={() => toggleRuntime(r, reload)}>{r.enabled ? t("resources.a.disable") : t("resources.a.enable")}</button>
+            <button className="small" onClick={() => toggleUsable(r, reload)}>{r.usableInTask ? t("resources.a.disallow") : t("resources.a.allow")}</button>
+            <button className="small danger" onClick={() => { removeItem("/api/runtimes", r.id, reload); close(); }}>{t("resources.a.delete")}</button>
           </span>
         </div>
       </>
     ),
   },
   agents: {
-    title: "Agents",
+    title: "resources.kind.agents",
+    titleOne: "resources.kind.agents.one",
     path: "/api/agents",
     columns: [
-      { key: "id", label: "ID", render: (r) => <Id value={r.id} /> },
-      { key: "name", label: "Name", render: (r) => <span className="nw">{r.name}</span> },
-      { key: "description", label: "Description", render: (r) => r.description ?? "-" },
-      { key: "runtimeId", label: "Runtime", render: (r) => <Id value={r.runtimeId ?? "-"} /> },
-      { key: "modelId", label: "Model", render: (r) => <Id value={r.modelId ?? "-"} /> },
+      { key: "id", label: "resources.col.id", render: (r) => <Id value={r.id} /> },
+      { key: "name", label: "resources.col.name", render: (r) => <span className="nw">{r.name}</span> },
+      { key: "description", label: "resources.col.description", render: (r) => r.description ?? "-" },
+      { key: "runtimeId", label: "resources.col.runtime", render: (r) => <Id value={r.runtimeId ?? "-"} /> },
+      { key: "modelId", label: "resources.col.model", render: (r) => <Id value={r.modelId ?? "-"} /> },
     ],
     createFields: [
-      { key: "name", label: "Name", required: true },
-      { key: "description", label: "Description" },
-      { key: "runtimeId", label: "Runtime id", placeholder: "rt_…" },
-      { key: "modelId", label: "Model id", placeholder: "mod_…" },
-      { key: "systemInstructions", label: "System instructions", type: "textarea" },
+      { key: "name", label: "resources.f.name", required: true },
+      { key: "description", label: "resources.f.description" },
+      { key: "runtimeId", label: "resources.f.runtimeId", placeholder: "rt_…" },
+      { key: "modelId", label: "resources.f.modelId", placeholder: "mod_…" },
+      { key: "systemInstructions", label: "resources.f.systemInstructions", type: "textarea" },
     ],
-    rowActions: (row, reload) => (
-      <button className="small danger" onClick={() => removeItem("/api/agents", row.id, reload)}>delete</button>
+    rowActions: (row, reload, t) => (
+      <button className="small danger" onClick={() => removeItem("/api/agents", row.id, reload)}>{t("resources.a.delete")}</button>
     ),
   },
   workspaces: {
-    title: "Workspaces",
+    title: "resources.kind.workspaces",
+    titleOne: "resources.kind.workspaces.one",
     path: "/api/workspaces",
     columns: [
-      { key: "id", label: "ID", render: (r) => <Id value={r.id} /> },
-      { key: "name", label: "Name", render: (r) => <span className="nw">{r.name}</span> },
-      { key: "type", label: "Type" },
-      { key: "source", label: "Source", render: (r) => r.source ?? "create" },
-      { key: "path", label: "Path / Repo", render: (r) => <Clip value={r.path ?? r.repoUrl ?? "-"} max={220} /> },
-      { key: "status", label: "Status", render: (r) => <StatusBadge status={r.status === "missing" ? "failed" : "completed"} /> },
-      { key: "lastSavedAt", label: "Last saved", render: (r) => <span className="nw" title={r.lastSavedAt}>{fmtSaved(r.lastSavedAt)}</span> },
+      { key: "id", label: "resources.col.id", render: (r) => <Id value={r.id} /> },
+      { key: "name", label: "resources.col.name", render: (r) => <span className="nw">{r.name}</span> },
+      { key: "type", label: "resources.col.type" },
+      { key: "source", label: "resources.col.source", render: (r) => r.source ?? "create" },
+      { key: "path", label: "resources.col.path", render: (r) => <Clip value={r.path ?? r.repoUrl ?? "-"} max={220} /> },
+      { key: "status", label: "resources.col.status", render: (r) => <StatusBadge status={r.status === "missing" ? "failed" : "completed"} /> },
+      { key: "lastSavedAt", label: "resources.col.lastSaved", render: (r) => <span className="nw" title={r.lastSavedAt}>{fmtSaved(r.lastSavedAt)}</span> },
     ],
     createFields: [
-      { key: "name", label: "Name", required: true },
-      { key: "type", label: "Type", type: "select", options: ["local", "git", "volume"] },
-      { key: "path", label: "Local path", placeholder: "/path/to/repo" },
-      { key: "repoUrl", label: "Git repo URL" },
-      { key: "branch", label: "Branch" },
+      { key: "name", label: "resources.f.name", required: true },
+      { key: "type", label: "resources.f.type", type: "select", options: ["local", "git", "volume"] },
+      { key: "path", label: "resources.f.localPath", placeholder: "/path/to/repo" },
+      { key: "repoUrl", label: "resources.f.repoUrl" },
+      { key: "branch", label: "resources.f.branch" },
     ],
-    rowActions: (row, reload) => (
+    rowActions: (row, reload, t) => (
       <>
         <button
           className="small"
@@ -181,11 +189,11 @@ const configs: Record<string, Config> = {
             await post(`/api/workspaces/${row.id}/save`);
             reload();
           }}
-          title="Persist/verify the workspace (containers are disposable, workspaces are durable)"
+          title={t("resources.a.saveTip")}
         >
-          save
+          {t("resources.a.save")}
         </button>
-        <button className="small danger" onClick={() => removeItem("/api/workspaces", row.id, reload)}>delete</button>
+        <button className="small danger" onClick={() => removeItem("/api/workspaces", row.id, reload)}>{t("resources.a.delete")}</button>
       </>
     ),
   },
@@ -202,9 +210,11 @@ const configs: Record<string, Config> = {
  */
 let askDelete: ((label: string) => Promise<boolean>) | null = null;
 
+let refuseDeleteNoAsker = "Refusing to delete without a confirmation dialog installed";
+
 async function removeItem(path: string, id: string, reload: () => void) {
   if (!askDelete) {
-    throw new Error("Refusing to delete without a confirmation dialog installed");
+    throw new Error(refuseDeleteNoAsker);
   }
   if (!(await askDelete(id))) return;
   await del(path + "/" + id);
@@ -228,6 +238,7 @@ async function toggleUsable(row: any, reload: () => void) {
  * credential material is never displayed or read.
  */
 function HarnessStatusCard() {
+  const t = useT();
   const runtimes = useAsync<any[]>(() => get("/api/runtimes"), []);
   const kinds = [...new Set(
     (runtimes.data ?? [])
@@ -236,13 +247,10 @@ function HarnessStatusCard() {
   )];
   return (
     <div className="card">
-      <h2>Harness runtime status</h2>
-      <p className="sub">
-        Local coding harnesses run on their own logged-in account (Codex + ChatGPT, Claude Code + Claude.ai).
-        AgentFabric only detects availability — credentials stay with the harness and are never displayed or read.
-      </p>
+      <h2>{t("resources.harness.title")}</h2>
+      <p className="sub">{t("resources.harness.desc")}</p>
       {kinds.length === 0 ? (
-        <div className="muted">No harness-native runtime enabled.</div>
+        <div className="muted">{t("resources.harness.none")}</div>
       ) : (
         kinds.map((kind) => <HarnessStatusRow key={kind} kind={kind} runtimes={runtimes.data ?? []} />)
       )}
@@ -251,6 +259,7 @@ function HarnessStatusCard() {
 }
 
 function HarnessStatusRow({ kind, runtimes }: { kind: string; runtimes: any[] }) {
+  const t = useT();
   const auth = useAsync<any>(() => get(`/api/harness/${kind}/auth-status`), [kind]);
   const runtime = runtimes.find((r) => r.kind === kind && r.enabled);
   const status = auth.data;
@@ -259,28 +268,34 @@ function HarnessStatusRow({ kind, runtimes }: { kind: string; runtimes: any[] })
       <strong>{runtime?.name ?? kind}</strong>
       <table>
         <thead>
-          <tr><th>CLI installed</th><th>Authenticated</th><th>Credential source</th><th>Execution backend</th><th>Detail</th></tr>
+          <tr>
+            <th>{t("resources.harness.installed")}</th><th>{t("resources.harness.authenticated")}</th>
+            <th>{t("resources.harness.credentialSource")}</th><th>{t("resources.harness.backend")}</th>
+            <th>{t("resources.harness.detail")}</th>
+          </tr>
         </thead>
         <tbody>
           <tr>
             <td>{status ? (status.installed ? "✓" : "✗") : "…"}</td>
             <td>{status ? (status.loggedIn ? "✓" : "✗") : "…"}</td>
-            <td>Harness native</td>
+            <td>{t("resources.detail.harnessNative")}</td>
             <td>{runtime?.containerized ? "docker" : "local"}</td>
             <td className="muted">
-              {status?.detail ?? (auth.error ? auth.error : "checking…")}
+              {status?.detail ?? (auth.error ? auth.error : t("resources.harness.checking"))}
               {status?.version ? ` · ${status.version}` : ""}
             </td>
           </tr>
         </tbody>
       </table>
       {status && !status.ok && status.hint && <div className="muted">{status.hint}</div>}
-      {auth.error && <div className="muted">Auth check unavailable: {auth.error}</div>}
+      {auth.error && <div className="muted">{t("resources.harness.authUnavailable", { error: auth.error })}</div>}
     </div>
   );
 }
 
 export function ResourceView({ kind }: { kind: string }) {
+  const t = useT();
+  refuseDeleteNoAsker = t("resources.delete.noAsker");
   const cfg = configs[kind];
   const { data, error, loading, reload } = useAsync<any[]>((force) => get(cfg.path, undefined, force), [cfg.path]);
   const [showCreate, setShowCreate] = useState(false);
@@ -315,7 +330,7 @@ export function ResourceView({ kind }: { kind: string }) {
     deleteResolver.current = null;
   };
 
-  if (!cfg) return <div>Unknown resource kind: {kind}</div>;
+  if (!cfg) return <div>{t("resources.unknown", { kind })}</div>;
 
   const submit = async () => {
     setSaving(true);
@@ -351,21 +366,23 @@ export function ResourceView({ kind }: { kind: string }) {
   return (
     <div>
       <div className="row">
-        <h1>{cfg.title}</h1>
+        <h1>{t(cfg.title)}</h1>
         <span className="right">
-          <button className="primary" onClick={() => setShowCreate((v) => !v)}>{showCreate ? "close" : "+ add"}</button>
+          <button className="primary" onClick={() => setShowCreate((v) => !v)}>
+            {showCreate ? t("common.close") : t("resources.add")}
+          </button>
         </span>
       </div>
-      <p className="sub">Manage {cfg.title.toLowerCase()} through the AgentFabric API.</p>
+      <p className="sub">{t("resources.subtitle", { name: t(cfg.title) })}</p>
 
       {showCreate && (
         <div className="card">
-          <h2>Add {cfg.title.slice(0, -1)}</h2>
+          <h2>{t("resources.addTitle", { name: t(cfg.titleOne) })}</h2>
           {cfg.createFields.map((f) => (
-            <Field key={f.key} label={f.label}>
+            <Field key={f.key} label={t(f.label)}>
               {f.type === "select" ? (
                 <select value={form[f.key] ?? ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}>
-                  <option value="">— select —</option>
+                  <option value="">{t("resources.select")}</option>
                   {f.options?.map((o) => <option key={o} value={o}>{o}</option>)}
                 </select>
               ) : f.type === "textarea" ? (
@@ -381,7 +398,9 @@ export function ResourceView({ kind }: { kind: string }) {
             </Field>
           ))}
           {saveError && <div className="muted" style={{ color: "var(--red)" }}>{saveError}</div>}
-          <button className="primary" disabled={saving} onClick={submit}>{saving ? "saving…" : "create"}</button>
+          <button className="primary" disabled={saving} onClick={submit}>
+            {saving ? t("common.saving") : t("common.create")}
+          </button>
         </div>
       )}
 
@@ -391,44 +410,45 @@ export function ResourceView({ kind }: { kind: string }) {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr>{cfg.columns.map((c) => <th key={c.key}>{c.label}</th>)}<th className="actions"></th></tr>
+                <tr>{cfg.columns.map((c) => <th key={c.key}>{t(c.label)}</th>)}<th className="actions"></th></tr>
               </thead>
               <tbody>
                 {data.map((row) => (
                   <tr
                     key={row.id}
                     className={cfg.detail ? "clickable" : undefined}
-                    title={cfg.detail ? "Click for details" : undefined}
+                    title={cfg.detail ? t("resources.details") : undefined}
                     onClick={cfg.detail ? () => setDetailId(row.id) : undefined}
                   >
                     {cfg.columns.map((c) => <td key={c.key}>{c.render ? c.render(row) : String(row[c.key] ?? "")}</td>)}
-                    <td className="actions" onClick={(e) => e.stopPropagation()}>{cfg.rowActions?.(row, reload)}</td>
+                    <td className="actions" onClick={(e) => e.stopPropagation()}>{cfg.rowActions?.(row, reload, t)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         ) : (
-          <div className="muted">{loading ? "Loading…" : "No items yet."}</div>
+          <div className="muted">{loading ? t("common.loading") : t("resources.empty")}</div>
         )}
       </div>
 
       {detailRow && cfg.detail && (
-        <Modal title={cfg.detailTitle ? cfg.detailTitle(detailRow) : "Details"} onClose={() => setDetailId(null)}>
-          {cfg.detail(detailRow, { reload, close: () => setDetailId(null) })}
+        <Modal
+          title={cfg.detailTitle ? cfg.detailTitle(detailRow, t) : t("resources.detailsTitle")}
+          onClose={() => setDetailId(null)}
+        >
+          {cfg.detail(detailRow, { reload, close: () => setDetailId(null), t })}
         </Modal>
       )}
 
       {kind === "runtimes" && <HarnessStatusCard />}
 
       {deleteLabel && (
-        <Modal title="Delete" onClose={() => answerDelete(false)}>
-          <p>
-            Delete <strong className="mono">{deleteLabel}</strong>?
-          </p>
+        <Modal title={t("resources.delete.title")} onClose={() => answerDelete(false)}>
+          <p>{t("resources.delete.question", { name: deleteLabel })}</p>
           <div className="modal-actions">
-            <button onClick={() => answerDelete(false)}>Cancel</button>
-            <button className="danger" onClick={() => answerDelete(true)}>Delete</button>
+            <button onClick={() => answerDelete(false)}>{t("common.cancel")}</button>
+            <button className="danger" onClick={() => answerDelete(true)}>{t("common.delete")}</button>
           </div>
         </Modal>
       )}

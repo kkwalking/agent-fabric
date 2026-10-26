@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get, post, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
 import { StatusBadge, useMinuteClock, useAsync, ErrorBox, CopyButton, Pager, usePolling } from "../components";
+import { useI18n } from "../i18n-react";
 import { navigate } from "../router";
 
 /** How each harness resumes a native session by id (matches runtimes' buildArgs). */
@@ -20,6 +21,7 @@ const NATIVE_RESUME_CMD: Record<string, string> = {
 const RUNS_PAGE_SIZE = 50;
 
 export function RunsView() {
+  const { t } = useI18n();
   const { data, error, loading, reload } = useAsync<any[]>((force) => get("/api/runs", undefined, force), []);
   // Runs accumulate one per execution: page them, for the same reason the task
   // list is paged (flat DOM and re-render cost).
@@ -37,7 +39,7 @@ export function RunsView() {
       await post(`/api/runs/${runId}/cancel`);
       reloadAll();
     } catch (e) {
-      setActionError(`Could not cancel ${runId}: ${e instanceof Error ? e.message : String(e)}`);
+      setActionError(t("runs.cancelFailed", { id: runId, error: e instanceof Error ? e.message : String(e) }));
     } finally {
       setCancelling((prev) => ({ ...prev, [runId]: false }));
     }
@@ -58,19 +60,24 @@ export function RunsView() {
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}>
-        <h1>Runs</h1>
-        <span className="right"><button className="small" onClick={reloadAll}>refresh</button></span>
+        <h1>{t("runs.title")}</h1>
+        <span className="right"><button className="small" onClick={reloadAll}>{t("common.refresh")}</button></span>
       </div>
       <p className="sub">
-        Every task execution produces an independent Run. This is the operations view — the conversation
-        lives in the <a onClick={() => navigate("/tasks")}>task thread</a>.
+        {t("runs.subtitle")} 
+        <a onClick={() => navigate("/tasks")}>{t("runs.subtitle.threadLink")}</a>
+        {"。"}
       </p>
       <ErrorBox message={actionError ?? error} />
       {data && data.length > 0 ? (
       <div className="card">
           <table>
             <thead>
-              <tr><th>Run</th><th>Task</th><th>Status</th><th>Runtime</th><th>Continuity</th><th>Model</th><th>Cost</th><th>Created</th><th></th></tr>
+              <tr>
+                <th>{t("runs.col.run")}</th><th>{t("runs.col.task")}</th><th>{t("runs.col.status")}</th>
+                <th>{t("runs.col.runtime")}</th><th>{t("runs.col.continuity")}</th><th>{t("runs.col.model")}</th>
+                <th>{t("runs.col.cost")}</th><th>{t("runs.col.created")}</th><th></th>
+              </tr>
             </thead>
             <tbody>
               {pageRows.map((r: any) => {
@@ -82,18 +89,20 @@ export function RunsView() {
                   <td><a onClick={() => navigate(`/tasks/${r.taskId}`)}>{r.taskTitle}</a></td>
                   <td><StatusBadge status={r.status} /></td>
                   <td>{r.runtimeName ?? "-"}</td>
-                  <td className="muted">{r.continuity ?? "new"}</td>
+                  <td className="muted">{continuityLabel(t, r.continuity ?? "new")}</td>
                   <td>{r.modelName ?? "-"}</td>
                   <td>{fmtCost(r.cost)}</td>
                   <td className="muted">{fmtTime(r.createdAt)}</td>
                   <td>
                     {sessionRef && (
                       <CopyButton
-                        label="copy session id"
+                        label={t("runs.copySessionId")}
                         text={sessionRef.nativeSessionRef}
                         title={
-                          `${sessionRef.nativeSessionRef} (${sessionRef.runtimeKind})` +
-                          (resumeCmd ? `\nresume in the native harness: ${resumeCmd.replace("<id>", sessionRef.nativeSessionRef)}` : "")
+                          t("runs.sessionTip", { ref: sessionRef.nativeSessionRef, kind: sessionRef.runtimeKind }) +
+                          (resumeCmd
+                            ? `\n${t("runs.sessionTip.resume", { cmd: resumeCmd.replace("<id>", sessionRef.nativeSessionRef) })}`
+                            : "")
                         }
                       />
                     )}{" "}
@@ -103,7 +112,7 @@ export function RunsView() {
                         disabled={Boolean(cancelling[r.id])}
                         onClick={() => void cancelRun(r.id)}
                       >
-                        {cancelling[r.id] ? "cancelling…" : "cancel"}
+                        {cancelling[r.id] ? t("runs.cancelling") : t("runs.cancel")}
                       </button>
                     )}
                   </td>
@@ -115,17 +124,26 @@ export function RunsView() {
           <Pager page={currentPage} pageCount={pageCount} total={data?.length ?? 0} pageSize={RUNS_PAGE_SIZE} onChange={setPage} />
       </div>
       ) : (
-        <div className="card muted">{loading ? "Loading…" : "No runs yet — create a task first."}</div>
+        <div className="card muted">{loading ? t("common.loading") : t("runs.empty")}</div>
       )}
     </div>
   );
 }
 
-const CONTINUITY_LABEL: Record<string, string> = {
-  new: "new session",
-  resume: "▶ resume (native session)",
-  handoff: "⇄ handoff (new native session)",
-};
+/** "new" / "resume" / "handoff" → its label; anything else is shown as-is. */
+function continuityLabel(t: ReturnType<typeof useI18n>["t"], continuity: string): string {
+  if (continuity === "new") return t("runs.continuity.new");
+  if (continuity === "resume") return t("runs.continuity.resume");
+  if (continuity === "handoff") return t("runs.continuity.handoff");
+  return continuity;
+}
+
+/** Container lifecycle mode: known modes are translated, anything else as-is. */
+function lifecycleLabel(t: ReturnType<typeof useI18n>["t"], mode?: string): string {
+  if (!mode || mode === "ephemeral") return t("runs.lifecycle.ephemeral");
+  if (mode === "persistent") return t("runs.lifecycle.persistent");
+  return mode;
+}
 
 /**
  * Run Inspector (v5 §12/§13): the advanced execution-detail, debugging
@@ -134,6 +152,7 @@ const CONTINUITY_LABEL: Record<string, string> = {
  * It is deliberately NOT the user's primary interaction surface.
  */
 export function RunDetailView({ runId }: { runId: string }) {
+  const { t } = useI18n();
   const { data: run, error, reload } = useAsync<any>((force) => get(`/api/runs/${runId}`, undefined, force), [runId]);
   const [events, setEvents] = useState<any[]>([]);
   // Same reasoning as the list page: a cancel that fails must say so, and a
@@ -201,7 +220,7 @@ export function RunDetailView({ runId }: { runId: string }) {
   usePolling(pollStatus, 3000, Boolean(run));
 
   if (error) return <ErrorBox message={error} />;
-  if (!run) return <div className="muted">Loading…</div>;
+  if (!run) return <div className="muted">{t("common.loading")}</div>;
   // Declared after the early returns so the block below can render it. A failed
   // cancel is not a load error: the run is still there and still yours to read.
 
@@ -215,12 +234,20 @@ export function RunDetailView({ runId }: { runId: string }) {
     })
     .filter((l) => l !== "");
 
+  const continuity = continuityLabel(t, run.continuity ?? "new");
+  const purpose =
+    run.purpose === "validation"
+      ? t("runs.purpose.validation")
+      : run.purpose === "rework"
+        ? t("runs.purpose.rework")
+        : t("runs.purpose.development");
+
   return (
     <div>
       {actionError && <ErrorBox message={actionError} />}
       <div className="row">
-        <a onClick={() => navigate("/runs")}>← runs</a>
-        <a onClick={() => navigate(`/tasks/${run.taskId}`)}>task thread ↗</a>
+        <a onClick={() => navigate("/runs")}>{t("runs.detail.back")}</a>
+        <a onClick={() => navigate(`/tasks/${run.taskId}`)}>{t("runs.detail.thread")}</a>
         <span className="right">
           {isLive && (
             <button
@@ -233,52 +260,52 @@ export function RunDetailView({ runId }: { runId: string }) {
                   await post(`/api/runs/${runId}/cancel`);
                   reload();
                 } catch (e) {
-                  setActionError(`Could not cancel: ${e instanceof Error ? e.message : String(e)}`);
+                  setActionError(t("runs.cancelFailed", { id: runId, error: e instanceof Error ? e.message : String(e) }));
                 } finally {
                   setCancelling(false);
                 }
               }}
             >
-              {cancelling ? "cancelling…" : "cancel"}
+              {cancelling ? t("runs.cancelling") : t("runs.cancel")}
             </button>
           )}
           {" "}
-          <button className="small" onClick={reload}>refresh</button>
+          <button className="small" onClick={reload}>{t("common.refresh")}</button>
         </span>
       </div>
       <h1 className="mono">{runId}</h1>
       <p className="sub">
-        <strong>Run Inspector</strong> — advanced execution details, debugging and audit for this run.
-        For the conversation view open the <a onClick={() => navigate(`/tasks/${run.taskId}`)}>task thread</a>.
+        <strong>{t("runs.detail.inspector")}</strong>{" "}
+        <a onClick={() => navigate(`/tasks/${run.taskId}`)}>{t("runs.subtitle.threadLink")}</a>
+        {t("runs.detail.inspectorTail")}
       </p>
 
       <div className="grid">
-        <div className="stat"><div className="num"><StatusBadge status={run.status} /></div><div className="lbl">status</div></div>
+        <div className="stat"><div className="num"><StatusBadge status={run.status} /></div><div className="lbl">{t("runs.stat.status")}</div></div>
         <div className="stat">
           <div className="num">
-            {run.purpose === "validation" || run.purpose === "rework" ? run.purpose : "development"}
+            {purpose}
             {run.round ? ` · r${run.round}` : ""}
           </div>
-          <div className="lbl">purpose</div>
+          <div className="lbl">{t("runs.stat.purpose")}</div>
         </div>
-        <div className="stat"><div className="num">{run.runtimeName ?? "-"}</div><div className="lbl">runtime</div></div>
-        <div className="stat"><div className="num">{run.modelName ?? "-"}</div><div className="lbl">model</div></div>
-        <div className="stat"><div className="num">{CONTINUITY_LABEL[run.continuity ?? "new"] ?? run.continuity}</div><div className="lbl">continuity</div></div>
-        <div className="stat"><div className="num">{run.lifecycle?.mode ?? "ephemeral"}</div><div className="lbl">container lifecycle</div></div>
-        <div className="stat"><div className="num">{fmtCost(run.cost)}</div><div className="lbl">cost</div></div>
-        <div className="stat"><div className="num">{(run.usage?.modelRequests ?? 0)}</div><div className="lbl">model calls</div></div>
-        <div className="stat"><div className="num">{(run.usage?.inputTokens ?? 0) + (run.usage?.outputTokens ?? 0)}</div><div className="lbl">tokens</div></div>
+        <div className="stat"><div className="num">{run.runtimeName ?? "-"}</div><div className="lbl">{t("runs.stat.runtime")}</div></div>
+        <div className="stat"><div className="num">{run.modelName ?? "-"}</div><div className="lbl">{t("runs.stat.model")}</div></div>
+        <div className="stat"><div className="num">{continuity}</div><div className="lbl">{t("runs.stat.continuity")}</div></div>
+        <div className="stat"><div className="num">{lifecycleLabel(t, run.lifecycle?.mode)}</div><div className="lbl">{t("runs.stat.lifecycle")}</div></div>
+        <div className="stat"><div className="num">{fmtCost(run.cost)}</div><div className="lbl">{t("runs.stat.cost")}</div></div>
+        <div className="stat"><div className="num">{(run.usage?.modelRequests ?? 0)}</div><div className="lbl">{t("runs.stat.modelCalls")}</div></div>
+        <div className="stat"><div className="num">{(run.usage?.inputTokens ?? 0) + (run.usage?.outputTokens ?? 0)}</div><div className="lbl">{t("runs.stat.tokens")}</div></div>
       </div>
 
       {/* Full harness instruction — inspector-only (v5 §5/§12). */}
       <details className="card instruction-details">
-        <summary>Full input instruction sent to the harness ({(run.inputInstruction ?? "").length} chars)</summary>
+        <summary>{t("runs.instruction.summary", { n: (run.inputInstruction ?? "").length })}</summary>
         <p className="muted" style={{ margin: "8px 0" }}>
-          The Task Thread shows only the user's message (<code>{run.userPrompt ? "run.userPrompt" : "not recorded (legacy run)"}</code>);
-          this is the complete <code>inputInstruction</code> including handoff and internal context.
+          {t("runs.instruction.note")}
         </p>
         {run.userPrompt && (
-          <p style={{ margin: "0 0 8px" }}><span className="muted">userPrompt: </span>{run.userPrompt}</p>
+          <p style={{ margin: "0 0 8px" }}><span className="muted">{t("runs.instruction.userPrompt")}</span>{run.userPrompt}</p>
         )}
         <pre style={{ whiteSpace: "pre-wrap" }}>{run.inputInstruction ?? run.taskTitle}</pre>
       </details>
@@ -287,53 +314,48 @@ export function RunDetailView({ runId }: { runId: string }) {
         <div className="card">
           <div className="row" style={{ gap: 18, flexWrap: "wrap" }}>
             {run.workspaceId && (
-              <span>workspace: <span className="mono" title={run.workspaceId}>{shortId(run.workspaceId)}</span></span>
+              <span title={run.workspaceId}>{t("runs.refs.workspace", { id: shortId(run.workspaceId) })}</span>
             )}
             {previousHandoff && (
-              <span>
-                consumed handoff: <span className="mono">{shortId(previousHandoff.id)}</span>
-              </span>
+              <span>{t("runs.refs.consumedHandoff", { id: shortId(previousHandoff.id) })}</span>
             )}
             {generatedHandoff && (
-              <span>
-                generated handoff: <span className="mono">{shortId(generatedHandoff.id)}</span>{" "}
-                <span className="muted">({generatedHandoff.source})</span>
-              </span>
+              <span>{t("runs.refs.generatedHandoff", { id: shortId(generatedHandoff.id), source: generatedHandoff.source })}</span>
             )}
             {sessionRef && (
               <span>
-                native session: <span className="mono" title={sessionRef.nativeSessionRef}>{sessionRef.nativeSessionRef}</span>{" "}
+                {t("runs.refs.nativeSession", { ref: sessionRef.nativeSessionRef })}{" "}
                 <CopyButton
-                  label="copy"
+                  label={t("common.copy")}
                   text={sessionRef.nativeSessionRef}
-                  title={`Copy the native harness session id${NATIVE_RESUME_CMD[sessionRef.runtimeKind] ? ` — resume with \`${NATIVE_RESUME_CMD[sessionRef.runtimeKind]}\`` : ""}`}
+                  title={
+                    NATIVE_RESUME_CMD[sessionRef.runtimeKind]
+                      ? t("runs.copyNativeSession.resume", { cmd: NATIVE_RESUME_CMD[sessionRef.runtimeKind] })
+                      : t("runs.copyNativeSession")
+                  }
                 />{" "}
                 <span className="muted">
                   ({sessionRef.runtimeKind}
                   {sessionRef.runtimeVersion ? ` ${sessionRef.runtimeVersion}` : ""}
                   {sessionRef.executionBackend ? `, ${sessionRef.executionBackend}` : ""}
-                  {sessionRef.resumeSupported ? ", resumable" : ""})
+                  {sessionRef.resumeSupported ? `, ${t("runs.refs.runtimeMeta.resumable")}` : ""})
                 </span>
               </span>
             )}
             {nativeState && (
-              <span>
-                native state: <span className="mono" title={nativeState.path}>{shortId(nativeState.id)}</span>{" "}
-                <span className="muted">(mounted at {nativeState.mountPath})</span>
-              </span>
+              <span>{t("runs.refs.nativeState", { id: shortId(nativeState.id), path: nativeState.mountPath })}</span>
             )}
           </div>
         </div>
       )}
 
-      {run.error && (
-        <div className="card" style={{ borderColor: "var(--red)", color: "var(--red)" }}>Error: {run.error}</div>
-      )}
+      {run.error && <ErrorBox message={String(run.error)} />}
 
       <div className="row" style={{ margin: "16px 0" }}>
-        {(["events", "logs", "artifacts", "continuity"] as const).map((t) => (
-          <button key={t} className={tab === t ? "primary" : ""} onClick={() => setTab(t)}>
-            {t} {t === "events" ? `(${events.length})` : t === "artifacts" ? `(${artifacts.length})` : ""}
+        {(["events", "logs", "artifacts", "continuity"] as const).map((entry) => (
+          <button key={entry} className={tab === entry ? "primary" : ""} onClick={() => setTab(entry)}>
+            {t(`runs.tab.${entry}` as const)}
+            {entry === "events" ? ` (${events.length})` : entry === "artifacts" ? ` (${artifacts.length})` : ""}
           </button>
         ))}
       </div>
@@ -341,7 +363,7 @@ export function RunDetailView({ runId }: { runId: string }) {
       <div className="card">
         {tab === "events" && (
           <div style={{ maxHeight: 520, overflow: "auto" }}>
-            {events.length === 0 && <div className="muted">No events yet.</div>}
+            {events.length === 0 && <div className="muted">{t("runs.events.empty")}</div>}
             {events.map((e) => (
               <div key={e.id} className={`event-line ${e.level === "error" ? "error" : ""}`}>
                 <span className="t">{fmtTime(e.timestamp)}</span>
@@ -356,13 +378,18 @@ export function RunDetailView({ runId }: { runId: string }) {
           </div>
         )}
         {tab === "logs" && (
-          <pre>{logs.length ? logs.join("\n") : "(no log lines)"}</pre>
+          <pre>{logs.length ? logs.join("\n") : t("runs.logs.empty")}</pre>
         )}
         {tab === "artifacts" && (
           <div>
-            {artifacts.length === 0 && <div className="muted">No artifacts for this run.</div>}
+            {artifacts.length === 0 && <div className="muted">{t("runs.artifacts.empty")}</div>}
             <table>
-              <thead><tr><th>Name</th><th>Kind</th><th>Size</th><th>ID</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>{t("runs.artifacts.name")}</th><th>{t("runs.artifacts.kind")}</th>
+                  <th>{t("runs.artifacts.size")}</th><th>{t("runs.artifacts.id")}</th>
+                </tr>
+              </thead>
               <tbody>
                 {artifacts.map((a) => (
                   <tr key={a.id}>
@@ -378,63 +405,64 @@ export function RunDetailView({ runId }: { runId: string }) {
         )}
         {tab === "continuity" && (
           <div>
-            <p className="sub">
-              How this run continues the task: <strong>{CONTINUITY_LABEL[run.continuity ?? "new"] ?? run.continuity}</strong>.
-              A native resume continues the same harness's own session; a handoff starts a new one (sessions are
-              never migrated).
-            </p>
+            <p className="sub">{t("runs.continuity.how", { label: continuity })}</p>
             {previousHandoff && (
               <>
-                <h2 style={{ marginTop: 14 }}>Consumed handoff</h2>
+                <h2 style={{ marginTop: 14 }}>{t("runs.continuity.consumed")}</h2>
                 <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(previousHandoff.content, null, 2)}</pre>
               </>
             )}
             {generatedHandoff && (
               <>
-                <h2 style={{ marginTop: 14 }}>Generated handoff (for the next continuation)</h2>
+                <h2 style={{ marginTop: 14 }}>{t("runs.continuity.generated")}</h2>
                 <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(generatedHandoff.content, null, 2)}</pre>
               </>
             )}
             {sessionRef && (
               <>
-                <h2 style={{ marginTop: 14 }}>Runtime-native session reference</h2>
+                <h2 style={{ marginTop: 14 }}>{t("runs.continuity.sessionRef")}</h2>
                 <pre style={{ whiteSpace: "pre-wrap" }}>
-{`harness type : ${sessionRef.runtimeKind}
-native ref   : ${sessionRef.nativeSessionRef}
-runtime ver. : ${sessionRef.runtimeVersion ?? "-"}
-resume       : ${sessionRef.resumeSupported ? "supported" : "not supported"}
-backend      : ${sessionRef.executionBackend ?? "-"}
-created by   : ${sessionRef.runId}
-status       : ${sessionRef.status}`}
+{rawLines(t, [
+  ["runs.raw.harnessType", sessionRef.runtimeKind],
+  ["runs.raw.ref", sessionRef.nativeSessionRef],
+  ["runs.raw.runtimeVersion", sessionRef.runtimeVersion ?? "-"],
+  ["runs.raw.resume", sessionRef.resumeSupported ? t("runs.raw.resume.yes") : t("runs.raw.resume.no")],
+  ["runs.raw.backend", sessionRef.executionBackend ?? "-"],
+  ["runs.raw.createdBy", sessionRef.runId],
+  ["runs.raw.status", sessionRef.status],
+])}
                 </pre>
-                <p className="muted">
-                  AgentFabric stores this reference verbatim; the session's internal structure belongs to the harness.
-                </p>
+                <p className="muted">{t("runs.continuity.sessionRef.note")}</p>
               </>
             )}
             {nativeState && (
               <>
-                <h2 style={{ marginTop: 14 }}>Runtime native state</h2>
+                <h2 style={{ marginTop: 14 }}>{t("runs.continuity.nativeState")}</h2>
                 <pre style={{ whiteSpace: "pre-wrap" }}>
-{`state id     : ${nativeState.id}
-runtime      : ${nativeState.runtimeKind} (${nativeState.runtimeId})
-host path    : ${nativeState.path}
-mounted at   : ${nativeState.mountPath}
-last used by : ${nativeState.lastUsedRunId ?? "-"}
-last used at : ${nativeState.lastUsedAt ?? "-"}`}
+{rawLines(t, [
+  ["runs.raw.stateId", nativeState.id],
+  ["runs.raw.runtime", `${nativeState.runtimeKind} (${nativeState.runtimeId})`],
+  ["runs.raw.hostPath", nativeState.path],
+  ["runs.raw.mountedAt", nativeState.mountPath],
+  ["runs.raw.lastUsedBy", nativeState.lastUsedRunId ?? "-"],
+  ["runs.raw.lastUsedAt", nativeState.lastUsedAt ?? "-"],
+])}
                 </pre>
-                <p className="muted">
-                  Opaque harness-private storage (native session store, internal files). AgentFabric only creates,
-                  mounts, preserves, reattaches and deletes it — never reads it.
-                </p>
+                <p className="muted">{t("runs.continuity.nativeState.note")}</p>
               </>
             )}
             {!previousHandoff && !generatedHandoff && !sessionRef && !nativeState && (
-              <div className="muted">No handoff or native session reference on this run.</div>
+              <div className="muted">{t("runs.continuity.empty")}</div>
             )}
           </div>
         )}
       </div>
     </div>
   );
+}
+
+/** `label: value` lines aligned in two columns, for the inspector's raw blocks. */
+function rawLines(t: ReturnType<typeof useI18n>["t"], rows: Array<[Parameters<typeof t>[0], string]>): string {
+  const width = Math.max(...rows.map(([key]) => t(key).length));
+  return rows.map(([key, value]) => `${t(key).padEnd(width)} : ${value}`).join("\n");
 }

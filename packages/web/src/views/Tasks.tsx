@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { del, get, fmtRelative } from "../api";
 import { Icon, Modal, Pager, StatusBadge, clickableRow, useMinuteClock, useAsync, ErrorBox } from "../components";
+import { statusLabel, type Translate } from "../i18n";
+import { useT } from "../i18n-react";
 import { navigate } from "../router";
 
 // Per-browser UI preference: when set, deleting a task skips the confirm modal.
@@ -16,7 +18,24 @@ const SUPPRESS_DELETE_CONFIRM_KEY = "agentfabric.deleteTaskConfirmSuppressed";
 /** Rows per page. */
 const TASKS_PAGE_SIZE = 50;
 
+/**
+ * Relative timestamp in the interface language. `fmtRelative` is deliberately
+ * not translated in place: it is shared with views this module does not own.
+ */
+function relativeLabel(t: Translate, iso?: string): string {
+  if (!iso) return "—";
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return "—";
+  const diff = Date.now() - at;
+  if (diff < 60_000) return t("status.justNow");
+  if (diff < 3_600_000) return t("status.minutesAgo", { n: Math.floor(diff / 60_000) });
+  if (diff < 86_400_000) return t("status.hoursAgo", { n: Math.floor(diff / 3_600_000) });
+  if (diff < 7 * 86_400_000) return t("status.daysAgo", { n: Math.floor(diff / 86_400_000) });
+  return new Date(at).toLocaleDateString();
+}
+
 export function TasksView() {
+  const t = useT();
   const tasks = useAsync<any[]>(() => get("/api/tasks"), []);
   const runs = useAsync<any[]>(() => get("/api/runs"), []);
   const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
@@ -117,26 +136,25 @@ export function TasksView() {
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}>
-        <h1>Tasks</h1>
+        <h1>{t("tasks.title")}</h1>
         <span className="right">
           {deletedCount > 0 && (
-            <button className="small" onClick={() => navigate("/trash")} title="Deleted tasks are recoverable for 30 days">
-              Trash ({deletedCount})
+            <button className="small" onClick={() => navigate("/trash")} title={t("tasks.trashTitle")}>
+              {t("tasks.trash", { n: deletedCount })}
             </button>
           )}{" "}
-          <button className="small" onClick={() => { tasks.reload(); runs.reload(); summary.reload(); }}>refresh</button>{" "}
-          <button className="small primary" onClick={() => navigate("/new")}>New task</button>
+          <button className="small" onClick={() => { tasks.reload(); runs.reload(); summary.reload(); }}>{t("common.refresh")}</button>{" "}
+          <button className="small primary" onClick={() => navigate("/new")}>{t("tasks.new")}</button>
         </span>
       </div>
       <p className="sub">
-        A Task is your long-term work thread. The system executes each step as a Run — resume or hand off
-        between agents without leaving the thread.
+        {t("tasks.sub")}
         {/* The Dashboard used to show the total cost; it lives on the Usage page
             in full, and one line here keeps it from becoming invisible. */}
         {typeof summary.data?.usage?.estimatedCost === "number" && (
-          <>
-            {" "}Spent so far: ${summary.data.usage.estimatedCost.toFixed(4)} — see{" "}
-            <a onClick={() => navigate("/usage")}>Usage</a> for the breakdown.
+          <> {t("tasks.spent", { cost: `$${summary.data.usage.estimatedCost.toFixed(4)}` })}
+            <a onClick={() => navigate("/usage")}>{t("tasks.spentLink")}</a>
+            {t("tasks.spentAfter")}
           </>
         )}
       </p>
@@ -145,7 +163,9 @@ export function TasksView() {
 
       {entries.length === 0 ? (
         <div className="card muted">
-          No tasks yet — create one with <a onClick={() => navigate("/new")}>New task</a>.
+          {t("tasks.empty")}
+          <a onClick={() => navigate("/new")}>{t("tasks.new")}</a>
+          {t("tasks.emptyAfter")}
         </div>
       ) : (
         <>
@@ -159,19 +179,19 @@ export function TasksView() {
                 <div className="task-item-meta">
                   <span className="meta-chip">
                     {last?.runtimeName ? `${last.runtimeName}` : "—"}
-                    {last ? ` · last run ${last.status}` : " · no runs"}
+                    {last ? ` · ${t("tasks.lastRun", { status: statusLabel(t, last.status) })}` : ` · ${t("tasks.noRuns")}`}
                   </span>
-                  <span className="meta-chip"><span className="muted">workspace</span> {wsName(last?.workspaceId ?? task.workspaceId) ?? "—"}</span>
-                  <span className="meta-chip">{taskRuns.length} {taskRuns.length === 1 ? "run" : "runs"}</span>
+                  <span className="meta-chip"><span className="muted">{t("tasks.label.workspace")}</span> {wsName(last?.workspaceId ?? task.workspaceId) ?? "—"}</span>
+                  <span className="meta-chip">{t("tasks.runCount", { n: taskRuns.length })}</span>
                   {/* Project-based tasks expose their lifecycle (v11 §40):
                       which branch they own and where they stand. */}
                   {task.projectId && (
                     <>
-                      <span className="meta-chip"><span className="muted">branch</span> {task.workingBranch ?? "—"}</span>
+                      <span className="meta-chip"><span className="muted">{t("tasks.label.branch")}</span> {task.workingBranch ?? "—"}</span>
                       <span className="meta-chip">
-                        <span className="muted">agent</span> {task.execution?.agent?.status ?? "—"} ·{" "}
-                        <span className="muted">validation</span> {task.execution?.validation?.status ?? "—"} ·{" "}
-                        <span className="muted">publish</span> {task.execution?.publish?.status ?? "—"}
+                        <span className="muted">{t("tasks.label.agent")}</span> {statusLabel(t, task.execution?.agent?.status)} ·{" "}
+                        <span className="muted">{t("tasks.label.validation")}</span> {statusLabel(t, task.execution?.validation?.status)} ·{" "}
+                        <span className="muted">{t("tasks.label.publish")}</span> {statusLabel(t, task.execution?.publish?.status)}
                       </span>
                     </>
                   )}
@@ -182,12 +202,12 @@ export function TasksView() {
                   the title. */}
               <div className="task-item-side">
                 <StatusBadge status={status} />
-                <span className="muted task-item-time">{fmtRelative(lastActivity)}</span>
+                <span className="muted task-item-time">{relativeLabel(t, lastActivity)}</span>
               </div>
               <div className="task-item-menu" onClick={(e) => e.stopPropagation()}>
                 <button
                   className="icon-btn"
-                  title="Task actions"
+                  title={t("tasks.actions")}
                   onClick={() => setMenuTaskId((open) => (open === task.id ? null : task.id))}
                 >
                   <Icon name="more" />
@@ -195,9 +215,9 @@ export function TasksView() {
                 {menuTaskId === task.id && (
                   <div className="menu">
                     {task.projectId && (
-                      <button className="menu-item" onClick={() => navigate(`/tasks/${task.id}/lifecycle`)}>Lifecycle</button>
+                      <button className="menu-item" onClick={() => navigate(`/tasks/${task.id}/lifecycle`)}>{t("tasks.lifecycle")}</button>
                     )}
-                    <button className="menu-item danger" onClick={() => requestDelete(task)}>Delete</button>
+                    <button className="menu-item danger" onClick={() => requestDelete(task)}>{t("tasks.delete")}</button>
                   </div>
                 )}
               </div>
@@ -209,13 +229,13 @@ export function TasksView() {
       )}
 
       {confirmTask && (
-        <Modal title="Delete task" onClose={() => setConfirmTask(null)}>
+        <Modal title={t("tasks.deleteTitle")} onClose={() => setConfirmTask(null)}>
           <div className="delete-confirm">
             <p className="delete-confirm-question">
-              Delete task <strong>{confirmTask.title}</strong>?
+              {t("tasks.deleteQuestion", { title: confirmTask.title })}
             </p>
             <p className="muted">
-              It is hidden from Tasks but kept for 30 days — restore it from Trash in this page's header.
+              {t("tasks.deleteBody")}
             </p>
             <label className="check">
               <input
@@ -223,11 +243,11 @@ export function TasksView() {
                 checked={dontAskAgain}
                 onChange={(e) => setDontAskAgain(e.target.checked)}
               />
-              Don't ask again
+              {t("tasks.dontAsk")}
             </label>
             <div className="modal-actions">
-              <button onClick={() => setConfirmTask(null)}>Cancel</button>
-              <button className="danger" onClick={confirmDelete}>Delete</button>
+              <button onClick={() => setConfirmTask(null)}>{t("common.cancel")}</button>
+              <button className="danger" onClick={confirmDelete}>{t("common.delete")}</button>
             </div>
           </div>
         </Modal>

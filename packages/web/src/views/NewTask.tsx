@@ -2,6 +2,7 @@ import { useState } from "react";
 import { get, post } from "../api";
 import { ErrorBox, Field, Icon, useAsync } from "../components";
 import { HARNESS_NATIVE_KINDS, HARNESS_THREAD_SOURCES } from "../harness";
+import { useT } from "../i18n-react";
 import { modelOptionLabel } from "../presentation";
 import { navigate } from "../router";
 
@@ -55,6 +56,7 @@ import { navigate } from "../router";
  */
 
 export function NewTaskView() {
+  const t = useT();
   // Two served runtime lists, one per mode. Both are fetched up front so
   // switching the Project selector never leaves the pill empty.
   const classicRuntimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
@@ -223,29 +225,18 @@ export function NewTaskView() {
 
   return (
     <div className="new-task">
-      <h1>New task</h1>
-      <p className="sub">
-        Describe what the agent should work on. One task, many runs — you stay in the same thread while the
-        system executes each step. Choose a Project for a coding task: the platform creates the task's own
-        managed workspace, prepares the source and publishes the working branch. Pick “Project: none” to work
-        in a workspace you manage yourself.
-      </p>
-      {missingModel && (
-        <ErrorBox message="尚未配置任何 LLM 模型 — 请先在左下角「更多」→ 设置 → 模型里添加 Provider 与模型，再回来发起任务（或在 Runtime 选择 Codex / Claude Code，使用其自有登录）" />
-      )}
-      {missingWorkspace && (
-        <ErrorBox message="还没有可用于任务的工作目录 — 最直接的方式：在左下角「更多」→ 项目里新建一个项目（git 仓库或本地目录），然后在这里选中它；平台会为每个任务自动创建独立的工作副本，不需要你手工建 Workspace。注意 Project 任务需要容器化隔离 Runtime：如果本机没有安装 Docker，请先在「更多」→ 运行时 里确认可用项，或安装 Docker 后重启应用。" />
-      )}
-      {missingProjectRuntime && (
-        <ErrorBox message="没有可用于 Project Task 的隔离 Runtime — Project Coding Task 必须运行在 isolated Runtime 中（v11 hardening §4），不会降级到 Host。请先在左下角「更多」→ 运行时里启用一个 containerized Runtime；启用前提是本机 Docker 可用，「更多」→ 设置 → Docker 会告诉你它是否装好并在运行。" />
-      )}
+      <h1>{t("newtask.title")}</h1>
+      <p className="sub">{t("newtask.sub")}</p>
+      {missingModel && <ErrorBox message={t("newtask.missingModel")} />}
+      {missingWorkspace && <ErrorBox message={t("newtask.missingWorkspace")} />}
+      {missingProjectRuntime && <ErrorBox message={t("newtask.missingRuntime")} />}
       <ErrorBox message={error} />
 
       <div className="composer new-task-composer">
         <textarea
           rows={5}
           autoFocus
-          placeholder="随心输入，描述一个任务…"
+          placeholder={t("newtask.prompt.placeholder")}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
@@ -253,7 +244,7 @@ export function NewTaskView() {
           }}
         />
         <input
-          placeholder="Task title (optional — defaults to the first line of the prompt)"
+          placeholder={t("newtask.title.placeholder")}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
@@ -261,29 +252,29 @@ export function NewTaskView() {
             no Project there is no source to branch from. */}
         {projectMode && (
           <details className="new-task-details" open>
-            <summary>Base ref &amp; working branch</summary>
+            <summary>{t("newtask.branch.summary")}</summary>
             <div className="form-grid-2">
-              <Field label={`Base ref (default: ${projectDefaultBranch})`}>
+              <Field label={t("newtask.branch.baseRef", { branch: projectDefaultBranch })}>
                 <input
                   value={baseRef}
                   onChange={(e) => setBaseRef(e.target.value)}
                   placeholder={projectDefaultBranch}
                 />
               </Field>
-              <Field label="Working branch (leave empty to generate af/<task>-<slug>)">
+              <Field label={t("newtask.branch.workingBranch")}>
                 <input
                   value={workingBranch}
                   onChange={(e) => setWorkingBranch(e.target.value)}
-                  placeholder="auto-generated"
+                  placeholder={t("newtask.branch.workingBranch.placeholder")}
                 />
               </Field>
             </div>
             {/* Full width: the two modes need a sentence each to explain
                 themselves, and half a grid column truncates them. */}
-            <Field label="Branch mode">
+            <Field label={t("newtask.branch.mode")}>
               <select value={branchMode} onChange={(e) => setBranchMode(e.target.value)}>
-                <option value="new">new — create a fresh branch (never overwrites an existing one)</option>
-                <option value="continue">continue — build on an existing branch explicitly</option>
+                <option value="new">{t("newtask.branch.mode.new")}</option>
+                <option value="continue">{t("newtask.branch.mode.continue")}</option>
               </select>
             </Field>
           </details>
@@ -293,16 +284,13 @@ export function NewTaskView() {
             "inherit the Project's". */}
         {projectMode && (
           <details className="new-task-details">
-            <summary>Validation override</summary>
-            <Field label="Acceptance standard the validation agent checks — replaces the Project's; empty keeps it">
+            <summary>{t("newtask.validation.summary")}</summary>
+            <Field label={t("newtask.validation.label")}>
               <textarea
                 rows={3}
                 value={validation}
                 onChange={(e) => setValidation(e.target.value)}
-                placeholder={
-                  projectValidationPrompt ||
-                  "e.g. the full test suite passes and `go build ./...` is clean"
-                }
+                placeholder={projectValidationPrompt || t("newtask.validation.placeholder")}
               />
             </Field>
           </details>
@@ -328,18 +316,16 @@ export function NewTaskView() {
                 // meaningless for another's — drop it with the branch input.
                 setValidation("");
               }}
-              title={
-                projectMode
-                  ? "Project (v11 §39) — the codebase this task develops against. The platform creates the task's managed workspace."
-                  : "Project: none (advanced, v11 §5.4) — no codebase definition, so you choose the workspace and the platform does not create one for you."
-              }
+              title={projectMode ? t("newtask.project.title") : t("newtask.project.titleNone")}
             >
               {projectList.map((p: any) => (
-                <option key={p.id} value={p.id}>Project: {p.name}</option>
+                <option key={p.id} value={p.id}>
+                  {t("newtask.option.project", { name: p.name })}
+                </option>
               ))}
               {/* Kept short enough to render inside the pill's 240px cap;
                   the subtitle and the tooltip carry the full explanation. */}
-              <option value="">Project: none — pick a workspace</option>
+              <option value="">{t("newtask.option.projectNone")}</option>
             </select>
           )}
           {/* Hidden rather than rendered empty when the mode offers no
@@ -350,29 +336,33 @@ export function NewTaskView() {
               className="pill"
               value={effectiveRuntimeId}
               onChange={(e) => { setRuntimeChoice(e.target.value); setRuntimeTouched(true); }}
-              title={projectMode ? "Runtime (isolated runtimes only)" : "Runtime"}
+              title={projectMode ? t("newtask.runtime.titleProject") : t("newtask.runtime.title")}
             >
               {selectableRuntimes.map((r: any) => (
-                <option key={r.id} value={r.id}>Runtime: {r.name} ({r.kind})</option>
+                <option key={r.id} value={r.id}>
+                  {t("newtask.option.runtime", { name: r.name, kind: r.kind })}
+                </option>
               ))}
             </select>
           )}
           {harnessNative ? (
             <span
               className="pill harness-native-note"
-              title="Harness-native credentials (v6): this runtime runs on its own logged-in account (Codex + ChatGPT) and its own default model — no AgentFabric provider or API key is needed or used."
+              title={t("newtask.model.harnessNote.title")}
             >
-              Model: harness account (no AgentFabric model)
+              {t("newtask.model.harnessNote")}
             </span>
           ) : (
             <select
               className="pill"
               value={effectiveModelId}
               onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
-              title="Model"
+              title={t("newtask.model.title")}
             >
               {modelList.map((m: any) => (
-                <option key={m.id} value={m.id}>Model: {modelOptionLabel(providerList, m)}</option>
+                <option key={m.id} value={m.id}>
+                  {t("newtask.option.model", { name: modelOptionLabel(providerList, m) })}
+                </option>
               ))}
             </select>
           )}
@@ -383,15 +373,17 @@ export function NewTaskView() {
               className="pill"
               value={effectiveWorkspaceId}
               onChange={(e) => setWorkspaceChoice(e.target.value)}
-              title="Workspace (required without a Project)"
+              title={t("newtask.workspace.title")}
             >
               {workspaceList.map((w: any) => (
-                <option key={w.id} value={w.id}>Workspace: {w.name}</option>
+                <option key={w.id} value={w.id}>
+                  {t("newtask.option.workspace", { name: w.name })}
+                </option>
               ))}
             </select>
           )}
           {/* AGENT_UI_HIDDEN: Agent Profile 选择器，恢复入口时取消注释。
-          <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title="Agent profile">
+          <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title={t("common.agentProfile")}>
             <option value="">Agent: none</option>
             {(profiles.data ?? []).map((p: any) => (
               <option key={p.id} value={p.id}>Agent: {p.name}</option>
@@ -404,15 +396,15 @@ export function NewTaskView() {
             className="pill"
             value={lifecycle}
             onChange={(e) => setLifecycle(e.target.value)}
-            title="Container lifecycle for this task — fixed for every run of the task"
+            title={t("newtask.lifecycle.title")}
           >
-            <option value="ephemeral">Lifecycle: ephemeral (default)</option>
-            <option value="keep-alive">Lifecycle: keep-alive</option>
-            <option value="persistent">Lifecycle: persistent</option>
+            <option value="ephemeral">{t("newtask.option.lifecycle.ephemeral")}</option>
+            <option value="keep-alive">{t("newtask.option.lifecycle.keepAlive")}</option>
+            <option value="persistent">{t("newtask.option.lifecycle.persistent")}</option>
           </select>
           <button
             className="send"
-            title="Create task (⌘↵)"
+            title={t("newtask.submit.title")}
             disabled={busy || !prompt.trim() || blocked}
             onClick={submit}
           >
@@ -423,7 +415,7 @@ export function NewTaskView() {
 
       {!projects.loading && projectList.length === 0 && (
         <p className="sub">
-          No Projects yet.{" "}
+          {t("newtask.noProjects")}{" "}
           <a
             href="/projects"
             onClick={(e) => {
@@ -431,17 +423,15 @@ export function NewTaskView() {
               navigate("/projects");
             }}
           >
-            Create one
-          </a>{" "}
-          to bind a Git repository — the platform then creates the task's managed workspace, clones the source
-          and publishes the working branch. Without a Project you pick an existing workspace instead.
+            {t("newtask.noProjects.create")}
+          </a>
         </p>
       )}
 
       {/* Existing local harness work lives on its own page (v6 §6, v7 §9) —
           this page only describes new tasks. */}
       <p className="sub sessions-pointer">
-        Already working in {HARNESS_THREAD_SOURCES.map((s) => s.label).join(" / ")} on this machine?{" "}
+        {t("newtask.sessions")}{" "}
         <a
           href="/sessions"
           onClick={(e) => {
@@ -449,9 +439,8 @@ export function NewTaskView() {
             navigate("/sessions");
           }}
         >
-          Local harness sessions
-        </a>{" "}
-        lists what is there and continues it here.
+          {t("newtask.sessions.link")}
+        </a>
       </p>
     </div>
   );
