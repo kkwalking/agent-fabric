@@ -987,12 +987,12 @@ export async function retryCompletion(
  * incidental absolute paths) and can name the wrong project.
  */
 export function formatWorkspaceBlock(workspace: Workspace): string {
-  const where = workspace.path ?? workspace.repoUrl ?? "unknown location";
+  const where = workspace.path ?? "unknown location";
   return (
     `<workspace>\n` +
     `Workspace "${workspace.name}" (${workspace.type}) at ${where}.\n` +
-    `The conversation took place inside this directory — it is the "current project" the user refers to. ` +
-    `Relative file paths in the transcript resolve against it; do not infer the project from incidental absolute paths in harness output.\n` +
+    `The conversation took place inside this directory — it is the "current workspace" the user refers to. ` +
+    `Relative file paths in the transcript resolve against it; do not infer the workspace from incidental absolute paths in harness output.\n` +
     `</workspace>`
   );
 }
@@ -1537,7 +1537,7 @@ export function handoffMetadataFields(meta: {
   const { run, workspace, artifacts } = meta;
   return {
     workspaceStatus: workspace
-      ? `Workspace "${workspace.name}" (${workspace.type}) at ${workspace.path ?? workspace.repoUrl ?? "unknown"}.`
+      ? `Workspace "${workspace.name}" (${workspace.type}) at ${workspace.path ?? "unknown"}.`
       : "No workspace was attached to the previous run.",
     previousRunResult:
       `Run ${run.id} finished with status "${run.status}"${run.error ? `, error: ${run.error}` : ""}.`,

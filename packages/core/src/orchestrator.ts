@@ -215,11 +215,7 @@ export interface RunSpec {
   continuity?: RunContinuity;
   previousHandoffId?: ID;
   runtimeSessionRefId?: ID;
-  /** Project-based runs: the Project and its working branch (v11 §6/§40). */
-  projectId?: ID;
-  workingBranch?: string;
-  baseCommitSha?: string;
-  /** Initial lifecycle phase (v11 §21); set by the execution supervisor. */
+  /** Initial lifecycle phase, when the producer records one. */
   phase?: RunPhase;
 }
 
@@ -1051,9 +1047,6 @@ export class RunService {
       status: recorded.status ?? "pending",
       purpose: recorded.purpose,
       phase: extra.phase,
-      projectId: extra.projectId ?? task.projectId,
-      workingBranch: extra.workingBranch ?? task.workingBranch,
-      baseCommitSha: extra.baseCommitSha ?? task.baseCommitSha,
       runtimeId,
       runtimeName: recorded.runtimeName ?? runtime?.name,
       modelId,
@@ -2097,8 +2090,8 @@ export class RunService {
     // over the task's defaults. The Proxy page env (when enabled) is the
     // lowest layer — explicit task/run env wins — and is resolved at
     // spawn time: toggling affects subsequent runs, never live ones.
-    // Platform provisioning env (skills / MCP paths, v11 §25/§26) sits just
-    // above the proxy layer so an explicit user value still wins.
+    // Run-level extras sit just above the proxy layer so an explicit user
+    // value still wins.
     const extras = this.executionExtras.get(runId);
     const mergedEnv: Record<string, string> = {
       ...buildProxyEnv(this.store.config().proxy, Boolean(runtime.containerized)),
@@ -2106,17 +2099,8 @@ export class RunService {
       ...(task.env ?? {}),
       ...(run.env ?? {}),
     };
-    // A validation judge run (v12 §4.1) gets **only** the secrets set on the
-    // run record (the task's validationSecretIds) — never the development
-    // agent's secrets. The task's `secretIds` stay behind this boundary.
-    const mergedSecretIds =
-      run.purpose === "validation"
-        ? [...new Set(run.secretIds ?? [])]
-        : [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
-    const secrets =
-      run.purpose === "validation"
-        ? this.secretService().resolve(mergedSecretIds, "validation")
-        : this.secretService().resolve(mergedSecretIds);
+    const mergedSecretIds = [...new Set([...(task.secretIds ?? []), ...(run.secretIds ?? [])])];
+    const secrets = this.secretService().resolve(mergedSecretIds);
     // The Run's own snapshot, copied from the Task when it was created.
     const lifecycle = run.lifecycle;
     const continuity: RunContinuity = run.continuity ?? "new";
@@ -2288,9 +2272,8 @@ export class RunService {
       }
 
       run = (await this.store.update<Run>("runs", runId, { status: "running", updatedAt: now() })) ?? run;
-      // Project-based runs carry the fine-grained phase (v11 §21) so the task
-      // view can say whether the agent is developing, testing or publishing.
-      if (run.phase || run.projectId) {
+      // Runs with a producer-recorded phase advance to the agent phase.
+      if (run.phase) {
         await this.store.update<Run>("runs", runId, { phase: "agent.running", updatedAt: now() });
       }
 

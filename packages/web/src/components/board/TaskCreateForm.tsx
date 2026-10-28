@@ -32,7 +32,7 @@ export interface TaskCreateSubmissionOptions {
   keepOpen: boolean;
 }
 
-/** The values the form starts from: the project's last choices when creating,
+/** The values the form starts from: the workspace's last choices when creating,
  *  or the card itself when editing. */
 export interface TaskFormInitial {
   prompt?: string;
@@ -62,7 +62,7 @@ export function initialFromCard(card: KanbanCard): TaskFormInitial {
 
 /**
  * The values a card form starts from. Seeds depend on what the user is doing:
- * a new card starts from the project's last choices, an edited card from the
+ * a new card starts from the workspace's last choices, an edited card from the
  * card itself.
  */
 export function initialFromDefaults(
@@ -129,7 +129,7 @@ export function TaskCreateForm({
   workspaceType: WorkspaceType;
   agents: KanbanAgent[];
   git: KanbanGitInfo | null;
-  /** Seed values: project defaults when creating, the card when editing. */
+  /** Seed values: workspace defaults when creating, the card when editing. */
   initial: TaskFormInitial;
   /**
    * Editing an existing Backlog card: the fields are the same, but nothing is
@@ -169,7 +169,7 @@ export function TaskCreateForm({
 
   const selectedAgent = agents.find((agent) => agent.id === agentId) ?? null;
 
-  // Agents load asynchronously and can change availability between projects.
+  // Agents load asynchronously and can change availability between workspaces.
   useEffect(() => {
     if (agentId && agents.some((agent) => agent.id === agentId)) return;
     const preferred =
@@ -178,12 +178,12 @@ export function TaskCreateForm({
     if (preferred) setAgentId(preferred.id);
   }, [agents, agentId, initial.agentId]);
 
-  // Worktree mode is only meaningful when the project root is a Git repository.
+  // Worktree mode is only meaningful when the workspace directory is a Git repository.
   useEffect(() => {
     if (workspaceType !== "git" && executionMode === "worktree") setExecutionMode("direct");
   }, [workspaceType, executionMode]);
 
-  // Seed the base ref from the branch the project is on, and repair a stale one.
+  // Seed the base ref from the branch the workspace is on, and repair a stale one.
   useEffect(() => {
     if (!git) return;
     const valid = baseRef && (git.branches.includes(baseRef) || baseRef === git.currentBranch);

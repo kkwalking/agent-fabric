@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTime, fmtTokens, ApiError } from "../api";
 import { ErrorBox, Icon, Modal, StatusBadge, useAsync } from "../components";
+import { AcpChat } from "../components/AcpChat";
+import { BoardTerminal } from "../components/BoardTerminal";
 import { Markdown } from "../markdown";
 import {
   modelLabel,
@@ -205,6 +207,16 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   // The card this task came from, when it was started on the board. Recorded
   // on the task itself at creation, so it survives restarts and reruns.
   const boardCardId = (thread?.task?.metadata as { board?: { cardId?: string } } | undefined)?.board?.cardId;
+  // A board task's agent output lives in its KanbanSession transcript, not in
+  // Run events: a board card owns an interactive PTY/ACP process. Read the
+  // card's latest session here so the task view can show the same output.
+  const boardSessionData = useAsync<any>(
+    () => (boardCardId ? get(`/api/kanban/cards/${boardCardId}/session`) : Promise.resolve({ session: null })),
+    [boardCardId]
+  );
+  const boardSession = boardSessionData.data?.session ?? null;
+  const visibleBoardSession =
+    boardSession && thread?.runs.some((turn) => turn.run.id === boardSession.runId) ? boardSession : null;
 
   // Real-time updates ride the existing global SSE stream, filtered to
   // this task's runs (v5 §27).
@@ -382,15 +394,13 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           <a className="switch-link" onClick={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}>
             <Icon name="refresh" size={12} /> {t("thread.switchRuntime")}
           </a>
-          {/* Project Coding Tasks answer "developing, testing, committing or
-              pushing?" on the lifecycle page (v11 §40). It is a detail view
-              of this task, so the entry point lives here rather than being
-              the page the composer lands on. */}
-          {thread.task.projectId && (
-            <a className="switch-link" onClick={() => navigate(`/tasks/${thread.task.id}/lifecycle`)}>
-              <Icon name="box" size={12} /> {t("thread.lifecycle")}
-            </a>
-          )}
+          {/* The lifecycle page is a detail view of this task: workspace,
+              runtime, current phase, agent status and its runs. The entry
+              point lives here rather than being the page the composer lands
+              on. */}
+          <a className="switch-link" onClick={() => navigate(`/tasks/${thread.task.id}/lifecycle`)}>
+            <Icon name="box" size={12} /> {t("thread.lifecycle")}
+          </a>
           {/* A board card's Task keeps living on the board it came from: the
               card owns the column, the terminal and the chat. Without this
               link the board conversation would be a dead end from the task
@@ -405,6 +415,20 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         {handoffError && <ErrorBox message={t("thread.handoffFailed", { error: handoffError })} />}
       </header>
 
+      {visibleBoardSession ? (
+        <div className="thread-board-session">
+          {visibleBoardSession.transport === "acp" ? (
+            <AcpChat key={visibleBoardSession.id} sessionId={visibleBoardSession.id} />
+          ) : (
+            <BoardTerminal
+              key={visibleBoardSession.id}
+              sessionId={visibleBoardSession.id}
+              interactive={visibleBoardSession.interactiveTui}
+            />
+          )}
+        </div>
+      ) : (
+        <>
       {/* ---------- Timeline (v5 §11: each run is one assistant turn) ---------- */}
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="thread-list">
@@ -520,6 +544,8 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
         onSubmitted={bump}
         handoffState={pendingHandoff?.stage ?? (armedHandoff ? "ready" : undefined)}
       />
+        </>
+      )}
 
       {/* ---------- Handoff confirmation (the only trigger of generation) ---------- */}
       {handoffDialog && (

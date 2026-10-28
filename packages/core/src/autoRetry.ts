@@ -1,11 +1,9 @@
 /**
  * Automatic retry of transient failures (the policy layer).
  *
- * The three manual Retry operations (v11 §31) already exist and are correct:
- * `retryRun` continues on the same workspace, `retryValidation` re-runs only
- * the checks, `retryPublish` re-pushes the frozen revision. What was missing
- * was anything that *decides* to use them: a Task that failed because docker
- * hiccuped sat there until a human noticed.
+ * The manual Retry operation (`retryRun`) continues on the same workspace.
+ * What was missing was anything that *decides* to use it: a Task that failed
+ * because docker hiccuped sat there until a human noticed.
  *
  * This module is that decision, as pure functions:
  *
@@ -104,23 +102,12 @@ export function planAutoRetry(input: PlanAutoRetryInput): AutoRetryDecision | un
   const failure = execution?.failure;
   if (!execution || !failure) return undefined;
   // A cancellation is a user decision; a retry would resurrect work they
-  // stopped (v11 §32). This includes a cancel that landed mid-validation and
-  // settled the stage as a runtime failure.
+  // stopped.
   if (cancelled || execution.status === "cancelled" || failure.code === "agent-cancelled") return undefined;
   const config = resolveAutoRetryConfig(input.config);
   if (!config.enabled) return undefined;
   if (!isTransientErrorCode(failure.code)) return undefined;
-  let kind: RetryKind = retryKindForFailure(failure.stage);
-  // A network failure during the push is classified by its code
-  // (`source-network-failed` → stage "source" → "retry the agent"), but the
-  // agent already finished and the revision is frozen: re-pushing the frozen
-  // SHA is both the honest and the cheap recovery. The publish record being
-  // "failed" is what proves the failure came from the publish attempt — a
-  // genuine source failure on a re-run leaves it "pending" (retryRun resets
-  // it before the new lifecycle starts).
-  if (kind === "agent" && execution.publish?.status === "failed" && execution.frozenRevision?.finalCommitSha) {
-    kind = "publish";
-  }
+  const kind: RetryKind = retryKindForFailure(failure.stage);
   if (kind === "none") return undefined;
 
   const spent = execution.autoRetry?.attempts ?? 0;

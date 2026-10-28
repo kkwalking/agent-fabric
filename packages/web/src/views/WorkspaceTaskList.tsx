@@ -6,14 +6,7 @@ import { navigate } from "../router";
 
 /**
  * The sidebar's workspace tree: every Task, grouped by the Workspace it
- * actually runs in, most recent first.
- *
- * Why a Workspace and not a Project: a Task has always carried the
- * `workspaceId` it runs in, whereas a Project is optional (a plain task has
- * none) and is only set for Project-sourced work. Grouping by the record the
- * Task really has keeps every task visible, and a Project-sourced Task still
- * lands under its Project because a Project's managed workspace is named after
- * it.
+ * runs in, most recent first.
  *
  * The list is the primary navigation: opening the app shows it, and clicking a
  * row opens that Task. Each workspace shows its most recent few tasks with an
@@ -60,7 +53,6 @@ interface TaskRow {
   id: string;
   title: string;
   workspaceId?: string;
-  projectId?: string;
   createdAt?: string;
   metadata?: { lastActivityAt?: string };
 }
@@ -68,13 +60,6 @@ interface TaskRow {
 interface WorkspaceRow {
   id: string;
   name: string;
-  /**
-   * The platform names a managed (per-task) workspace `"<project> / <title>"`.
-   * Such a workspace is one task's scratch copy, not a place the user works
-   * from, so its task belongs under the workspace the work actually came from.
-   */
-  ownership?: "managed" | "external";
-  projectId?: string;
   path?: string;
 }
 
@@ -88,69 +73,21 @@ interface Group {
 }
 
 /**
- * The workspace (folder) a Task is listed under.
- *
- * A managed workspace belongs to exactly one task — the platform named it
- * `"<project> / <title>"` and only that task runs in it — so listing it as its
- * own folder would repeat the task's title as a heading and bury the real
- * workspaces. Such a task is filed under:
- *
- * 1. the external workspace of its Project, when the Project has one (that is
- *    where the user works from), else
- * 2. its Project, else
- * 3. the same managed copy only if neither exists — nothing better to say.
+ * The workspace (folder) a Task is listed under: the workspace it runs in.
+ * A task without a workspace joins the catch-all group.
  */
-function folderFor(task: TaskRow, byId: Map<string, WorkspaceRow>): string {
-  const own = task.workspaceId ? byId.get(task.workspaceId) : undefined;
-  // A dangling reference (the workspace record is gone) is not a folder of its
-  // own: showing the bare id as a heading tells the user nothing. Such tasks
-  // join the catch-all until they are given a workspace again.
-  if (task.workspaceId && !own) return "";
-  if (!own || own.ownership !== "managed") return task.workspaceId ?? "";
-
-  // The Project a managed copy belongs to: its own `projectId`, or the one the
-  // task carries (older copies may lack either).
-  const projectId = task.projectId ?? own.projectId;
-
-  // Preferred: the directory the user works in for that Project. An external
-  // workspace references its Project two ways — by `projectId` on newer records,
-  // and only by name on older ones, where the folder is named after the
-  // repository (`bruce-go` for `.../bruce-go.git`). Matching only on
-  // `projectId` is what used to split one project across two headings.
-  const external = [...byId.values()].filter(
-    (w) => w.ownership !== "managed" && w.id !== task.workspaceId
-  );
-  const byProject = projectId ? external.find((w) => w.projectId === projectId) : undefined;
-  if (byProject) return byProject.id;
-
-  const copyName = own.name ?? "";
-  const projectName = copyName.includes(" / ") ? copyName.slice(0, copyName.indexOf(" / ")).trim() : "";
-  const byName = projectName
-    ? external.find((w) => (w.name ?? "").trim() === projectName)
-    : undefined;
-  if (byName) return byName.id;
-
-  if (projectId) return `project:${projectId}`;
-  return own.id;
+function folderFor(task: TaskRow): string {
+  return task.workspaceId ?? "";
 }
 
 /** The heading for a folder key produced by `folderFor`. */
-function folderLabel(
-  key: string,
-  byId: Map<string, WorkspaceRow>,
-  projects: Array<{ id: string; name: string }>,
-  unfiled: string
-): string {
+function folderLabel(key: string, byId: Map<string, WorkspaceRow>, unfiled: string): string {
   if (!key) return unfiled;
-  if (key.startsWith("project:")) {
-    const id = key.slice("project:".length);
-    return projects.find((p) => p.id === id)?.name ?? id;
-  }
   const workspace = byId.get(key);
   if (!workspace) return key;
-  // Older external workspaces were created with the directory path as their
-  // name. A heading is a label, not a location: show the last path segment, and
-  // keep the full path in the tooltip.
+  // A workspace may have been created with the directory path as its name. A
+  // heading is a label, not a location: show the last path segment, and keep
+  // the full path in the tooltip.
   const name = workspace.name ?? "";
   if (name.includes("/") && workspace.path === name) {
     const segment = name.replace(/\/+$/, "").split("/").pop();
@@ -159,18 +96,8 @@ function folderLabel(
   return name || key;
 }
 
-/** A folder that comes from a Project (a repository or directory source). */
-function isProjectFolder(key: string, byId: Map<string, WorkspaceRow>): boolean {
-  if (key.startsWith("project:")) return true;
-  return Boolean(byId.get(key)?.projectId);
-}
-
 /** The hover text for a folder heading: the full name or path behind it. */
-function tooltipFor(key: string, byId: Map<string, WorkspaceRow>, projects: Array<{ id: string; name: string }>): string {
-  // A Project folder has no directory of its own: its hover text is the project.
-  if (key.startsWith("project:")) {
-    return `Project · ${folderLabel(key, byId, projects, "")}`;
-  }
+function tooltipFor(key: string, byId: Map<string, WorkspaceRow>): string {
   const workspace = byId.get(key);
   const full = workspace?.path ?? workspace?.name ?? key;
   return workspace?.name && workspace.path && workspace.name !== workspace.path
@@ -196,18 +123,14 @@ function taskStamp(task: TaskRow): string | undefined {
 export function WorkspaceTaskList({
   activeTaskId,
   pinnedOnly = false,
-  projectsOnly = false,
 }: {
   activeTaskId?: string;
   /** Show only sessions this browser has pinned. */
   pinnedOnly?: boolean;
-  /** Show only workspaces that are a Project (a git/directory source). */
-  projectsOnly?: boolean;
 } = {}) {
   const t = useT();
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([]);
-  const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   // How many sessions each workspace is currently showing (absent = collapsed).
   const [shown, setShown] = useState<Record<string, number>>({});
@@ -254,19 +177,16 @@ export function WorkspaceTaskList({
    * Reloads everything the tree is built from, bypassing the GET cache.
    *
    * Tasks alone is not enough: renaming or deleting a workspace changes the
-   * labels and the grouping, which come from `/api/workspaces` (and a Project's
-   * name from `/api/projects`). Refreshing only the tasks left the old label on
-   * screen after a rename.
+   * labels and the grouping, which come from `/api/workspaces`. Refreshing only
+   * the tasks left the old label on screen after a rename.
    */
   const reload = async () => {
-    const [taskRows, workspaceRows, projectRows] = await Promise.all([
+    const [taskRows, workspaceRows] = await Promise.all([
       get<TaskRow[]>("/api/tasks", undefined, true).catch(() => null),
       get<WorkspaceRow[]>("/api/workspaces", undefined, true).catch(() => null),
-      get<Array<{ id: string; name: string }>>("/api/projects", undefined, true).catch(() => null),
     ]);
     if (taskRows) setTasks(taskRows);
     if (workspaceRows) setWorkspaces(workspaceRows);
-    if (projectRows) setProjects(projectRows);
   };
 
   const togglePinned = (id: string) => {
@@ -358,13 +278,11 @@ export function WorkspaceTaskList({
     Promise.all([
       get<TaskRow[]>("/api/tasks"),
       get<WorkspaceRow[]>("/api/workspaces"),
-      get<Array<{ id: string; name: string }>>("/api/projects"),
     ])
-      .then(([taskRows, workspaceRows, projectRows]) => {
+      .then(([taskRows, workspaceRows]) => {
         if (cancelled) return;
         setTasks(taskRows ?? []);
         setWorkspaces(workspaceRows ?? []);
-        setProjects(projectRows ?? []);
         setError(null);
       })
       .catch((e: unknown) => {
@@ -382,7 +300,7 @@ export function WorkspaceTaskList({
     const buckets = new Map<string, TaskRow[]>();
     const shown = tasks.filter((task) => (pinnedOnly ? pinned.has(task.id) : true));
     for (const task of shown) {
-      const key = folderFor(task, byId);
+      const key = folderFor(task);
       const bucket = buckets.get(key);
       if (bucket) bucket.push(task);
       else buckets.set(key, [task]);
@@ -398,7 +316,7 @@ export function WorkspaceTaskList({
       });
       built.push({
         key,
-        label: folderLabel(key, byId, projects, t("sidebar.noWorkspace")),
+        label: folderLabel(key, byId, t("sidebar.noWorkspace")),
         tasks: bucket,
         latest: bucket.length > 0 ? taskTime(bucket[0]) : 0,
       });
@@ -410,11 +328,8 @@ export function WorkspaceTaskList({
       if (b.key === "") return -1;
       return b.latest - a.latest;
     });
-    // "Projects only" keeps the folders that are a Project source: either a
-    // workspace a Project references, or a Project that has no directory yet.
-    const filtered = projectsOnly ? built.filter((group) => isProjectFolder(group.key, byId)) : built;
-    return filtered;
-  }, [tasks, workspacesById, projects, pinned, pinnedOnly, projectsOnly, t]);
+    return built;
+  }, [tasks, workspacesById, pinned, pinnedOnly, t]);
 
   if (error) {
     return (
@@ -448,9 +363,8 @@ export function WorkspaceTaskList({
         const hidden = group.tasks.length - visible.length;
         const groupMenuOpen = groupMenuKey === group.key;
         // Only a real workspace can be renamed or deleted: the catch-all bucket
-        // is a view over unassigned tasks, and a Project-only folder has no
-        // workspace record behind it.
-        const editable = group.key !== "" && !group.key.startsWith("project:");
+        // is a view over unassigned tasks.
+        const editable = group.key !== "";
         return (
           <section className="ws-group" key={group.key || "(none)"}>
             <div

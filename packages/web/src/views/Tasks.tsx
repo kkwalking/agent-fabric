@@ -183,18 +183,6 @@ export function TasksView() {
                   </span>
                   <span className="meta-chip"><span className="muted">{t("tasks.label.workspace")}</span> {wsName(last?.workspaceId ?? task.workspaceId) ?? "—"}</span>
                   <span className="meta-chip">{t("tasks.runCount", { n: taskRuns.length })}</span>
-                  {/* Project-based tasks expose their lifecycle (v11 §40):
-                      which branch they own and where they stand. */}
-                  {task.projectId && (
-                    <>
-                      <span className="meta-chip"><span className="muted">{t("tasks.label.branch")}</span> {task.workingBranch ?? "—"}</span>
-                      <span className="meta-chip">
-                        <span className="muted">{t("tasks.label.agent")}</span> {statusLabel(t, task.execution?.agent?.status)} ·{" "}
-                        <span className="muted">{t("tasks.label.validation")}</span> {statusLabel(t, task.execution?.validation?.status)} ·{" "}
-                        <span className="muted">{t("tasks.label.publish")}</span> {statusLabel(t, task.execution?.publish?.status)}
-                      </span>
-                    </>
-                  )}
                 </div>
               </div>
               {/* Status and recency answer the same question from the same
@@ -214,9 +202,7 @@ export function TasksView() {
                 </button>
                 {menuTaskId === task.id && (
                   <div className="menu">
-                    {task.projectId && (
-                      <button className="menu-item" onClick={() => navigate(`/tasks/${task.id}/lifecycle`)}>{t("tasks.lifecycle")}</button>
-                    )}
+                    <button className="menu-item" onClick={() => navigate(`/tasks/${task.id}/lifecycle`)}>{t("tasks.lifecycle")}</button>
                     <button className="menu-item danger" onClick={() => requestDelete(task)}>{t("tasks.delete")}</button>
                   </div>
                 )}

@@ -20,7 +20,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { DomainError } from "@agentfabric/core";
-import type { KanbanAgentKind, KanbanCard, KanbanSessionTransport, Project } from "@agentfabric/core";
+import type { KanbanAgentKind, KanbanCard, KanbanSessionTransport, Workspace } from "@agentfabric/core";
 import { detectHarnessCli, harnessCliSpec } from "../harnessCli.js";
 
 const execFileAsync = promisify(execFile);
@@ -136,8 +136,8 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     installHint: "Install Pi: https://github.com/badlogic/pi-mono",
     permissionModes: [
       PERMISSION_DEFAULT,
-      { id: "approve", label: "Trust project files", description: "Trust project-local files for this run.", args: ["--approve"], risky: true },
-      { id: "no-approve", label: "Ignore project files", description: "Ignore project-local configuration for this run.", args: ["--no-approve"], risky: false },
+      { id: "approve", label: "Trust workspace files", description: "Trust workspace-local files for this run.", args: ["--approve"], risky: true },
+      { id: "no-approve", label: "Ignore workspace files", description: "Ignore workspace-local configuration for this run.", args: ["--no-approve"], risky: false },
     ],
   },
   {
@@ -295,7 +295,7 @@ export interface KanbanLaunch {
  */
 export function buildKanbanLaunch(
   card: KanbanCard,
-  project: Project,
+  workspace: Workspace,
   options: { resumeSessionId?: string; executable?: string } = {}
 ): KanbanLaunch {
   const entry = getKanbanAgent(card.agentId);
@@ -320,7 +320,7 @@ export function buildKanbanLaunch(
       env: {
         ...(selected.env ?? {}),
         AGENTFABRIC_KANBAN_CARD_ID: card.id,
-        AGENTFABRIC_KANBAN_PROJECT_ID: project.id,
+        AGENTFABRIC_KANBAN_WORKSPACE_ID: workspace.id,
       },
       interactiveTui: entry.interactiveTui,
       transport: entry.transport,
@@ -345,7 +345,7 @@ export function buildKanbanLaunch(
   const env: Record<string, string> = {
     ...(selected.env ?? {}),
     AGENTFABRIC_KANBAN_CARD_ID: card.id,
-    AGENTFABRIC_KANBAN_PROJECT_ID: project.id,
+    AGENTFABRIC_KANBAN_WORKSPACE_ID: workspace.id,
   };
 
   return { file, args, env, interactiveTui: entry.interactiveTui, transport: entry.transport };

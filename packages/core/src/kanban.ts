@@ -1,9 +1,9 @@
 /**
- * Kanban domain service (v13, unified with Projects and Tasks).
+ * Kanban domain service (v13, unified with Workspaces and Tasks).
  *
- * The board has no project collection of its own: a board project **is** a
- * `Project` (added through `addProject()`), whose root directory comes from the
- * Project's own `source`. A card is a prompt + an agent + a working mode, and
+ * The board has no workspace collection of its own: a board workspace **is** a
+ * `Workspace` (added through `addWorkspace()`), whose root directory is the
+ * Workspace's own `path`. A card is a prompt + an agent + a working mode, and
  * the work it produces is a real `Task`: the card's first start creates the
  * Task, every new start adds one `Run` of it, and the live agent process is a
  * `KanbanSession` handle whose id equals that Run's id.
@@ -28,8 +28,7 @@ import type {
   KanbanSessionStatus,
   KanbanSessionTransport,
   KanbanWorkspaceType,
-  Project,
-  ProjectBoardSettings,
+  BoardSettings,
   Run,
   RunStatus,
   Runtime,
@@ -41,7 +40,6 @@ import type {
   Workspace,
 } from "./types.js";
 import type {
-  ProjectService,
   RuntimeService,
   RuntimeSessionService,
   TaskService,
@@ -102,12 +100,12 @@ function assertExecutionMode(value: unknown): KanbanExecutionMode {
  * single worktree root; refusing here is louder than creating something the
  * user did not ask for.
  */
-function assertExecutionModeForProject(value: unknown, workspaceType: KanbanWorkspaceType): KanbanExecutionMode {
+function assertExecutionModeForWorkspace(value: unknown, workspaceType: KanbanWorkspaceType): KanbanExecutionMode {
   const mode = assertExecutionMode(value);
   if (mode === "worktree" && workspaceType !== "git") {
     throw new DomainError(
       "kanban-worktree-unavailable",
-      `Worktree mode requires a Git repository rooted at the board project folder (workspaceType: ${workspaceType})`
+      `Worktree mode requires a Git repository rooted at the board workspace folder (workspaceType: ${workspaceType})`
     );
   }
   return mode;
@@ -145,10 +143,10 @@ function countNestedGitRepos(rootPath: string, maxEntries = 512, maxDepth = 2): 
 }
 
 /**
- * Classifies a project root for display and optional Git features.
+ * Classifies a workspace root for display and optional Git features.
  *
  * Discovery is total: a failure degrades to `none` with a warning. It never
- * blocks project creation or a task (v13 §2.1, carrying the fork's fix).
+ * blocks workspace creation or a task (v13 §2.1, carrying the fork's fix).
  */
 export function detectKanbanWorkspaceType(rootPath: string): {
   workspaceType: KanbanWorkspaceType;
@@ -171,34 +169,23 @@ export function detectKanbanWorkspaceType(rootPath: string): {
 }
 
 /**
- * The directory a board project works in, or a loud failure.
+ * The directory a board workspace works in, or a loud failure.
  *
- * A `directory` source carries its own path. A `git` source has no directory of
- * its own — the board folder is the clone the user made — so it is resolved
- * from the external Workspace (`projectId`) that the cards record. There is no
- * guessed path and no empty string: an unresolvable board root is an error.
+ * A workspace *is* a directory: `path` is required and absolute, so there is no
+ * second source to fall back to and no guessed path. An unresolvable root is an
+ * error, never an empty string.
  */
-export function boardProjectRoot(project: Project, workspace?: Workspace): string {
-  if (project.source.type === "directory") {
-    const path = project.source.path;
-    if (!path) {
-      throw new DomainError(
-        "kanban-project-path-invalid",
-        `Board project ${project.id} has a directory source without a path`
-      );
-    }
-    return resolve(path);
-  }
-  if (!workspace?.path) {
+export function boardRoot(workspace: Workspace): string {
+  if (!workspace.path) {
     throw new DomainError(
-      "kanban-project-path-invalid",
-      `Board project ${project.id} works on a git source, so its folder can only come from its external workspace (workspace: ${workspace?.id ?? "none"})`
+      "kanban-workspace-path-invalid",
+      `Board workspace ${workspace.id} has no directory path`
     );
   }
   return resolve(workspace.path);
 }
 
-export interface NewKanbanProjectInput {
+export interface NewKanbanWorkspaceInput {
   name?: string;
   rootPath: string;
 }
@@ -261,16 +248,15 @@ const USER_MOVES: Record<KanbanColumn, readonly KanbanColumn[]> = {
 };
 
 /**
- * The services the board writes through. `projects` and `runtimes` cover the
+ * The services the board writes through. `workspaces` and `runtimes` cover the
  * board itself; the other three are needed the moment a card is started, which
  * is what makes a card a Task.
  */
 export interface KanbanServiceDeps {
-  projects: ProjectService;
+  workspaces: WorkspaceService;
   runtimes: RuntimeService;
   tasks?: TaskService;
   runs?: RunService;
-  workspaces?: WorkspaceService;
   /** Native session records, so a board Run can be resumed like any other. */
   runtimeSessions?: RuntimeSessionService;
 }
@@ -386,9 +372,8 @@ function sessionOutcome(status: KanbanSessionStatus, at: string): SessionOutcome
 
 /**
  * The complete `Task.execution` a board session change writes: every field is
- * produced here, every time. Only `stages` and the untouched
- * `validation`/`publish` parts carry forward from the previous value — the
- * board never fabricates a validation verdict or a publish result.
+ * produced here, every time. Only `stages` carries forward from the previous
+ * value.
  */
 function projectExecution(input: {
   previous?: TaskExecution;
@@ -417,8 +402,6 @@ function projectExecution(input: {
         }
       : { failure: undefined }),
     agent: { status: outcome.agent, runId, attempts: 1, ...(error ? { error } : {}) },
-    validation: previous?.validation ?? { status: "pending", attempts: 0 },
-    publish: previous?.publish ?? { status: "pending", attempts: 0 },
     stages,
     updatedAt: at,
   };
@@ -438,22 +421,28 @@ export class KanbanService {
     private deps: KanbanServiceDeps
   ) {}
 
-  /* ---------------- projects: they are Projects ---------------- */
+  /* ---------------- workspaces: they are Workspaces ---------------- */
 
   /**
-   * Adds a folder to the board: validates the directory, discovers its shape
-   * and creates a `Project` with a `directory` source plus board settings.
+   * Adds a folder to the board: validates the directory, discovers its shape,
+   * creates the `Workspace` for it and stamps the board settings on that record.
    *
-   * Git initialisation (the "this folder is not a repository yet" question) is
-   * a board-specific conversation owned by the server; what is stored here is
-   * only what the model owns.
+   * A workspace is just a directory on this machine, so the board owns no
+   * collection: the settings live in `Workspace.board` and everything else
+   * (listing, renaming, deleting) is the plain `/api/workspaces` API.
+   *
+   * One directory has one record. A workspace already created for that folder
+   * (the task form's "new workspace") is adopted by writing the board settings
+   * onto it, never duplicated: two records over one tree would show up as two
+   * sidebar groups for the same work. A record that is already a board, or a
+   * managed per-task copy, is refused instead.
    */
-  async addProject(input: NewKanbanProjectInput): Promise<Project> {
+  async addWorkspace(input: NewKanbanWorkspaceInput): Promise<Workspace> {
     if (typeof input.rootPath !== "string" || input.rootPath.trim() === "") {
-      throw new DomainError("kanban-project-path-invalid", "A board project needs an absolute directory path");
+      throw new DomainError("kanban-workspace-path-invalid", "A board workspace needs an absolute directory path");
     }
     if (!isAbsolute(input.rootPath.trim())) {
-      throw new DomainError("kanban-project-path-invalid", `Board project path must be absolute: ${input.rootPath}`);
+      throw new DomainError("kanban-workspace-path-invalid", `Board workspace path must be absolute: ${input.rootPath}`);
     }
     const rootPath = resolve(input.rootPath.trim());
     let stat;
@@ -462,55 +451,80 @@ export class KanbanService {
       accessSync(rootPath, constants.R_OK);
     } catch (err) {
       throw new DomainError(
-        "kanban-project-path-invalid",
-        `Board project path is not a readable directory: ${rootPath} (${err instanceof Error ? err.message : String(err)})`
+        "kanban-workspace-path-invalid",
+        `Board workspace path is not a readable directory: ${rootPath} (${err instanceof Error ? err.message : String(err)})`
       );
     }
     if (!stat.isDirectory()) {
-      throw new DomainError("kanban-project-path-invalid", `Board project path is not a directory: ${rootPath}`);
+      throw new DomainError("kanban-workspace-path-invalid", `Board workspace path is not a directory: ${rootPath}`);
     }
     // One board per folder: two boards over the same tree would show the same
     // working directory twice and make "which board owns this card" ambiguous.
-    const existing = this.deps.projects
+    // A plain workspace at that folder is not a second record: it is adopted
+    // below, because a workspace *is* the board once it carries board settings.
+    const existing = this.deps.workspaces
       .list()
-      .find((project) => project.source.path !== undefined && resolve(project.source.path) === rootPath);
-    if (existing) {
+      .find((workspace) => workspace.path !== undefined && resolve(workspace.path) === rootPath);
+    if (existing?.board) {
       throw new DomainError(
-        "kanban-project-duplicate",
-        `This folder is already a board project: ${existing.name} (${rootPath})`
+        "kanban-workspace-duplicate",
+        `This folder is already a board workspace: ${existing.name} (${rootPath})`
+      );
+    }
+    if (existing && (existing.ownership === "managed" || existing.taskId !== undefined)) {
+      throw new DomainError(
+        "kanban-workspace-duplicate",
+        `Workspace ${existing.id} at ${rootPath} belongs to a task and cannot become a board workspace`
       );
     }
     const discovery = detectKanbanWorkspaceType(rootPath);
-    return this.deps.projects.create({
-      name: (typeof input.name === "string" && input.name.trim()) || basename(rootPath) || rootPath,
-      // `workTree: true` keeps the board's in-place contract: the card works in
-      // the folder the user picked. Without it the platform makes a managed copy
-      // per task, and the card's Task never touches that folder.
-      source: { type: "directory", path: rootPath, workTree: true },
-      board: {
-        workspaceType: discovery.workspaceType,
-        ...(discovery.warning ? { discoveryWarning: discovery.warning } : {}),
-      },
-    });
+    const board: BoardSettings = {
+      workspaceType: discovery.workspaceType,
+      ...(discovery.warning ? { discoveryWarning: discovery.warning } : {}),
+    };
+    const workspace =
+      existing ??
+      (await this.deps.workspaces.create({
+        name: (typeof input.name === "string" && input.name.trim()) || basename(rootPath) || rootPath,
+        type: "local",
+        path: rootPath,
+      }));
+    // `WorkspaceService.create` only takes `NewWorkspaceInput` (name/type/path),
+    // so the board settings are written onto the record afterwards.
+    return (await this.store.update<Workspace>("workspaces", workspace.id, { board }))!;
   }
 
-  getProject(id: ID): Project {
-    const project = this.deps.projects.get(id);
-    if (!project) throw new DomainError("kanban-project-not-found", `Board project not found: ${id}`);
-    return project;
+  /**
+   * Every workspace that carries board settings — the board's own list.
+   *
+   * There is no separate board collection: a workspace *is* the board when it
+   * has `board` settings, so adding one from the board and adding one from the
+   * workspace list write the same record.
+   */
+  listWorkspaces(): Workspace[] {
+    return this.deps.workspaces
+      .list()
+      .filter((workspace) => Boolean(workspace.board))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  /** The board folder of a project (see `boardProjectRoot`). */
-  rootOf(project: Project): string {
-    return boardProjectRoot(project, this.workspaceFor(project));
+  getWorkspace(id: ID): Workspace {
+    const workspace = this.deps.workspaces.get(id);
+    if (!workspace) throw new DomainError("kanban-workspace-not-found", `Board workspace not found: ${id}`);
+    return workspace;
+  }
+
+  /** The board folder of a workspace (see `boardRoot`). */
+  rootOf(workspace: Workspace): string {
+    return boardRoot(workspace);
   }
 
   /* ---------------- cards ---------------- */
 
-  listCards(projectId: ID): KanbanCard[] {
+  listCards(workspaceId: ID): KanbanCard[] {
     return this.store
       .list<KanbanCard>("kanbanCards")
-      .filter((card) => card.projectId === projectId)
+      .filter((card) => card.workspaceId === workspaceId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
@@ -525,23 +539,23 @@ export class KanbanService {
   }
 
   /**
-   * Creates a card and fixes its working directory on the record: the
-   * Project's external Workspace, created on first use.
+   * Creates a card and fixes its working directory on the record: the board
+   * workspace's own folder.
    */
-  async createCard(projectId: ID, input: NewKanbanCardInput): Promise<KanbanCard> {
-    const project = this.getProject(projectId);
-    const board = this.boardSettings(project);
-    const workspace = await this.ensureWorkspace(project);
+  async createCard(workspaceId: ID, input: NewKanbanCardInput): Promise<KanbanCard> {
+    const workspace = this.getWorkspace(workspaceId);
+    // Fails loudly for a plain (non-board) Workspace.
+    const board = this.boardSettings(workspace);
     const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
     if (!prompt) throw new DomainError("kanban-session-not-startable", "A card needs a prompt");
     const agentId = assertAgentKind(input.agentId ?? board.defaultAgentId ?? "claude");
-    const executionMode = assertExecutionModeForProject(
+    const executionMode = assertExecutionModeForWorkspace(
       input.executionMode ?? board.defaultExecutionMode ?? "direct",
       board.workspaceType
     );
     const card: KanbanCard = {
       id: newId("kbcard"),
-      projectId,
+      workspaceId,
       title:
         (typeof input.title === "string" && input.title.trim()) || deriveKanbanCardTitle(prompt) || prompt.slice(0, 80),
       prompt,
@@ -552,7 +566,6 @@ export class KanbanService {
       ...(input.permissionModeId ? { permissionModeId: input.permissionModeId } : {}),
       executionMode,
       ...(input.baseRef ? { baseRef: input.baseRef } : {}),
-      workspaceId: workspace.id,
       createdAt: now(),
       updatedAt: now(),
     };
@@ -561,7 +574,7 @@ export class KanbanService {
 
   async updateCard(id: ID, patch: KanbanCardPatch): Promise<KanbanCard> {
     const card = this.getCard(id);
-    const board = this.boardSettings(this.getProject(card.projectId));
+    const board = this.boardSettings(this.getWorkspace(card.workspaceId));
     const next: Partial<KanbanCard> = { updatedAt: now() };
     if (patch.title !== undefined) next.title = String(patch.title);
     if (patch.prompt !== undefined) {
@@ -573,7 +586,7 @@ export class KanbanService {
     if (patch.reasoningEffort !== undefined) next.reasoningEffort = patch.reasoningEffort || undefined;
     if (patch.permissionModeId !== undefined) next.permissionModeId = patch.permissionModeId || undefined;
     if (patch.executionMode !== undefined) {
-      next.executionMode = assertExecutionModeForProject(patch.executionMode, board.workspaceType);
+      next.executionMode = assertExecutionModeForWorkspace(patch.executionMode, board.workspaceType);
     }
     if (patch.baseRef !== undefined) next.baseRef = String(patch.baseRef).trim() || undefined;
     return (await this.store.update<KanbanCard>("kanbanCards", id, next))!;
@@ -660,11 +673,10 @@ export class KanbanService {
   async startAttempt(cardId: ID, input: KanbanStartInput): Promise<KanbanStartResult> {
     const card = this.getCard(cardId);
     const { tasks, runs } = this.writeServices();
-    const project = this.getProject(card.projectId);
-    // Fails loudly for a plain (non-board) Project before anything is written.
-    this.boardSettings(project);
-    const workspace = await this.ensureWorkspace(project);
-    const cwd = resolve(input.cwd || boardProjectRoot(project, workspace));
+    const workspace = this.getWorkspace(card.workspaceId);
+    // Fails loudly for a plain (non-board) Workspace before anything is written.
+    this.boardSettings(workspace);
+    const cwd = resolve(input.cwd || boardRoot(workspace));
 
     if (input.resume) {
       const previous = this.latestSessionForCard(card.id);
@@ -718,8 +730,7 @@ export class KanbanService {
       task = await tasks.create({
         title: card.title,
         prompt: card.prompt,
-        projectId: card.projectId,
-        workspaceId: workspace.id,
+        workspaceId: card.workspaceId,
         runtimeId: runtime.id,
         metadata: { board: { cardId: card.id }, lastActivityAt: at },
         execution: projectExecution({ outcome: sessionOutcome("starting", at), runId: "", at }),
@@ -728,8 +739,7 @@ export class KanbanService {
 
     const run = await runs.recordRunForTask(task, {
       runtimeId: task.runtimeId ?? runtime.id,
-      workspaceId: task.workspaceId ?? workspace.id,
-      projectId: card.projectId,
+      workspaceId: card.workspaceId,
       phase: "agent.running",
       status: "running",
       purpose: "development",
@@ -764,7 +774,6 @@ export class KanbanService {
       column: "in_progress",
       taskId: task.id,
       runId: run.id,
-      workspaceId: workspace.id,
       updatedAt: at,
     }))!;
     // The task's execution names its latest run, so it is written after the run
@@ -890,25 +899,25 @@ export class KanbanService {
 
   /* ---------------- internals ---------------- */
 
-  private writeServices(): { tasks: TaskService; runs: RunService; workspaces: WorkspaceService } {
-    const { tasks, runs, workspaces } = this.deps;
-    if (!tasks || !runs || !workspaces) {
+  private writeServices(): { tasks: TaskService; runs: RunService } {
+    const { tasks, runs } = this.deps;
+    if (!tasks || !runs) {
       throw new DomainError(
         "config-invalid",
-        "The kanban service was created without its task, run and workspace services — a board card cannot start without them"
+        "The kanban service was created without its task and run services — a board card cannot start without them"
       );
     }
-    return { tasks, runs, workspaces };
+    return { tasks, runs };
   }
 
-  private boardSettings(project: Project): ProjectBoardSettings {
-    if (!project.board) {
+  private boardSettings(workspace: Workspace): BoardSettings {
+    if (!workspace.board) {
       throw new DomainError(
-        "kanban-project-path-invalid",
-        `Project ${project.id} (${project.name}) is not a board project — it has no board settings`
+        "kanban-workspace-path-invalid",
+        `Workspace ${workspace.id} (${workspace.name}) is not a board workspace — it has no board settings`
       );
     }
-    return project.board;
+    return workspace.board;
   }
 
   private runtimeForAgent(agentId: KanbanAgentKind): Runtime {
@@ -921,55 +930,6 @@ export class KanbanService {
       );
     }
     return runtime;
-  }
-
-  /** The Project's external Workspace (the board folder), if it exists. */
-  private workspaceFor(project: Project): Workspace | undefined {
-    return this.deps.workspaces
-      ?.list()
-      .find((candidate) => candidate.projectId === project.id && candidate.ownership === "external");
-  }
-
-  /**
-   * The Project's external Workspace: the board folder, user-owned.
-   *
-   * Found by `projectId` among external workspaces, so a `git`-sourced board
-   * project — whose folder exists only as a workspace — resolves the same
-   * record. Created when missing, refreshed when the Project's directory moved.
-   *
-   * The path is the folder **itself**, never a managed copy: the board runs a
-   * local agent CLI in the directory the user picked, so this Workspace is what
-   * makes a card's Task show up under that folder in the workspace tree. A
-   * Project that already has a *managed* Workspace (a Project-task copy) is
-   * therefore refused instead of being run in place behind the user's back.
-   */
-  async ensureWorkspace(project: Project): Promise<Workspace> {
-    const { workspaces } = this.writeServices();
-    const managed = this.deps.workspaces
-      ?.list()
-      .find((candidate) => candidate.projectId === project.id && candidate.ownership === "managed");
-    if (managed) {
-      throw new DomainError(
-        "kanban-project-path-invalid",
-        `Board project ${project.id} already has a managed workspace (${managed.id}) — a board card runs in the project folder itself, not in a per-task copy`
-      );
-    }
-    const existing = this.workspaceFor(project);
-    const desiredPath = project.source.type === "directory" ? project.source.path : undefined;
-    if (existing) {
-      if (desiredPath && existing.path !== resolve(desiredPath)) {
-        return (await this.store.update<Workspace>("workspaces", existing.id, { path: resolve(desiredPath) }))!;
-      }
-      return existing;
-    }
-    if (!desiredPath) {
-      throw new DomainError(
-        "kanban-project-path-invalid",
-        `Board project ${project.id} works on a git source and has no external workspace yet — its board folder cannot be resolved`
-      );
-    }
-    const workspace = await workspaces.create({ name: project.name, type: "local", path: desiredPath });
-    return (await this.store.update<Workspace>("workspaces", workspace.id, { projectId: project.id }))!;
   }
 
   /**

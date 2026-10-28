@@ -122,28 +122,20 @@ const dataDir = mkdtempSync(join(tmpdir(), "af-verify-ui-"));
 /** Two workspaces, three tasks, one task with no workspace (the catch-all). */
 function writeFixture(dir) {
   const now = new Date().toISOString();
-  const workspace = (id, name, path) => ({
+  const workspace = (id, name, path, extra = {}) => ({
     id, name, type: "local", path, mountPath: "/workspace",
     persistent: true, source: "create", status: "ready", ownership: "external",
-    createdAt: now, updatedAt: now,
+    createdAt: now, updatedAt: now, ...extra,
   });
   const task = (id, title, workspaceId) => ({
     id, title, prompt: title, workspaceId,
     env: {}, secretIds: [], tools: [], createdAt: now, updatedAt: now,
     metadata: { lastActivityAt: now },
   });
-  // The board shares the Project collection (`source` + `board`), so a board
-  // project is just a Project whose source is the folder the user picked.
-  const boardProject = (id, name, rootPath) => ({
-    id, name,
-    source: { type: "directory", path: rootPath, defaultBranch: "main" },
-    board: { workspaceType: "git", defaultAgentId: "dsh", defaultExecutionMode: "direct" },
-    createdAt: now, updatedAt: now,
-  });
-  // The board's folder is also an external Workspace: that is what the sidebar
-  // task tree groups a board card's Task under.
+  // A board workspace is a Workspace carrying `board` settings — the board has
+  // no collection of its own.
   const kanbanCard = (id, title, column) => ({
-    id, projectId: "proj_verify_board", title, prompt: title, column,
+    id, workspaceId: "ws_verify_board", title, prompt: title, column,
     agentId: "dsh", executionMode: "direct", createdAt: now, updatedAt: now,
   });
   const db = {
@@ -164,10 +156,6 @@ function writeFixture(dir) {
       },
     ],
     projects: [
-      // The board's project first: opening /kanban selects `projects[0]` unless
-      // this browser already remembers another one. It is the same record the
-      // Projects page lists — the board has no collection of its own.
-      boardProject("proj_verify_board", "verify-board", "/tmp/af-verify-board"),
       {
         id: "proj_verify",
         name: "verify-project",
@@ -185,6 +173,11 @@ function writeFixture(dir) {
       kanbanCard("card_verify_open", "verify open card", "review"),
     ],
     workspaces: [
+      // The board's workspace first: opening /kanban selects the first one
+      // unless this browser already remembers another.
+      workspace("ws_verify_board", "af-board", "/tmp/af-verify-board", {
+        board: { workspaceType: "git", defaultAgentId: "dsh", defaultExecutionMode: "direct" },
+      }),
       workspace("ws_verify_alpha", "verify-alpha", "/tmp/af-verify-alpha"),
       workspace("ws_verify_beta", "verify-beta", "/tmp/af-verify-beta"),
       // A long workspace, so paging has something to page through.
@@ -440,11 +433,10 @@ try {
        const token = await (await fetch("/api/health")).ok;
        const tasks = await (await fetch("/api/tasks")).json();
        const workspaces = await (await fetch("/api/workspaces")).json();
-       const projects = await (await fetch("/api/projects")).json();
-       return { health: token, tasks: tasks.length, workspaces: workspaces.length, projects: projects.length };
+       return { health: token, tasks: tasks.length, workspaces: workspaces.length };
      })()`
   );
-  check(api.health === true, `/api/health answers ok (${api.tasks} tasks, ${api.workspaces} workspaces, ${api.projects} projects)`);
+  check(api.health === true, `/api/health answers ok (${api.tasks} tasks, ${api.workspaces} workspaces)`);
 
   // FIXTURE-DATA ONLY (5-open)
   if (!emptyMode) {
@@ -479,11 +471,16 @@ try {
   if (!emptyMode) {
   }
 
-  // 5b. The rail's new-session button and the row menu.
+  // 5b. The rail's new-session button, the Kanban row, and the row menu.
   const railOps = await evaluate(
     cdp,
     `(async () => {
        const newBtn = document.querySelector(".rail-new");
+       const kanbanBtn = document.querySelector(".rail-kanban");
+       const railHead = document.querySelector(".rail-head");
+       const newRect = newBtn?.getBoundingClientRect();
+       const kanbanRect = kanbanBtn?.getBoundingClientRect();
+       const headRect = railHead?.getBoundingClientRect();
        const headIcons = document.querySelectorAll(".rail-head-actions .icon-btn").length;
        document.querySelector(".ws-task-row .ws-task-more")?.click();
        await new Promise((r) => setTimeout(r, 300));
@@ -496,6 +493,8 @@ try {
        await new Promise((r) => setTimeout(r, 200));
        return {
          newLabel: newBtn?.textContent?.trim() ?? null,
+         kanbanLabel: kanbanBtn?.textContent?.trim() ?? null,
+         kanbanBetween: Boolean(newRect && kanbanRect && headRect && newRect.bottom <= kanbanRect.top && kanbanRect.bottom <= headRect.top),
          headIcons,
          items,
          menuOnScreen,
@@ -504,6 +503,8 @@ try {
      })()`
   );
   check(/新会话|New session/.test(railOps.newLabel ?? ""), `the rail has a new-session button ("${railOps.newLabel}")`);
+  check(/看板|Kanban/.test(railOps.kanbanLabel ?? ""), `the rail has a Kanban entry ("${railOps.kanbanLabel}")`);
+  check(railOps.kanbanBetween, "the Kanban entry sits between New session and the Workspaces heading");
   check(railOps.headIcons === 3, `the workspace heading carries ${railOps.headIcons} icons (search / filter / new)`);
   check(railOps.items.length === 4, `session menu offers ${railOps.items.length} actions: ${railOps.items.join(", ")}`);
   check(railOps.menuOnScreen && railOps.closedByEscape, "the session menu stays on screen and closes on Escape");
@@ -761,112 +762,86 @@ try {
     );
 
     // The first-use path has to be walkable: the composer is blocked (no
-    // workspace), and its message must point somewhere that actually opens.
+    // workspace) and the way out is on the same page — a workspace *is* a
+    // directory, so adding one is a path field, not a detour to another view.
     const firstUse = await evaluate(
       cdp,
       `(async () => {
          history.pushState({}, "", "/new");
          window.dispatchEvent(new PopStateEvent("popstate"));
          await new Promise((r) => setTimeout(r, 1800));
-         const main = () => document.querySelector("main");
          const sendBtn = [...document.querySelectorAll("main button")]
            .find((b) => b.className.includes("send"));
-         // The hint card is found by structure, not by its wording: the UI is
-         // bilingual, so matching English prose here broke the moment the
-         // Chinese strings landed. The card that carries the way out is the one
-         // containing a link into Projects.
+         // Found by structure, not wording: the UI is bilingual.
          const hint = [...document.querySelectorAll("main .card")]
            .map((c) => c.textContent.trim())
-           .find((t) => /更多|More/.test(t)) ?? "";
+           .find((t) => /工作区|workspace/i.test(t)) ?? "";
+         const addBtn = [...document.querySelectorAll("main button")]
+           .find((b) => /新建工作区|New workspace/.test(b.textContent));
          const out = {
            sendDisabled: sendBtn ? sendBtn.disabled : null,
-           hintMentionsPath: /更多/.test(hint) && /项目/.test(hint),
            hintText: hint,
+           hintMentionsWorkspace: /工作区|workspace/i.test(hint),
+           hasAddEntry: Boolean(addBtn),
+           addOpensForm: false,
          };
-         // Follow the path the hint describes.
-         history.pushState({}, "", "/projects");
-         window.dispatchEvent(new PopStateEvent("popstate"));
-         await new Promise((r) => setTimeout(r, 1400));
-         const trigger = [...document.querySelectorAll("main a, main button")]
-           // Either language: the button's label is translated now.
-           .find((el) => /New project|新建项目|新建一个项目|添加项目|创建项目/.test(el.textContent));
-         out.hasCreateEntry = Boolean(trigger);
-         if (trigger) {
-           trigger.click();
-           await new Promise((r) => setTimeout(r, 700));
-           // A dialog is a dialog whatever its language: require that one opened
-           // and that it is asking about a project (name label or source tabs).
-           out.dialogOpened = [...document.querySelectorAll(".modal, [role=dialog]")]
-             .some((m) => /project|项目|仓库|文件夹/i.test(m.innerText));
+         if (addBtn) {
+           addBtn.click();
+           await new Promise((r) => setTimeout(r, 400));
+           out.addOpensForm = [...document.querySelectorAll("main input")]
+             .some((i) => /Users|路径|path/i.test(i.placeholder ?? ""));
          }
          return out;
        })()`
     );
     check(firstUse.sendDisabled === true, "a fresh install blocks the composer until a workspace exists");
-    check(firstUse.hintMentionsPath === true, "the block message names a path that exists (更多 → 项目)");
-    // The message must not send the user to a page that does not exist: there is
-    // no workspace-creation entry in the UI, and the platform creates a task's
-    // working copy itself, so "go create a Workspace" is a dead end.
     check(
-      !/前往 Workspaces|新建一个 Workspace|Workspaces 页面/.test(firstUse.hintText ?? ""),
-      `the block message does not send the user to a page that cannot exist (${JSON.stringify((firstUse.hintText ?? "").slice(0, 60))})`
+      firstUse.hintMentionsWorkspace === true,
+      `the block message names the missing thing (${JSON.stringify((firstUse.hintText ?? "").slice(0, 60))})`
     );
-    check(firstUse.hasCreateEntry === true, "the projects page offers a way to create the first project");
-    check(firstUse.dialogOpened === true, "clicking it opens the create dialog");
+    check(firstUse.hasAddEntry === true, "the composer offers an inline workspace entry");
+    check(firstUse.addOpensForm === true, "clicking it opens the directory form");
 
-    // After creating a project the next gate is a containerized runtime, and the
-    // message for it must lead to the Docker diagnosis rather than leaving the
-    // user to guess whether Docker is missing, stopped, or fine.
-    //
-    // This only exists once a project exists: with none, the Project selector
-    // itself is not rendered, so the runtime question cannot come up yet (that
-    // ordering is what the composer check above covers). Create one first.
-    const gateSource = join(dataDir, "gate-source");
-    mkdirSync(gateSource, { recursive: true });
+    // Adding the workspace must clear the gate, and the runtime pill must offer
+    // the host harnesses: the isolation gate that used to hide them is gone —
+    // a workspace is a directory, and any runtime may work on it.
+    const firstWorkspace = join(dataDir, "first-workspace");
+    mkdirSync(firstWorkspace, { recursive: true });
     await evaluate(
       cdp,
-      `(async () => {
-         const res = await fetch("/api/projects", {
-           method: "POST",
-           headers: { "Content-Type": "application/json" },
-           body: JSON.stringify({ name: "gate-probe", source: { type: "directory", path: ${JSON.stringify(gateSource)} } }),
-         });
-         return res.status;
-       })()`
+      `fetch("/api/workspaces", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ name: "first-workspace", type: "local", path: ${JSON.stringify(firstWorkspace)} }),
+       }).then((r) => r.status)`
     );
-    const runtimeGate = await evaluate(
+    const afterWorkspace = await evaluate(
       cdp,
       `(async () => {
-         // Create a project through the dialog's own API path is covered above;
-         // here the message text for the runtime gate is what matters.
-         // Leave and come back so the composer re-reads the project list: the
-         // GET cache lives 5s, and the project was created a moment ago.
+         // Leave and come back so the composer re-reads the workspace list: the
+         // GET cache lives 5s, and the workspace was created a moment ago.
          history.pushState({}, "", "/tasks");
          window.dispatchEvent(new PopStateEvent("popstate"));
          await new Promise((r) => setTimeout(r, 5200));
          history.pushState({}, "", "/new");
          window.dispatchEvent(new PopStateEvent("popstate"));
          await new Promise((r) => setTimeout(r, 2200));
-         const texts = [...document.querySelectorAll("main .card")].map((c) => c.textContent.trim());
-         // Both languages: the gate text is translated.
-         const gate = texts.find((t) => /isolated runtime|隔离运行时/i.test(t)) ?? null;
-         return {
-           gate,
-           mentionsDocker: /Docker/.test(gate ?? ""),
-           // Where the fix lives moves as the IA changes (Runtimes lives under
-           // "More" now), so assert the runtimes/settings entry point rather
-           // than one literal menu word.
-           mentionsSettings: /设置|运行时|Settings|Runtimes/.test(gate ?? ""),
-         };
+         const gate = [...document.querySelectorAll("main .card")]
+           .map((c) => c.textContent.trim())
+           .find((t) => /工作区|workspace/i.test(t)) ?? "";
+         const pills = [...document.querySelectorAll("main select.pill")]
+           .map((s) => [...s.options].map((o) => o.textContent).join(" | "));
+         return { gate, pills: pills.join(" ‖ ") };
        })()`
     );
-    // With a project present and no containerized runtime on a fresh install,
-    // the gate must be on screen — asserting its wording only when it happens to
-    // appear would let a missing message pass silently.
-    check(runtimeGate.gate !== null, `a project without a containerized runtime shows the gate (${JSON.stringify((runtimeGate.gate ?? "").slice(0, 60))})`);
+    check(afterWorkspace.gate === "", `the workspace gate disappears once one exists (${JSON.stringify((afterWorkspace.gate ?? "").slice(0, 60))})`);
     check(
-      runtimeGate.gate !== null && runtimeGate.mentionsDocker === true && runtimeGate.mentionsSettings === true,
-      `the runtime gate points at the Docker diagnosis (${JSON.stringify((runtimeGate.gate ?? "").slice(0, 60))})`
+      /运行时|Runtime/.test(afterWorkspace.pills ?? ""),
+      `the runtime pill is on screen (${JSON.stringify((afterWorkspace.pills ?? "").slice(0, 80))})`
+    );
+    check(
+      /Codex|Claude|DSH|Pi|OpenCode/i.test(afterWorkspace.pills ?? ""),
+      `host harnesses are selectable as runtimes — no isolation gate (${JSON.stringify((afterWorkspace.pills ?? "").slice(0, 80))})`
     );
   }
 
@@ -909,8 +884,7 @@ try {
      })()`
   );
   check(settings.panel, `settings panel opens with ${settings.sections.length} sections: ${settings.sections.join(", ")}`);
-  check(settings.sections.some((s) => /凭据|credential/i.test(s)), "the settings nav includes source credentials");
-  check(settings.credentialsHeading !== null, `the credentials page renders ("${settings.credentialsHeading}")`);
+  check(!settings.sections.some((s) => /凭据|credential/i.test(s)), `source credentials are gone from settings (${settings.sections.join(", ")})`);
 
   // 7b. The Harness CLI page shows what detection found on this machine — the
   //     whole point of the page: the app's PATH is launchd's, so a CLI installed
@@ -1183,7 +1157,8 @@ try {
        // A Project's delete lives on its detail page (the list row navigates
        // there); the credential table is a settings section, which renders
        // inside the panel rather than in <main>.
-       for (const [path, match] of [["/projects/proj_verify", /delete/i], ["/source-credentials", /remove/i]]) {
+       for (const [path, match] of []) { // Project and source-credential deletes were removed with the Project entity
+      void path; void match;
          const problem = await openDeleteConfirm(path, match);
          if (problem) out.push(problem);
        }
@@ -1192,7 +1167,7 @@ try {
   );
   check(
     Array.isArray(guardedDeletes) && guardedDeletes.length === 0,
-    `the Project and credential deletes ask first (${Array.isArray(guardedDeletes) ? guardedDeletes.join("; ") || "both confirmed" : String(guardedDeletes)})`
+    `no Project or credential delete is left to confirm (${Array.isArray(guardedDeletes) ? guardedDeletes.join("; ") || "none" : String(guardedDeletes)})`
   );
 
   }
@@ -1277,12 +1252,12 @@ try {
   const board = await evaluate(
     cdp,
     `(async () => {
-       const res = await fetch("/api/projects");
+       const res = await fetch("/api/workspaces");
        const body = await res.json();
-       return { ok: res.ok, count: Array.isArray(body) ? body.length : (body.projects?.length ?? 0) };
+       return { ok: res.ok, count: Array.isArray(body) ? body.length : 0 };
      })()`
   );
-  check(board.ok, `the project API answers from the bundle (${board.count} project(s))`);
+  check(board.ok, `the workspace API answers from the bundle (${board.count} workspace(s))`);
 
   const heading = await evaluate(cdp, `document.querySelector("h1")?.textContent?.trim()`);
   notes.push(`  info landed on "${heading}" (${home.path})`);

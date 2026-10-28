@@ -52,9 +52,6 @@ function makeTask(patch: Partial<Task> = {}): Task {
     title: "Add retry to the publish step",
     prompt: "Make the publish step retry transient git push failures.",
     lifecycle: LIFECYCLE,
-    projectId: "proj-1",
-    workingBranch: "agentfabric/task-1",
-    baseRef: "main",
     createdAt: "2026-10-08T10:00:00.000Z",
     execution: {
       phase: "completed",
@@ -69,27 +66,6 @@ function makeTask(patch: Partial<Task> = {}): Task {
       },
       stages: {
         agent: { status: "completed", at: "2026-10-08T10:10:00.000Z" },
-        validation: { status: "completed", at: "2026-10-08T10:15:00.000Z" },
-        finalization: { status: "completed", at: "2026-10-08T10:18:00.000Z", commitSha: "f".repeat(40) },
-        publish: { status: "completed", at: "2026-10-08T10:20:00.000Z", commitSha: "f".repeat(40) },
-      },
-      frozenRevision: {
-        finalCommitSha: "f".repeat(40),
-        baseCommitSha: "a".repeat(40),
-        workingBranch: "agentfabric/task-1",
-        remote: "origin",
-        remoteBranch: "agentfabric/task-1",
-        workspaceFingerprint: "fingerprint",
-        at: "2026-10-08T10:18:00.000Z",
-        finalizations: 1,
-      },
-      publish: {
-        status: "pushed",
-        remote: "origin",
-        remoteBranch: "agentfabric/task-1",
-        finalCommitSha: "f".repeat(40),
-        pushedAt: "2026-10-08T10:20:00.000Z",
-        attempts: 1,
       },
     },
     ...patch,
@@ -164,25 +140,13 @@ test("payload reads stage outcomes verbatim, without re-deriving them", () => {
   assert.equal(payload.event, "task.completed");
   assert.equal(payload.taskId, "task-1");
   assert.equal(payload.title, "Add retry to the publish step");
-  assert.equal(payload.projectId, "proj-1");
-  assert.equal(payload.workingBranch, "agentfabric/task-1");
   assert.equal(payload.status, "completed");
   assert.equal(payload.phase, "completed");
   assert.deepEqual(payload.stages, {
     agent: { status: "completed", at: "2026-10-08T10:10:00.000Z" },
-    validation: { status: "completed", at: "2026-10-08T10:15:00.000Z" },
-    finalization: { status: "completed", at: "2026-10-08T10:18:00.000Z", commitSha: "f".repeat(40) },
-    publish: { status: "completed", at: "2026-10-08T10:20:00.000Z", commitSha: "f".repeat(40) },
   });
   // A copy, not the record's own object: a payload must not alias stored state.
   assert.notEqual(payload.stages.agent, task.execution?.stages?.agent);
-});
-
-test("a frozen revision puts finalCommitSha and remoteBranch on the payload", () => {
-  const payload = buildTaskNotificationPayload({ task: makeTask(), run: makeRun() });
-  assert.equal(payload.finalCommitSha, "f".repeat(40));
-  assert.equal(payload.remoteBranch, "agentfabric/task-1");
-  assert.equal(payload.remote, "origin");
 });
 
 test("the task link is relative — no host is baked in", () => {
@@ -241,79 +205,19 @@ test("truncateInstruction leaves short text untouched", () => {
 
 /* ---- failure payloads ---- */
 
-/** Agent succeeded, publishing failed — the case `agent.completed` would get wrong. */
-function makePublishFailureTask(): Task {
+test("a completed event never carries a failure block", () => {
+  // An announcement that the task finished must not also assert a failure —
+  // and an explicit override cannot produce that contradiction.
   const base = makeTask();
-  return makeTask({
+  const task = makeTask({
     execution: {
       ...base.execution!,
       phase: "failed",
       status: "failed",
-      failure: {
-        stage: "publish",
-        code: "git-push-auth-failed",
-        message: "The remote rejected the credentials for the push",
-        at: "2026-10-08T10:21:00.000Z",
-      },
-      publish: { ...base.execution!.publish!, status: "failed", error: "auth failed", errorCode: "git-push-auth-failed" },
-      stages: {
-        agent: { status: "completed", at: "2026-10-08T10:10:00.000Z" },
-        validation: { status: "completed", at: "2026-10-08T10:15:00.000Z" },
-        finalization: { status: "completed", at: "2026-10-08T10:18:00.000Z", commitSha: "f".repeat(40) },
-        publish: { status: "failed", at: "2026-10-08T10:21:00.000Z", errorCode: "git-push-auth-failed" },
-      },
+      failure: { stage: "agent", code: "agent-failed", message: "boom", at: "2026-10-08T10:16:00.000Z" },
     },
   });
-}
-
-test("a task that completed agent work but failed to publish notifies task.failed with the code and stage", () => {
-  const task = makePublishFailureTask();
-  assert.equal(notificationEventFor(task), "task.failed");
-
-  const payload = buildTaskNotificationPayload({ task, run: makeRun({ status: "failed" }) });
-  assert.equal(payload.event, "task.failed");
-  assert.deepEqual(payload.failure, {
-    stage: "publish",
-    code: "git-push-auth-failed",
-    message: "The remote rejected the credentials for the push",
-  });
-  // The successful stages survive the failure — the payload does not collapse
-  // the run into "it broke".
-  assert.equal(payload.stages.agent?.status, "completed");
-  assert.equal(payload.stages.publish?.status, "failed");
-  assert.equal(payload.stages.publish?.errorCode, "git-push-auth-failed");
-  // The frozen revision is still reported: the work exists, publishing it failed.
-  assert.equal(payload.finalCommitSha, "f".repeat(40));
-  assert.equal(payload.endedAt, "2026-10-08T10:21:00.000Z");
-});
-
-test("a validation failure reports the validation code and stage", () => {
-  const task = makeTask({
-    execution: {
-      phase: "failed",
-      status: "failed",
-      updatedAt: "2026-10-08T10:16:00.000Z",
-      failure: { stage: "validation", code: "validation-failed", message: "npm test exited 1", at: "2026-10-08T10:16:00.000Z" },
-      stages: {
-        agent: { status: "completed", at: "2026-10-08T10:10:00.000Z" },
-        validation: { status: "failed", at: "2026-10-08T10:16:00.000Z", errorCode: "validation-failed" },
-      },
-    },
-  });
-  const payload = buildTaskNotificationPayload({ task });
-  assert.equal(payload.event, "task.failed");
-  assert.equal(payload.failure?.stage, "validation");
-  assert.equal(payload.failure?.code, "validation-failed");
-  // No frozen revision: the run never got past validation.
-  assert.equal(payload.finalCommitSha, undefined);
-  assert.equal(payload.remoteBranch, undefined);
-});
-
-test("a completed event never carries a failure block", () => {
-  // An announcement that the task finished must not also assert a failure —
-  // and an explicit override cannot produce that contradiction.
-  const task = makePublishFailureTask();
-  assert.equal(buildTaskNotificationPayload({ task }).failure?.code, "git-push-auth-failed");
+  assert.equal(buildTaskNotificationPayload({ task }).failure?.code, "agent-failed");
   assert.equal(buildTaskNotificationPayload({ task }, { event: "task.completed" }).failure, undefined);
 });
 
@@ -364,7 +268,7 @@ test("a failed status carrying agent-cancelled is still a cancellation", () => {
 /* ---- non-terminal records ---- */
 
 test("a non-terminal task has no event and cannot produce a payload", () => {
-  for (const status of ["created", "preparing", "running", "validating", "finalizing", "publishing"] as const) {
+  for (const status of ["created", "preparing", "running"] as const) {
     const base = makeTask();
     const task = makeTask({ execution: { ...base.execution!, phase: "agent.running", status } });
     assert.equal(notificationEventFor(task), undefined, status);

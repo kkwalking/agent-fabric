@@ -1,5 +1,5 @@
 /**
- * Git operations for the Project source lifecycle (v11 §11/§12/§17/§18).
+ * Git helper operations (diff capture, repository probes, branch utilities).
  *
  * Two properties are non-negotiable here:
  *
@@ -18,9 +18,8 @@
  *    the command *description* (what gets logged) is built from argv with all
  *    secret values redacted.
  *
- * The implementation is injected as a `GitOps` interface so the supervisor can
- * be tested against failure modes (auth failure, network failure, rejected
- * push, remote conflict) without a live server.
+ * The implementation is injected as a `GitOps` interface so callers can be
+ * tested against failure modes without a live server.
  */
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
@@ -28,7 +27,6 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DomainError } from "./errors.js";
 import { SecretRedactor, redactRemoteUrl, urlHasUserInfo } from "./redaction.js";
-import type { SourceCredential, SourceCredentialType } from "./types.js";
 
 /* ------------------------------------------------------------------ */
 /* Credential materialization                                          */
@@ -279,8 +277,15 @@ export function hostPatternMatches(pattern: string, host: string): boolean {
   return h.endsWith(suffix) && h.length > suffix.length;
 }
 
+/** A credential's non-secret binding facts. */
+interface CredentialBindingSubject {
+  name: string;
+  type: "https-token" | "ssh-key";
+  host?: string;
+}
+
 /** Which transports each credential type can actually authenticate. */
-const CREDENTIAL_TRANSPORTS: Record<SourceCredentialType, RemoteTransport[]> = {
+const CREDENTIAL_TRANSPORTS: Record<CredentialBindingSubject["type"], RemoteTransport[]> = {
   "https-token": ["https"],
   "ssh-key": ["ssh"],
 };
@@ -307,7 +312,7 @@ export interface CredentialBindingCheck {
  * it); the transport rule still applies. Local-path remotes need neither.
  */
 export function checkCredentialBinding(
-  credential: Pick<SourceCredential, "name" | "type" | "host">,
+  credential: CredentialBindingSubject,
   remoteUrl: string
 ): CredentialBindingCheck {
   const endpoint = parseRemoteEndpoint(remoteUrl);
@@ -381,7 +386,7 @@ export function classifyGitFailure(stderr: string, operation: string): DomainErr
   const match = (patterns: RegExp[]): boolean => patterns.some((p) => p.test(text));
   if (match(AUTH_PATTERNS)) {
     return new DomainError(
-      operation === "push" ? "git-push-auth-failed" : "source-auth-failed",
+      operation === "push" ? "git-push-auth-failed" : "source-not-found",
       operation === "push"
         ? "Pushing was rejected: the source credential could not authenticate"
         : "The repository could not be read: the source credential was rejected",
@@ -462,11 +467,8 @@ export interface GitOps {
   commitsBetween(opts: GitCommandOptions & { from: string; to: string }): Promise<string[]>;
   push(opts: GitCommandOptions & { remote: string; branch: string }): Promise<void>;
   /**
-   * Pushes one **exact revision** to a remote branch (v11 hardening §13):
-   * `git push <remote> <sha>:refs/heads/<branch>`. This is the only publish
-   * primitive a Project task uses, because it publishes the frozen
-   * `finalCommitSha` regardless of what the local working tree or branch has
-   * done since. Never forced, never a tag.
+   * Pushes one exact revision to a remote branch:
+   * `git push <remote> <sha>:refs/heads/<branch>`. Never forced, never a tag.
    */
   pushRevision(opts: GitCommandOptions & { remote: string; branch: string; revision: string }): Promise<void>;
 }

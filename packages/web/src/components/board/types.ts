@@ -7,10 +7,8 @@
 
 export type BoardColumnId = "backlog" | "in_progress" | "review" | "trash";
 export type ExecutionMode = "direct" | "worktree";
-/** Repository shape discovered for a board project. Discovery never blocks. */
+/** Repository shape discovered for a board workspace. Discovery never blocks. */
 export type WorkspaceType = "none" | "git" | "multi-git" | "google-repo";
-/** Where a Project's code comes from (`Project.source.type`). */
-export type ProjectSourceType = "git" | "directory";
 export type SessionStatus =
   | "starting"
   | "running"
@@ -78,22 +76,10 @@ export interface KanbanAgent {
 
 export type ColumnCounts = Record<BoardColumnId, number>;
 
-/** Where a Project's code comes from; the board root is derived from it. */
-export interface ProjectSource {
-  type: ProjectSourceType;
-  /** Present for `git`: the credential-free repository URL. */
-  remoteUrl?: string;
-  /** Present for `directory`: the absolute folder the user picked. */
-  path?: string;
-  provider?: string;
-  defaultBranch?: string;
-  credentialId?: string;
-}
-
 /**
- * Board settings of a Project — only a Project added from the board has them.
- * The board root itself is never stored here: it comes from `source` (or, for
- * a `git` source, from the external Workspace the cards run in).
+ * Board settings of a workspace — only a workspace added from the board has
+ * them. The board root is never stored here: it is the workspace's own `path`,
+ * because a second copy of a path always drifts from the first.
  */
 export interface ProjectBoardSettings {
   workspaceType: WorkspaceType;
@@ -104,44 +90,27 @@ export interface ProjectBoardSettings {
 }
 
 /**
- * A Project record (`/api/projects`), as the board sees it.
+ * One row of `/api/kanban/workspaces`: a workspace directory plus the board's
+ * view of it.
  *
- * A board project *is* a Project: the board keeps no project collection of its
- * own, so this is the same list the Projects page renders. Fields the board
- * does not read are left out rather than mirrored.
+ * A board workspace *is* a workspace — there is no Project above it — so the
+ * row is the directory itself: `path` is where the cards run and where the
+ * sidebar's tasks land. `board` is present only on a workspace that was added
+ * from the board; `cardCounts` is the server's per-column total for the row.
  */
-export interface Project {
+export interface BoardWorkspace {
   id: string;
   name: string;
-  description?: string;
-  source: ProjectSource;
-  /** Present only for a Project that was added from the board. */
+  /** Absolute directory the board works in; the only copy of that path. */
+  path: string;
   board?: ProjectBoardSettings;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** One project row as the board's sidebar lists it (Project plus card totals). */
-export interface BoardProject extends Project {
   cardCounts?: ColumnCounts;
-}
-
-/**
- * An external Workspace (`/api/workspaces`): the folder a `git`-sourced board
- * project works in. Only `external` workspaces matter here — a managed one is
- * one task's scratch copy.
- */
-export interface KanbanWorkspace {
-  id: string;
-  name: string;
-  ownership?: "managed" | "external";
-  projectId?: string;
-  path?: string;
 }
 
 export interface KanbanCard {
   id: string;
-  projectId: string;
+  /** The workspace this card belongs to (a board works in one directory). */
+  workspaceId: string;
   title: string;
   prompt: string;
   column: BoardColumnId;
@@ -151,10 +120,8 @@ export interface KanbanCard {
   reasoningEffort?: string;
   permissionModeId?: string;
   executionMode: ExecutionMode;
-  /** Git ref a worktree checkout starts from; absent = project HEAD. */
+  /** Git ref a worktree checkout starts from; absent = workspace HEAD. */
   baseRef?: string;
-  /** The external Workspace (folder) the card works in; fixed when created. */
-  workspaceId?: string;
   /** The Task this card drives: created on the first start, never replaced. */
   taskId?: string;
   /** The Task's most recent Run (= the current `KanbanSession.id`). */
@@ -251,7 +218,7 @@ export interface TaskDraft {
   baseRef?: string;
 }
 
-/** The last choices a user made in a project, used to seed the next task. */
+/** The last choices a user made in a workspace, used to seed the next task. */
 export interface TaskFormDefaults {
   agentId?: string;
   model?: string;

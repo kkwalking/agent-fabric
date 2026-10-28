@@ -89,17 +89,18 @@ async function ptyRoundTrip(url, token, scratch) {
     return body === "" ? undefined : JSON.parse(body);
   };
 
-  // A plain folder becomes a project (Kanban initializes a repo for it).
-  const project = join(scratch, "project");
-  mkdirSync(project, { recursive: true });
-  writeFileSync(join(project, "README.md"), "smoke\n");
-  const created = await api("/api/kanban/projects", {
+  // A plain folder becomes a board workspace: the board runs in place, so
+  // nothing is cloned and no repository is initialised.
+  const workspaceDir = join(scratch, "workspace");
+  mkdirSync(workspaceDir, { recursive: true });
+  writeFileSync(join(workspaceDir, "README.md"), "smoke\n");
+  const created = await api("/api/kanban/workspaces", {
     method: "POST",
-    body: JSON.stringify({ name: "smoke", path: project, gitInit: "init" }),
+    body: JSON.stringify({ name: "smoke", rootPath: workspaceDir }),
   });
-  const projectId = created.project.id;
+  const workspaceId = created.workspace.id;
 
-  const card = await api(`/api/kanban/projects/${projectId}/cards`, {
+  const card = await api(`/api/kanban/workspaces/${workspaceId}/cards`, {
     method: "POST",
     body: JSON.stringify({ title: "pty smoke", prompt: "Reply with the single word ok.", agentId: "opencode" }),
   });

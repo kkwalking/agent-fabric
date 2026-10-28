@@ -8,10 +8,11 @@ import { navigate } from "../router";
  * The rail's overflow menu.
  *
  * With the task tree occupying the rail, the pages that are not Tasks have no
- * room of their own: Projects, Kanban, Runtimes, Native sessions, Handoffs and
- * the System pages live here instead of in the main area. They are still real
- * routes — the panel navigates like any other entry, it just does not hold a
- * permanent row in the rail.
+ * room of their own: Runtimes, Native sessions, Handoffs and the System pages
+ * live here instead of in the main area. Kanban is not in this list — it has
+ * its own row directly under 新会话. They are still real routes — the panel
+ * navigates like any other entry, it just does not hold a permanent row in the
+ * rail.
  */
 
 interface Entry {
@@ -21,8 +22,6 @@ interface Entry {
 }
 
 const RESOURCE_ENTRIES: Entry[] = [
-  { path: "/kanban", label: "nav.kanban", icon: "grid" },
-  { path: "/projects", label: "nav.projects", icon: "folder" },
   { path: "/runtimes", label: "nav.runtimes", icon: "box" },
   { path: "/sessions", label: "nav.sessions", icon: "terminal" },
   { path: "/handoffs", label: "nav.handoffs", icon: "archive" },

@@ -156,9 +156,8 @@ export interface RuntimeLifecycle {
  *
  * - `isolated`: the harness runs inside a container/VM boundary and never on
  *   the AgentFabric host.
- * - `host`: the harness runs as a local process on the AgentFabric host.
- *   Still fully supported for development, debugging, non-project tasks and
- *   internal tests — but never for a Project Coding Task.
+ * - `host`: the harness runs as a local process on the AgentFabric host,
+ *   fully supported for development, debugging and internal tests.
  */
 export type RuntimeExecutionBackend = "isolated" | "host";
 
@@ -279,8 +278,7 @@ export interface Runtime {
   /**
    * Declared execution backend (v11 hardening §4). Absent on records created
    * before the field existed; read it through `executionBackendOf()`, which
-   * derives the backend from `containerized`. Project Coding Tasks require
-   * `"isolated"`.
+   * derives the backend from `containerized`.
    */
   executionBackend?: RuntimeExecutionBackend;
   /**
@@ -323,20 +321,16 @@ export interface Runtime {
 /* ------------------------------------------------------------------ */
 
 /**
- * How a `Workspace` directory is backed.
- *
- * There is deliberately no `git` member: a repository is a Project `source`
- * (see `SourceType`), never a workspace type. A managed workspace for a
- * git-sourced Project is an ordinary directory that happens to hold a clone.
+ * How a `Workspace` directory is backed. A workspace is always a directory on
+ * this machine; a repository is simply a directory that happens to hold one.
  */
 export type WorkspaceType = "local" | "volume";
 
 /**
  * How a Workspace came into being (v11 §5.4):
- * - `managed`: the platform created it for one Project-based Task and owns
- *   its lifecycle. Never shared between tasks.
- * - `external`: a user directory or repository the user attached — used in
- *   place, never copied or taken over.
+ * - `managed`: the platform created it and owns its lifecycle.
+ * - `external`: a user directory the user attached — used in place, never
+ *   copied or taken over.
  */
 export type WorkspaceOwnership = "managed" | "external";
 
@@ -346,11 +340,23 @@ export interface Workspace {
   type: WorkspaceType;
   /** Absolute path for local/volume workspaces. */
   path?: string;
-  repoUrl?: string;
-  branch?: string;
   /** Mount target inside the container. */
   mountPath?: string;
   persistent: boolean;
+  /**
+   * Default runtime for tasks started in this workspace. The workspace is the
+   * only place such a default lives: a task inherits it and may override it.
+   * Absent means "pick per task".
+   */
+  runtimeId?: ID;
+  /** Default model for tasks started in this workspace; absent = runtime default. */
+  modelId?: ID;
+  /**
+   * Board settings — present only on a workspace that was added from the
+   * kanban board. The board owns no collection of its own: the workspace *is*
+   * the board, and its root directory is `path`.
+   */
+  board?: BoardSettings;
   /** How the workspace came into being: created empty or imported. */
   source?: "create" | "import";
   /** Liveness of the backing directory ("missing" means the path vanished). */
@@ -360,18 +366,12 @@ export interface Workspace {
   /** Run that last saved the workspace. */
   lastSavedRunId?: ID;
   /**
-   * Managed vs external (v11 §5.4). Absent means external: every workspace
-   * created before this concept existed is a user-owned working copy.
+   * Managed vs external (v11 §5.4). Absent means external: a user-owned
+   * working copy.
    */
   ownership?: WorkspaceOwnership;
-  /** Project a managed workspace belongs to. */
-  projectId?: ID;
   /** Task a managed workspace belongs to (1 Task = 1 Workspace, v11 §5.1). */
   taskId?: ID;
-  /** Working branch checked out in a managed workspace. */
-  workingBranch?: string;
-  /** Base revision the managed workspace was created from. */
-  baseCommitSha?: string;
   createdAt: string;
 }
 
@@ -386,243 +386,6 @@ export interface WorkspaceLock {
   taskId: ID;
   runId: ID;
   acquiredAt: string;
-}
-
-/* ------------------------------------------------------------------ */
-/* Project & Source (v11 §2/§3)                                        */
-/* ------------------------------------------------------------------ */
-
-/** Source providers with first-class recognition (v11 §3). */
-export type SourceProvider = "github" | "gitlab" | "gitee" | "generic";
-
-/**
- * What a Project's code comes from.
- *
- * - `git`: a repository (remote URL + optional credential). Tasks get their own
- *   branch and the work can be pushed back.
- * - `directory`: a directory on this machine. Tasks run in a copy of it and the
- *   result is committed locally; there is no remote to push to.
- *
- * A Project is the one place a code source is described — there is no separate
- * "workspace type" for a git repository or a local folder. (The `Workspace`
- * record still exists for the copy a task actually runs in; it is the
- * platform's bookkeeping, not something the user configures.)
- */
-export type SourceType = "git" | "directory";
-
-/**
- * A Project's primary source (v11 §3). One Project currently has exactly one
- * primary source; the shape keeps `repositories`-style multi-source growth
- * possible without a rewrite (a future version adds a list beside it).
- */
-export interface ProjectSource {
-  type: SourceType;
-  /**
-   * Credential-free remote URL (v11 §12). Present for `git`; absent for a
-   * `directory` source, whose `path` is used instead.
-   */
-  remoteUrl?: string;
-  /** Absolute directory for a `directory` source. */
-  path?: string;
-  /**
-   * The `directory` source is a Git repository whose Tasks work **in place**:
-   * the Task's Workspace *is* this directory (no managed copy, so no working
-   * branch and no publish — the branch belongs to the folder, not the Task).
-   *
-   * Written only by the board, which runs local agent CLIs directly in the
-   * folder the user picked. A directory Project created from the Projects page
-   * keeps its copy semantics (`workTree` absent), so this is not a global
-   * behaviour flip.
-   */
-  workTree?: boolean;
-  provider?: SourceProvider;
-  /** Default branch used when a Task does not name a base ref. */
-  defaultBranch?: string;
-  /** Reference to a SourceCredential; absent = public repository (v11 §4.3). */
-  credentialId?: ID;
-}
-
-/**
- * The repository URL of a `git` Project.
- *
- * Only a `git` source has one; the git lifecycle (clone, fetch, push, branch
- * comparison) all needs it, so it is read through this accessor, which fails
- * loudly for a `directory` Project instead of threading `undefined` through
- * code that would silently degrade into "push nothing".
- */
-export function gitRemoteUrl(project: Project): string {
-  const url = project.source.remoteUrl?.trim();
-  if (project.source.type !== "git" || !url) {
-    throw new Error(
-      `Project ${project.id} ("${project.name}") is not a git source (type: ${project.source.type}) — there is no remote to reach`
-    );
-  }
-  return url;
-}
-
-/** Whether the Project's code comes from a git repository (vs a local directory). */
-export function isGitProject(project: Project): boolean {
-  return project.source.type === "git";
-}
-
-/**
- * A reusable Git credential (v11 §4). Lives in global settings, never inside
- * a Project: Projects only reference it by id. Sensitive material is always a
- * Secret reference — this record only carries non-sensitive metadata.
- */
-export type SourceCredentialType = "https-token" | "ssh-key";
-
-export interface SourceCredential {
-  id: ID;
-  name: string;
-  type: SourceCredentialType;
-  /** Host this credential applies to (e.g. `github.com`), when scoped. */
-  host?: string;
-  /** Non-sensitive username (HTTPS token user, or SSH user). */
-  username?: string;
-  /** Secret holding the token (https-token) or the private key (ssh-key). */
-  secretId: ID;
-  /** Secret holding the SSH key passphrase, when the key is encrypted. */
-  passphraseSecretId?: ID;
-  /**
-   * known_hosts content for SSH host verification (v11 §12.1/§42). Absent
-   * falls back to the host's `~/.ssh/known_hosts`; host keys are always
-   * verified (StrictHostKeyChecking=yes) — never silently trusted.
-   */
-  knownHosts?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** A SourceCredential as served by the API: metadata plus the masked secret. */
-export interface SourceCredentialView extends SourceCredential {
-  secretMasked?: string;
-  passphraseMasked?: string;
-}
-
-/** Where a Project's agent execution defaults come from (v11 §24). */
-export interface ProjectExecutionConfig {
-  runtimeId?: ID;
-  modelId?: ID;
-  profileId?: ID;
-  timeoutMs?: number;
-  resourceLimits?: ResourceLimits;
-  env?: Record<string, string>;
-  secretIds?: ID[];
-  tools?: string[];
-  policy?: ExecutionPolicy;
-  networkPolicy?: NetworkPolicy;
-  /**
-   * Explicit advanced policy allowing a Project Coding Task to run on a
-   * host (non-isolated) runtime (v11 hardening §4.1). Default off; it is an
-   * operator escape hatch, never something a task request can grant itself.
-   */
-  allowHostExecution?: boolean;
-  /**
-   * Secrets the Validation Agent (judge) may receive (v12 §4.1). A separate
-   * allowlist from `secretIds`: build/test credentials are not agent
-   * credentials, and the judge never gets the agent's secrets. `scope: "git"`
-   * secrets are refused here as well.
-   */
-  validationSecretIds?: ID[];
-}
-
-/** A skill provisioned into the agent execution environment (v11 §25). */
-export interface ProjectSkill {
-  name: string;
-  /** Host directory whose contents are provisioned. */
-  path: string;
-  description?: string;
-}
-
-/**
- * An MCP server definition (v11 §26). Secrets are referenced, never inlined:
- * the generated runtime configuration resolves them at provisioning time.
- */
-export interface McpServerConfig {
-  name: string;
-  transport?: "stdio" | "http" | "sse";
-  command?: string;
-  args?: string[];
-  url?: string;
-  env?: Record<string, string>;
-  secretIds?: ID[];
-  enabled?: boolean;
-}
-
-/**
- * Project/Task-level validation configuration (v12 §3).
- *
- * Validation is a **natural-language acceptance standard** judged by a
- * separate Validation Agent in a fresh container — not a list of shell
- * commands. Its presence *is* the enablement: a Project or Task without a
- * `validation` record skips the stage entirely. An empty prompt is a
- * configuration error, never a silent skip.
- */
-export interface ValidationConfig {
-  /** Natural-language acceptance standard. Required, non-empty. */
-  prompt: string;
-  /**
-   * Judge verdicts allowed in one validation cycle (v12 §2). A verdict that
-   * was never produced (the judge runtime failed, the run timed out without
-   * a verdict, the verdict was malformed) does not consume an attempt.
-   */
-  maxAttempts?: number;
-  /** Model the judge runs on; defaults to the Task's model. */
-  modelId?: ID;
-  /** Judge run timeout; defaults to the Task/policy resolution chain. */
-  timeoutMs?: number;
-}
-
-
-/**
- * How the platform publishes a Task's work (v11 §17/§18).
- *
- * The platform — never the agent — owns commit policy and publishing: an
- * agent that never runs `git commit` still gets its work published when
- * `autoCommit` is on (the default).
- */
-export interface GitPublishPolicy {
-  /** Commit remaining dirty changes at finalization (default true). */
-  autoCommit?: boolean;
-  /** Commit message template; `{task}` / `{title}` / `{branch}` are substituted. */
-  commitMessage?: string;
-  commitAuthorName?: string;
-  commitAuthorEmail?: string;
-  /** Push the working branch after finalization (default true). */
-  push?: boolean;
-  /** Remote name to push to (default `origin`). */
-  remote?: string;
-  /** Branches the platform refuses to publish (default main / master). */
-  protectedBranches?: string[];
-}
-
-/** How a Task's working branch comes into being (v11 §8.1). */
-export type BranchMode = "new" | "continue";
-
-export interface Project {
-  id: ID;
-  name: string;
-  description?: string;
-  source: ProjectSource;
-  /** Default execution configuration inherited by every Task (v11 §24). */
-  execution?: ProjectExecutionConfig;
-  /** Default skills provisioned before the runtime starts (v11 §25). */
-  skills?: ProjectSkill[];
-  /** Default MCP servers generated into the runtime configuration (v11 §26). */
-  mcpServers?: McpServerConfig[];
-  /** Default validation config; a Task may replace it entirely (v12 §3). */
-  validation?: ValidationConfig;
-  /** Default publish policy; a Task may override it. */
-  git?: GitPublishPolicy;
-  /**
-   * Board settings — present only on a Project that was added from the kanban
-   * board. The board owns no project collection: this Project **is** the
-   * board project, and its root directory comes from `source`.
-   */
-  board?: ProjectBoardSettings;
-  createdAt: string;
-  updatedAt: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -645,26 +408,18 @@ export interface ExecutionPolicy {
 }
 
 /* ------------------------------------------------------------------ */
-/* Task lifecycle (v11 §9/§21/§22/§23)                                 */
+/* Task lifecycle                                                     */
 /* ------------------------------------------------------------------ */
 
 /**
- * Fine-grained lifecycle phase of a Project-based Task / its Run (v11 §21).
- * The coarse `RunStatus` stays as-is; the phase answers "what is happening
- * right now" — developing, testing, committing or pushing.
+ * Fine-grained phase of a Task execution. The coarse `RunStatus` answers
+ * "did it finish"; the phase answers "what is happening right now".
  */
 export type RunPhase =
   | "task.created"
   | "workspace.preparing"
-  | "source.fetching"
-  | "source.checkout"
   | "runtime.preparing"
   | "agent.running"
-  | "validation.preparing"
-  | "validation.running"
-  | "validation.reworking"
-  | "git.finalizing"
-  | "git.pushing"
   | "cleanup"
   | "completed"
   | "failed"
@@ -675,18 +430,12 @@ export type TaskLifecycleStatus =
   | "created"
   | "preparing"
   | "running"
-  | "validating"
-  | "finalizing"
-  | "publishing"
   | "completed"
   | "failed"
   | "cancelled";
 
-/**
- * Which stage a failure belongs to (v11 §20/§23). Agent execution, validation
- * and publishing failures are never collapsed into one plain "Task failed".
- */
-export type TaskFailureStage = "workspace" | "source" | "runtime" | "agent" | "validation" | "finalization" | "publish";
+/** Which stage a failure belongs to. */
+export type TaskFailureStage = "workspace" | "runtime" | "agent";
 
 export interface TaskFailure {
   stage: TaskFailureStage;
@@ -707,141 +456,20 @@ export interface TaskAgentState {
   endedAt?: string;
 }
 
-/**
- * One Validation Agent verdict (v12 §5), frozen at generation time: the
- * supervisor parses the judge's tool call once, records it, and every reader
- * returns the record verbatim.
- */
-export interface ValidationVerdict {
-  passed: boolean;
-  /** 1-3 sentence conclusion. */
-  summary: string;
-  /** Requirements the judge found unmet; non-empty when `passed` is false. */
-  unmet: string[];
-  /** Commands the judge actually ran and what it observed. */
-  evidence: string[];
-  round: number;
-  judgeRunId: ID;
-  /** When the verdict was frozen onto the record. */
-  at: string;
-}
-
-/**
- * The completion pin (v12 §4.5): the commit a development run's output was
- * frozen to before judging. The judge validates this revision, and any drift
- * a judge leaves behind is replayed back to it.
- */
-export interface PinnedRevision {
-  commitSha: string;
-  /** The development run (initial or rework) that produced this pin. */
-  runId: ID;
-  round: number;
-  at: string;
-}
-
-/** One judge round of a validation cycle (v12 §6.1). */
-export interface ValidationRound {
-  round: number;
-  /** The revision this round judged (round 1 = the initial run; ≥2 = the rework run). */
-  agentRunId?: ID;
-  /** The rework run that produced this round's subject (round ≥2). */
-  reworkRunId?: ID;
-  /** The completion pin this round judged and replays to (v12 §4.5). */
-  pinnedRevision?: PinnedRevision;
-  /** Set when the judge left the workspace drifted; the replay already happened. */
-  drift?: { detected: true; observedHead?: string; driftedPaths?: string[]; replayedAt: string };
-  judgeRunId?: ID;
-  verdict?: ValidationVerdict;
-  status: "judging" | "passed" | "failed" | "interrupted";
-  startedAt?: string;
-  endedAt?: string;
-  error?: string;
-  errorCode?: string;
-}
-
-export interface TaskValidationState {
-  status: "pending" | "skipped" | "running" | "passed" | "failed" | "timeout" | "interrupted";
-  /**
-   * Judge verdicts produced in the current cycle (v12 §2). Reset by a manual
-   * Retry Validation; a verdict-less failure never increments it.
-   */
-  attempts: number;
-  /** Full round history (v12 §6.1) — appended across retries, never recomputed. */
-  rounds?: ValidationRound[];
-  /** The last frozen verdict, for convenient reading. */
-  verdict?: ValidationVerdict;
-  error?: string;
-  errorCode?: string;
-  startedAt?: string;
-  endedAt?: string;
-}
-
-/**
- * Publish outcome (v11 §17.2). Kept separate from the development result so
- * "development completed, publishing failed" is expressible and publish can
- * be retried without re-running the agent (v11 §23/§31).
- */
-export interface TaskPublishState {
-  status: "pending" | "pushed" | "failed" | "skipped";
-  /** Remote branch the work was published to. */
-  remoteBranch?: string;
-  remote?: string;
-  baseCommitSha?: string;
-  finalCommitSha?: string;
-  pushedAt?: string;
-  attempts: number;
-  error?: string;
-  errorCode?: string;
-}
-
-/**
- * The frozen result of the first successful Git finalization (v11 hardening
- * §13). Written once; every later publish pushes exactly this revision.
- * `publishOnly` distinguishes a publish that must never touch the working
- * tree from a full lifecycle that owns it.
- */
-export interface FrozenFinalRevision {
-  finalCommitSha: string;
-  baseCommitSha: string;
-  workingBranch: string;
-  remote: string;
-  remoteBranch: string;
-  /**
-   * Fingerprint of the working tree at the moment finalization succeeded
-   * (HEAD + branch + porcelain status). Retry Publish compares it to detect a
-   * workspace that drifted after finalization.
-   */
-  workspaceFingerprint: string;
-  /** When the revision was frozen. */
-  at: string;
-  /** Number of finalizations that produced it (always 1 for a frozen revision). */
-  finalizations: number;
-}
-
 export interface TaskExecution {
   phase: RunPhase;
   status: TaskLifecycleStatus;
   failure?: TaskFailure;
   agent?: TaskAgentState;
-  validation?: TaskValidationState;
-  publish?: TaskPublishState;
-  /** Revision the task was started from, resolved once (v11 §7). */
-  baseCommitSha?: string;
   /**
-   * The task's frozen publish revision (v11 hardening §13). Present once
-   * finalization succeeded; Retry Publish pushes this and nothing else.
-   */
-  frozenRevision?: FrozenFinalRevision;
-  /**
-   * Stage completion record (v11 hardening §17/§36). Written monotonically:
-   * a stage that completed stays completed, whatever a later stage does.
+   * Stage completion record. Written monotonically: a stage that completed
+   * stays completed, whatever a later step does.
    */
   stages?: TaskStageStates;
   /**
    * Auto-retry bookkeeping for the current failure episode: how many automatic
    * retries the policy has already spent, and — while one is scheduled — when
-   * it will start. Cleared only when the task completes; a task that keeps
-   * failing transiently cannot retry forever.
+   * it will start.
    */
   autoRetry?: TaskAutoRetryState;
   updatedAt: string;
@@ -859,12 +487,9 @@ export interface TaskAutoRetryState {
   at?: string;
 }
 
-/** Monotonic per-stage outcomes of one Project task (v11 hardening §36). */
+/** Monotonic per-stage outcomes of one Task. */
 export interface TaskStageStates {
   agent?: StageOutcome;
-  validation?: StageOutcome;
-  finalization?: StageOutcome;
-  publish?: StageOutcome;
 }
 
 export interface StageOutcome {
@@ -872,8 +497,6 @@ export interface StageOutcome {
   at: string;
   /** Failure code when the stage did not complete. */
   errorCode?: string;
-  /** Commit the stage produced / published, when it has one. */
-  commitSha?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -890,12 +513,6 @@ export interface Task {
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: string[];
-  /**
-   * Secrets the Task's validation commands may receive (v11 hardening §6.2).
-   * A separate allowlist from `secretIds`: a build/test credential is not an
-   * agent credential, and a git-scoped secret is refused here.
-   */
-  validationSecretIds?: string[];
   tools?: string[];
   resourceLimits?: ResourceLimits;
   timeoutMs?: number;
@@ -909,29 +526,7 @@ export interface Task {
    */
   lifecycle: RuntimeLifecycle;
   metadata?: Record<string, unknown>;
-  /** Project this Task develops against (v11 §6); absent = classic Task. */
-  projectId?: ID;
-  /** Base ref the working branch was created from (v11 §7). */
-  baseRef?: string;
-  /** Concrete revision `baseRef` resolved to when the Task started (v11 §7). */
-  baseCommitSha?: string;
-  /** Branch the platform owns and publishes for this Task (v11 §7/§8). */
-  workingBranch?: string;
-  /** Whether the working branch is new or continues an existing one. */
-  branchMode?: BranchMode;
-  /** Task-level validation override — replaces the Project's entirely (v12 §3). */
-  validation?: ValidationConfig;
-  /** Task-level publish policy override. */
-  git?: GitPublishPolicy;
-  /**
-   * Task-level skill override (v11 §25). Declared here, the Task's list
-   * **replaces** the Project's; absent (the normal case) the Project's list
-   * applies. Resolved when the execution environment is provisioned.
-   */
-  skills?: ProjectSkill[];
-  /** Task-level MCP server override (v11 §26); same replace-or-inherit rule. */
-  mcpServers?: McpServerConfig[];
-  /** Project-based lifecycle state (v11 §6/§40). */
+  /** Execution state projected by the board's session tracking. */
   execution?: TaskExecution;
   /**
    * Set when the task was soft-deleted (recoverable, hidden from the live
@@ -978,17 +573,8 @@ export interface Run {
   purpose?: "development" | "validation" | "rework";
   /** Round this validation/rework run belongs to (1-based, v12 §4.1). */
   round?: number;
-  /**
-   * Fine-grained lifecycle phase (v11 §21) for Project-based runs. Absent on
-   * classic Task runs, which never go through the execution supervisor.
-   */
+  /** Fine-grained lifecycle phase, when the producer records one. */
   phase?: RunPhase;
-  /** Project this run develops against (Project-based runs only). */
-  projectId?: ID;
-  /** Working branch the run's workspace was on when it started. */
-  workingBranch?: string;
-  /** Base revision the task started from, snapshotted per run. */
-  baseCommitSha?: string;
   runtimeId?: ID;
   runtimeName?: string;
   modelId?: ID;
@@ -1442,28 +1028,10 @@ export type EventType =
   | "workspace.attached"
   | "workspace.saved"
   | "workspace.prepared"
-  | "source.prepared"
   | "runtime.prepared"
   | "runtime.destroyed"
-  | "credential.resolved"
-  | "credential.released"
   | "provisioning.prepared"
   | "provisioning.cleaned"
-  | "validation.round.started"
-  | "validation.pinned"
-  | "validation.verdict"
-  | "validation.workspace.replayed"
-  | "validation.rework.started"
-  | "validation.passed"
-  | "validation.failed"
-  | "validation.skipped"
-  | "git.finalized"
-  | "git.revision.frozen"
-  | "git.diff.captured"
-  | "git.diff.failed"
-  | "git.pushed"
-  | "publish.failed"
-  | "publish.retry.started"
   | "task.recovered"
   | "task.retry.scheduled"
   | "task.retry.started"
@@ -1579,8 +1147,6 @@ export interface AgentProfile {
     name?: string;
     type?: WorkspaceType;
     path?: string;
-    repoUrl?: string;
-    branch?: string;
   };
   createdAt: string;
   updatedAt: string;
@@ -1747,21 +1313,20 @@ export type KanbanColumn = "backlog" | "in_progress" | "review" | "trash";
 /** Local CLI agents the board can launch in a PTY (v13 §4). */
 export type KanbanAgentKind = "claude" | "pi" | "opencode" | "dsh";
 
-/** Where a card's agent works: the project root or a private copy. */
+/** Where a card's agent works: the workspace root or a private copy. */
 export type KanbanExecutionMode = "direct" | "worktree";
 
-/** Repository shape discovered for a board project. Discovery never blocks. */
+/** Repository shape discovered for a board workspace. Discovery never blocks. */
 export type KanbanWorkspaceType = "none" | "git" | "multi-git" | "google-repo";
 
 /**
- * Board settings carried by a `Project` that was added from the board.
+ * Board settings carried by a `Workspace` that was added from the board.
  *
- * The board has no project collection of its own: a board project **is** a
- * `Project`, and its root directory is the Project's own `source` (a
- * `directory` source's `path`) — never a second copy of the path. Only the
- * board-specific choices live here.
+ * The board has no collection of its own: a board workspace **is** a
+ * `Workspace`, and its root directory is the workspace's own `path` — never a
+ * second copy of the path. Only the board-specific choices live here.
  */
-export interface ProjectBoardSettings {
+export interface BoardSettings {
   workspaceType: KanbanWorkspaceType;
   /** Present when discovery failed; discovery is advisory and never blocks. */
   discoveryWarning?: string;
@@ -1776,8 +1341,8 @@ export interface ProjectBoardSettings {
  */
 export interface KanbanCard {
   id: ID;
-  /** The Project this card belongs to (a board project is a Project). */
-  projectId: ID;
+  /** The workspace this card belongs to (a board works in one directory). */
+  workspaceId: ID;
   title: string;
   prompt: string;
   column: KanbanColumn;
@@ -1798,14 +1363,9 @@ export interface KanbanCard {
   executionMode: KanbanExecutionMode;
   /**
    * Git ref the card's `worktree` checkout is created from (v13 §3.3). Absent
-   * means the project's current HEAD. Ignored in `direct` mode.
+   * means the workspace's current HEAD. Ignored in `direct` mode.
    */
   baseRef?: string;
-  /**
-   * The card's working directory: the Project's external Workspace for the
-   * board folder. Fixed when the card is created.
-   */
-  workspaceId?: ID;
   /**
    * The Task this card produces. Created on the card's first start and never
    * replaced afterwards — reruns and continued conversations are new Runs of
@@ -1865,7 +1425,7 @@ export interface KanbanSession {
   /** The Run this handle belongs to; always equal to `id`. */
   runId: ID;
   agentId: KanbanAgentKind;
-  /** Actual working directory (project root for direct mode). */
+  /** Actual working directory (workspace root for direct mode). */
   cwd: string;
   executionMode: KanbanExecutionMode;
   status: KanbanSessionStatus;

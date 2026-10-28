@@ -2,9 +2,9 @@
  * Domain error model (v11 §22).
  *
  * Every lifecycle failure carries a stable machine-readable `code` plus the
- * stage it happened in, so callers (API / CLI / UI) can tell an agent
- * execution failure from a validation failure from a publish failure — and
- * never collapse them into one plain "Task failed" (v11 §20/§23).
+ * stage it happened in, so callers (API / CLI / UI) can tell a workspace,
+ * runtime or agent failure apart instead of collapsing them into one plain
+ * "Task failed".
  *
  * Codes are grouped by the stage that raises them. Messages are safe to show
  * and to store: they are redacted of credential material at the boundary
@@ -13,20 +13,6 @@
 
 /** Every domain failure code AgentFabric can report. */
 export type ErrorCode =
-  /* Source */
-  | "source-url-invalid"
-  | "source-not-found"
-  | "source-auth-failed"
-  | "source-network-failed"
-  | "source-credential-missing"
-  | "source-credential-invalid"
-  | "credential-host-mismatch"
-  | "credential-transport-mismatch"
-  | "secret-scope-not-allowed"
-  | "base-ref-not-found"
-  | "branch-invalid"
-  | "branch-not-found"
-  | "branch-conflict"
   /* Workspace */
   | "workspace-create-failed"
   | "workspace-locked"
@@ -36,51 +22,41 @@ export type ErrorCode =
   | "runtime-start-failed"
   | "runtime-lost"
   | "runtime-timeout"
-  | "runtime-not-isolated"
-  | "runtime-not-allowed-for-project-task"
   /* Agent */
   | "agent-start-failed"
   | "agent-failed"
   | "agent-timeout"
   | "agent-cancelled"
-  /* Validation */
-  | "validation-failed"
-  | "validation-timeout"
-  | "validation-runtime-failed"
-  | "validation-runtime-unavailable"
-  | "validation-verdict-missing"
-  | "validation-secret-not-allowed"
-  /* Git finalization */
-  | "git-state-invalid"
-  | "git-commit-failed"
-  /* Publishing */
-  | "git-push-failed"
-  | "git-push-auth-failed"
-  | "git-push-rejected"
-  | "remote-branch-conflict"
-  | "publish-revision-missing"
-  | "workspace-diverged-after-finalization"
-  /* Project / Task */
-  | "project-not-found"
-  | "project-invalid"
-  | "credential-not-found"
+  /* Task */
   | "profile-not-found"
   | "model-not-found"
   | "task-not-found"
   | "task-state-invalid"
   | "task-busy"
   | "policy-denied"
+  /* Git helpers (diff capture / repository probes) */
+  | "source-url-invalid"
+  | "source-not-found"
+  | "source-network-failed"
+  | "source-credential-invalid"
+  | "base-ref-not-found"
+  | "git-state-invalid"
+  | "git-commit-failed"
+  | "git-push-failed"
+  | "git-push-auth-failed"
+  | "git-push-rejected"
   /* Secrets at rest */
   | "secret-legacy-format"
   | "secret-key-invalid"
   | "secret-decrypt-failed"
+  | "secret-scope-not-allowed"
   /* Kanban (v13) */
-  | "kanban-project-not-found"
+  | "kanban-workspace-not-found"
   | "kanban-card-not-found"
   | "kanban-card-not-editable"
   | "kanban-session-not-found"
-  | "kanban-project-path-invalid"
-  | "kanban-project-duplicate"
+  | "kanban-workspace-path-invalid"
+  | "kanban-workspace-duplicate"
   | "kanban-path-invalid"
   | "kanban-git-command-failed"
   | "kanban-agent-unknown"
@@ -93,51 +69,18 @@ export type ErrorCode =
   | "kanban-worktree-unavailable"
   | "kanban-worktree-failed"
   | "kanban-terminal-unauthorized"
-  /**
-   * A board card's agent reported failure (spec kanban-task-unification §2):
-   * written onto `Task.execution.failure` and the Run when a session fails.
-   */
   | "kanban-agent-failed"
-  /**
-   * A board session was cut off by a restart while it was still active; its
-   * task is marked failed so nothing pretends the agent is still working.
-   */
   | "kanban-session-interrupted"
-  /**
-   * No harness `Runtime` exists for a card's agent, so the card cannot produce
-   * a run. Refused at start time rather than silently picking another harness.
-   */
   | "kanban-runtime-missing"
   /* Platform */
   | "config-invalid"
   | "settings-open-failed"
-  | "supervisor-restarted"
   | "internal-error";
 
-/** The stage a failure belongs to (v11 §20). */
-export type FailureStage =
-  | "workspace"
-  | "source"
-  | "runtime"
-  | "agent"
-  | "validation"
-  | "finalization"
-  | "publish";
+/** The stage a failure belongs to. */
+export type FailureStage = "workspace" | "runtime" | "agent";
 
 const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
-  "source-url-invalid": "source",
-  "source-not-found": "source",
-  "source-auth-failed": "source",
-  "source-network-failed": "source",
-  "source-credential-missing": "source",
-  "source-credential-invalid": "source",
-  "credential-host-mismatch": "source",
-  "credential-transport-mismatch": "source",
-  "secret-scope-not-allowed": "runtime",
-  "base-ref-not-found": "source",
-  "branch-invalid": "source",
-  "branch-not-found": "source",
-  "branch-conflict": "source",
   "workspace-create-failed": "workspace",
   "workspace-locked": "workspace",
   "workspace-invalid": "workspace",
@@ -145,39 +88,15 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "runtime-start-failed": "runtime",
   "runtime-lost": "runtime",
   "runtime-timeout": "runtime",
-  "runtime-not-isolated": "runtime",
-  "runtime-not-allowed-for-project-task": "runtime",
   "agent-start-failed": "agent",
   "agent-failed": "agent",
   "agent-timeout": "agent",
   "agent-cancelled": "agent",
-  "validation-failed": "validation",
-  "validation-timeout": "validation",
-  "validation-runtime-failed": "validation",
-  "validation-runtime-unavailable": "validation",
-  "validation-verdict-missing": "validation",
-  "validation-secret-not-allowed": "validation",
-  "git-state-invalid": "finalization",
-  "git-commit-failed": "finalization",
-  "git-push-failed": "publish",
-  "git-push-auth-failed": "publish",
-  "git-push-rejected": "publish",
-  "remote-branch-conflict": "publish",
-  "publish-revision-missing": "publish",
-  "workspace-diverged-after-finalization": "publish",
-  // Secret material that cannot be read. Not a lifecycle stage — these codes
-  // are raised at the store boundary and reported by whichever API or service
-  // touched the secret.
-  "secret-legacy-format": "workspace",
-  "secret-key-invalid": "workspace",
-  "secret-decrypt-failed": "workspace",
-  // A profile the Task or Project references no longer resolves: the failure
-  // belongs to run preparation, and the agent never started.
+  // A profile the Task references no longer resolves: the failure belongs to
+  // run preparation, and the agent never started.
   "profile-not-found": "agent",
   "model-not-found": "runtime",
-  // A board card's agent failure is an agent-stage failure of the card task,
-  // and an interrupted board session is an interrupted agent, not a
-  // platform-cancelled run.
+  // A board card's agent failure is an agent-stage failure of the card task.
   "kanban-agent-failed": "agent",
   "kanban-session-interrupted": "agent",
 };
@@ -188,8 +107,7 @@ export function stageForCode(code: ErrorCode): FailureStage {
 
 /**
  * The single error type raised by platform-enforced lifecycle steps. It is
- * deliberately not `Error`-with-a-string: the code drives retry semantics
- * (retry agent vs retry validation vs retry publish).
+ * deliberately not `Error`-with-a-string: the code drives retry semantics.
  */
 export class DomainError extends Error {
   readonly code: ErrorCode;
@@ -212,31 +130,21 @@ export function isDomainError(err: unknown): err is DomainError {
 
 /** HTTP status for a domain error, so the API stays consistent. */
 export function httpStatusForCode(code: ErrorCode): number {
-  if (code.endsWith("-not-found") || code === "project-not-found" || code === "credential-not-found") return 404;
+  if (code.endsWith("-not-found")) return 404;
   if (
     code === "workspace-locked" ||
-    code === "branch-conflict" ||
-    code === "remote-branch-conflict" ||
     code === "task-busy" ||
     code === "task-state-invalid" ||
-    code === "workspace-diverged-after-finalization" ||
-    code === "publish-revision-missing" ||
     code === "kanban-session-not-startable" ||
     code === "kanban-card-not-editable" ||
-    code === "kanban-project-duplicate"
+    code === "kanban-workspace-duplicate"
   ) {
     return 409;
   }
   if (
-    code === "source-auth-failed" ||
     code === "git-push-auth-failed" ||
     code === "policy-denied" ||
-    code === "runtime-not-isolated" ||
-    code === "runtime-not-allowed-for-project-task" ||
-    code === "credential-host-mismatch" ||
-    code === "credential-transport-mismatch" ||
     code === "secret-scope-not-allowed" ||
-    code === "validation-secret-not-allowed" ||
     code === "kanban-terminal-unauthorized"
   ) {
     return 403;
@@ -249,15 +157,12 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "runtime-start-failed" ||
     code === "runtime-lost" ||
     code === "runtime-timeout" ||
-    code === "validation-runtime-failed" ||
-    code === "validation-runtime-unavailable" ||
-    code === "validation-verdict-missing" ||
     code === "source-not-found"
   ) {
     return 502;
   }
-  // A `git`/`gh` invocation the platform ran and that failed on its own terms
-  // (clone, init) is a server-side failure, not bad client input.
+  // A `git` invocation the platform ran and that failed on its own terms is a
+  // server-side failure, not bad client input.
   if (code === "kanban-git-command-failed") return 500;
   return 400;
 }
@@ -270,54 +175,23 @@ export function asDomainError(err: unknown, fallback: ErrorCode, context?: strin
 }
 
 /* ------------------------------------------------------------------ */
-/* Retry semantics (v11 §31)                                          */
+/* Retry semantics                                                    */
 /* ------------------------------------------------------------------ */
 
-/** The retry a failure permits. Never a single generic "retry task". */
-export type RetryKind = "agent" | "validation" | "publish" | "none";
+/** The retry a failure permits. */
+export type RetryKind = "agent" | "none";
 
 export function retryKindForFailure(stage: FailureStage | undefined): RetryKind {
-  switch (stage) {
-    case "workspace":
-    case "source":
-    case "runtime":
-    case "agent":
-      return "agent";
-    case "validation":
-      return "validation";
-    case "finalization":
-      // A failed finalization leaves the workspace intact; the next agent run
-      // re-inspects and re-commits, which is the honest recovery path.
-      return "agent";
-    case "publish":
-      return "publish";
-    default:
-      return "none";
-  }
+  return stage ? "agent" : "none";
 }
 
 /**
- * Whether a failure is *transient* — the environment broke, not the work.
- *
- * This is the one classification automatic retry keys off. It deliberately
- * stays a small allowlist rather than "everything except a denylist":
- * `agent-failed` / `agent-timeout` (the work itself), `validation-failed`
- * (a test that ran and failed), `git-push-auth-failed` (a credential that
- * will not fix itself) and every configuration error are permanent as far as
- * an automatic retry is concerned — retrying them either burns model budget
- * for nothing or hides a real signal.
- *
- * `runtime-create-failed` / `runtime-start-failed` look infrastructural but
- * are configuration errors in this codebase (runtime missing / disabled / no
- * adapter registered), and `runtime-lost` / `runtime-timeout` are never
- * raised — none of them belong here.
+ * Whether a failure is transient — the environment broke, not the work.
+ * Automatic retry keys off this one classification.
  */
 export function isTransientErrorCode(code: string): boolean {
   switch (code) {
     case "source-network-failed":
-    case "validation-runtime-failed":
-    case "validation-runtime-unavailable":
-    case "validation-verdict-missing":
     case "git-push-failed":
       return true;
     default:

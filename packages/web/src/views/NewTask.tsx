@@ -1,139 +1,84 @@
 import { useState } from "react";
 import { get, post } from "../api";
 import { ErrorBox, Field, Icon, useAsync } from "../components";
-import { HARNESS_NATIVE_KINDS, HARNESS_THREAD_SOURCES } from "../harness";
+import { HARNESS_NATIVE_KINDS } from "../harness";
 import { useT } from "../i18n-react";
 import { modelOptionLabel } from "../presentation";
 import { navigate } from "../router";
 
 /**
  * New Task (v5 §14): the user describes a Task, not a Run. Submitting
- * creates the Task + Run #1 and lands on the Task Thread — never on the
- * Run Detail page.
+ * creates the Task + Run #1 and lands on the Task Thread.
  *
- * The composer has two modes and the Project selector is what picks between
- * them (v11 §39, which starts the Task flow at "Select Project"):
+ * AgentFabric is a control plane over local harnesses, so the composer asks
+ * for exactly three things:
  *
- * - **Project mode** — the default whenever a Project exists. A Project
- *   defines the codebase, so the user chooses it first and then only the
- *   decisions a Task actually owns: base ref, working branch, branch mode,
- *   optional runtime/model overrides, and an optional validation override
- *   (a natural-language acceptance standard the validation agent judges;
- *   replaces the Project's wholesale, empty inherits it — v12 §3.2). There
- *   is deliberately **no Workspace selector**: `1 Task = 1 Managed
- *   Workspace` (v11 §5.1) and the platform creates it, so the working copy
- *   is not the user's to pick.
- *   Submission goes to `POST /api/projects/:id/tasks` and lands on the Task
- *   Lifecycle page, where phase / agent / validation / publish are visible.
+ * - **Workspace** — an absolute directory on this machine. The task runs
+ *   *in place*: no clone, no branch, no push. Git writes (commit, push) are
+ *   the harness's business, never the platform's.
+ * - **Runtime** — any runtime usable in tasks, host or container: a local
+ *   harness (OpenCode, Pi, Codex, Claude Code, DSH) or a Docker-isolated
+ *   runtime. The list is deliberately **not** filtered by isolation — the
+ *   workspace says what directory is mounted, the runtime says where the
+ *   agent process runs, and both combinations are legitimate.
+ * - **Model** — skipped for harness-native runtimes, which run on their own
+ *   logged-in account and default model (v6 §3, v7 §3).
  *
- * - **Workspace mode** — "Project: none", the advanced path v11 §5.4 and
- *   v11 hardening §37 require to stay available (non-project task, local
- *   runtime, external workspace). With no Project there is no codebase
- *   definition, so the working copy *is* the user's decision: the Workspace
- *   selector is what makes this mode meaningful. Submission goes to the
- *   classic `POST /api/runs` and lands on the Task Thread.
- *
- * Every selector shows a concrete, visible default instead of a "default"
- * pseudo-option: runtime → the Project's default, else built-in Pi Agent,
- * else the first eligible runtime; model → the Project's default, else the
- * runtime's default, else the first model of the first configured provider;
- * workspace → first configured workspace. A missing prerequisite (no LLM, no
- * workspace, no eligible runtime) blocks submission with a pointer to the
- * right settings tab — except for harness-native runtimes (Codex + ChatGPT,
- * Claude Code + Claude.ai — v6 §3/v7 §3), which need neither a provider nor
- * a model.
- *
- * The runtime list is mode-specific and served, never derived. A Project
- * Coding Task runs isolated or it does not run at all (v11 hardening §4), so
- * Project mode reads `/api/runtimes/project-eligible` — the same rule the
- * server enforces at submit. Rendering the unfiltered list here would put
- * runtimes on screen that the server then refuses.
+ * There is no Project here. A Project used to own a repository, a clone and a
+ * branch; all three decisions are gone, and so is the form that asked for
+ * them. The workspace carries the default runtime/model a task inherits when
+ * the user does not pick one.
  *
  * Discovery of work that started outside AgentFabric lives on its own page
- * (/sessions, v6 §6/§11, v7 §9/§11): this page is where a task is
- * described; that one is where existing local harness sessions are found
- * and adopted.
+ * (/sessions, v6 §6/§11, v7 §9/§11): this page is where a task is described;
+ * that one is where existing local harness sessions are found and adopted.
  */
 
 export function NewTaskView() {
   const t = useT();
-  // Two served runtime lists, one per mode. Both are fetched up front so
-  // switching the Project selector never leaves the pill empty.
-  const classicRuntimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
-  const projectRuntimes = useAsync<any[]>(() => get("/api/runtimes/project-eligible"), []);
+  const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
+  const runtimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
   const providers = useAsync<any[]>(() => get("/api/providers"), []);
   const models = useAsync<any[]>(() => get("/api/models"), []);
-  const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
-  const projects = useAsync<any[]>(() => get("/api/projects"), []);
-  // AGENT_UI_HIDDEN: 下方的 Agent 选择器已注释。这个请求与 profileId 相关的
-  // 默认值逻辑（effectiveRuntimeId / effectiveModelId 的 profile 分支、提交体
-  // 里的 profileId 字段）原样保留——选择器隐藏期间 profileId 恒为 ""，这些
-  // 分支不会命中；恢复入口只需取消注释带 AGENT_UI_HIDDEN 标记的块。
-  const profiles = useAsync<any[]>(() => get("/api/agents"), []);
+
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
+  const [workspaceChoice, setWorkspaceChoice] = useState("");
   const [runtimeChoice, setRuntimeChoice] = useState("");
   const [runtimeTouched, setRuntimeTouched] = useState(false);
   const [modelChoice, setModelChoice] = useState("");
   const [modelTouched, setModelTouched] = useState(false);
-  const [workspaceChoice, setWorkspaceChoice] = useState("");
-  const [profileId, setProfileId] = useState("");
-  // The Project selector: absent means "none" (workspace mode). The first
-  // Project is the visible default so the primary flow — a coding task
-  // against a real repository — is one keystroke away.
-  const [projectChoice, setProjectChoice] = useState("");
-  const [projectTouched, setProjectTouched] = useState(false);
-  // Task-owned branch decisions (v11 §7/§8), only meaningful in Project mode.
-  const [baseRef, setBaseRef] = useState("");
-  const [workingBranch, setWorkingBranch] = useState("");
-  const [branchMode, setBranchMode] = useState("new");
-  // Task-level validation override (v12 §3.2), also Project mode only: a
-  // validation cycle exists only on a Project Coding Task, and this prompt
-  // replaces the Project's wholesale (it never merges).
-  const [validation, setValidation] = useState("");
   // Container lifecycle for the task, decided at creation and immutable
   // afterwards; `ephemeral` is what the server materializes when unset.
   const [lifecycle, setLifecycle] = useState("ephemeral");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Inline workspace creation: a task needs a directory, and sending the user
+  // to another page to add one is a needless round trip.
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newPath, setNewPath] = useState("");
 
-  const modelList = models.data ?? [];
   const workspaceList = workspaces.data ?? [];
   const providerList = providers.data ?? [];
-  const projectList = projects.data ?? [];
-  const profile = (profiles.data ?? []).find((p: any) => p.id === profileId);
+  const modelList = models.data ?? [];
+  const selectableRuntimes = (runtimes.data ?? []).filter((r: any) => r.enabled && r.usableInTask);
   const inList = (list: any[], id?: string) => Boolean(id && list.some((x) => x.id === id));
 
-  const effectiveProjectId = projectTouched
-    ? inList(projectList, projectChoice)
-      ? projectChoice
-      : ""
-    : projectList[0]?.id ?? "";
-  const effectiveProject = projectList.find((p: any) => p.id === effectiveProjectId);
-  const projectMode = Boolean(effectiveProject);
-  const projectDefaultBranch = effectiveProject?.source?.defaultBranch || "main";
-  // What the task inherits when the override is left empty — shown in the
-  // placeholder so "empty keeps the Project's" is concrete, not a promise.
-  const projectValidationPrompt: string = effectiveProject?.validation?.prompt ?? "";
-
-  // Mode-specific runtime list. `project-eligible` already means enabled +
-  // usableInTask + sandboxed, so the filter below is a no-op there; it is
-  // what narrows the classic list.
-  const runtimeSource = projectMode ? projectRuntimes : classicRuntimes;
-  const selectableRuntimes = (runtimeSource.data ?? []).filter((r: any) => r.enabled && r.usableInTask);
-
   // Visible defaults — the submitted ids are always the concrete values on
-  // screen. Choosing an Agent profile visibly re-resolves the fields the
-  // user has not touched; so does switching Project, whose defaults the
-  // Task inherits (v11 §24).
+  // screen. Switching workspace re-resolves the runtime/model the user has
+  // not touched, because the workspace carries those defaults.
+  const effectiveWorkspaceId = inList(workspaceList, workspaceChoice)
+    ? workspaceChoice
+    : workspaceList[0]?.id ?? "";
+  const workspace = workspaceList.find((w: any) => w.id === effectiveWorkspaceId);
+
   const builtinPi = selectableRuntimes.find((r: any) => r.kind === "pi");
   const effectiveRuntimeId = runtimeTouched
     ? runtimeChoice
-    : inList(selectableRuntimes, profile?.runtimeId)
-      ? profile.runtimeId
-      : inList(selectableRuntimes, effectiveProject?.execution?.runtimeId)
-        ? effectiveProject.execution.runtimeId
-        : builtinPi?.id ?? selectableRuntimes[0]?.id ?? "";
+    : inList(selectableRuntimes, workspace?.runtimeId)
+      ? workspace.runtimeId
+      : builtinPi?.id ?? selectableRuntimes[0]?.id ?? "";
   const effectiveRuntime = selectableRuntimes.find((r: any) => r.id === effectiveRuntimeId);
   // Harness-native runtimes (v6 §2/§3, v7 §2/§3) run on their own account —
   // Codex's ChatGPT or Claude Code's Claude.ai login and default model. No
@@ -149,74 +94,62 @@ export function NewTaskView() {
   const providerDefaultModelId = firstProviderWithModels
     ? modelList.find((m: any) => m.providerId === firstProviderWithModels.id)?.id ?? ""
     : "";
-  // Mirrors the supervisor's `resolveModelId`: explicit > Project default >
-  // runtime default > first enabled model.
+  // Explicit > workspace default > runtime default > first enabled model.
   const effectiveModelId = modelTouched
     ? modelChoice
-    : inList(modelList, profile?.modelId)
-      ? profile.modelId
-      : inList(modelList, effectiveProject?.execution?.modelId)
-        ? effectiveProject.execution.modelId
-        : inList(modelList, effectiveRuntime?.defaultModelId)
-          ? effectiveRuntime.defaultModelId
-          : providerDefaultModelId || (modelList[0]?.id ?? "");
+    : inList(modelList, workspace?.modelId)
+      ? workspace.modelId
+      : inList(modelList, effectiveRuntime?.defaultModelId)
+        ? effectiveRuntime.defaultModelId
+        : providerDefaultModelId || (modelList[0]?.id ?? "");
 
-  const effectiveWorkspaceId = inList(workspaceList, workspaceChoice) ? workspaceChoice : workspaceList[0]?.id ?? "";
-
+  const missingWorkspace = !workspaces.loading && workspaceList.length === 0;
+  const missingRuntime = !runtimes.loading && selectableRuntimes.length === 0;
   const missingModel = !harnessNative && !models.loading && modelList.length === 0;
-  // A Project Task gets its managed Workspace from the platform, so the
-  // Workspace prerequisite only applies to workspace mode (v11 §5.1/§39).
-  const missingWorkspace = !projectMode && !workspaces.loading && workspaceList.length === 0;
-  // Refused at submit anyway (`runtime-not-isolated`); say so before the
-  // click rather than after it.
-  const missingProjectRuntime =
-    projectMode && !projectRuntimes.loading && selectableRuntimes.length === 0;
-  const blocked = missingModel || missingWorkspace || missingProjectRuntime;
+  const blocked = missingWorkspace || missingRuntime || missingModel;
+
+  const createWorkspace = async () => {
+    const path = newPath.trim();
+    if (!path || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await post<any>("/api/workspaces", {
+        name: newName.trim() || path.split("/").filter(Boolean).pop() || path,
+        type: "local",
+        path,
+      });
+      setCreating(false);
+      setNewName("");
+      setNewPath("");
+      workspaces.reload();
+      setWorkspaceChoice(created.id);
+      // The new workspace's own defaults decide the runtime/model until the
+      // user touches those pills.
+      setRuntimeTouched(false);
+      setModelTouched(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const submit = async () => {
     if (!prompt.trim() || busy || blocked) return;
     setBusy(true);
     setError(null);
     try {
-      if (effectiveProject) {
-        // Project mode (v11 §39): the platform creates the managed
-        // Workspace, clones the source and publishes the working branch.
-        // No workspaceId is sent — that decision is not the user's here.
-        const validationPrompt = validation.trim();
-        const r = await post<any>(`/api/projects/${effectiveProject.id}/tasks`, {
-          instruction: prompt.trim(),
-          title: title.trim() || undefined,
-          baseRef: baseRef.trim() || undefined,
-          workingBranch: workingBranch.trim() || undefined,
-          branchMode,
-          runtimeId: effectiveRuntimeId || undefined,
-          // Harness-native runtimes never bind an AgentFabric model (v6 §3).
-          modelId: harnessNative ? undefined : effectiveModelId || undefined,
-          profileId: profileId || undefined,
-          lifecycle: { mode: lifecycle },
-          // Empty text means "no override" — the Project's validation
-          // applies. Sending an empty prompt would be a config error, which
-          // is the opposite of leaving the field untouched.
-          ...(validationPrompt ? { validation: { prompt: validationPrompt } } : {}),
-        });
-        // Create Task → Run #1 → Task Thread (v5 §14). The thread is where
-        // the run is watched; the lifecycle view is one click away from its
-        // header, never the landing page — landing there hid the running
-        // agent behind a status table.
-        navigate(`/tasks/${r.task.id}`);
-      } else {
-        const r = await post<any>("/api/runs", {
-          prompt: prompt.trim(),
-          title: title.trim() || undefined,
-          runtimeId: effectiveRuntimeId || undefined,
-          modelId: harnessNative ? undefined : effectiveModelId || undefined,
-          workspaceId: effectiveWorkspaceId || undefined,
-          profileId: profileId || undefined,
-          lifecycle: { mode: lifecycle },
-        });
-        // Create Task → Create Run #1 → Task Thread (v5 §14).
-        navigate(`/tasks/${r.task.id}`);
-      }
+      const r = await post<any>("/api/runs", {
+        prompt: prompt.trim(),
+        title: title.trim() || undefined,
+        runtimeId: effectiveRuntimeId || undefined,
+        modelId: harnessNative ? undefined : effectiveModelId || undefined,
+        workspaceId: effectiveWorkspaceId || undefined,
+        lifecycle: { mode: lifecycle },
+      });
+      // Create Task → Create Run #1 → Task Thread (v5 §14).
+      navigate(`/tasks/${r.task.id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -227,9 +160,9 @@ export function NewTaskView() {
     <div className="new-task">
       <h1>{t("newtask.title")}</h1>
       <p className="sub">{t("newtask.sub")}</p>
-      {missingModel && <ErrorBox message={t("newtask.missingModel")} />}
       {missingWorkspace && <ErrorBox message={t("newtask.missingWorkspace")} />}
-      {missingProjectRuntime && <ErrorBox message={t("newtask.missingRuntime")} />}
+      {missingRuntime && <ErrorBox message={t("newtask.missingRuntime")} />}
+      {missingModel && <ErrorBox message={t("newtask.missingModel")} />}
       <ErrorBox message={error} />
 
       <div className="composer new-task-composer">
@@ -248,131 +181,49 @@ export function NewTaskView() {
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
-        {/* Branch decisions exist only for a Project Task (v11 §7/§8): with
-            no Project there is no source to branch from. */}
-        {projectMode && (
-          <details className="new-task-details" open>
-            <summary>{t("newtask.branch.summary")}</summary>
+        {/* Inline workspace creation. The path is the whole definition of a
+            workspace: the task runs there in place, so nothing is cloned and
+            nothing is asked about branches. */}
+        {creating && (
+          <div className="new-task-details">
             <div className="form-grid-2">
-              <Field label={t("newtask.branch.baseRef", { branch: projectDefaultBranch })}>
+              <Field label={t("newtask.workspace.name")}>
                 <input
-                  value={baseRef}
-                  onChange={(e) => setBaseRef(e.target.value)}
-                  placeholder={projectDefaultBranch}
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder={t("newtask.workspace.namePlaceholder")}
                 />
               </Field>
-              <Field label={t("newtask.branch.workingBranch")}>
+              <Field label={t("newtask.workspace.path")}>
                 <input
-                  value={workingBranch}
-                  onChange={(e) => setWorkingBranch(e.target.value)}
-                  placeholder={t("newtask.branch.workingBranch.placeholder")}
+                  value={newPath}
+                  onChange={(e) => setNewPath(e.target.value)}
+                  placeholder={t("newtask.workspace.pathPlaceholder")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") createWorkspace();
+                  }}
                 />
               </Field>
             </div>
-            {/* Full width: the two modes need a sentence each to explain
-                themselves, and half a grid column truncates them. */}
-            <Field label={t("newtask.branch.mode")}>
-              <select value={branchMode} onChange={(e) => setBranchMode(e.target.value)}>
-                <option value="new">{t("newtask.branch.mode.new")}</option>
-                <option value="continue">{t("newtask.branch.mode.continue")}</option>
-              </select>
-            </Field>
-          </details>
-        )}
-        {/* Task-level validation override (v12 §3.2): a Project Task runs the
-            Project's validation unless this prompt replaces it. Empty means
-            "inherit the Project's". */}
-        {projectMode && (
-          <details className="new-task-details">
-            <summary>{t("newtask.validation.summary")}</summary>
-            <Field label={t("newtask.validation.label")}>
-              <textarea
-                rows={3}
-                value={validation}
-                onChange={(e) => setValidation(e.target.value)}
-                placeholder={projectValidationPrompt || t("newtask.validation.placeholder")}
-              />
-            </Field>
-          </details>
+            <div className="modal-actions">
+              <button onClick={() => setCreating(false)}>{t("newtask.workspace.cancel")}</button>
+              <button className="primary" disabled={busy || !newPath.trim()} onClick={createWorkspace}>
+                {t("newtask.workspace.create")}
+              </button>
+            </div>
+          </div>
         )}
         <div className="composer-bar">
-          {projectList.length > 0 && (
-            <select
-              className="pill"
-              value={effectiveProjectId}
-              onChange={(e) => {
-                setProjectChoice(e.target.value);
-                setProjectTouched(true);
-                // Re-resolve runtime/model against the new Project's
-                // defaults, and drop branch input that belonged to the
-                // previous one.
-                setRuntimeChoice("");
-                setRuntimeTouched(false);
-                setModelChoice("");
-                setModelTouched(false);
-                setBaseRef("");
-                setWorkingBranch("");
-                // A command list written for one repository's toolchain is
-                // meaningless for another's — drop it with the branch input.
-                setValidation("");
-              }}
-              title={projectMode ? t("newtask.project.title") : t("newtask.project.titleNone")}
-            >
-              {projectList.map((p: any) => (
-                <option key={p.id} value={p.id}>
-                  {t("newtask.option.project", { name: p.name })}
-                </option>
-              ))}
-              {/* Kept short enough to render inside the pill's 240px cap;
-                  the subtitle and the tooltip carry the full explanation. */}
-              <option value="">{t("newtask.option.projectNone")}</option>
-            </select>
-          )}
-          {/* Hidden rather than rendered empty when the mode offers no
-              runtime: the ErrorBox above already explains why, and submit
-              is blocked regardless. */}
-          {selectableRuntimes.length > 0 && (
-            <select
-              className="pill"
-              value={effectiveRuntimeId}
-              onChange={(e) => { setRuntimeChoice(e.target.value); setRuntimeTouched(true); }}
-              title={projectMode ? t("newtask.runtime.titleProject") : t("newtask.runtime.title")}
-            >
-              {selectableRuntimes.map((r: any) => (
-                <option key={r.id} value={r.id}>
-                  {t("newtask.option.runtime", { name: r.name, kind: r.kind })}
-                </option>
-              ))}
-            </select>
-          )}
-          {harnessNative ? (
-            <span
-              className="pill harness-native-note"
-              title={t("newtask.model.harnessNote.title")}
-            >
-              {t("newtask.model.harnessNote")}
-            </span>
-          ) : (
-            <select
-              className="pill"
-              value={effectiveModelId}
-              onChange={(e) => { setModelChoice(e.target.value); setModelTouched(true); }}
-              title={t("newtask.model.title")}
-            >
-              {modelList.map((m: any) => (
-                <option key={m.id} value={m.id}>
-                  {t("newtask.option.model", { name: modelOptionLabel(providerList, m) })}
-                </option>
-              ))}
-            </select>
-          )}
-          {/* Workspace mode only: a Project Task's working copy is managed
-              (1 Task = 1 Managed Workspace, v11 §5.1), never chosen. */}
-          {!projectMode && (
+          {workspaceList.length > 0 && (
             <select
               className="pill"
               value={effectiveWorkspaceId}
-              onChange={(e) => setWorkspaceChoice(e.target.value)}
+              onChange={(e) => {
+                setWorkspaceChoice(e.target.value);
+                // The runtime/model a task inherits come from the workspace.
+                setRuntimeTouched(false);
+                setModelTouched(false);
+              }}
               title={t("newtask.workspace.title")}
             >
               {workspaceList.map((w: any) => (
@@ -382,14 +233,49 @@ export function NewTaskView() {
               ))}
             </select>
           )}
-          {/* AGENT_UI_HIDDEN: Agent Profile 选择器，恢复入口时取消注释。
-          <select className="pill" value={profileId} onChange={(e) => setProfileId(e.target.value)} title={t("common.agentProfile")}>
-            <option value="">Agent: none</option>
-            {(profiles.data ?? []).map((p: any) => (
-              <option key={p.id} value={p.id}>Agent: {p.name}</option>
-            ))}
-          </select>
-          */}
+          <button className="pill" onClick={() => setCreating((v) => !v)} title={t("newtask.workspace.newTitle")}>
+            {t("newtask.workspace.new")}
+          </button>
+          {/* Hidden rather than rendered empty when no runtime is usable: the
+              ErrorBox above already explains why, and submit is blocked. */}
+          {selectableRuntimes.length > 0 && (
+            <select
+              className="pill"
+              value={effectiveRuntimeId}
+              onChange={(e) => {
+                setRuntimeChoice(e.target.value);
+                setRuntimeTouched(true);
+              }}
+              title={t("newtask.runtime.title")}
+            >
+              {selectableRuntimes.map((r: any) => (
+                <option key={r.id} value={r.id}>
+                  {t("newtask.option.runtime", { name: r.name, kind: r.kind })}
+                </option>
+              ))}
+            </select>
+          )}
+          {harnessNative ? (
+            <span className="pill harness-native-note" title={t("newtask.model.harnessNote.title")}>
+              {t("newtask.model.harnessNote")}
+            </span>
+          ) : (
+            <select
+              className="pill"
+              value={effectiveModelId}
+              onChange={(e) => {
+                setModelChoice(e.target.value);
+                setModelTouched(true);
+              }}
+              title={t("newtask.model.title")}
+            >
+              {modelList.map((m: any) => (
+                <option key={m.id} value={m.id}>
+                  {t("newtask.option.model", { name: modelOptionLabel(providerList, m) })}
+                </option>
+              ))}
+            </select>
+          )}
           {/* The lifecycle belongs to the Task, not the runtime: chosen here,
               once, and inherited by every later turn of this task. */}
           <select
@@ -412,21 +298,6 @@ export function NewTaskView() {
           </button>
         </div>
       </div>
-
-      {!projects.loading && projectList.length === 0 && (
-        <p className="sub">
-          {t("newtask.noProjects")}{" "}
-          <a
-            href="/projects"
-            onClick={(e) => {
-              e.preventDefault();
-              navigate("/projects");
-            }}
-          >
-            {t("newtask.noProjects.create")}
-          </a>
-        </p>
-      )}
 
       {/* Existing local harness work lives on its own page (v6 §6, v7 §9) —
           this page only describes new tasks. */}

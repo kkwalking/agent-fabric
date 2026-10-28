@@ -1,17 +1,14 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { cp, mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { Store, newId } from "./store.js";
 import { EventBus } from "./eventbus.js";
 import { emptyUsage, addUsage, estimateCost } from "./cost.js";
 import { DomainError, isDomainError } from "./errors.js";
-import { validateRemoteUrl, checkCredentialBinding, type CredentialBindingCheck, type GitCredentialInput } from "./git.js";
 import { decryptSecretValue, encryptSecretValue, isEncryptedSecretValue } from "./secretCrypto.js";
-import { assertSecretAllowed, resolveSecretsForPurpose, type SecretPurpose } from "./secrets.js";
+import { resolveSecretsForPurpose, type SecretPurpose } from "./secrets.js";
 import { taskLifecycle } from "./lifecycle.js";
-import { validationConfigProblem } from "./validation.js";
 import type {
   ID,
   Provider,
@@ -33,20 +30,7 @@ import type {
   RuntimeSessionRef,
   RuntimeNativeState,
   Handoff,
-  Project,
-  SourceProvider,
-  SourceType,
-  SourceCredential,
-  SourceCredentialView,
-  SourceCredentialType,
-  ProjectBoardSettings,
-  ProjectExecutionConfig,
-  ProjectSkill,
-  McpServerConfig,
-  ValidationConfig,
-  GitPublishPolicy,
   WorkspaceLock,
-  BranchMode,
   TaskExecution,
 } from "./types.js";
 
@@ -263,9 +247,9 @@ export interface NewRuntimeInput {
   filesystemPolicy?: Runtime["filesystemPolicy"];
   config?: Record<string, unknown>;
   /**
-   * Declared execution backend (v11 hardening §4). `isolated` marks the
-   * runtime eligible for Project Coding Tasks; `host` marks it
-   * development-only. Absent derives from `containerized`.
+   * Declared execution backend (v11 hardening §4): `isolated` runs inside a
+   * container/VM boundary, `host` runs as a local process. Absent derives
+   * from `containerized`.
    */
   executionBackend?: Runtime["executionBackend"];
 }
@@ -357,11 +341,8 @@ export class RuntimeService {
 /* ------------------------------------------------------------------ */
 
 /**
- * A user-owned working directory.
- *
- * There is no `repoUrl` here: a repository is described by a Project (`source`),
- * which is also what carries the credential, default branch and execution
- * defaults a task needs. A workspace is only ever a directory.
+ * A user-owned working directory. A repository is simply a directory that
+ * happens to hold one — there is no separate source entity.
  */
 export interface NewWorkspaceInput {
   name: string;
@@ -369,6 +350,9 @@ export interface NewWorkspaceInput {
   path?: string;
   mountPath?: string;
   persistent?: boolean;
+  /** Default runtime/model for tasks started here (see `Workspace`). */
+  runtimeId?: ID;
+  modelId?: ID;
 }
 
 /**
@@ -391,19 +375,14 @@ export class WorkspaceService {
 
   /**
    * Creates an external (user-owned) working directory.
-   *
-   * A repository is not a workspace type: it is a Project `source`, which also
-   * carries the credential, default branch and execution defaults a task needs.
-   * `Project` is the only answer to "where does the code come from".
    */
   async create(input: NewWorkspaceInput): Promise<Workspace> {
-    // A wire request has no type: a client built against the old shape can still
-    // send `type: "git"`. Refuse it instead of creating a directory nothing
-    // clones into and no task can run.
+    // A wire request has no type: a client built against the old shape can
+    // still send `type: "git"`. A workspace is a directory, never a type.
     if ((input as { type: string }).type === "git") {
       throw new DomainError(
         "config-invalid",
-        "A git repository is configured as a Project source, not a workspace — create a Project instead"
+        "A git repository is just a directory on this machine — add it as a workspace instead"
       );
     }
     const id = newId("ws");
@@ -420,105 +399,11 @@ export class WorkspaceService {
       path,
       mountPath: input.mountPath ?? "/workspace",
       persistent: input.persistent ?? true,
+      runtimeId: input.runtimeId,
+      modelId: input.modelId,
       source: "create",
       status: "ready",
       ownership: "external",
-      createdAt: now(),
-    };
-    return this.store.insert("workspaces", workspace);
-  }
-
-  /**
-   * Create the platform-managed working copy for one Project-based Task
-   * (v11 §5.1/§10), owned by the platform and never shared between tasks.
-   *
-   * Two kinds of content, matching the two Project source types:
-   * - a git repository (`repoUrl`): the directory is created here and the
-   *   supervisor clones into it;
-   * - a directory (`sourcePath`): the directory is copied here, so the task
-   *   works on a copy and the user's own directory is never modified.
-   */
-  async createManaged(input: {
-    name: string;
-    projectId: ID;
-    taskId: ID;
-    /** Repository URL for a git-sourced Project. */
-    repoUrl?: string;
-    /** Directory to copy for a directory-sourced Project. */
-    sourcePath?: string;
-    workingBranch?: string;
-    mountPath?: string;
-    /**
-     * Use `sourcePath` **as the workspace** instead of copying it (v11 §5.4,
-     * the board's in-place product). The user's folder stays the single tree
-     * the Task works in, which is why the board records it as this Task's
-     * workspace rather than a per-task copy of it.
-     */
-    inPlace?: boolean;
-  }): Promise<Workspace> {
-    const id = newId("ws");
-    const inPlacePath = input.inPlace ? input.sourcePath?.trim() : undefined;
-    if (input.inPlace && !inPlacePath) {
-      throw new DomainError(
-        "workspace-create-failed",
-        "An in-place workspace needs the directory to use — `sourcePath` is missing"
-      );
-    }
-    if (inPlacePath) {
-      // No directory is created and nothing is copied: this Task's working tree
-      // *is* the user's folder. `ownership` stays `managed` because the platform
-      // owns the record, but nothing here takes ownership of the files.
-      return this.store.insert("workspaces", {
-        id,
-        name: input.name,
-        type: "local",
-        path: resolve(inPlacePath),
-        repoUrl: input.repoUrl,
-        branch: input.workingBranch,
-        workingBranch: input.workingBranch,
-        mountPath: input.mountPath ?? "/workspace",
-        persistent: true,
-        source: "create",
-        status: "ready",
-        ownership: "managed",
-        projectId: input.projectId,
-        taskId: input.taskId,
-        createdAt: now(),
-      } satisfies Workspace);
-    }
-    const path = join(this.store.dataDir, "workspaces", id);
-    try {
-      await mkdir(path, { recursive: true });
-      if (input.sourcePath) {
-        // Copy the tracked content into the task's own directory. `.git` is
-        // included on purpose: the supervisor commits the task's work in this
-        // copy and may need its history, and a copy keeps that off the original.
-        await cp(input.sourcePath, path, { recursive: true, errorOnExist: false });
-      }
-    } catch (err) {
-      throw new DomainError(
-        "workspace-create-failed",
-        `Could not create the managed workspace directory: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-    const workspace: Workspace = {
-      id,
-      name: input.name,
-      // A managed workspace is always a plain directory: for a git Project it is
-      // the clone the supervisor prepares into it, for a directory Project it is
-      // the copy made above.
-      type: "local",
-      path,
-      repoUrl: input.repoUrl,
-      branch: input.workingBranch,
-      workingBranch: input.workingBranch,
-      mountPath: input.mountPath ?? "/workspace",
-      persistent: true,
-      source: "create",
-      status: "ready",
-      ownership: "managed",
-      projectId: input.projectId,
-      taskId: input.taskId,
       createdAt: now(),
     };
     return this.store.insert("workspaces", workspace);
@@ -548,6 +433,8 @@ export class WorkspaceService {
       path: abs,
       mountPath: input.mountPath ?? "/workspace",
       persistent: input.persistent ?? true,
+      runtimeId: input.runtimeId,
+      modelId: input.modelId,
       source: "import",
       status: "ready",
       ownership: "external",
@@ -744,10 +631,8 @@ export class SecretService {
   }
 
   /**
-   * Resolves the Git credential material a Source Credential points at. This
-   * is the *only* path allowed to read a `git`-scoped secret, and it is
-   * reachable only from `SourceCredentialService.resolve` — the credential
-   * broker.
+   * Resolves `git`-scoped secret material. This is the only path allowed to
+   * read one, so an `agent-runtime` resolution can never obtain it.
    */
   resolveForGit(ids: ID[] | undefined): Secret[] {
     return resolveSecretsForPurpose(ids, "git", (id) => this.getWithValue(id));
@@ -817,11 +702,7 @@ export class ProfileService {
 /* ------------------------------------------------------------------ */
 
 export interface NewTaskInput {
-  /**
-   * Explicit task id. The execution supervisor generates it up front because
-   * the managed workspace and the system-generated working branch are both
-   * derived from it (v11 §8).
-   */
+  /** Explicit task id (used by callers that need to know it up front). */
   id?: ID;
   title?: string;
   prompt: string;
@@ -831,8 +712,6 @@ export interface NewTaskInput {
   profileId?: ID;
   env?: Record<string, string>;
   secretIds?: ID[];
-  /** Secrets the Task's validation commands may receive (v11 hardening §6.2). */
-  validationSecretIds?: ID[];
   tools?: string[];
   resourceLimits?: ResourceLimits;
   timeoutMs?: number;
@@ -845,18 +724,6 @@ export interface NewTaskInput {
    */
   lifecycle?: Task["lifecycle"];
   metadata?: Record<string, unknown>;
-  /** Project-based Task fields (v11 §6). */
-  projectId?: ID;
-  baseRef?: string;
-  baseCommitSha?: string;
-  workingBranch?: string;
-  branchMode?: BranchMode;
-  validation?: ValidationConfig;
-  git?: GitPublishPolicy;
-  /** Task-level skills override (v11 §25); absent = the Project's. */
-  skills?: ProjectSkill[];
-  /** Task-level MCP server override (v11 §26); absent = the Project's. */
-  mcpServers?: McpServerConfig[];
   execution?: TaskExecution;
 }
 
@@ -887,7 +754,6 @@ export class TaskService {
   }
 
   async create(input: NewTaskInput): Promise<Task> {
-    assertValidationConfig(input.validation);
     const task: Task = {
       id: input.id ?? newId("task"),
       title: input.title ?? input.prompt.slice(0, 80),
@@ -898,7 +764,6 @@ export class TaskService {
       profileId: input.profileId,
       env: input.env,
       secretIds: input.secretIds,
-      validationSecretIds: input.validationSecretIds,
       tools: input.tools,
       resourceLimits: input.resourceLimits,
       timeoutMs: input.timeoutMs,
@@ -906,15 +771,6 @@ export class TaskService {
       // Materialized once, here: the stored Task always carries the decision.
       lifecycle: taskLifecycle(input.lifecycle),
       metadata: input.metadata,
-      projectId: input.projectId,
-      baseRef: input.baseRef,
-      baseCommitSha: input.baseCommitSha,
-      workingBranch: input.workingBranch,
-      branchMode: input.branchMode,
-      validation: input.validation,
-      git: input.git,
-      skills: input.skills,
-      mcpServers: input.mcpServers,
       execution: input.execution,
       createdAt: now(),
     };
@@ -1296,461 +1152,6 @@ export class UsageService {
 }
 
 /* ------------------------------------------------------------------ */
-/* Project (v11 §2/§3)                                                */
-/* ------------------------------------------------------------------ */
-
-export interface NewProjectInput {
-  name: string;
-  description?: string;
-  /**
-   * Where the code comes from. `git` (the default) needs `remoteUrl`;
-   * `directory` needs `path` and must not carry a credential (there is no
-   * host to bind it to).
-   */
-  source: {
-    type?: SourceType;
-    remoteUrl?: string;
-    /** Absolute path of a `directory` source. */
-    path?: string;
-    /**
-     * Use the `directory` in place — the Task works in it instead of a managed
-     * copy (see `ProjectSource.workTree`). The board sets it.
-     */
-    workTree?: boolean;
-    provider?: SourceProvider;
-    defaultBranch?: string;
-    credentialId?: ID;
-  };
-  execution?: ProjectExecutionConfig;
-  skills?: ProjectSkill[];
-  mcpServers?: McpServerConfig[];
-  validation?: ValidationConfig;
-  git?: GitPublishPolicy;
-  /**
-   * Board settings (spec kanban-task-unification §1). Only a board-created
-   * Project carries them; the update merges a partial patch into the stored
-   * value, the same rule `execution` follows.
-   */
-  board?: Partial<ProjectBoardSettings>;
-}
-
-/** Infers the provider from the host so users never have to pick one. */
-export function inferSourceProvider(remoteUrl: string): SourceProvider {
-  const url = remoteUrl.toLowerCase();
-  if (url.includes("github.com")) return "github";
-  if (url.includes("gitlab")) return "gitlab";
-  if (url.includes("gitee.com")) return "gitee";
-  return "generic";
-}
-
-/**
- * Projects are the long-lived top-level business resource (v11 §2): one
- * codebase AgentFabric keeps working on. A Project owns its source definition
- * and the execution defaults every Task inherits; it never holds a working
- * copy (that is the Workspace's job) and never holds credential material
- * (that is the SourceCredential's job).
- */
-/**
- * A declared validation config must be usable — an empty prompt is a
- * configuration error, never a silent skip (v12 §3.1). Enforced at every
- * write boundary (project create/update, task create), so an invalid config
- * never reaches a record.
- */
-function assertValidationConfig(config: ValidationConfig | undefined): void {
-  const problem = validationConfigProblem(config);
-  if (problem) throw new DomainError("config-invalid", problem, "a validation prompt describes the acceptance standard the judge checks");
-}
-
-export class ProjectService {
-  constructor(private store: Store) {}
-
-  list(): Project[] {
-    return this.store.list<Project>("projects");
-  }
-
-  get(id: ID): Project | undefined {
-    return this.store.get<Project>("projects", id);
-  }
-
-  async create(input: NewProjectInput): Promise<Project> {
-    const name = input.name?.trim();
-    if (!name) throw new DomainError("project-invalid", "A project needs a name");
-    assertValidationConfig(input.validation);
-    const source = this.normalizeSource(input.source);
-    const project: Project = {
-      id: newId("proj"),
-      name,
-      description: input.description,
-      source,
-      execution: input.execution,
-      skills: input.skills,
-      mcpServers: input.mcpServers,
-      validation: input.validation,
-      git: input.git,
-      // Written once, complete: `workspaceType` is required on the record, so a
-      // Project that is a board project always carries the board's answer.
-      ...(input.board?.workspaceType !== undefined
-        ? { board: { ...input.board, workspaceType: input.board.workspaceType } }
-        : {}),
-      createdAt: now(),
-      updatedAt: now(),
-    };
-    return this.store.insert("projects", project);
-  }
-
-  async update(id: ID, patch: Partial<NewProjectInput>): Promise<Project | undefined> {
-    const project = this.get(id);
-    if (!project) return undefined;
-    assertValidationConfig(patch.validation);
-    const next: Partial<Project> = { updatedAt: now() };
-    if (patch.name !== undefined) {
-      const name = patch.name.trim();
-      if (!name) throw new DomainError("project-invalid", "A project needs a name");
-      next.name = name;
-    }
-    if (patch.description !== undefined) next.description = patch.description || undefined;
-    if (patch.source !== undefined) {
-      next.source = this.normalizeSource(patch.source, project.source);
-    }
-    // Merge, not replace: the settings form submits partial execution
-    // patches (it only renders a few fields), and a wholesale replace would
-    // silently drop everything the patch does not mention (timeoutMs,
-    // networkPolicy, validationSecretIds, …). `undefined` fields in the
-    // patch mean "not mentioned", never "clear this field" — removing a
-    // value is done by setting it explicitly (e.g. `null`-equivalent empty
-    // string is not a concept here; the form clears by omitting).
-    if (patch.execution !== undefined) next.execution = { ...project.execution, ...patch.execution };
-    if (patch.skills !== undefined) next.skills = patch.skills;
-    if (patch.mcpServers !== undefined) next.mcpServers = patch.mcpServers;
-    if (patch.validation !== undefined) next.validation = patch.validation;
-    if (patch.git !== undefined) next.git = patch.git;
-    // Same merge rule as `execution`: a board form submits only the fields it
-    // renders, so a partial board patch must not drop the others.
-    if (patch.board !== undefined) {
-      if (!project.board) {
-        if (patch.board.workspaceType === undefined) {
-          throw new DomainError(
-            "project-invalid",
-            "Board settings need a workspaceType the first time they are written — this Project is not a board project yet"
-          );
-        }
-        next.board = { ...patch.board, workspaceType: patch.board.workspaceType };
-      } else {
-        next.board = { ...project.board, ...patch.board };
-      }
-    }
-    return this.store.update<Project>("projects", id, next);
-  }
-
-  /**
-   * Validates one `source` input and turns it into the stored shape.
-   *
-   * The two source types have different prerequisites, and both are checked
-   * here rather than when a task starts:
-   * - `git`: a credential-free remote URL, and — if a credential is named — a
-   *   credential bound to that URL's host and transport (v11 hardening §9/§10).
-   * - `directory`: an absolute path that exists. A credential is refused
-   *   outright: there is no host for it to be bound to, so accepting one would
-   *   store a secret that can never be used.
-   */
-  private normalizeSource(
-    input: NonNullable<NewProjectInput["source"]>,
-    previous?: Project["source"]
-  ): Project["source"] {
-    const type = input.type ?? previous?.type ?? "git";
-    if (type === "directory") {
-      const path = input.path?.trim();
-      if (!path) throw new DomainError("project-invalid", "A directory project needs a path");
-      if (!isAbsolute(path)) throw new DomainError("project-invalid", "The directory path must be absolute");
-      if (!existsSync(path)) throw new DomainError("source-not-found", `Directory not found: ${path}`);
-      if (input.credentialId) {
-        throw new DomainError(
-          "project-invalid",
-          "A directory project cannot use a source credential — credentials are bound to a repository host"
-        );
-      }
-      return {
-        type: "directory",
-        path: resolve(path),
-        defaultBranch: input.defaultBranch?.trim() || "main",
-        // Carried over from the stored source: an update that only renames the
-        // Project must not silently turn an in-place board project into a
-        // per-task copy.
-        ...(input.workTree ?? previous?.workTree ? { workTree: true } : {}),
-      };
-    }
-    const remoteUrl = input.remoteUrl?.trim();
-    if (!remoteUrl) throw new DomainError("project-invalid", "A git project needs a repository URL");
-    const urlCheck = validateRemoteUrl(remoteUrl);
-    if (!urlCheck.ok) throw new DomainError("source-url-invalid", urlCheck.reason);
-    // The credential may be carried over from the current source; either way
-    // the *resulting* pairing must satisfy the host binding (§9/§10).
-    const credentialId = input.credentialId !== undefined ? input.credentialId : previous?.credentialId;
-    if (credentialId) {
-      const credential = this.store.get<SourceCredential>("sourceCredentials", credentialId);
-      if (!credential) throw new DomainError("credential-not-found", `Source credential not found: ${credentialId}`);
-      assertCredentialBinding(credential, remoteUrl);
-    }
-    return {
-      type: "git",
-      remoteUrl,
-      provider: input.provider ?? inferSourceProvider(remoteUrl),
-      defaultBranch: input.defaultBranch?.trim() || previous?.defaultBranch || "main",
-      credentialId,
-    };
-  }
-
-  async remove(id: ID): Promise<boolean> {
-    return this.store.remove("projects", id);
-  }
-
-  /** Tasks belonging to this project (live and deleted alike). */
-  taskIds(id: ID): ID[] {
-    return this.store.list<Task>("tasks").filter((t) => t.projectId === id).map((t) => t.id);
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Source Credential (v11 §4)                                         */
-/* ------------------------------------------------------------------ */
-
-/**
- * Project-level credential binding check (v11 hardening §9/§10): a Project
- * may only reference a credential that is scoped to its repository host and
- * compatible with its transport. Kept as a free function so both the Project
- * service and the supervisor's preflight run the exact same rule.
- */
-export function assertCredentialBinding(credential: SourceCredential, remoteUrl: string): void {
-  const check = checkCredentialBinding(credential, remoteUrl);
-  if (check.ok) return;
-  throw new DomainError(check.code, check.message, check.detail);
-}
-
-export interface NewSourceCredentialInput {
-  name: string;
-  type: SourceCredentialType;
-  host?: string;
-  username?: string;
-  /** HTTPS token (type `https-token`) or PEM private key (`ssh-key`). */
-  value?: string;
-  /** SSH key passphrase, when the key is encrypted. */
-  passphrase?: string;
-  knownHosts?: string;
-  /** Reference an existing Secret instead of creating one from `value`. */
-  secretId?: ID;
-}
-
-/**
- * Reusable Git credentials (v11 §4). The sensitive value always lives in the
- * existing Secret store: this record is metadata plus a Secret reference, and
- * the API only ever serves the masked preview.
- */
-export class SourceCredentialService {
-  constructor(private store: Store) {}
-
-  list(): SourceCredentialView[] {
-    return this.store
-      .list<SourceCredential>("sourceCredentials")
-      .map((c) => this.toView(c));
-  }
-
-  get(id: ID): SourceCredential | undefined {
-    return this.store.get<SourceCredential>("sourceCredentials", id);
-  }
-
-  getView(id: ID): SourceCredentialView | undefined {
-    const credential = this.get(id);
-    return credential ? this.toView(credential) : undefined;
-  }
-
-  private toView(credential: SourceCredential): SourceCredentialView {
-    const secret = this.store.get<Secret>("secrets", credential.secretId);
-    const passphrase = credential.passphraseSecretId
-      ? this.store.get<Secret>("secrets", credential.passphraseSecretId)
-      : undefined;
-    return {
-      ...credential,
-      secretMasked: secret?.masked,
-      passphraseMasked: passphrase?.masked,
-    };
-  }
-
-  async create(input: NewSourceCredentialInput): Promise<SourceCredentialView> {
-    const name = input.name?.trim();
-    if (!name) throw new DomainError("source-credential-invalid", "A source credential needs a name");
-    if (input.type !== "https-token" && input.type !== "ssh-key") {
-      throw new DomainError("source-credential-invalid", `Unsupported credential type: ${String(input.type)}`);
-    }
-    let secretId = input.secretId;
-    if (secretId) {
-      if (!this.store.get<Secret>("secrets", secretId)) {
-        throw new DomainError("source-credential-invalid", `Secret not found: ${secretId}`);
-      }
-    } else {
-      if (!input.value) {
-        throw new DomainError(
-          "source-credential-invalid",
-          input.type === "https-token" ? "An HTTPS credential needs a token value" : "An SSH credential needs a private key value"
-        );
-      }
-      const secret = await this.store.insert<Secret>("secrets", {
-        id: newId("sec"),
-        name: `${name} ${input.type === "https-token" ? "token" : "private key"}`,
-        value: this.encrypt(input.value),
-        masked: maskSecret(input.value),
-        scope: "git",
-        createdAt: now(),
-        updatedAt: now(),
-      });
-      secretId = secret.id;
-    }
-    let passphraseSecretId: ID | undefined;
-    if (input.passphrase) {
-      const secret = await this.store.insert<Secret>("secrets", {
-        id: newId("sec"),
-        name: `${name} passphrase`,
-        value: this.encrypt(input.passphrase),
-        masked: maskSecret(input.passphrase),
-        scope: "git",
-        createdAt: now(),
-        updatedAt: now(),
-      });
-      passphraseSecretId = secret.id;
-    }
-    const credential: SourceCredential = {
-      id: newId("cred"),
-      name,
-      type: input.type,
-      host: input.host?.trim() || undefined,
-      username: input.username?.trim() || undefined,
-      secretId: secretId!,
-      passphraseSecretId,
-      knownHosts: input.knownHosts,
-      createdAt: now(),
-      updatedAt: now(),
-    };
-    const stored = await this.store.insert("sourceCredentials", credential);
-    return this.toView(stored);
-  }
-
-  async update(id: ID, patch: Partial<NewSourceCredentialInput>): Promise<SourceCredentialView | undefined> {
-    const credential = this.get(id);
-    if (!credential) return undefined;
-    const next: Partial<SourceCredential> = { updatedAt: now() };
-    if (patch.name !== undefined) next.name = patch.name.trim() || credential.name;
-    if (patch.host !== undefined) next.host = patch.host.trim() || undefined;
-    if (patch.username !== undefined) next.username = patch.username.trim() || undefined;
-    if (patch.knownHosts !== undefined) next.knownHosts = patch.knownHosts;
-    if (patch.value) {
-      const secret = this.store.get<Secret>("secrets", credential.secretId);
-      await this.store.update<Secret>("secrets", credential.secretId, {
-        value: this.encrypt(patch.value),
-        masked: maskSecret(patch.value),
-        updatedAt: now(),
-        ...(secret ? {} : { id: credential.secretId, name: `${credential.name} secret`, scope: "git", createdAt: now() }),
-      });
-    }
-    if (patch.passphrase) {
-      const existing = credential.passphraseSecretId
-        ? this.store.get<Secret>("secrets", credential.passphraseSecretId)
-        : undefined;
-      if (existing) {
-        await this.store.update<Secret>("secrets", existing.id, { value: this.encrypt(patch.passphrase), masked: maskSecret(patch.passphrase), updatedAt: now() });
-      } else {
-        const secret = await this.store.insert<Secret>("secrets", {
-          id: newId("sec"),
-          name: `${credential.name} passphrase`,
-          value: this.encrypt(patch.passphrase),
-          masked: maskSecret(patch.passphrase),
-          scope: "git",
-          createdAt: now(),
-          updatedAt: now(),
-        });
-        next.passphraseSecretId = secret.id;
-      }
-    }
-    const updated = await this.store.update<SourceCredential>("sourceCredentials", id, next);
-    return updated ? this.toView(updated) : undefined;
-  }
-
-  async remove(id: ID): Promise<boolean> {
-    const credential = this.get(id);
-    if (!credential) return false;
-    await this.store.remove("secrets", credential.secretId);
-    if (credential.passphraseSecretId) await this.store.remove("secrets", credential.passphraseSecretId);
-    return this.store.remove("sourceCredentials", id);
-  }
-
-  /**
-   * Resolves the credential's plaintext material for one Git operation
-   * (v11 §12.1). The result is handed straight to the credential
-   * materializer and never stored, logged or returned by an API.
-   *
-   * This is the **credential broker** boundary (v11 hardening §8): it is the
-   * only caller allowed to read a `git`-scoped secret, and it refuses to hand
-   * that secret to any other purpose.
-   */
-  resolve(id: ID | undefined): GitCredentialInput | undefined {
-    if (!id) return undefined;
-    const credential = this.get(id);
-    if (!credential) throw new DomainError("credential-not-found", `Source credential not found: ${id}`);
-    const secret = this.secretService().getWithValue(credential.secretId);
-    if (!secret?.value) {
-      throw new DomainError(
-        "source-credential-invalid",
-        `Source credential "${credential.name}" has no stored value — re-save it`
-      );
-    }
-    // A credential's secret is git material by definition: assert the scope
-    // rather than assume it, so a mis-scoped secret fails here and not at the
-    // remote.
-    assertSecretAllowed(secret, "git");
-    const passphrase = credential.passphraseSecretId
-      ? this.secretService().getWithValue(credential.passphraseSecretId)?.value
-      : undefined;
-    if (credential.type === "https-token") {
-      return { type: "https-token", username: credential.username, token: secret.value };
-    }
-    return {
-      type: "ssh-key",
-      username: credential.username,
-      privateKey: secret.value,
-      passphrase,
-      knownHosts: credential.knownHosts,
-    };
-  }
-
-  /** Delegates to the SecretService so both share one encryption path. */
-  private secretService(): SecretService {
-    return new SecretService(this.store);
-  }
-
-  /** Encrypts a credential value for storage (delegates to `SecretService`). */
-  private encrypt(plaintext: string): string {
-    return SecretService.encryptPlaintext(this.store, plaintext);
-  }
-
-  /**
-   * Credential binding check (v11 hardening §9/§10): the credential may only
-   * be sent to the host it is scoped to, over a transport its type supports.
-   *
-   * Called before the credential is materialized, and again at project
-   * create/update so an incompatible configuration fails at configuration
-   * time rather than after a clone was attempted.
-   */
-  assertBoundTo(credential: SourceCredential, remoteUrl: string): void {
-    const binding = checkCredentialBinding(credential, remoteUrl);
-    if (binding.ok) return;
-    throw new DomainError(binding.code, binding.message, binding.detail);
-  }
-
-  /** The same check without throwing, for preflight callers. */
-  checkBinding(credential: SourceCredential, remoteUrl: string): CredentialBindingCheck {
-    return checkCredentialBinding(credential, remoteUrl);
-  }
-}
-
-/* ------------------------------------------------------------------ */
 /* Workspace locks (v11 §36)                                          */
 /* ------------------------------------------------------------------ */
 
@@ -1950,13 +1351,12 @@ export async function seedDefaults(store: Store): Promise<void> {
     env: {},
   });
   // The generic Docker runtime is the seeded *isolated* runtime: it declares
-  // container-backed execution and names an image, which is what the Project
-  // Coding Task isolation gate reads (v11 hardening §4). `usableInTask` stays
-  // false until the operator opts in — the Runtimes page toggles it.
+  // container-backed execution and names an image. `usableInTask` stays false
+  // until the operator opts in — the Runtimes page toggles it.
   await runtimeService.create({
     name: "Docker (generic)",
     kind: "docker",
-    description: "Generic Docker container runtime — isolated execution, the runtime kind Project Coding Tasks require",
+    description: "Generic Docker container runtime — isolated execution in a container",
     image: "node:22-alpine",
     command: ["sh", "-c", "echo hello from agent-fabric container"],
     containerized: true,

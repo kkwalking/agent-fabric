@@ -110,7 +110,7 @@ export function buildAssistedHandoffContent(input: AssistedHandoffInput): Handof
       : "No explicit test/build result signals found in the run output.";
 
   const workspaceStatus = workspace
-    ? `Workspace "${workspace.name}" (${workspace.type}) at ${workspace.path ?? workspace.repoUrl ?? "unknown"}${workspace.lastSavedAt ? `, last saved ${workspace.lastSavedAt}` : ", not saved since the last run"}.`
+    ? `Workspace "${workspace.name}" (${workspace.type}) at ${workspace.path ?? "unknown"}${workspace.lastSavedAt ? `, last saved ${workspace.lastSavedAt}` : ", not saved since the last run"}.`
     : "No workspace was attached to the previous run.";
 
   return {

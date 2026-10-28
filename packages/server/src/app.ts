@@ -23,8 +23,6 @@ import {
   HandoffService,
   RuntimeSessionService,
   NativeStateService,
-  ProjectService,
-  SourceCredentialService,
   WorkspaceLockService,
   seedDefaults,
   effectiveCapabilities,
@@ -44,7 +42,6 @@ import {
   type Model,
   type NewTaskInput,
   type ContinueTaskInput,
-  type StartProjectTaskInput,
   type Run,
   type Task,
   KanbanService,
@@ -480,8 +477,6 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   const handoffs = new HandoffService(store);
   const runtimeSessions = new RuntimeSessionService(store);
   const nativeStates = new NativeStateService(store);
-  const projects = new ProjectService(store);
-  const sourceCredentials = new SourceCredentialService(store);
   const workspaceLocks = new WorkspaceLockService(store);
   const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
     codex: codexThreadSource,
@@ -490,12 +485,10 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     pi: piThreadSource,
     dsh: dshThreadSource,
   });
-  // The board is a separate product surface from Project Coding Tasks: it
-  // launches local CLIs in PTYs. Its records are not separate any more (a
-  // board project is a Project, a started card is a Task with Runs), so it
+  // The board launches local CLIs in PTYs. Its records are not separate (a
+  // board workspace is a Workspace, a started card is a Task with Runs), so it
   // writes through the same services.
   const kanban = new KanbanService(store, {
-    projects,
     tasks,
     runs,
     workspaces,
@@ -508,15 +501,15 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       options.hookBaseUrl ??
       `http://127.0.0.1:${process.env.AGENTFABRIC_PORT ?? 7377}/kanban-hooks/ingest`,
   });
-  // The execution supervisor owns the Project-based task lifecycle (v11 §13).
+  // The supervisor exposes the generic task lifecycle reads the server needs.
   const supervisor = new ExecutionSupervisor(store, bus, runs);
   // Re-arm keep-alive idle timers from container labels after a restart.
   await runs.recoverKeepAliveContainers();
-  // A restart leaves no lifecycle running: mark in-flight project tasks as
-  // interrupted (workspace preserved) and reclaim their workspace locks.
+  // A restart leaves no lifecycle running: reclaim stale records and report
+  // which tasks were interrupted (workspace preserved).
   const recovered = await supervisor.recoverInterrupted();
   if (recovered.tasks.length > 0) {
-    console.log(`[agent-fabric] marked ${recovered.tasks.length} interrupted project task(s) after restart: ${recovered.tasks.join(", ")}`);
+    console.log(`[agent-fabric] marked ${recovered.tasks.length} interrupted task(s) after restart: ${recovered.tasks.join(", ")}`);
   }
   // Board PTYs do not survive a restart either; the records must say so
   // instead of pretending a dead agent is still running (v13 §3.4).
@@ -583,7 +576,7 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /* ---------------- board (v13) ---------------- */
   // Registered inside the authenticated /api region: the terminal data itself
   // travels over the websocket upgrade handler returned below.
-  registerKanbanRoutes(app, { kanban, runtime: kanbanRuntime, projects, workspaces });
+  registerKanbanRoutes(app, { kanban, runtime: kanbanRuntime, workspaces });
 
   /* ---------------- health ---------------- */
 
@@ -613,10 +606,9 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   /**
    * Can this machine run a containerized runtime?
    *
-   * A Project task refuses to run anywhere but an isolated runtime, so with no
-   * Docker the user is stuck — and until now nothing on screen could tell them
-   * whether Docker was missing, stopped, or fine. Two separate questions get two
-   * separate answers: is the CLI there at all, and does the daemon respond.
+   * Whether Docker is missing, stopped or fine is two separate questions and
+   * gets two separate answers: is the CLI there at all, and does the daemon
+   * respond.
    */
   app.get("/api/docker/status", async (_req, res) => {
     const bin = dockerBin();
@@ -668,8 +660,6 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
         handoffs: handoffs.list().length,
         runtimeSessions: runtimeSessions.list().length,
         nativeStates: nativeStates.list().length,
-        projects: projects.list().length,
-        sourceCredentials: sourceCredentials.list().length,
       },
       usage: usage.summary(),
     });
@@ -804,18 +794,6 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
       return ok(res, runtimes.enabled().filter((r) => r.usableInTask));
     }
     ok(res, runtimes.list());
-  });
-  // The runtimes a Project Coding Task may actually use (v11 hardening §4):
-  // enabled, usable in tasks, and isolated. The Projects/Task forms read this
-  // so the user is never offered a runtime that will be refused at submit.
-  app.get("/api/runtimes/project-eligible", (_req, res) => {
-    ok(
-      res,
-      runtimes
-        .enabled()
-        .filter((r) => r.usableInTask && runtimeIsolation(r).sandboxed)
-        .map((r) => ({ ...r, isolation: runtimeIsolation(r) }))
-    );
   });
   app.post("/api/runtimes", async (req, res) => {
     try {
@@ -1043,99 +1021,11 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     })
   );
 
-  /* ---------------- projects (v11 §2/§3) ---------------- */
-
-  app.get("/api/projects", (_req, res) => ok(res, projects.list()));
-  app.post("/api/projects", async (req, res) => {
-    try {
-      ok(res, await projects.create(req.body), 201);
-    } catch (e) {
-      failDomain(res, e);
-    }
-  });
-  app.get("/api/projects/:id", (req, res) => {
-    const p = projects.get(req.params.id);
-    p ? ok(res, p) : fail(res, new Error("Project not found"), 404);
-  });
-  app.put("/api/projects/:id", async (req, res) => {
-    try {
-      const p = await projects.update(req.params.id, req.body);
-      p ? ok(res, p) : fail(res, new Error("Project not found"), 404);
-    } catch (e) {
-      failDomain(res, e);
-    }
-  });
-  app.delete(
-    "/api/projects/:id",
-    ah(async (req, res) => {
-      const removed = await projects.remove(req.params.id);
-      removed ? ok(res, { ok: true }) : fail(res, new Error("Project not found"), 404);
-    })
-  );
-  // Tasks that belong to this project (the Project detail page's list).
-  app.get("/api/projects/:id/tasks", (req, res) => {
-    if (!projects.get(req.params.id)) return fail(res, new Error("Project not found"), 404);
-    const ids = new Set(projects.taskIds(req.params.id));
-    ok(res, tasks.list({ deleted: false }).filter((t) => ids.has(t.id)));
-  });
-
-  // Start a Project-based Task (v11 §39): the platform creates the managed
-  // workspace, prepares the source and runs the whole lifecycle. Users never
-  // create a Workspace by hand. The body is the `StartProjectTaskInput`
-  // contract verbatim — including the Task-level `skills` / `mcpServers`
-  // overrides (v11 §25/§26), which fall back to the Project's lists when the
-  // field is absent.
-  app.post("/api/projects/:id/tasks", async (req, res) => {
-    if (!projects.get(req.params.id)) return fail(res, new Error("Project not found"), 404);
-    try {
-      const body = (req.body ?? {}) as Partial<StartProjectTaskInput>;
-      const result = await supervisor.startTask({ ...body, projectId: req.params.id } as StartProjectTaskInput);
-      ok(res, result, 201);
-    } catch (e) {
-      failDomain(res, e);
-    }
-  });
-
-  /* ---------------- source credentials (v11 §4) ---------------- */
-  // Sensitive values live in Secrets; these endpoints only ever return
-  // metadata plus the masked preview (v11 §4.2).
-
-  app.get("/api/source-credentials", (_req, res) => ok(res, sourceCredentials.list()));
-  app.post("/api/source-credentials", async (req, res) => {
-    try {
-      ok(res, await sourceCredentials.create(req.body), 201);
-    } catch (e) {
-      failDomain(res, e);
-    }
-  });
-  app.get("/api/source-credentials/:id", (req, res) => {
-    const c = sourceCredentials.getView(req.params.id);
-    c ? ok(res, c) : fail(res, new Error("Source credential not found"), 404);
-  });
-  app.put("/api/source-credentials/:id", async (req, res) => {
-    try {
-      const c = await sourceCredentials.update(req.params.id, req.body);
-      c ? ok(res, c) : fail(res, new Error("Source credential not found"), 404);
-    } catch (e) {
-      failDomain(res, e);
-    }
-  });
-  app.delete(
-    "/api/source-credentials/:id",
-    ah(async (req, res) => {
-      const removed = await sourceCredentials.remove(req.params.id);
-      removed ? ok(res, { ok: true }) : fail(res, new Error("Source credential not found"), 404);
-    })
-  );
-
   /* ---------------- tasks ---------------- */
 
   // Reads and lifecycle actions only. A Task is never created here: it is
-  // either started in a Project (`POST /api/projects/:id/tasks`, which owns
-  // the managed Workspace and the whole lifecycle) or submitted as a classic
-  // non-project run (`POST /api/runs`). A bare `insert` of a task row would
-  // produce a record with no Runtime resolution, Workspace or Run — a shape
-  // no other endpoint accepts.
+  // submitted as a run (`POST /api/runs`), which resolves its runtime and
+  // workspace and creates the Task + Run together.
   //
   // Live tasks by default; `?deleted=true` serves the recoverable-deleted
   // list (Trash). A deleted task is invisible to task-scoped reads and
@@ -1234,29 +1124,6 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     try {
       const body = (req.body ?? {}) as { instruction?: string; runtimeId?: string; modelId?: string };
       ok(res, await supervisor.retryRun(req.params.id, body), 201);
-    } catch (e) {
-      failDomain(res, e);
-    }
-  });
-
-  // Retry Validation: re-runs validation only — no agent, no model call.
-  app.post("/api/tasks/:id/retry-validation", async (req, res) => {
-    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
-    try {
-      const task = await supervisor.retryValidation(req.params.id);
-      task ? ok(res, task) : fail(res, new Error("Task not found"), 404);
-    } catch (e) {
-      failDomain(res, e);
-    }
-  });
-
-  // Retry Publish: re-pushes the already-committed revision — no agent, no
-  // model call (v11 §23/§31).
-  app.post("/api/tasks/:id/retry-publish", async (req, res) => {
-    if (!tasks.getLive(req.params.id)) return fail(res, new Error("Task not found"), 404);
-    try {
-      const task = await supervisor.retryPublish(req.params.id);
-      task ? ok(res, task) : fail(res, new Error("Task not found"), 404);
     } catch (e) {
       failDomain(res, e);
     }

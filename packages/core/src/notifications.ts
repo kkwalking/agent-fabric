@@ -41,9 +41,6 @@ export type NotificationEvent = "task.completed" | "task.failed" | "task.cancell
 /** Per-stage outcome, copied verbatim from `TaskExecution["stages"]`. */
 export interface NotificationStages {
   agent?: StageOutcome;
-  validation?: StageOutcome;
-  finalization?: StageOutcome;
-  publish?: StageOutcome;
 }
 
 /** The failure classification (code + stage) — the core of the error model. */
@@ -66,9 +63,6 @@ export interface TaskNotificationPayload {
   instruction: string;
   /** True when `instruction` was cut; the full text stays on the Task page. */
   instructionTruncated: boolean;
-  projectId?: string;
-  workingBranch?: string;
-  baseRef?: string;
   /** Terminal lifecycle status, read from the record. */
   status: string;
   /** Terminal phase, read from the record. */
@@ -77,11 +71,6 @@ export interface TaskNotificationPayload {
   stages: NotificationStages;
   /** Present only when the task failed. */
   failure?: NotificationFailure;
-  /** The frozen final revision's commit, when finalization succeeded. */
-  finalCommitSha?: string;
-  /** Remote branch the work was published to. */
-  remoteBranch?: string;
-  remote?: string;
   /** Task lifecycle start, best available (run start → agent start → creation). */
   startedAt: string;
   /** When the terminal state was reached. */
@@ -157,9 +146,6 @@ function stagesFor(task: Task): NotificationStages {
   const stages = task.execution?.stages ?? {};
   return {
     ...(stages.agent ? { agent: { ...stages.agent } } : {}),
-    ...(stages.validation ? { validation: { ...stages.validation } } : {}),
-    ...(stages.finalization ? { finalization: { ...stages.finalization } } : {}),
-    ...(stages.publish ? { publish: { ...stages.publish } } : {}),
   };
 }
 
@@ -217,8 +203,6 @@ export function buildTaskNotificationPayload(
     options.instructionMaxChars ?? DEFAULT_INSTRUCTION_MAX_CHARS
   );
   const failure = failureFor(task, event, options.failureMessageMaxChars ?? DEFAULT_FAILURE_MESSAGE_MAX_CHARS);
-  const frozen = task.execution?.frozenRevision;
-  const publish = task.execution?.publish;
   const startedAt = startedAtFor(task, run);
   const endedAt = endedAtFor(task, run);
   const elapsed = Date.parse(endedAt) - Date.parse(startedAt);
@@ -229,20 +213,10 @@ export function buildTaskNotificationPayload(
     title: task.title,
     instruction: instruction.text,
     instructionTruncated: instruction.truncated,
-    ...(task.projectId ? { projectId: task.projectId } : {}),
-    ...(task.workingBranch ? { workingBranch: task.workingBranch } : {}),
-    ...(task.baseRef ? { baseRef: task.baseRef } : {}),
     status: task.execution?.status ?? "created",
     phase: task.execution?.phase ?? "task.created",
     stages: stagesFor(task),
     ...(failure ? { failure } : {}),
-    // The frozen revision is the published fact (v11 hardening §13); the
-    // publish state's copy is only a fallback for records finalized before it.
-    ...(frozen?.finalCommitSha || publish?.finalCommitSha
-      ? { finalCommitSha: frozen?.finalCommitSha ?? publish?.finalCommitSha }
-      : {}),
-    ...(publish?.remoteBranch ? { remoteBranch: publish.remoteBranch } : {}),
-    ...(publish?.remote ? { remote: publish.remote } : {}),
     startedAt,
     endedAt,
     durationMs: Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0,

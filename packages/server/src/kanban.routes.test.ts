@@ -7,14 +7,14 @@ import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
-import type { Project, Run, Task, Workspace } from "@agentfabric/core";
+import type { Run, Task, Workspace } from "@agentfabric/core";
 import { createServer } from "./app.js";
 
 /**
- * A board project, as the board routes return it: the ordinary `Project` plus
- * the board's card counts. There is no board-owned project type any more.
+ * A board workspace, as the board routes return it: the ordinary `Workspace`
+ * plus the board's card counts. There is no board-owned workspace type.
  */
-type BoardProject = Project & {
+type BoardProject = Workspace & {
   cardCounts: Record<"backlog" | "in_progress" | "review" | "trash", number>;
   runningCards: number;
 };
@@ -106,13 +106,12 @@ async function api<T>(h: Harness, method: string, path: string, body?: unknown):
 test("board HTTP + terminal websocket end to end with a fake CLI", async () => {
   const h = await makeHarness();
   try {
-    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
     assert.equal(project.board?.workspaceType, "none");
 
-    const { card } = await api<{ card: { id: string; column: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string; column: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "do the thing",
       agentId: "claude",
     });
@@ -200,14 +199,13 @@ test("a signalled agent exit is a failure, not a clean Review", async () => {
   // the card to Review and lie about why the agent stopped.
   const h = await makeHarness("#!/bin/sh\nprintf 'SIGNAL_AGENT\\n'\nkill -TERM $$\n");
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
     const { card } = await api<{ card: { id: string; column: string } }>(
       h,
       "POST",
-      `/api/kanban/projects/${project.id}/cards`,
+      `/api/kanban/workspaces/${project.id}/cards`,
       { prompt: "kill yourself", agentId: "claude" }
     );
     await api(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
@@ -224,7 +222,7 @@ test("a signalled agent exit is a failure, not a clean Review", async () => {
     const { cards } = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     assert.equal(cards.find((c) => c.id === card.id)?.column, "in_progress");
   } finally {
@@ -259,14 +257,14 @@ async function pollSession(
 }
 
 /** Waits for a card to reach `column` (one transition is several writes). */
-async function pollColumn(h: Harness, projectId: string, cardId: string, column: string): Promise<string> {
+async function pollColumn(h: Harness, workspaceId: string, cardId: string, column: string): Promise<string> {
   const deadline = Date.now() + 5_000;
   let last = "unknown";
   while (Date.now() < deadline) {
     const { cards } = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${projectId}/cards`
+      `/api/kanban/workspaces/${workspaceId}/cards`
     );
     last = cards.find((c) => c.id === cardId)?.column ?? "missing";
     if (last === column) return last;
@@ -280,12 +278,12 @@ test("worktree mode runs in a git worktree and leaves the project tree untouched
   try {
     const projectDir = join(h.dir, "project");
     initGitRepo(projectDir);
-    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
-      path: projectDir,
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: projectDir,
     });
     assert.equal(project.board?.workspaceType, "git");
 
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "work in a worktree",
       agentId: "claude",
       executionMode: "worktree",
@@ -322,14 +320,13 @@ test("Claude Stop hook moves the card to Review; typing moves it back to In Prog
   ].join("\n");
   const h = await makeHarness(hookScript);
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
     const { card } = await api<{ card: { id: string; column: string } }>(
       h,
       "POST",
-      `/api/kanban/projects/${project.id}/cards`,
+      `/api/kanban/workspaces/${project.id}/cards`,
       { prompt: "finish a turn", agentId: "claude" }
     );
     const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
@@ -347,7 +344,7 @@ test("Claude Stop hook moves the card to Review; typing moves it back to In Prog
     const cards = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     assert.equal(cards.cards.find((c) => c.id === card.id)?.column, "review");
 
@@ -394,14 +391,13 @@ test("a Claude permission/AskUserQuestion dialog parks the card in Review", asyn
   ].join("\n");
   const h = await makeHarness(hookScript);
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
     const { card } = await api<{ card: { id: string; column: string } }>(
       h,
       "POST",
-      `/api/kanban/projects/${project.id}/cards`,
+      `/api/kanban/workspaces/${project.id}/cards`,
       { prompt: "ask me a question", agentId: "claude" }
     );
     const { session } = await api<{ session: { id: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
@@ -420,7 +416,7 @@ test("a Claude permission/AskUserQuestion dialog parks the card in Review", asyn
     const cards = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     assert.equal(
       cards.cards.find((c) => c.id === card.id)?.column,
@@ -435,13 +431,12 @@ test("a Claude permission/AskUserQuestion dialog parks the card in Review", asyn
 test("two Direct cards can run in one project at the same time", async () => {
   const h = await makeHarness();
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
     const cards = [];
     for (const prompt of ["first", "second"]) {
-      const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+      const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
         prompt,
         agentId: "claude",
       });
@@ -461,7 +456,7 @@ test("two Direct cards can run in one project at the same time", async () => {
     const { cards: boardCards } = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     for (const card of cards) {
       assert.equal(boardCards.find((entry) => entry.id === card.id)?.column, "in_progress");
@@ -475,11 +470,10 @@ test("two Direct cards can run in one project at the same time", async () => {
 test("a clean exit (node-pty signal 0) moves the card to Review", async () => {
   const h = await makeHarness("#!/bin/sh\nprintf 'CLEAN_EXIT_AGENT\\n'\nexit 0\n");
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "finish cleanly",
       agentId: "claude",
     });
@@ -489,7 +483,7 @@ test("a clean exit (node-pty signal 0) moves the card to Review", async () => {
     const { cards } = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     assert.equal(cards.find((c) => c.id === card.id)?.column, "review");
   } finally {
@@ -551,122 +545,6 @@ test("the project picker lists folders and flags Git repositories", async () => 
   }
 });
 
-test("adding a non-Git folder asks for an explicit choice, then honours it", async () => {
-  const h = await makeHarness();
-  try {
-    const plainDir = join(h.dir, "plain-folder");
-    mkdirSync(plainDir);
-
-    // No choice yet: nothing is created, and the answer says why.
-    const asked = await rawApi(h, "POST", "/api/kanban/projects", { path: plainDir });
-    assert.equal(asked.status, 409);
-    assert.equal(asked.data.code, "kanban-project-not-git");
-    assert.equal(asked.data.requiresGitInitialization, true);
-    assert.equal(asked.data.path, plainDir);
-    // Nothing was created: projects are Projects, and there is no board-owned
-    // project collection to look at.
-    const before = await api<Project[]>(h, "GET", "/api/projects");
-    assert.deepEqual(before, []);
-
-    // "Add without Git" is a real board project.
-    const skipped = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
-      path: plainDir,
-      gitInit: "skip",
-    });
-    assert.equal(skipped.project.board?.workspaceType, "none");
-    assert.equal(skipped.project.name, "plain-folder");
-    assert.equal(skipped.project.source.type, "directory");
-    assert.equal(skipped.project.source.path, plainDir);
-    // The same Project is what the ordinary projects API lists.
-    const listed = await api<Project[]>(h, "GET", "/api/projects");
-    assert.deepEqual(listed.map((entry) => entry.id), [skipped.project.id]);
-    assert.equal(listed[0]?.source.type, "directory");
-    assert.equal(listed[0]?.source.path, plainDir);
-
-    // The same folder cannot be a second board.
-    const duplicate = await rawApi(h, "POST", "/api/kanban/projects", { path: plainDir, gitInit: "skip" });
-    assert.equal(duplicate.status, 409);
-    assert.equal(duplicate.data.code, "kanban-project-duplicate");
-  } finally {
-    await h.cleanup();
-  }
-});
-
-test("initializing Git on an existing folder creates a worktree-ready repository", async () => {
-  const h = await makeHarness();
-  try {
-    const folder = join(h.dir, "to-init");
-    mkdirSync(folder);
-    writeFileSync(join(folder, "hello.txt"), "hello\n");
-
-    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
-      path: folder,
-      gitInit: "init",
-    });
-    assert.equal(project.board?.workspaceType, "git");
-    // The initial commit is what makes a detached worktree possible.
-    const head = execFileSync("git", ["-C", folder, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).trim();
-    assert.match(head, /^[0-9a-f]{40}$/);
-
-    const { git } = await api<{ git: { currentBranch: string | null; branches: string[] } | null }>(
-      h,
-      "GET",
-      `/api/kanban/projects/${project.id}/git`
-    );
-    assert.ok(git);
-    assert.equal(git.branches.length, 1);
-    assert.equal(git.currentBranch, git.branches[0]);
-  } finally {
-    await h.cleanup();
-  }
-});
-
-test("cloning a Git URL adds the clone as a board project", async () => {
-  const h = await makeHarness();
-  try {
-    const seed = join(h.dir, "seed");
-    mkdirSync(seed);
-    initGitRepo(seed);
-    const target = join(h.dir, "cloned");
-
-    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
-      gitUrl: seed,
-      path: target,
-    });
-    assert.equal(project.board?.workspaceType, "git");
-    assert.equal(project.source.type, "directory");
-    assert.equal(project.source.path, target);
-    assert.ok(existsSync(join(target, ".git")));
-    assert.ok(existsSync(join(target, "README.md")));
-
-    // Cloning the same folder again is a duplicate board, not a second copy.
-    const duplicate = await rawApi(h, "POST", "/api/kanban/projects", { gitUrl: seed, path: target });
-    assert.equal(duplicate.status, 409);
-    assert.equal(duplicate.data.code, "kanban-project-duplicate");
-
-    // A different, non-empty destination is refused instead of being merged into.
-    const occupied = join(h.dir, "occupied");
-    mkdirSync(occupied);
-    writeFileSync(join(occupied, "keep.txt"), "keep me\n");
-    const blocked = await rawApi(h, "POST", "/api/kanban/projects", { gitUrl: seed, path: occupied });
-    assert.equal(blocked.status, 400);
-    assert.equal(blocked.data.code, "kanban-path-invalid");
-  } finally {
-    await h.cleanup();
-  }
-});
-
-/**
- * Clicking a Backlog card edits it (v13 §七). The edit form sends the whole
- * card back, including empty strings for fields the user cleared, so the PATCH
- * contract below is what the board's Save button relies on: an absent key
- * leaves a field alone, an empty one clears it, and an unknown agent or a
- * prompt cleared to nothing fails loudly instead of being stored.
- *
- * A card that has left Backlog is not editable: once a session has run, its
- * prompt and agent are the history the agent worked from, so the board opens
- * it read-only and the server refuses the write.
- */
 test("a Backlog card's edit form round-trips through PATCH, and only while it is editable", async () => {
   const h = await makeHarness();
   try {
@@ -676,13 +554,13 @@ test("a Backlog card's edit form round-trips through PATCH, and only while it is
     const branch = execFileSync("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"], {
       encoding: "utf8",
     }).trim();
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: repo,
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: repo,
     });
     const { card } = await api<{ card: { id: string; title: string; column: string } }>(
       h,
       "POST",
-      `/api/kanban/projects/${project.id}/cards`,
+      `/api/kanban/workspaces/${project.id}/cards`,
       { prompt: "first draft of the task", agentId: "claude" }
     );
     assert.equal(card.column, "backlog");
@@ -692,7 +570,7 @@ test("a Backlog card's edit form round-trips through PATCH, and only while it is
     const listed = await api<{ cards: Array<Record<string, unknown>> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     for (const key of ["prompt", "title", "agentId", "executionMode", "column"]) {
       assert.ok(key in listed.cards[0]!, `card JSON is missing ${key}`);
@@ -758,7 +636,7 @@ test("a Backlog card's edit form round-trips through PATCH, and only while it is
     const unchanged = await api<{ cards: Array<{ id: string; prompt: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     assert.equal(unchanged.cards[0]?.prompt, "  the task, rewritten  ");
   } finally {
@@ -781,18 +659,18 @@ test("a worktree card checks out its base ref, and an unknown ref fails loudly",
     execFileSync("git", ["-C", repo, "commit", "-q", "-m", "feature"]);
     execFileSync("git", ["-C", repo, "checkout", "-q", mainBranch]);
 
-    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", { path: repo });
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", { rootPath: repo });
     assert.equal(project.board?.workspaceType, "git");
 
     const { git } = await api<{ git: { currentBranch: string | null; branches: string[]; defaultBranch: string | null } }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/git`
+      `/api/kanban/workspaces/${project.id}/git`
     );
     assert.deepEqual([...git.branches].sort(), ["feature/base", mainBranch].sort());
     assert.equal(git.currentBranch, mainBranch);
 
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "start from the feature branch",
       agentId: "claude",
       executionMode: "worktree",
@@ -812,7 +690,7 @@ test("a worktree card checks out its base ref, and an unknown ref fails loudly",
     const { card: badCard } = await api<{ card: { id: string } }>(
       h,
       "POST",
-      `/api/kanban/projects/${project.id}/cards`,
+      `/api/kanban/workspaces/${project.id}/cards`,
       { prompt: "bad ref", agentId: "claude", executionMode: "worktree", baseRef: "does-not-exist" }
     );
     const failed = await rawApi(h, "POST", `/api/kanban/cards/${badCard.id}/start`, {});
@@ -836,11 +714,10 @@ test("moving a card to Done keeps the process when there is nothing to resume fr
   // copy of the conversation, so its process stays.
   const h = await makeHarness("#!/bin/sh\nprintf AGENT_UP\nsleep 60\n");
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "archive me",
       agentId: "claude",
     });
@@ -869,11 +746,10 @@ test("Done releases the process and restoring relaunches with --resume", async (
   // the process back, and bring the conversation back on restore.
   const h = await makeHarness("#!/bin/sh\nprintf AGENT_UP\nsleep 60\n");
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "archive me",
       agentId: "claude",
     });
@@ -924,11 +800,10 @@ test("Done releases the process and restoring relaunches with --resume", async (
 test("a hook-reported harness session id is recorded on the session", async () => {
   const h = await makeHarness();
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "record my id",
       agentId: "claude",
     });
@@ -961,35 +836,34 @@ test("a hook-reported harness session id is recorded on the session", async () =
 test("clearing Done deletes only trashed card records", async () => {
   const h = await makeHarness();
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card: kept } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card: kept } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "keep me",
       agentId: "claude",
     });
     const { card: trashed } = await api<{ card: { id: string } }>(
       h,
       "POST",
-      `/api/kanban/projects/${project.id}/cards`,
+      `/api/kanban/workspaces/${project.id}/cards`,
       { prompt: "clear me", agentId: "claude" }
     );
     await api(h, "POST", `/api/kanban/cards/${trashed.id}/move`, { column: "trash" });
 
-    const cleared = await api<{ deleted: number }>(h, "POST", `/api/kanban/projects/${project.id}/trash/clear`, {});
+    const cleared = await api<{ deleted: number }>(h, "POST", `/api/kanban/workspaces/${project.id}/trash/clear`, {});
     assert.equal(cleared.deleted, 1);
 
     const { cards } = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${project.id}/cards`
+      `/api/kanban/workspaces/${project.id}/cards`
     );
     assert.deepEqual(cards.map((card) => card.id), [kept.id]);
     // The folder itself is untouched: clearing Done is a record operation.
     assert.ok(existsSync(join(h.dir, "project")));
 
-    const again = await api<{ deleted: number }>(h, "POST", `/api/kanban/projects/${project.id}/trash/clear`, {});
+    const again = await api<{ deleted: number }>(h, "POST", `/api/kanban/workspaces/${project.id}/trash/clear`, {});
     assert.equal(again.deleted, 0);
   } finally {
     await h.cleanup();
@@ -1030,11 +904,10 @@ test("the agent chat socket shares the terminal socket's auth and transport guar
 
     // A PTY session is a terminal, not a chat: the agent socket says so
     // instead of silently streaming nothing.
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "stay alive",
       agentId: "claude",
     });
@@ -1095,25 +968,21 @@ test("a malformed session id in a socket upgrade is rejected without taking the 
  * - 5: a failed session leaves the Run and `Task.execution` saying so, and the
  *   read path returns exactly what was written.
  */
-test("a started card is a Task of its Project, with one Run per start", async () => {
+test("a started card is a Task of its Workspace, with one Run per start", async () => {
   const h = await makeHarness();
   try {
     const projectDir = join(h.dir, "project");
-    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
-      path: projectDir,
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: projectDir,
     });
 
     // 2. The board project is a Project with a directory source.
-    assert.equal(project.source.type, "directory");
-    assert.equal(project.source.path, projectDir);
-    const projects = await api<Project[]>(h, "GET", "/api/projects");
-    assert.deepEqual(projects.map((entry) => entry.id), [project.id]);
-
+    assert.ok(project.board);
+    assert.equal(project.path, projectDir);
     const { card } = await api<{ card: { id: string; workspaceId?: string } }>(
       h,
       "POST",
-      `/api/kanban/projects/${project.id}/cards`,
+      `/api/kanban/workspaces/${project.id}/cards`,
       { prompt: "do the thing", agentId: "claude" }
     );
     // The card records the folder it works in at creation time.
@@ -1134,11 +1003,7 @@ test("a started card is a Task of its Project, with one Run per start", async ()
     // 3. The Task is visible through both task APIs.
     const allTasks = await api<Task[]>(h, "GET", "/api/tasks");
     assert.deepEqual(allTasks.map((task) => task.id), [taskId]);
-    const projectTasks = await api<Task[]>(h, "GET", `/api/projects/${project.id}/tasks`);
-    assert.deepEqual(projectTasks.map((task) => task.id), [taskId]);
-
     const task = await api<Task>(h, "GET", `/api/tasks/${taskId}`);
-    assert.equal(task.projectId, project.id);
     assert.equal(task.title, "do the thing");
     // The folder is the Project's external Workspace, and it is the folder.
     const workspaces = await api<Workspace[]>(h, "GET", "/api/workspaces");
@@ -1146,7 +1011,6 @@ test("a started card is a Task of its Project, with one Run per start", async ()
     assert.ok(workspace);
     assert.equal(workspace.path, projectDir);
     assert.equal(workspace.ownership, "external");
-    assert.equal(workspace.projectId, project.id);
     // The projection is written at start, not derived on read.
     assert.equal(task.execution?.phase, "agent.running");
     assert.equal(task.execution?.agent?.status, "running");
@@ -1176,11 +1040,10 @@ test("a failed board session writes the failure into its Run and Task", async ()
   // execution must say so. The read path returns the stored projection.
   const h = await makeHarness("#!/bin/sh\nprintf 'FAIL_AGENT\\n'\nexit 3\n");
   try {
-    const { project } = await api<{ project: BoardProject }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "fail on purpose",
       agentId: "claude",
     });

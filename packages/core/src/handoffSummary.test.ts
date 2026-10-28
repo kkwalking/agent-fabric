@@ -336,7 +336,7 @@ test("buildSummarizationPrompt states the workspace authoritatively (AgentFabric
   // Order: conversation → workspace → previous summary → pi prompt.
   assert.ok(wsStart > convEnd && wsStart < prevStart);
   assert.match(withWs, /<workspace>\nWorkspace "bruce-go" \(local\) at \/Users\/zhouzekun\/code\/bruce-go\./);
-  assert.match(withWs, /it is the "current project" the user refers to\./);
+  assert.match(withWs, /it is the "current workspace" the user refers to\./);
   // No workspace attached → no block, prompts stay pi-verbatim.
   const withoutWs = buildSummarizationPrompt("CONV");
   assert.ok(!withoutWs.includes("<workspace>"));

@@ -15,7 +15,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, newId } from "./store.js";
-import { SecretService, ProviderService, SourceCredentialService } from "./services.js";
+import { SecretService, ProviderService } from "./services.js";
 import { DomainError } from "./errors.js";
 import {
   ENCRYPTED_SECRET_PREFIX,
@@ -312,67 +312,5 @@ describe("every writer of the secrets collection encrypts", () => {
     assert.equal(storedSecrets(dir).filter((s) => s.id === provider.apiKeySecretId).length, 1);
   });
 
-  test("Git credentials (token, private key, passphrase) are ciphertext and still resolve for Git", async () => {
-    const dir = tempDir();
-    const store = await Store.open(dir);
-    const credentials = new SourceCredentialService(store);
-    const token = "ghp_git-credential-canary-0001";
-    const key = "-----BEGIN OPENSSH PRIVATE KEY-----\ncanary-private-key-material\n-----END OPENSSH PRIVATE KEY-----";
-    const passphrase = "ssh-passphrase-canary";
 
-    const https = await credentials.create({ name: "GitHub", type: "https-token", username: "octocat", value: token });
-    const ssh = await credentials.create({ name: "Internal", type: "ssh-key", username: "git", value: key, passphrase });
-
-    const raw = readFileSync(dbPath(dir), "utf8");
-    for (const [label, value] of [["token", token], ["private key", key], ["passphrase", passphrase]] as const) {
-      assert.equal(raw.includes(value), false, `the ${label} must not sit in db.json`);
-    }
-    // The API serves masks only.
-    const served = JSON.stringify(credentials.list()) + JSON.stringify(credentials.getView(https.id));
-    for (const value of [token, key, passphrase]) assert.equal(served.includes(value), false);
-
-    // The credential broker is the one path that gets the plaintext.
-    assert.deepEqual(credentials.resolve(https.id), { type: "https-token", username: "octocat", token });
-    const sshInput = credentials.resolve(ssh.id)!;
-    assert.equal(sshInput.type, "ssh-key");
-    assert.equal(sshInput.privateKey, key);
-    assert.equal(sshInput.passphrase, passphrase);
-
-    // Rotation keeps the credential usable and the disk clean.
-    const rotated = "ghp_git-credential-rotated-0002";
-    await credentials.update(https.id, { value: rotated });
-    assert.equal(readFileSync(dbPath(dir), "utf8").includes(rotated), false, "a rotated credential value is encrypted too");
-    assert.equal(credentials.resolve(https.id)!.token, rotated);
-  });
-
-  test("a legacy plaintext credential fails at the broker boundary instead of being sent to a remote", async () => {
-    const dir = tempDir();
-    const secretId = newId("sec");
-    writeFileSync(
-      dbPath(dir),
-      JSON.stringify({
-        secrets: [
-          {
-            id: secretId,
-            name: "Legacy token",
-            value: "legacy-git-token-canary",
-            masked: "leg***nary",
-            scope: "git",
-            createdAt: "",
-            updatedAt: "",
-          },
-        ],
-        sourceCredentials: [
-          { id: "cred_1", name: "old", type: "https-token", secretId, createdAt: "", updatedAt: "" },
-        ],
-      })
-    );
-    const store = await Store.open(dir);
-    const credentials = new SourceCredentialService(store);
-    await captureErrors(() => new SecretService(store));
-    assert.throws(() => credentials.resolve("cred_1"), (err) => assertDomainCode(err, "secret-legacy-format"));
-    // The credential metadata is still visible for the user to delete/re-save.
-    assert.equal(credentials.getView("cred_1")?.secretMasked, "leg***nary");
-    assert.equal(await credentials.remove("cred_1"), true);
-  });
 });

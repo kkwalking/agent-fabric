@@ -6,7 +6,7 @@
  * running when the browser closes (a card's agent must survive a page refresh).
  *
  * Two execution modes share this path:
- * - `direct`: the agent runs in the board project folder itself. Multiple
+ * - `direct`: the agent runs in the board workspace folder itself. Multiple
  *   cards may run at once by design (the user asked for it); concurrent edits
  *   are the agents' problem, not a platform lock.
  * - `worktree`: a detached `git worktree` checkout under the data directory,
@@ -37,7 +37,7 @@ import type {
   KanbanSession,
   KanbanSessionModelRoute,
   KanbanSessionStatus,
-  Project,
+  Workspace,
   Task,
 } from "@agentfabric/core";
 import type { KanbanService } from "@agentfabric/core";
@@ -179,8 +179,7 @@ export class KanbanSessionRuntime {
    */
   async startAttempt(cardId: ID): Promise<KanbanStart> {
     const card = this.kanban.getCard(cardId);
-    const project = this.kanban.getProject(card.projectId);
-
+    const workspace = this.kanban.getWorkspace(card.workspaceId);
 
     if (card.column === "trash") {
       throw new DomainError("kanban-session-not-startable", "Restore the card from Done before starting it");
@@ -199,12 +198,12 @@ export class KanbanSessionRuntime {
     const resumeId =
       previous && previous.agentId === card.agentId && previous.nativeSessionId ? previous.nativeSessionId : undefined;
 
-    const launch = buildKanbanLaunch(card, project, {
+    const launch = buildKanbanLaunch(card, workspace, {
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
       ...approved,
     });
     const pendingWorktree = card.executionMode === "worktree";
-    let cwd = this.kanban.rootOf(project);
+    let cwd = this.kanban.rootOf(workspace);
     const rootPath = cwd;
     let worktreeCreated = false;
 
@@ -213,7 +212,7 @@ export class KanbanSessionRuntime {
     // record would detach the resumed conversation from its history.
     // A worktree session resumes in the worktree the board already created for
     // it; re-creating that path fails, and a new one would hide the files the
-    // agent worked on. Direct sessions resume in the project directory.
+    // agent worked on. Direct sessions resume in the workspace directory.
     const canReuse =
       resumeId !== undefined &&
       previous !== undefined &&
@@ -257,14 +256,14 @@ export class KanbanSessionRuntime {
     }
 
     if (launch.transport === "acp") {
-      const started = await this.startAcp({ card, project, launch, session, cwd, worktreeCreated, rootPath });
+      const started = await this.startAcp({ card, workspace, launch, session, cwd, worktreeCreated, rootPath });
       return { ...attempt, session: started };
     }
 
     // Claude blocks on a "trust this folder?" dialog in an unknown directory,
     // and through a PTY that dialog eats the prompt: no turn, no hooks, a card
     // that looks dead. Only workspaces the board created are trusted here; a
-    // user's own project directory keeps its dialog.
+    // user's own workspace directory keeps its dialog.
     if (card.agentId === "claude") {
       await preTrustClaudeWorkspace({ cwd, dataDir: this.options.dataDir });
     }
@@ -334,15 +333,15 @@ export class KanbanSessionRuntime {
    */
   private async startAcp(input: {
     card: KanbanCard;
-    project: Project;
+    workspace: Workspace;
     launch: KanbanLaunch;
     session: KanbanSession;
     cwd: string;
     worktreeCreated: boolean;
-    /** The project folder, for removing a worktree this start created. */
+    /** The workspace folder, for removing a worktree this start created. */
     rootPath: string;
   }): Promise<KanbanSession> {
-    const { card, project, launch, session, cwd, worktreeCreated, rootPath } = input;
+    const { card, workspace, launch, session, cwd, worktreeCreated, rootPath } = input;
     const acp = new AcpSession({ file: launch.file, args: launch.args, cwd, env: launch.env });
     const state: AcpState = {
       session,
@@ -1095,8 +1094,8 @@ export class KanbanSessionRuntime {
     this.broadcastStatus(state);
     try {
       const approved = await assertKanbanAgentAvailable(card);
-      const project = this.kanban.getProject(card.projectId);
-      const launch = buildKanbanLaunch(card, project, approved);
+      const workspace = this.kanban.getWorkspace(card.workspaceId);
+      const launch = buildKanbanLaunch(card, workspace, approved);
       const acp = new AcpSession({
         file: launch.file,
         args: launch.args,
@@ -1181,8 +1180,8 @@ export class KanbanSessionRuntime {
     this.broadcastComposer(state);
     try {
       const approved = await assertKanbanAgentAvailable(card);
-      const project = this.kanban.getProject(card.projectId);
-      const launch = buildKanbanLaunch(card, project, approved);
+      const workspace = this.kanban.getWorkspace(card.workspaceId);
+      const launch = buildKanbanLaunch(card, workspace, approved);
       const acp = new AcpSession({
         file: launch.file,
         args: launch.args,

@@ -1,23 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildKanbanLaunch, getKanbanAgent } from "./kanban/agents.js";
-import type { KanbanAgentKind, KanbanCard, Project } from "@agentfabric/core";
+import type { KanbanAgentKind, KanbanCard, Workspace } from "@agentfabric/core";
 
-// A board project is a Project: the folder is its `directory` source and the
+// A board workspace is a Workspace: the folder is its `path` and the
 // board-only choices live in `board`.
-const project: Project = {
-  id: "proj_test",
+const workspace: Workspace = {
+  id: "ws_test",
   name: "test",
-  source: { type: "directory", path: "/tmp/kanban-agents-test" },
+  type: "local",
+  path: "/tmp/kanban-agents-test",
+  persistent: true,
   board: { workspaceType: "none" },
   createdAt: "2026-01-01T00:00:00.000Z",
-  updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
 function card(agentId: KanbanAgentKind, extra: Partial<KanbanCard> = {}): KanbanCard {
   return {
     id: "kbcard_test",
-    projectId: project.id,
+    workspaceId: workspace.id,
     title: "test",
     prompt: "fix the failing test",
     column: "backlog",
@@ -30,7 +31,7 @@ function card(agentId: KanbanAgentKind, extra: Partial<KanbanCard> = {}): Kanban
 }
 
 test("DSH launches the ACP app and carries the prompt over the protocol", () => {
-  const launch = buildKanbanLaunch(card("dsh"), project);
+  const launch = buildKanbanLaunch(card("dsh"), workspace);
   assert.equal(launch.file, "dsh");
   // DSH has no TUI; the board drives its ACP stdio app. The prompt is a
   // protocol request after the handshake, never an argv element.
@@ -43,7 +44,7 @@ test("DSH launches the ACP app and carries the prompt over the protocol", () => 
 test("DSH ignores the card's model; its permission choice is runtime policy, not argv", () => {
   const launch = buildKanbanLaunch(
     card("dsh", { permissionModeId: "auto", model: "group/flash" }),
-    project
+    workspace
   );
   assert.deepEqual(launch.args, ["--profile", "acp"]);
   const dsh = getKanbanAgent("dsh");
@@ -55,8 +56,8 @@ test("DSH ignores the card's model; its permission choice is runtime policy, not
 });
 
 test("Claude Code takes a positional prompt and its model flag", () => {
-  assert.deepEqual(buildKanbanLaunch(card("claude"), project).args, ["fix the failing test"]);
-  assert.deepEqual(buildKanbanLaunch(card("claude", { model: "opus" }), project).args, [
+  assert.deepEqual(buildKanbanLaunch(card("claude"), workspace).args, ["fix the failing test"]);
+  assert.deepEqual(buildKanbanLaunch(card("claude", { model: "opus" }), workspace).args, [
     "--model",
     "opus",
     "fix the failing test",
@@ -64,14 +65,14 @@ test("Claude Code takes a positional prompt and its model flag", () => {
 });
 
 test("OpenCode gets the prompt through --prompt", () => {
-  assert.deepEqual(buildKanbanLaunch(card("opencode"), project).args, [
+  assert.deepEqual(buildKanbanLaunch(card("opencode"), workspace).args, [
     "--prompt",
     "fix the failing test",
   ]);
 });
 
 test("a permission mode's args sit between the launch and the prompt", () => {
-  assert.deepEqual(buildKanbanLaunch(card("claude", { permissionModeId: "plan" }), project).args, [
+  assert.deepEqual(buildKanbanLaunch(card("claude", { permissionModeId: "plan" }), workspace).args, [
     "--permission-mode",
     "plan",
     "fix the failing test",

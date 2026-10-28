@@ -17,8 +17,6 @@ import type {
   Handoff,
   RuntimeSessionRef,
   RuntimeNativeState,
-  Project,
-  SourceCredential,
   WorkspaceLock,
   KanbanCard,
   KanbanSession,
@@ -38,8 +36,6 @@ export type CollectionName =
   | "handoffs"
   | "runtimeSessions"
   | "nativeStates"
-  | "projects"
-  | "sourceCredentials"
   | "workspaceLocks"
   | "kanbanCards"
   | "kanbanSessions"
@@ -76,8 +72,6 @@ export interface Database {
   handoffs: Handoff[];
   runtimeSessions: RuntimeSessionRef[];
   nativeStates: RuntimeNativeState[];
-  projects: Project[];
-  sourceCredentials: SourceCredential[];
   workspaceLocks: WorkspaceLock[];
   kanbanCards: KanbanCard[];
   kanbanSessions: KanbanSession[];
@@ -104,8 +98,6 @@ export function emptyDatabase(): Database {
     handoffs: [],
     runtimeSessions: [],
     nativeStates: [],
-    projects: [],
-    sourceCredentials: [],
     workspaceLocks: [],
     kanbanCards: [],
     kanbanSessions: [],
@@ -169,8 +161,6 @@ export class Store {
       if (!Array.isArray(this.db.handoffs)) this.db.handoffs = [];
       if (!Array.isArray(this.db.runtimeSessions)) this.db.runtimeSessions = [];
       if (!Array.isArray(this.db.nativeStates)) this.db.nativeStates = [];
-      if (!Array.isArray(this.db.projects)) this.db.projects = [];
-      if (!Array.isArray(this.db.sourceCredentials)) this.db.sourceCredentials = [];
       if (!Array.isArray(this.db.workspaceLocks)) this.db.workspaceLocks = [];
       if (!Array.isArray(this.db.kanbanCards)) this.db.kanbanCards = [];
       if (!Array.isArray(this.db.kanbanSessions)) this.db.kanbanSessions = [];

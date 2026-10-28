@@ -3,7 +3,6 @@ import { get, post, put } from "../api";
 import { ErrorBox, Field, Icon, Modal, type IconName } from "../components";
 import { useI18n } from "../i18n-react";
 import { LlmView } from "./Llm";
-import { CredentialsSection } from "./SourceCredentials";
 import { LANGUAGES, type Language, type MessageKey } from "../i18n";
 import { navigate, type SettingsSection } from "../router";
 
@@ -18,7 +17,7 @@ import { navigate, type SettingsSection } from "../router";
  *
  * Saving always PUTs the *whole* config document (`GET /api/config`, change the
  * fields of one section, PUT back), because the API is a document API — the
- * server restores masked credentials from their `***` form, so a round-tripped
+ * server restores masked secret values from their `***` form, so a round-tripped
  * document never writes a placeholder over a real secret.
  *
  * Manual edits are handled next to the pages: the file card says whether the
@@ -40,9 +39,6 @@ const SECTIONS: SectionDef[] = [
   { id: "harness", label: "settings.nav.harness", icon: "terminal" },
   { id: "docker", label: "settings.nav.docker", icon: "box" },
   { id: "retry", label: "settings.nav.retry", icon: "refresh" },
-  // Git credentials are global settings, referenced by Project id — they belong
-  // beside the other app-wide settings, not in a page of their own.
-  { id: "credentials", label: "settings.nav.credentials", icon: "key" },
   { id: "about", label: "settings.nav.about", icon: "cpu" },
 ];
 
@@ -307,13 +303,6 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
             {config && current.id === "harness" && <HarnessSection config={config} save={saveSection} />}
             {config && current.id === "docker" && <DockerSection config={config} save={saveSection} />}
             {config && current.id === "retry" && <RetrySection config={config} save={saveSection} />}
-            {config && current.id === "credentials" && (
-              <div className="settings-page">
-                <h2 className="settings-page-title">{t("settings.nav.credentials")}</h2>
-                <p className="settings-page-desc">{t("credentials.description")}</p>
-                <CredentialsSection />
-              </div>
-            )}
             {config && current.id === "about" && <AboutSection config={config} />}
           </div>
         </div>
@@ -950,10 +939,11 @@ function DockerSection(props: { config: Record<string, unknown>; save: SaveSecti
 /**
  * Whether this machine can actually run a containerized runtime.
  *
- * A Project task refuses to run anywhere else, so with no working Docker the
- * user is stuck — and "the CLI is installed but the daemon is not running" looks
- * identical to "not installed at all" from the outside. Re-probed on demand
- * because it is the Docker app's state that changes, not ours.
+ * A task that needs an isolated runtime refuses to run anywhere else, so with
+ * no working Docker the user is stuck — and "the CLI is installed but the
+ * daemon is not running" looks identical to "not installed at all" from the
+ * outside. Re-probed on demand because it is the Docker app's state that
+ * changes, not ours.
  */
 function DockerStatus() {
   const { t } = useI18n();

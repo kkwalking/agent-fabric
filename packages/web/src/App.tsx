@@ -36,9 +36,6 @@ const UsageView = load(() => import("./views/Usage"), "UsageView");
 // The settings panel is its own chunk: it is opened deliberately, and it is
 // the only view that writes the configuration file.
 const SettingsPanel = load(() => import("./views/Settings"), "SettingsView");
-const ProjectsView = load(() => import("./views/Projects"), "ProjectsView");
-const ProjectDetailView = load(() => import("./views/Projects"), "ProjectDetailView");
-const NewProjectTaskView = load(() => import("./views/Projects"), "NewProjectTaskView");
 const TaskLifecycleView = load(() => import("./views/TaskLifecycle"), "TaskLifecycleView");
 const KanbanView = load(() => import("./views/Board"), "BoardView");
 
@@ -52,7 +49,6 @@ const VIEW_IMPORTERS: Array<() => Promise<unknown>> = [
   () => import("./views/Tasks"),
   () => import("./views/NewTask"),
   () => import("./views/Runs"),
-  () => import("./views/Projects"),
   () => import("./views/Llm"),
   () => import("./views/ResourceView"),
   () => import("./views/Sessions"),
@@ -148,10 +144,9 @@ export function App() {
     setSettingsOpen(open);
     writeSettingsOpen(open);
   }, [parsed.view]);
-  // The rail's filter row: two independent narrowing switches.
+  // The rail's filter row.
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filterPinnedOnly, setFilterPinnedOnly] = useState(false);
-  const [filterProjectsOnly, setFilterProjectsOnly] = useState(false);
   const [health, setHealth] = useState<string>("connecting…");
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -216,6 +211,16 @@ export function App() {
               <Icon name="plus" size={15} />
               <span>{t("sidebar.newSession")}</span>
             </button>
+            {/* The board is a primary destination of its own: it sits between
+                the new-session action and the workspace tree instead of hiding
+                in the overflow menu. */}
+            <button
+              className={`nav-item rail-kanban ${route.view === "kanban" ? "active" : ""}`}
+              onClick={() => navigate("/kanban")}
+            >
+              <Icon name="grid" size={15} />
+              <span>{t("nav.kanban")}</span>
+            </button>
             <div className="rail-head">
               <button
                 className="icon-btn sidebar-toggle expanded"
@@ -265,16 +270,11 @@ export function App() {
                     <input type="checkbox" checked={filterPinnedOnly} onChange={(e) => setFilterPinnedOnly(e.target.checked)} />
                     {t("sidebar.filterPinned")}
                   </label>
-                  <label>
-                    <input type="checkbox" checked={filterProjectsOnly} onChange={(e) => setFilterProjectsOnly(e.target.checked)} />
-                    {t("sidebar.filterProjects")}
-                  </label>
                 </div>
               )}
               <WorkspaceTaskList
                 activeTaskId={route.view === "task" ? route.id : undefined}
                 pinnedOnly={filterPinnedOnly}
-                projectsOnly={filterProjectsOnly}
               />
             </nav>
           </>
@@ -301,6 +301,14 @@ export function App() {
               onClick={() => navigate("/new")}
             >
               <Icon name="newSession" size={16} />
+            </button>
+            <button
+              className={`icon-btn rail-kanban-icon ${route.view === "kanban" ? "active" : ""}`}
+              title={t("nav.kanban")}
+              aria-label={t("nav.kanban")}
+              onClick={() => navigate("/kanban")}
+            >
+              <Icon name="grid" size={16} />
             </button>
           </div>
         )}
@@ -339,10 +347,7 @@ export function App() {
         {route.view === "sessions" && <SessionsView />}
         {/* AGENT_UI_HIDDEN: 与上面侧边栏的 Agents 导航一起恢复。 */}
         {/* {route.view === "agents" && <ResourceView kind="agents" />} */}
-        {route.view === "projects" && <ProjectsView />}
         {route.view === "kanban" && <KanbanView />}
-        {route.view === "project" && route.id && <ProjectDetailView key={route.id} projectId={route.id} />}
-        {route.view === "project-new-task" && route.id && <NewProjectTaskView key={route.id} projectId={route.id} />}
         {route.view === "handoffs" && <HandoffsView />}
         {route.view === "handoff" && route.id && <HandoffDetailView key={route.id} handoffId={route.id} />}
         {route.view === "usage" && <UsageView />}

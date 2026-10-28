@@ -1128,6 +1128,19 @@ textarea + .hint {
   overflow-y: auto;
   min-height: 0;
 }
+/* A board task's live PTY/ACP panel replaces the run-event timeline: the
+   session handle owns the only real transcript for that Task. */
+.thread-board-session {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 24px;
+}
+.thread-board-session .acp-chat,
+.thread-board-session .board-term {
+  margin: 12px 0;
+}
 .thread-list {
   max-width: 860px;
   margin: 0 auto;
@@ -4521,6 +4534,29 @@ button.stat.clickable:hover {
   border-color: var(--text);
 }
 
+/* Kanban's own row: between 新会话 and the 工作区 heading. Same shape as the
+   other nav rows, with the rail's edge margins and a slightly larger label so
+   it reads as a destination rather than a list item. */
+.rail-kanban {
+  width: calc(100% - 16px);
+  margin: 0 8px 10px;
+  padding: 8px 12px;
+  flex-shrink: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+.rail-kanban .icon {
+  opacity: 0.8;
+}
+.rail-kanban.active {
+  background: var(--sidebar-active);
+}
+.rail-kanban-icon.active {
+  background: var(--sidebar-active);
+  color: var(--text);
+}
+
 /* One session row: the title button, then the age, pin and ··· as siblings so
    the menu can anchor to the row instead of the scrolling rail. */
 .ws-task-row {
@@ -4558,6 +4594,9 @@ button.stat.clickable:hover {
   flex: 0 0 auto;
   width: 22px;
   height: 22px;
+  /* The global `button` rule adds 12px horizontal padding; in a 22px box that
+     leaves zero content width and the 14px SVG collapses to nothing. */
+  padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -4785,6 +4824,7 @@ button.stat.clickable:hover {
   width: 22px;
   height: 22px;
   margin-right: 5px;
+  padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;

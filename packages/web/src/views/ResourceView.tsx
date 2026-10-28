@@ -72,15 +72,11 @@ const configs: Record<string, Config> = {
       { key: "enabled", label: "resources.col.enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
       { key: "usableInTask", label: "resources.col.usableInTask", render: (r) => (r.usableInTask ? "yes" : "no") },
       {
-        // v11 hardening §4: Project Coding Tasks require an isolated runtime;
-        // the column states the verdict so an operator can see which runtimes
-        // are eligible without reading the record.
+        // The column states whether the runtime runs in a container, so an
+        // operator can see the execution backend without opening the record.
         key: "executionBackend",
         label: "resources.col.isolation",
-        render: (r) =>
-          (r.executionBackend ?? (r.containerized ? "isolated" : "host")) === "isolated" && r.image
-            ? "isolated"
-            : "host — not usable for project tasks",
+        render: (r) => (r.executionBackend ?? (r.containerized ? "isolated" : "host")),
       },
     ],
     createFields: [
@@ -115,12 +111,6 @@ const configs: Record<string, Config> = {
           <dt>{t("resources.f.executionBackend")}</dt><dd>{r.executionBackend ?? (r.containerized ? "isolated" : "host")}</dd>
           <dt>{t("resources.f.containerized")}</dt><dd>{String(Boolean(r.containerized))}</dd>
           <dt>{t("resources.f.image")}</dt><dd>{r.image ?? "—"}</dd>
-          <dt>{t("resources.detail.projectTasks")}</dt>
-          <dd>
-            {(r.executionBackend ?? (r.containerized ? "isolated" : "host")) === "isolated" && r.image
-              ? t("resources.detail.projectAllowed")
-              : t("resources.detail.projectRefused")}
-          </dd>
           <dt>{t("resources.detail.command")}</dt><dd>{Array.isArray(r.command) && r.command.length > 0 ? r.command.join(" ") : "—"}</dd>
           <dt>{t("resources.detail.cwd")}</dt><dd>{r.cwd ?? "—"}</dd>
           <dt>{t("resources.detail.defaultModel")}</dt><dd>{r.defaultModelId ?? "—"}</dd>

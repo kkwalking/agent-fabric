@@ -13,20 +13,17 @@ import type { MessageKey } from "../i18n";
 import { navigate } from "../router";
 import { AcpChat } from "../components/AcpChat";
 import { BoardTerminal } from "../components/BoardTerminal";
-import { AddProjectDialog } from "../components/board/AddProjectDialog";
+import { AddWorkspaceDialog } from "../components/board/AddWorkspaceDialog";
 import { TaskCreateDialog, TaskEditDialog } from "../components/board/TaskCreateDialog";
 import { initialFromDefaults, type TaskCreateSubmissionOptions } from "../components/board/TaskCreateForm";
 import type {
   BoardColumnId,
-  BoardProject,
+  BoardWorkspace,
   ExecutionMode,
   KanbanAgent,
   KanbanCard,
   KanbanGitInfo,
   KanbanSession,
-  KanbanWorkspace,
-  Project,
-  /** The board's view of a Project's board settings. */
   ProjectBoardSettings,
   SessionStatus,
   TaskDraft,
@@ -35,22 +32,22 @@ import type {
 } from "../components/board/types";
 
 /**
- * Board (v13 §七): four fixed columns over one Project's folder, with local
+ * Board (v13 §七): four fixed columns over one workspace's directory, with local
  * agent sessions and their live PTY terminals.
  *
- * A board project *is* a Project: the board reads `/api/projects` and shows the
- * folders among them, so the same project appears on the Projects page and in
- * the sidebar's workspace tree. `project.source` says where the code comes from
- * and `project.board` carries the board-only settings (folder shape, default
- * agent and execution mode).
+ * A board workspace *is* a workspace: the board reads `/api/kanban/workspaces`
+ * and each row is one directory on this machine plus the board-only settings
+ * (folder shape, default agent and execution mode) in `workspace.board`. There
+ * is no Project above it — the directory is the entity, so the same row is the
+ * workspace the sidebar lists.
  *
  * Every started card produces a real Task (one Task per card, one Run per
  * start): the card detail has an "Open task" entry into the ordinary task
- * thread, and the Task lands under the project's folder in the workspace tree.
+ * thread, and the Task lands under that workspace in the sidebar tree.
  *
- * Project creation and task creation follow the Cline Kanban fork's flow:
- * - add a project from a server-path picker or a Git clone, with the
- *   "this folder is not Git" decision left to the user;
+ * Adding a workspace and creating tasks follow the Cline Kanban fork's flow:
+ * - add a workspace by picking an absolute directory path (Git is optional —
+ *   a plain folder boards exactly the same way);
  * - create a card from the Backlog column or the "New task" dialog, choosing
  *   agent, model, permission mode, workspace mode and worktree base ref.
  *
@@ -101,7 +98,7 @@ function SessionStatusBadge({ status }: { status: string }) {
   return <span className={`badge ${status}`}>{key ? t(key) : status}</span>;
 }
 
-/** Letters used by the project-list count badges (fork uses B / IP / R / D). */
+/** Letters used by the workspace-list count badges (fork uses B / IP / R / D). */
 const COUNT_KEY: Record<BoardColumnId, string> = {
   backlog: "B",
   in_progress: "IP",
@@ -116,7 +113,7 @@ const WORKSPACE_LABEL_KEY: Record<WorkspaceType, MessageKey> = {
   "google-repo": "board.workspace.googleRepo",
 };
 
-/** What `<select>` offers for a project's board settings. */
+/** What `<select>` offers for a workspace's board settings. */
 const BOARD_WORKSPACE_TYPES: WorkspaceType[] = ["none", "git", "multi-git", "google-repo"];
 
 /** Session statuses that still own a running PTY (stop/restart are meaningful). */
@@ -127,7 +124,7 @@ const LIVE_SESSION_STATUSES = new Set<SessionStatus>([
   "needs_attention",
 ]);
 
-const PROJECT_STORAGE_KEY = "agentfabric.boardProjectId";
+const WORKSPACE_STORAGE_KEY = "agentfabric.boardWorkspaceId";
 const TASK_DEFAULTS_PREFIX = "agentfabric.boardTaskDefaults.";
 const DETAIL_SIDE_WIDTH_KEY = "agentfabric.boardDetailSideWidth";
 
@@ -139,30 +136,12 @@ function errText(error: unknown): string {
 }
 
 /**
- * Where a project's board lives on disk.
- *
- * A board root is never stored on the Project as a second copy of a path — two
- * copies always drift apart. A `directory` source carries the folder itself; a
- * `git` source has none of its own, so the board folder is the external
- * workspace the board attached to that project (created when its first card is
- * added). `null` means "no folder to show yet", never a guessed path: the
- * server owns the actual resolution and fails loudly when there is none.
+ * The board settings of a workspace. A workspace that was not added from the
+ * board has none (any directory is a valid board), so it boards as a plain
+ * folder with no defaults — that default is computed here, never stored back.
  */
-function projectRoot(project: Project, workspaces: KanbanWorkspace[]): string | null {
-  if (project.source.type === "directory") return project.source.path ?? null;
-  const workspace = workspaces.find(
-    (entry) => entry.ownership === "external" && entry.projectId === project.id
-  );
-  return workspace?.path ?? null;
-}
-
-/**
- * The board settings of a project. A Project that was not added from the board
- * has none (any folder is a valid board), so it boards as a plain folder with
- * no defaults — that default is computed here, never stored back.
- */
-function boardSettingsOf(project: Project): ProjectBoardSettings {
-  return project.board ?? { workspaceType: "none" };
+function boardSettingsOf(workspace: BoardWorkspace): ProjectBoardSettings {
+  return workspace.board ?? { workspaceType: "none" };
 }
 
 /** `/Users/you/x` → `~/x` for display; the absolute path is the fallback. */
@@ -203,10 +182,10 @@ function readStoredJson<T>(key: string): T | null {
   }
 }
 
-function readTaskDefaults(project: BoardProject | null): TaskFormDefaults {
-  if (!project) return {};
-  const board = boardSettingsOf(project);
-  const stored = readStoredJson<TaskFormDefaults>(`${TASK_DEFAULTS_PREFIX}${project.id}`) ?? {};
+function readTaskDefaults(workspace: BoardWorkspace | null): TaskFormDefaults {
+  if (!workspace) return {};
+  const board = boardSettingsOf(workspace);
+  const stored = readStoredJson<TaskFormDefaults>(`${TASK_DEFAULTS_PREFIX}${workspace.id}`) ?? {};
   return {
     ...(stored.agentId ?? board.defaultAgentId
       ? { agentId: stored.agentId ?? board.defaultAgentId }
@@ -229,10 +208,10 @@ function readStoredSideWidth(): number {
   return 330;
 }
 
-function writeTaskDefaults(projectId: string, draft: TaskDraft): void {
+function writeTaskDefaults(workspaceId: string, draft: TaskDraft): void {
   try {
     window.localStorage.setItem(
-      `${TASK_DEFAULTS_PREFIX}${projectId}`,
+      `${TASK_DEFAULTS_PREFIX}${workspaceId}`,
       JSON.stringify({
         agentId: draft.agentId,
         ...(draft.model ? { model: draft.model } : {}),
@@ -249,31 +228,25 @@ function writeTaskDefaults(projectId: string, draft: TaskDraft): void {
 
 export function BoardView() {
   const t = useT();
-  const [projects, setProjects] = useState<BoardProject[] | null>(null);
-  const [projectId, setProjectId] = useState<string | null>(() =>
-    window.localStorage.getItem(PROJECT_STORAGE_KEY)
+  const [workspaces, setWorkspaces] = useState<BoardWorkspace[] | null>(null);
+  const [workspaceId, setWorkspaceId] = useState<string | null>(() =>
+    window.localStorage.getItem(WORKSPACE_STORAGE_KEY)
   );
   const [agents, setAgents] = useState<KanbanAgent[] | null>(null);
   const [agentsError, setAgentsError] = useState<string | null>(null);
   const [cards, setCards] = useState<KanbanCard[]>([]);
   const [sessions, setSessions] = useState<Record<string, KanbanSession | null>>({});
   const [git, setGit] = useState<KanbanGitInfo | null>(null);
-  /**
-   * External workspaces, used for one thing: a `git` project's folder is only
-   * recorded on its workspace, so the sidebar and the header read it from
-   * there. A Project never stores a second copy of the path.
-   */
-  const [workspaces, setWorkspaces] = useState<KanbanWorkspace[]>([]);
   const [sessionStatusError, setSessionStatusError] = useState<string | null>(null);
   const [boardError, setBoardError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const [addProjectOpen, setAddProjectOpen] = useState(false);
-  const [deletingProject, setDeletingProject] = useState<BoardProject | null>(null);
-  const [deletingProjectBusy, setDeletingProjectBusy] = useState(false);
-  /** The project whose board settings are being edited (agent/execution mode). */
-  const [settingsProject, setSettingsProject] = useState<BoardProject | null>(null);
+  const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
+  const [deletingWorkspace, setDeletingWorkspace] = useState<BoardWorkspace | null>(null);
+  const [deletingWorkspaceBusy, setDeletingWorkspaceBusy] = useState(false);
+  /** The workspace whose board settings are being edited (agent/execution mode). */
+  const [settingsWorkspace, setSettingsWorkspace] = useState<BoardWorkspace | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
 
@@ -302,29 +275,29 @@ export function BoardView() {
   const dragRef = useRef<{ cardId: string; from: BoardColumnId } | null>(null);
   dragRef.current = drag;
 
-  const selectedProject = projects?.find((project) => project.id === projectId) ?? null;
+  const selectedWorkspace = workspaces?.find((workspace) => workspace.id === workspaceId) ?? null;
   const selectedCard = cards.find((card) => card.id === selectedCardId) ?? null;
   const editingCard = cards.find((card) => card.id === editingCardId) ?? null;
-  const taskDefaults = readTaskDefaults(selectedProject);
+  const taskDefaults = readTaskDefaults(selectedWorkspace);
 
   // ---------- loading ----------
 
   /**
-   * Loads the Project list — the same endpoint the Projects page reads, so the
-   * board has no project collection of its own. Card totals are attached by
-   * rendering (`useCardCounts` below), not by a board-specific project API.
+   * Loads the board's workspace list. A board workspace is an ordinary
+   * workspace, so this is the board's only collection: the sidebar row, the
+   * selected board and the directory in the header all come from here.
    */
-  const loadProjects = useCallback(async () => {
+  const loadWorkspaces = useCallback(async () => {
     try {
-      const result = await get<Project[]>("/api/projects");
-      setProjects(result);
+      const result = await get<{ workspaces: BoardWorkspace[] }>("/api/kanban/workspaces");
+      setWorkspaces(result.workspaces);
       setBoardError(null);
-      setProjectId((current) => {
-        const stored = window.localStorage.getItem(PROJECT_STORAGE_KEY);
+      setWorkspaceId((current) => {
+        const stored = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
         const pick =
-          result.find((project) => project.id === current) ??
-          result.find((project) => project.id === stored) ??
-          result[0];
+          result.workspaces.find((workspace) => workspace.id === current) ??
+          result.workspaces.find((workspace) => workspace.id === stored) ??
+          result.workspaces[0];
         return pick?.id ?? null;
       });
     } catch (error) {
@@ -334,28 +307,14 @@ export function BoardView() {
     }
   }, []);
 
-  /** External workspaces: the folder of every `git`-sourced board project. */
-  const loadWorkspaces = useCallback(async () => {
-    try {
-      const result = await get<KanbanWorkspace[]>("/api/workspaces");
-      setWorkspaces(result);
-    } catch (error) {
-      // The board runs without this (a directory project knows its own path),
-      // but a `git` project would render as "no folder". Say so instead of
-      // silently dropping the path.
-      setBoardError(errText(error));
-    }
-  }, []);
-
   useEffect(() => {
-    void loadProjects();
     void loadWorkspaces();
-  }, [loadProjects, loadWorkspaces]);
+  }, [loadWorkspaces]);
 
   useEffect(() => {
-    if (projectId) window.localStorage.setItem(PROJECT_STORAGE_KEY, projectId);
-    else window.localStorage.removeItem(PROJECT_STORAGE_KEY);
-  }, [projectId]);
+    if (workspaceId) window.localStorage.setItem(WORKSPACE_STORAGE_KEY, workspaceId);
+    else window.localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+  }, [workspaceId]);
 
   // Home directory, used only to shorten a Done card's working-directory path
   // to `~/…` the way the fork shows it. Best effort: without it the absolute
@@ -392,10 +351,10 @@ export function BoardView() {
   }, []);
 
   /** Branch options for worktree cards; `null` for a non-repository folder. */
-  const loadGit = useCallback(async (pid: string) => {
+  const loadGit = useCallback(async (workspace: string) => {
     try {
       const result = await get<{ git: KanbanGitInfo | null }>(
-        `/api/kanban/projects/${encodeURIComponent(pid)}/git`
+        `/api/kanban/workspaces/${encodeURIComponent(workspace)}/git`
       );
       setGit(result.git);
     } catch {
@@ -406,16 +365,16 @@ export function BoardView() {
 
   useEffect(() => {
     setGit(null);
-    if (!projectId) return;
-    void loadGit(projectId);
-  }, [projectId, loadGit]);
+    if (!workspaceId) return;
+    void loadGit(workspaceId);
+  }, [workspaceId, loadGit]);
 
   /** Cards + per-card session status. The board API returns cards only, so
    *  session state is read one card at a time for cards that have been started
    *  (`taskId`; a Backlog card that never ran has none). */
-  const refreshCards = useCallback(async (pid: string) => {
+  const refreshCards = useCallback(async (workspace: string) => {
     const result = await get<{ cards: KanbanCard[] }>(
-      `/api/kanban/projects/${encodeURIComponent(pid)}/cards`
+      `/api/kanban/workspaces/${encodeURIComponent(workspace)}/cards`
     );
     setCards(result.cards);
     const pending = result.cards.filter((card) => card.taskId);
@@ -447,23 +406,23 @@ export function BoardView() {
   }, [t]);
 
   const refreshNow = useCallback(async () => {
-    if (!projectId) return;
+    if (!workspaceId) return;
     try {
-      await refreshCards(projectId);
-      // The folder of a `git` project can appear when its first card starts, so
-      // a refresh that may have changed cards reloads the workspaces too.
-      await Promise.all([loadProjects(), loadWorkspaces()]);
+      await refreshCards(workspaceId);
+      // The row carries the server's card totals, so a refresh that may have
+      // changed cards reloads the workspace list as well.
+      await loadWorkspaces();
       setBoardError(null);
     } catch (error) {
       setBoardError(errText(error));
     }
-  }, [projectId, refreshCards, loadProjects, loadWorkspaces]);
+  }, [workspaceId, refreshCards, loadWorkspaces]);
 
-  // Board poll: every 2s (§七). Cards are the expensive part; project metadata
-  // is refreshed on explicit actions and initial load.
-  const projectsLoaded = projects !== null;
+  // Board poll: every 2s (§七). Cards are the expensive part; workspace
+  // metadata is refreshed on explicit actions and initial load.
+  const workspacesLoaded = workspaces !== null;
   useEffect(() => {
-    if (!projectId || !projectsLoaded) {
+    if (!workspaceId || !workspacesLoaded) {
       setCards([]);
       setSessions({});
       return;
@@ -474,7 +433,7 @@ export function BoardView() {
       if (inFlight) return;
       inFlight = true;
       try {
-        await refreshCards(projectId);
+        await refreshCards(workspaceId);
         if (!cancelled) setBoardError(null);
       } catch (error) {
         if (!cancelled) setBoardError(errText(error));
@@ -488,29 +447,27 @@ export function BoardView() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [projectId, projectsLoaded, refreshCards]);
+  }, [workspaceId, workspacesLoaded, refreshCards]);
 
-  // Project list poll (projects added or removed elsewhere, and a `git`
-  // project's folder appearing once its first card runs). Slower than the card
-  // poll because it changes far less often, but the sidebar never waits for a
-  // manual refresh.
+  // Workspace list poll (workspaces added or removed elsewhere). Slower than
+  // the card poll because it changes far less often, but the sidebar never
+  // waits for a manual refresh.
   useEffect(() => {
-    if (!projectId) return;
+    if (!workspaceId) return;
     const timer = window.setInterval(() => {
-      void loadProjects();
       void loadWorkspaces();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [projectId, loadProjects, loadWorkspaces]);
+  }, [workspaceId, loadWorkspaces]);
 
   // Returning to the tab refreshes immediately: a background tab throttles
   // timers, so the first paint after focus must not show stale sessions.
   useEffect(() => {
-    if (!projectId) return;
+    if (!workspaceId) return;
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
       void refreshNow();
-      void loadGit(projectId);
+      void loadGit(workspaceId);
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
@@ -518,7 +475,7 @@ export function BoardView() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [projectId, refreshNow, loadGit]);
+  }, [workspaceId, refreshNow, loadGit]);
 
   // Card detail session poll: every 1.5s while the overlay is open (§七).
   useEffect(() => {
@@ -552,9 +509,9 @@ export function BoardView() {
 
   // ---------- actions ----------
 
-  const selectProject = (id: string) => {
-    if (id === projectId) return;
-    setProjectId(id);
+  const selectWorkspace = (id: string) => {
+    if (id === workspaceId) return;
+    setWorkspaceId(id);
     setCards([]);
     setSessions({});
     setSelectedCardId(null);
@@ -644,42 +601,45 @@ export function BoardView() {
   };
 
   /**
-   * Deletes the Project itself (`DELETE /api/projects/:id`), not a board-only
-   * copy: there is only one project record, so the Projects page loses it too.
-   * The folder on disk, the worktrees and the Tasks that already ran are kept.
+   * Deletes the workspace itself (`DELETE /api/workspaces/:id`), not a
+   * board-only copy: there is only one workspace record, so the sidebar loses
+   * it too. The directory on disk, the worktrees and the Tasks that already ran
+   * are kept.
    */
-  const deleteProject = async () => {
-    if (!deletingProject) return;
-    setDeletingProjectBusy(true);
+  const deleteWorkspace = async () => {
+    if (!deletingWorkspace) return;
+    setDeletingWorkspaceBusy(true);
     setActionError(null);
     try {
-      await del(`/api/projects/${encodeURIComponent(deletingProject.id)}`);
-      setDeletingProject(null);
-      if (deletingProject.id === projectId) {
-        setProjectId(null);
+      await del(`/api/workspaces/${encodeURIComponent(deletingWorkspace.id)}`);
+      setDeletingWorkspace(null);
+      if (deletingWorkspace.id === workspaceId) {
+        setWorkspaceId(null);
         setSelectedCardId(null);
       }
-      await loadProjects();
+      await loadWorkspaces();
     } catch (error) {
-      setActionError(t("board.action.deleteProjectFailed", { error: errText(error) }));
-      setDeletingProject(null);
+      setActionError(t("board.action.deleteWorkspaceFailed", { error: errText(error) }));
+      setDeletingWorkspace(null);
     } finally {
-      setDeletingProjectBusy(false);
+      setDeletingWorkspaceBusy(false);
     }
   };
 
   /**
-   * Saves the board settings of a project (`PUT /api/projects/:id` with a
-   * partial `board`). `ProjectService.update` merges the patch, so the fields
-   * this dialog does not show are left as they are.
+   * Saves the board settings of a workspace (`PUT /api/workspaces/:id` with a
+   * partial `board`). The workspace update merges the patch, so the fields this
+   * dialog does not show are left as they are.
    */
-  const saveBoardSettings = async (project: BoardProject, next: ProjectBoardSettings) => {
+  const saveBoardSettings = async (workspace: BoardWorkspace, next: ProjectBoardSettings) => {
     setSettingsBusy(true);
     setSettingsError(null);
     try {
-      await put<Project>(`/api/projects/${encodeURIComponent(project.id)}`, { board: next });
-      setSettingsProject(null);
-      await loadProjects();
+      await put<BoardWorkspace>(`/api/workspaces/${encodeURIComponent(workspace.id)}`, {
+        board: next,
+      });
+      setSettingsWorkspace(null);
+      await loadWorkspaces();
     } catch (error) {
       setSettingsError(t("board.action.saveFailed", { error: errText(error) }));
     } finally {
@@ -687,13 +647,13 @@ export function BoardView() {
     }
   };
 
-  /** Empties Done. Records only — the project folder and worktrees are kept. */
+  /** Empties Done. Records only — the workspace directory and worktrees are kept. */
   const clearTrash = async () => {
-    if (!projectId) return;
+    if (!workspaceId) return;
     setClearTrashBusy(true);
     setActionError(null);
     try {
-      await post(`/api/kanban/projects/${encodeURIComponent(projectId)}/trash/clear`);
+      await post(`/api/kanban/workspaces/${encodeURIComponent(workspaceId)}/trash/clear`);
       setClearTrashOpen(false);
       await refreshNow();
     } catch (error) {
@@ -712,14 +672,14 @@ export function BoardView() {
    * did get created visible rather than silently rolling them back.
    */
   const createTasks = async (draft: TaskDraft, options: TaskCreateSubmissionOptions) => {
-    if (!projectId) return;
+    if (!workspaceId) return;
     setTaskBusy(true);
     setTaskError(null);
     const created: KanbanCard[] = [];
     try {
       for (const prompt of draft.prompts) {
         const response = await post<{ card: KanbanCard }>(
-          `/api/kanban/projects/${encodeURIComponent(projectId)}/cards`,
+          `/api/kanban/workspaces/${encodeURIComponent(workspaceId)}/cards`,
           {
             prompt,
             ...(draft.prompts.length === 1 && draft.title ? { title: draft.title } : {}),
@@ -733,7 +693,7 @@ export function BoardView() {
         );
         created.push(response.card);
       }
-      writeTaskDefaults(projectId, draft);
+      writeTaskDefaults(workspaceId, draft);
 
       const startFailures: string[] = [];
       if (options.start) {
@@ -818,24 +778,24 @@ export function BoardView() {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "c" && event.key !== "C") return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (taskDialogOpen || addProjectOpen || deletingProject || selectedCardId || editingCardId) return;
+      if (taskDialogOpen || addWorkspaceOpen || deletingWorkspace || selectedCardId || editingCardId) return;
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
-      if (!projectId) return;
+      if (!workspaceId) return;
       event.preventDefault();
       openTaskDialog();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
-    addProjectOpen,
-    deletingProject,
+    addWorkspaceOpen,
+    deletingWorkspace,
     editingCardId,
     openTaskDialog,
-    projectId,
     selectedCardId,
     taskDialogOpen,
+    workspaceId,
   ]);
 
   // ---------- drag & drop ----------
@@ -920,60 +880,58 @@ export function BoardView() {
 
   const detailSessionLive = detailSession ? LIVE_SESSION_STATUSES.has(detailSession.status) : false;
   /**
-   * Card totals per column. The selected project's totals are counted from the
-   * cards on screen (they are already loaded and are what the columns show);
-   * every other project has no board card endpoint of its own any more, so its
-   * row simply shows no badges until it is selected.
+   * Card totals per column. The selected workspace's totals are counted from
+   * the cards on screen (they are already loaded and are what the columns
+   * show); every other row uses the totals the server computes for the list.
    */
-  const countsFor = (project: BoardProject): Record<BoardColumnId, number> | null => {
-    if (project.id !== projectId) return null;
+  const countsFor = (workspace: BoardWorkspace): Record<BoardColumnId, number> | null => {
+    if (workspace.id !== workspaceId) return workspace.cardCounts ?? null;
     const counts: Record<BoardColumnId, number> = { backlog: 0, in_progress: 0, review: 0, trash: 0 };
     for (const card of cards) counts[card.column] += 1;
     return counts;
   };
-  const selectedRoot = selectedProject ? projectRoot(selectedProject, workspaces) : null;
-  const selectedBoard: ProjectBoardSettings | null = selectedProject
-    ? boardSettingsOf(selectedProject)
+  const selectedRoot = selectedWorkspace?.path ?? null;
+  const selectedBoard: ProjectBoardSettings | null = selectedWorkspace
+    ? boardSettingsOf(selectedWorkspace)
     : null;
 
   return (
     <div className="board">
       <aside className="board-projects">
         <div className="board-projects-head">
-          <span className="board-projects-title">{t("board.projects")}</span>
+          <span className="board-projects-title">{t("board.workspaces")}</span>
           <button
             className="icon-btn"
-            title={t("board.addProject")}
-            onClick={() => setAddProjectOpen(true)}
+            title={t("board.addWorkspace")}
+            onClick={() => setAddWorkspaceOpen(true)}
           >
             <Icon name="plus" />
           </button>
         </div>
         <div className="board-projects-list">
-          {projects === null && (
+          {workspaces === null && (
             <div className="muted board-projects-empty">{t("board.loadingShort")}</div>
           )}
-          {projects?.length === 0 && (
-            <div className="muted board-projects-empty">{t("board.noProjects")}</div>
+          {workspaces?.length === 0 && (
+            <div className="muted board-projects-empty">{t("board.noWorkspaces")}</div>
           )}
-          {(projects ?? []).map((project) => {
-            const counts = countsFor(project);
+          {(workspaces ?? []).map((workspace) => {
+            const counts = countsFor(workspace);
             const total = counts
               ? counts.backlog + counts.in_progress + counts.review + counts.trash
               : 0;
-            const board = boardSettingsOf(project);
-            const root = projectRoot(project, workspaces);
+            const board = boardSettingsOf(workspace);
             return (
               <div
-                key={project.id}
-                className={`board-project ${project.id === projectId ? "active" : ""}`}
+                key={workspace.id}
+                className={`board-project ${workspace.id === workspaceId ? "active" : ""}`}
                 role="button"
                 tabIndex={0}
-                onClick={() => selectProject(project.id)}
+                onClick={() => selectWorkspace(workspace.id)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    selectProject(project.id);
+                    selectWorkspace(workspace.id);
                   }
                 }}
               >
@@ -983,13 +941,10 @@ export function BoardView() {
                       git
                     </span>
                   )}
-                  <span className="board-project-name">{project.name}</span>
+                  <span className="board-project-name">{workspace.name}</span>
                 </span>
-                <span
-                  className="board-project-path mono"
-                  title={root ?? project.source.remoteUrl ?? undefined}
-                >
-                  {root ?? project.source.remoteUrl ?? t("board.noFolder")}
+                <span className="board-project-path mono" title={workspace.path}>
+                  {workspace.path}
                 </span>
                 {total > 0 && counts && (
                   <span className="board-project-counts">
@@ -1011,11 +966,11 @@ export function BoardView() {
                 )}
                 <button
                   className="board-project-del"
-                  title={t("board.deleteProjectTooltip")}
-                  aria-label={t("board.deleteProjectAria", { name: project.name })}
+                  title={t("board.deleteWorkspaceTooltip")}
+                  aria-label={t("board.deleteWorkspaceAria", { name: workspace.name })}
                   onClick={(event) => {
                     event.stopPropagation();
-                    setDeletingProject(project);
+                    setDeletingWorkspace(workspace);
                   }}
                 >
                   ×
@@ -1024,8 +979,8 @@ export function BoardView() {
             );
           })}
         </div>
-        <button className="board-add-project" onClick={() => setAddProjectOpen(true)}>
-          <Icon name="plus" size={12} /> {t("board.addProject")}
+        <button className="board-add-project" onClick={() => setAddWorkspaceOpen(true)}>
+          <Icon name="plus" size={12} /> {t("board.addWorkspace")}
         </button>
       </aside>
 
@@ -1033,7 +988,7 @@ export function BoardView() {
         <header className="board-head">
           <div className="board-head-main">
             <div className="board-head-title">
-              <h1>{selectedProject?.name ?? t("board.title")}</h1>
+              <h1>{selectedWorkspace?.name ?? t("board.title")}</h1>
               {selectedBoard && (
                 <span className="board-workspace-chip">
                   {t(WORKSPACE_LABEL_KEY[selectedBoard.workspaceType])}
@@ -1041,7 +996,7 @@ export function BoardView() {
               )}
             </div>
             <div className="board-head-path mono">
-              {selectedRoot ?? t("board.selectProjectHint")}
+              {selectedRoot ?? t("board.selectWorkspaceHint")}
             </div>
             {selectedBoard?.discoveryWarning && (
               <div className="board-hint warn">{selectedBoard.discoveryWarning}</div>
@@ -1051,16 +1006,16 @@ export function BoardView() {
             {agentsError && <span className="board-hint warn">{agentsError}</span>}
             <button
               className="small"
-              disabled={!selectedProject}
+              disabled={!selectedWorkspace}
               title={t("board.boardSettingsTooltip")}
               onClick={() => {
                 setSettingsError(null);
-                setSettingsProject(selectedProject);
+                setSettingsWorkspace(selectedWorkspace);
               }}
             >
               {t("board.boardSettings")}
             </button>
-            <button className="small primary" disabled={!selectedProject} onClick={openTaskDialog}>
+            <button className="small primary" disabled={!selectedWorkspace} onClick={openTaskDialog}>
               <Icon name="plus" size={12} /> {t("board.newTask")}
             </button>
           </div>
@@ -1074,18 +1029,18 @@ export function BoardView() {
           </div>
         )}
 
-        {!selectedProject ? (
+        {!selectedWorkspace ? (
           <div className="board-empty muted">
-            <p>{t("board.noProjectSelected")}</p>
-            <button className="small primary" onClick={() => setAddProjectOpen(true)}>
-              <Icon name="plus" size={12} /> {t("board.addProject")}
+            <p>{t("board.noWorkspaceSelected")}</p>
+            <button className="small primary" onClick={() => setAddWorkspaceOpen(true)}>
+              <Icon name="plus" size={12} /> {t("board.addWorkspace")}
             </button>
           </div>
         ) : (
           <div className="board-columns">
             {COLUMNS.map((column) => {
               const columnCards = cards.filter((card) => card.column === column.id);
-              const canCreateTask = column.id === "backlog" && projectId !== null;
+              const canCreateTask = column.id === "backlog" && workspaceId !== null;
               return (
                 <div className="board-column" key={column.id}>
                   <div className="board-column-head">
@@ -1164,20 +1119,20 @@ export function BoardView() {
         )}
       </section>
 
-      {addProjectOpen && (
-        <AddProjectDialog
-          onClose={() => setAddProjectOpen(false)}
-          onAdded={(project) => {
-            // The dialog returns the Project the server created; the list is
-            // re-read so the row is exactly what `/api/projects` reports.
-            setAddProjectOpen(false);
-            selectProject(project.id);
-            void loadProjects();
+      {addWorkspaceOpen && (
+        <AddWorkspaceDialog
+          onClose={() => setAddWorkspaceOpen(false)}
+          onAdded={(workspace) => {
+            // The dialog returns the workspace the server created; the list is
+            // re-read so the row is exactly what `/api/kanban/workspaces` reports.
+            setAddWorkspaceOpen(false);
+            selectWorkspace(workspace.id);
+            void loadWorkspaces();
           }}
         />
       )}
 
-      {taskDialogOpen && selectedProject && selectedBoard && (
+      {taskDialogOpen && selectedWorkspace && selectedBoard && (
         <TaskCreateDialog
           key={`dialog-${taskFormKey}`}
           workspaceType={selectedBoard.workspaceType}
@@ -1193,7 +1148,7 @@ export function BoardView() {
         />
       )}
 
-      {editingCard && selectedProject && selectedBoard && (
+      {editingCard && selectedWorkspace && selectedBoard && (
         <TaskEditDialog
           key={editingCard.id}
           card={editingCard}
@@ -1210,37 +1165,37 @@ export function BoardView() {
         />
       )}
 
-      {settingsProject && (
+      {settingsWorkspace && (
         <BoardSettingsDialog
-          project={settingsProject}
-          root={projectRoot(settingsProject, workspaces)}
+          workspace={settingsWorkspace}
+          root={settingsWorkspace.path}
           agents={agents ?? []}
           busy={settingsBusy}
           error={settingsError}
-          onSubmit={(next) => void saveBoardSettings(settingsProject, next)}
-          onClose={() => setSettingsProject(null)}
+          onSubmit={(next) => void saveBoardSettings(settingsWorkspace, next)}
+          onClose={() => setSettingsWorkspace(null)}
         />
       )}
 
-      {deletingProject && (
-        <Modal title={t("board.deleteProjectTitle")} onClose={() => setDeletingProject(null)}>
+      {deletingWorkspace && (
+        <Modal title={t("board.deleteWorkspaceTitle")} onClose={() => setDeletingWorkspace(null)}>
           <p>
-            {t("board.deleteProjectBody1")} <strong>{deletingProject.name}</strong>
-            {t("board.deleteProjectBody2")}
+            {t("board.deleteWorkspaceBody1")} <strong>{deletingWorkspace.name}</strong>
+            {t("board.deleteWorkspaceBody2")}
           </p>
           <p className="muted">
-            {t("board.deleteProjectNote")}{" "}
-            <span className="mono">
-              {projectRoot(deletingProject, workspaces) ??
-                deletingProject.source.remoteUrl ??
-                t("board.noFolder")}
-            </span>{" "}
-            {t("board.deleteProjectNote2")}
+            {t("board.deleteWorkspaceNote")}{" "}
+            <span className="mono">{deletingWorkspace.path}</span>{" "}
+            {t("board.deleteWorkspaceNote2")}
           </p>
           <div className="modal-actions">
-            <button onClick={() => setDeletingProject(null)}>{t("board.form.cancel")}</button>
-            <button className="danger" disabled={deletingProjectBusy} onClick={() => void deleteProject()}>
-              {t("board.deleteProject")}
+            <button onClick={() => setDeletingWorkspace(null)}>{t("board.form.cancel")}</button>
+            <button
+              className="danger"
+              disabled={deletingWorkspaceBusy}
+              onClick={() => void deleteWorkspace()}
+            >
+              {t("board.deleteWorkspace")}
             </button>
           </div>
         </Modal>
@@ -1266,7 +1221,7 @@ export function BoardView() {
       {selectedCard && (
         <CardDetail
           card={selectedCard}
-          projectRootPath={selectedRoot}
+          workspaceRootPath={selectedRoot}
           agents={agents ?? []}
           session={detailSession}
           sessionLive={detailSessionLive}
@@ -1453,7 +1408,7 @@ function CardTile({
 
 function CardDetail({
   card,
-  projectRootPath,
+  workspaceRootPath,
   agents,
   session,
   sessionLive,
@@ -1469,8 +1424,8 @@ function CardDetail({
   onDelete,
 }: {
   card: KanbanCard;
-  /** The project's folder on disk; `null` until a `git` project has one. */
-  projectRootPath: string | null;
+  /** The workspace directory on disk; the card's session runs inside it. */
+  workspaceRootPath: string | null;
   agents: KanbanAgent[];
   session: KanbanSession | null;
   sessionLive: boolean;
@@ -1698,9 +1653,9 @@ function CardDetail({
                   </div>
                 )}
                 <div className="board-meta-row">
-                  <dt>{t("board.detail.field.project")}</dt>
-                  <dd className="mono" title={projectRootPath ?? undefined}>
-                    {projectRootPath ?? "—"}
+                  <dt>{t("board.detail.field.workspace")}</dt>
+                  <dd className="mono" title={workspaceRootPath ?? undefined}>
+                    {workspaceRootPath ?? "—"}
                   </dd>
                 </div>
                 <div className="board-meta-row">
@@ -1850,19 +1805,19 @@ function CardDetail({
 }
 
 /**
- * Board settings of a Project (`project.board`).
+ * Board settings of a workspace (`workspace.board`).
  *
- * These are the only board-specific fields left on a Project: the folder shape
- * discovery reported, the agent and execution mode a new card starts with, and
- * a discovery warning when that probe failed. The folder itself is not here —
- * it is `source.path` for a directory project and the external workspace's
- * path for a git one, which is why it is shown read-only.
+ * These are the only board-specific fields left on a workspace: the folder
+ * shape discovery reported, the agent and execution mode a new card starts
+ * with, and a discovery warning when that probe failed. The directory itself is
+ * not here — it is the workspace's own `path`, which is why it is shown
+ * read-only.
  *
- * Saving sends a partial `board`; `ProjectService.update` merges it, so a field
+ * Saving sends a partial `board`; the workspace update merges it, so a field
  * this dialog does not show keeps its stored value.
  */
 function BoardSettingsDialog({
-  project,
+  workspace,
   root,
   agents,
   busy,
@@ -1870,7 +1825,7 @@ function BoardSettingsDialog({
   onSubmit,
   onClose,
 }: {
-  project: BoardProject;
+  workspace: BoardWorkspace;
   root: string | null;
   agents: KanbanAgent[];
   busy: boolean;
@@ -1879,7 +1834,7 @@ function BoardSettingsDialog({
   onClose: () => void;
 }) {
   const t = useT();
-  const current = boardSettingsOf(project);
+  const current = boardSettingsOf(workspace);
   const [workspaceType, setWorkspaceType] = useState<WorkspaceType>(current.workspaceType);
   const [agentId, setAgentId] = useState(current.defaultAgentId ?? "");
   const [executionMode, setExecutionMode] = useState<ExecutionMode>(
@@ -1899,8 +1854,7 @@ function BoardSettingsDialog({
   return (
     <Modal title={t("board.settings.title")} onClose={onClose}>
       <p className="muted">
-        <strong>{project.name}</strong> ·{" "}
-        <span className="mono">{root ?? project.source.remoteUrl ?? t("board.noFolderYet")}</span>
+        <strong>{workspace.name}</strong> · <span className="mono">{root ?? "—"}</span>
       </p>
       <div className="form-grid-2">
         <label className="board-dialog-field">

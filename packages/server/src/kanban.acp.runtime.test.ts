@@ -278,7 +278,7 @@ async function api<T>(h: Harness, method: string, path: string, body?: unknown):
 /** The column a card sits in, polled until it matches or time runs out. */
 async function pollColumn(
   h: Harness,
-  projectId: string,
+  workspaceId: string,
   cardId: string,
   expected: string,
   timeoutMs = 2_000
@@ -289,7 +289,7 @@ async function pollColumn(
     const cards = await api<{ cards: Array<{ id: string; column: string }> }>(
       h,
       "GET",
-      `/api/kanban/projects/${projectId}/cards`
+      `/api/kanban/workspaces/${workspaceId}/cards`
     );
     column = cards.cards.find((card) => card.id === cardId)?.column;
     if (column === expected) return column;
@@ -375,11 +375,10 @@ function itemsOf(socket: AgentSocket): Array<Record<string, unknown>> {
 test("a DSH card runs an interactive ACP turn, answers permission, continues, and stops", { timeout: 40_000 }, async () => {
   const h = await makeHarness();
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "list the files",
       agentId: "dsh",
       permissionModeId: "default",
@@ -452,7 +451,7 @@ test("a DSH card runs an interactive ACP turn, answers permission, continues, an
     assert.match(String(tool?.output ?? ""), /a\.txt/);
     const afterTurn = await api<{ session: { status: string } }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
     assert.equal(afterTurn.session.status, "awaiting_review");
-    const column = await api<{ cards: Array<{ id: string; column: string }> }>(h, "GET", `/api/kanban/projects/${project.id}/cards`);
+    const column = await api<{ cards: Array<{ id: string; column: string }> }>(h, "GET", `/api/kanban/workspaces/${project.id}/cards`);
     assert.equal(column.cards.find((entry) => entry.id === card.id)?.column, "review");
 
     // The process stays alive: a second prompt is a new turn in the same session.
@@ -493,11 +492,10 @@ test("a DSH card runs an interactive ACP turn, answers permission, continues, an
 test("a restarted server replays the saved transcript and resumes the ACP session", { timeout: 60_000 }, async () => {
   const h = await makeHarness({ simple: true });
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "first turn",
       agentId: "dsh",
     });
@@ -591,13 +589,12 @@ test("a restarted server replays the saved transcript and resumes the ACP sessio
 test("a card's model and reasoning effort are applied before the first turn", { timeout: 40_000 }, async () => {
   const h = await makeHarness({ simple: true });
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
     // The model is given as a display name; the board maps it onto the value
     // the agent advertises and applies it before the prompt.
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "first turn",
       agentId: "dsh",
       model: "DeepSeek-V4-Pro",
@@ -631,11 +628,10 @@ test("a card's model and reasoning effort are applied before the first turn", { 
 test("the chat can switch model and effort on a live session", { timeout: 40_000 }, async () => {
   const h = await makeHarness({ simple: true });
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "first turn",
       agentId: "dsh",
     });
@@ -668,11 +664,10 @@ test("the chat can switch model and effort on a live session", { timeout: 40_000
 test("a model the agent does not offer fails the start loudly", { timeout: 40_000 }, async () => {
   const h = await makeHarness({ simple: true });
   try {
-    const { project } = await api<{ project: { id: string } }>(h, "POST", "/api/kanban/projects", {
-      path: join(h.dir, "project"),
-      gitInit: "skip",
+    const { workspace: project } = await api<{ workspace: { id: string } }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
     });
-    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/projects/${project.id}/cards`, {
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "first turn",
       agentId: "dsh",
       model: "no-such-model",

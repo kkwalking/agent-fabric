@@ -69,12 +69,12 @@ export async function verifyApp(appPath) {
     check(page.ok && html.includes('<div id="root"'), `the server did not serve the web UI (status ${page.status})`);
     const health = await fetch(`${served.url}/api/health`, { headers: { Authorization: `Bearer ${served.token}` } });
     check(health.ok, `/api/health answered ${health.status}`);
-    // The board shares the Project collection, so this is the same endpoint the
-    // Projects page reads — one record, not a parallel board collection.
-    const projects = await fetch(`${served.url}/api/projects`, {
+    // Workspaces are the only first-class entity now: the board, the task
+    // composer and the sidebar all read this one collection.
+    const workspaces = await fetch(`${served.url}/api/workspaces`, {
       headers: { Authorization: `Bearer ${served.token}` },
     });
-    check(projects.ok, `/api/projects answered ${projects.status}`);
+    check(workspaces.ok, `/api/workspaces answered ${workspaces.status}`);
     const ptyVerdict = await ptyRoundTrip(served.url, served.token, scratch);
     if (failures.length > 0) throw new Error(`verify: the packaged bundle misbehaves —\n  - ${failures.join("\n  - ")}`);
     return `bundle ok: the packaged server runs from the bundle (UI, API, ${ptyVerdict})`;
@@ -119,14 +119,14 @@ async function ptyRoundTrip(url, token, scratch) {
     return body === "" ? undefined : JSON.parse(body);
   };
 
-  const project = join(scratch, "project");
-  mkdirSync(project, { recursive: true });
-  writeFileSync(join(project, "README.md"), "verify\n");
-  const created = await api("/api/kanban/projects", {
+  const workspaceDir = join(scratch, "workspace");
+  mkdirSync(workspaceDir, { recursive: true });
+  writeFileSync(join(workspaceDir, "README.md"), "verify\n");
+  const created = await api("/api/kanban/workspaces", {
     method: "POST",
-    body: JSON.stringify({ name: "verify", path: project, gitInit: "init" }),
+    body: JSON.stringify({ name: "verify", rootPath: workspaceDir }),
   });
-  const card = await api(`/api/kanban/projects/${created.project.id}/cards`, {
+  const card = await api(`/api/kanban/workspaces/${created.workspace.id}/cards`, {
     method: "POST",
     body: JSON.stringify({ title: "pty verify", prompt: "Reply with the single word ok.", agentId: "opencode" }),
   });

@@ -1,23 +1,23 @@
 /**
- * REST surface for the board (v13 §八, unified with Projects in v14).
+ * REST surface for the board (v13 §八, unified with Workspaces in v14).
  *
  * Routes are thin: validation and column rules live in `KanbanService`, the
  * process lifecycle lives in `KanbanSessionRuntime`. Failures are thrown as
  * `DomainError` and reach the app's existing error middleware, so the HTTP
  * status always comes from the code table instead of a per-route guess.
  *
- * **Projects are not a board-owned collection.** Listing, renaming and deleting
- * a board project is the plain `/api/projects` API. The single board-specific
- * project route is the "pick a folder / clone a URL → add it as a Project"
- * entry point, because the Git question it asks is board-specific.
+ * **Workspaces are not a board-owned collection.** Listing, renaming and deleting
+ * a board workspace is the plain `/api/workspaces` API. The single board-specific
+ * workspace route is the "pick a folder → add it as a board workspace" entry
+ * point, because that is where the board settings are written.
  */
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 import { DomainError } from "@agentfabric/core";
-import type { ID, KanbanColumn, KanbanService, Project, ProjectService, WorkspaceService } from "@agentfabric/core";
+import type { ID, KanbanColumn, KanbanService, Workspace, WorkspaceService } from "@agentfabric/core";
 import { listKanbanAgents } from "./agents.js";
 import { listKanbanDirectories } from "./fs.js";
 import { readGitInfo } from "./git.js";
-import { addKanbanProject, type KanbanGitInitChoice } from "./projects.js";
+import { addKanbanWorkspace } from "./workspaces.js";
 import type { KanbanSessionRuntime } from "./sessions.js";
 
 const COLUMNS: readonly KanbanColumn[] = ["backlog", "in_progress", "review", "trash"];
@@ -27,53 +27,47 @@ function asColumn(value: unknown): KanbanColumn {
   throw new DomainError("kanban-session-not-startable", `Unknown board column "${String(value)}"`);
 }
 
-function asGitInit(value: unknown): KanbanGitInitChoice {
-  if (value === "init" || value === "skip") return value;
-  return "ask";
-}
-
 /**
- * The board fields a project list row adds to a `Project`: how many cards it
+ * The board fields a workspace list row adds to a `Workspace`: how many cards it
  * has and how many of them are running. Computed for this response only; the
- * Project record itself stays the plain record.
+ * Workspace record itself stays the plain record.
  */
-export interface BoardProjectRow extends Project {
+export interface BoardWorkspaceRow extends Workspace {
   cardCounts: Record<KanbanColumn, number>;
   /** Cards whose latest session still owns a live process. */
   runningCards: number;
 }
 
-function projectWithCounts(
+function workspaceWithCounts(
   kanban: KanbanService,
-  project: Project,
+  workspace: Workspace,
   isLive: (sessionId: ID) => boolean
-): BoardProjectRow {
+): BoardWorkspaceRow {
   const counts: Record<KanbanColumn, number> = { backlog: 0, in_progress: 0, review: 0, trash: 0 };
   let runningCards = 0;
-  for (const card of kanban.listCards(project.id)) {
+  for (const card of kanban.listCards(workspace.id)) {
     counts[card.column] += 1;
     const session = kanban.latestSessionForCard(card.id);
     if (session && isLive(session.id)) runningCards += 1;
   }
-  return { ...project, cardCounts: counts, runningCards };
+  return { ...workspace, cardCounts: counts, runningCards };
 }
 
 export interface KanbanRouteDeps {
   kanban: KanbanService;
   runtime: KanbanSessionRuntime;
-  projects: ProjectService;
   workspaces: WorkspaceService;
 }
 
 export function registerKanbanRoutes(app: Express, deps: KanbanRouteDeps): void {
-  const { kanban, runtime, projects, workspaces } = deps;
+  const { kanban, runtime } = deps;
   const ah = (handler: (req: Request, res: Response) => Promise<void>): RequestHandler => {
     return (req, res, next: NextFunction) => {
       void handler(req, res).catch(next);
     };
   };
 
-  const projectParams = (req: Request): ID => req.params.id as ID;
+  const workspaceParams = (req: Request): ID => req.params.id as ID;
   const cardParams = (req: Request): ID => req.params.id as ID;
 
   /**
@@ -95,7 +89,7 @@ export function registerKanbanRoutes(app: Express, deps: KanbanRouteDeps): void 
   );
 
   /**
-   * Directory suggestions for the project picker. `path` is a folder to list;
+   * Directory suggestions for the workspace picker. `path` is a folder to list;
    * omitted means the user's home directory. Read-only.
    */
   app.get(
@@ -106,65 +100,60 @@ export function registerKanbanRoutes(app: Express, deps: KanbanRouteDeps): void 
     })
   );
 
-  /* ---------------- projects ---------------- */
+  /* ---------------- workspaces ---------------- */
 
   /**
-   * Adds a board project from a folder (`path`) or a clone URL (`gitUrl`).
+   * Adds a board workspace from a folder (`rootPath`).
    *
-   * A folder that is not a Git repository is a valid board project; the
-   * response asks the user how to proceed (`gitInit: "init" | "skip"`) instead
-   * of guessing or refusing. Any other failure is a typed `DomainError`.
-   *
-   * The result is an ordinary `Project`; listing, renaming and deleting it
-   * afterwards is `/api/projects`.
+   * Nothing is cloned and no repository is initialised: the board runs local
+   * agent CLIs in the folder the user picked, and Git (if that folder has any)
+   * stays that folder's own business. The result is an ordinary `Workspace`
+   * carrying the board settings; listing, renaming and deleting it afterwards
+   * is `/api/workspaces`.
    */
-  app.post(
-    "/api/kanban/projects",
-    ah(async (req, res) => {
-      const result = await addKanbanProject(kanban, {
-        path: req.body?.path,
-        gitUrl: req.body?.gitUrl,
-        folderName: req.body?.folderName,
-        name: req.body?.name,
-        gitInit: asGitInit(req.body?.gitInit),
+  /** The board's workspaces (every workspace carrying board settings). */
+  app.get(
+    "/api/kanban/workspaces",
+    ah(async (_req, res) => {
+      res.json({
+        workspaces: kanban
+          .listWorkspaces()
+          .map((workspace) => workspaceWithCounts(kanban, workspace, (id) => runtime.isLive(id))),
       });
-      if (result.kind === "requires-git-init") {
-        res.status(409).json({
-          error:
-            "This folder is not a Git repository. Kanban works with plain folders — add it as-is, or initialize a repository first.",
-          code: "kanban-project-not-git",
-          requiresGitInitialization: true,
-          path: result.path,
-        });
-        return;
-      }
-      res.status(201).json({ project: projectWithCounts(kanban, result.project, (id) => runtime.isLive(id)) });
+    })
+  );
+
+  app.post(
+    "/api/kanban/workspaces",
+    ah(async (req, res) => {
+      const result = await addKanbanWorkspace(kanban, { rootPath: req.body?.rootPath, name: req.body?.name });
+      res.status(201).json({ workspace: workspaceWithCounts(kanban, result.workspace, (id) => runtime.isLive(id)) });
     })
   );
 
   /** Branch list for worktree cards; `git: null` for a non-repository folder. */
   app.get(
-    "/api/kanban/projects/:id/git",
+    "/api/kanban/workspaces/:id/git",
     ah(async (req, res) => {
-      const project = kanban.getProject(projectParams(req));
-      res.json({ git: await readGitInfo(kanban.rootOf(project)) });
+      const workspace = kanban.getWorkspace(workspaceParams(req));
+      res.json({ git: await readGitInfo(kanban.rootOf(workspace)) });
     })
   );
 
   /* ---------------- cards ---------------- */
 
   app.get(
-    "/api/kanban/projects/:id/cards",
+    "/api/kanban/workspaces/:id/cards",
     ah(async (req, res) => {
-      const project = kanban.getProject(projectParams(req));
-      res.json({ cards: kanban.listCards(project.id) });
+      const workspace = kanban.getWorkspace(workspaceParams(req));
+      res.json({ cards: kanban.listCards(workspace.id) });
     })
   );
 
   app.post(
-    "/api/kanban/projects/:id/cards",
+    "/api/kanban/workspaces/:id/cards",
     ah(async (req, res) => {
-      const card = await kanban.createCard(projectParams(req), {
+      const card = await kanban.createCard(workspaceParams(req), {
         title: req.body?.title,
         prompt: req.body?.prompt,
         agentId: req.body?.agentId,
@@ -225,10 +214,10 @@ export function registerKanbanRoutes(app: Express, deps: KanbanRouteDeps): void 
    * with no record pointing at it.
    */
   app.post(
-    "/api/kanban/projects/:id/trash/clear",
+    "/api/kanban/workspaces/:id/trash/clear",
     ah(async (req, res) => {
-      const project = kanban.getProject(projectParams(req));
-      const cards = kanban.listCards(project.id).filter((card) => card.column === "trash");
+      const workspace = kanban.getWorkspace(workspaceParams(req));
+      const cards = kanban.listCards(workspace.id).filter((card) => card.column === "trash");
       for (const card of cards) {
         const latest = kanban.latestSessionForCard(card.id);
         if (latest && runtime.isLive(latest.id)) await runtime.stop(latest.id);

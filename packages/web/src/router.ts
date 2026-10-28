@@ -34,10 +34,7 @@ export interface Route {
     | "runtimes"
     | "sessions"
     | "agents"
-    | "projects"
     | "kanban"
-    | "project"
-    | "project-new-task"
     | "handoffs"
     | "handoff"
     | "usage"
@@ -59,7 +56,6 @@ export type SettingsSection =
   | "harness"
   | "docker"
   | "retry"
-  | "credentials"
   | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
@@ -70,7 +66,6 @@ const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "harness",
   "docker",
   "retry",
-  "credentials",
   "about",
 ];
 
@@ -88,7 +83,6 @@ const PATH_VIEWS: Record<string, Route["view"]> = {
   // AGENT_UI_HIDDEN: Agents 页隐藏期间，直接访问 /agents 回落到任务列表；
   // 与 App.tsx 的两处标记一起恢复。
   // "/agents": "agents",
-  "/projects": "projects",
   "/kanban": "kanban",
   // `/board` was the pre-rename URL; keep it landing on the same page instead of
   // dropping an open tab on the task list after the rename.
@@ -114,16 +108,10 @@ export function parsePath(path: string): Route {
     const section = SETTINGS_SECTIONS.find((id) => id === parts[1]);
     return { view: "settings", section: section ?? "general" };
   }
-  // `/proxy`, `/llm` and `/source-credentials` used to be pages of their own;
-  // their bookmarks now open the matching settings section instead of dropping
-  // the user on the task list.
+  // `/proxy` and `/llm` used to be pages of their own; their bookmarks now
+  // open the matching settings section instead of dropping the user on the
+  // task list.
   if (parts[0] === "proxy") return { view: "settings", section: "proxy" };
   if (parts[0] === "llm") return { view: "settings", section: "llm" };
-  if (parts[0] === "source-credentials") return { view: "settings", section: "credentials" };
-  if (parts[0] === "projects" && parts[1]) {
-    const id = decodeURIComponent(parts[1]);
-    if (parts[2] === "tasks" && parts[3] === "new") return { view: "project-new-task", id };
-    return { view: "project", id };
-  }
   return { view: "tasks" };
 }
