@@ -480,23 +480,15 @@ export class KanbanSessionRuntime {
   }
 
   /**
-   * ACP asks before a sensitive tool runs. "Auto-approve" answers immediately;
-   * otherwise the request is exposed to the card, the card moves to Review and
-   * the session is marked `needs_attention` (the spec's "waiting on a human"
-   * state, not a finish).
+   * ACP asks before a sensitive tool runs. In DSH every such request is a
+   * sandbox escalation: a write the sandbox denied, retried with a wider
+   * `sandbox_permissions` and a justification. Approving it is what grants the
+   * wider mode, so the board never answers on the user's behalf — the request
+   * is exposed to the card, the card moves to Review and the session is marked
+   * `needs_attention` (the spec's "waiting on a human" state, not a finish).
    */
   private async onAcpPermission(state: AcpState, request: AcpPermissionRequest): Promise<void> {
     if (state.stopping || state.exited || !state.acp) return;
-    const card = this.kanban.getCard(state.card.id);
-    if (card.permissionModeId === "auto") {
-      const allow =
-        request.options.find((option) => option.kind === "allow_always") ??
-        request.options.find((option) => option.kind === "allow_once");
-      if (allow) {
-        state.acp?.respondPermission(request.requestId, allow.optionId);
-        return;
-      }
-    }
     state.permissions.set(request.requestId, request);
     state.session = await this.kanban.updateSession(state.session.id, {
       status: "needs_attention",

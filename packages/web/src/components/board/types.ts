@@ -67,6 +67,12 @@ export interface KanbanAgent {
   /** `pty` = raw terminal (Claude/Pi/OpenCode); `acp` = structured chat (DSH). */
   transport: "pty" | "acp";
   permissionModes: KanbanAgentPermissionMode[];
+  /**
+   * The mode a card gets when it names none. `"default"` means the agent's
+   * no-op default, which the form's empty option ("agent default") selects;
+   * any other id is a real catalog row the form preselects.
+   */
+  defaultPermissionModeId: string;
   modelFlag: string | null;
   /** Absolute path detection found the CLI at; absent when it is not installed. */
   cliPath?: string;

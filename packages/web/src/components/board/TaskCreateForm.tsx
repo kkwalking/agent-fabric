@@ -252,6 +252,18 @@ export function TaskCreateForm({
     setFocusIndex(insertAt);
   };
 
+  // Permission modes. The catalog's "default" id is the agent's no-op choice,
+  // which the empty option ("agent default") already means — listing both
+  // would be two names for one choice. An agent whose default is a real mode
+  // (DSH pins one of its sandbox presets) preselects that row instead and
+  // shows no empty option, so the choice is never ambiguous.
+  const permissionModes = (selectedAgent?.permissionModes ?? []).filter((mode) => mode.id !== "default");
+  const catalogDefault = selectedAgent?.defaultPermissionModeId ?? "";
+  const defaultPermissionModeId = catalogDefault && catalogDefault !== "default" ? catalogDefault : "";
+  const permissionChoice = permissionModes.some((mode) => mode.id === permissionModeId)
+    ? permissionModeId
+    : defaultPermissionModeId;
+
   const submit = (start: boolean) => {
     if (!canSubmit) return;
     const prompts =
@@ -268,7 +280,7 @@ export function TaskCreateForm({
         ...(selectedAgent?.transport === "acp" && reasoningEffort
           ? { reasoningEffort }
           : {}),
-        ...(permissionModeId ? { permissionModeId } : {}),
+        ...(permissionChoice ? { permissionModeId: permissionChoice } : {}),
         executionMode,
         ...(executionMode === "worktree" && baseRef ? { baseRef } : {}),
       },
@@ -294,9 +306,6 @@ export function TaskCreateForm({
   };
 
   const titlePlaceholder = deriveCardTitle(prompt) || t("board.form.titlePlaceholder");
-  // The catalog's "default" mode has no extra args, which is exactly what
-  // "Agent default" selects; listing both would be two names for one choice.
-  const permissionModes = (selectedAgent?.permissionModes ?? []).filter((mode) => mode.id !== "default");
   const startLabel =
     mode === "multi"
       ? t("board.form.startTasks", { n: validTaskCount })
@@ -477,8 +486,10 @@ export function TaskCreateForm({
               </select>
             </div>
           )}
-          {/* One non-default mode is still a real choice (DSH Ask/Auto,
-              OpenCode Auto): hiding the select made it unreachable. */}
+          {/* One non-default mode is still a real choice (DSH's sandbox
+              presets, OpenCode Auto): hiding the select made it unreachable.
+              An agent whose default is a real mode gets no empty row — the
+              catalog's default row is the selection. */}
           {permissionModes.length > 0 && (
             <div className="board-dialog-field">
               <label className="board-dialog-label" htmlFor="task-create-permission">
@@ -486,11 +497,11 @@ export function TaskCreateForm({
               </label>
               <select
                 id="task-create-permission"
-                value={permissionModeId}
+                value={permissionChoice}
                 onChange={(event) => setPermissionModeId(event.target.value)}
                 disabled={busy}
               >
-                <option value="">{t("board.form.agentDefault")}</option>
+                {defaultPermissionModeId ? null : <option value="">{t("board.form.agentDefault")}</option>}
                 {permissionModes.map((permissionMode) => (
                   <option key={permissionMode.id} value={permissionMode.id}>
                     {permissionMode.label}

@@ -41,18 +41,45 @@ test("DSH launches the ACP app and carries the prompt over the protocol", () => 
   assert.equal(launch.env.AGENTFABRIC_KANBAN_CARD_ID, "kbcard_test");
 });
 
-test("DSH ignores the card's model; its permission choice is runtime policy, not argv", () => {
-  const launch = buildKanbanLaunch(
-    card("dsh", { permissionModeId: "auto", model: "group/flash" }),
-    workspace
-  );
-  assert.deepEqual(launch.args, ["--profile", "acp"]);
+test("DSH takes its permission preset through the environment, not argv", () => {
   const dsh = getKanbanAgent("dsh");
   assert.equal(dsh.transport, "acp");
+  // DSH's own three presets — a sandbox mode bundled with an approval policy.
+  // ACP has no "switch the mode" surface, so each preset is a launch env value
+  // the acp profile's base layer reads before the handshake.
   assert.deepEqual(
     dsh.permissionModes.map((mode) => mode.id),
-    ["default", "auto"]
+    ["read-only", "workspace-write", "danger-full-access"]
   );
+  assert.deepEqual(
+    dsh.permissionModes.map((mode) => mode.env?.DSH_PERMISSION_MODE),
+    ["read-only", "workspace-write", "danger-full-access"]
+  );
+  assert.deepEqual(
+    dsh.permissionModes.map((mode) => mode.risky),
+    [false, false, true]
+  );
+  // No "answer approvals for me" mode: approving is granting a sandbox
+  // escalation, so the board always asks the card.
+  assert.equal(dsh.permissionModes.some((mode) => mode.id === "auto"), false);
+  assert.equal(dsh.defaultPermissionModeId, "workspace-write");
+
+  const defaultLaunch = buildKanbanLaunch(card("dsh"), workspace);
+  assert.deepEqual(defaultLaunch.args, ["--profile", "acp"]);
+  assert.equal(defaultLaunch.env.DSH_PERMISSION_MODE, "workspace-write");
+
+  const readOnly = buildKanbanLaunch(card("dsh", { permissionModeId: "read-only" }), workspace);
+  assert.deepEqual(readOnly.args, ["--profile", "acp"]);
+  assert.equal(readOnly.env.DSH_PERMISSION_MODE, "read-only");
+
+  // The card model is not wired to ACP config options yet, and the preset is
+  // env — the argv stays exactly the ACP launch.
+  const full = buildKanbanLaunch(
+    card("dsh", { permissionModeId: "danger-full-access", model: "group/flash" }),
+    workspace
+  );
+  assert.deepEqual(full.args, ["--profile", "acp"]);
+  assert.equal(full.env.DSH_PERMISSION_MODE, "danger-full-access");
 });
 
 test("Claude Code takes a positional prompt and its model flag", () => {

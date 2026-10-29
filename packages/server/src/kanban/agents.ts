@@ -164,28 +164,48 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     baseArgs: ["--profile", "acp"],
     prompt: { kind: "acp" },
     transport: "acp",
-    defaultPermissionModeId: "default",
+    // Same default as the base layer's composition default (and therefore the
+    // same preset a plain `dsh --profile acp` pins), so a card that never
+    // touched the selector behaves like one created without AgentFabric.
+    defaultPermissionModeId: "workspace-write",
     // The ACP handshake advertises model config options; the card model is
     // not wired to them yet, so the catalog claims no model flag.
     modelFlag: null,
     interactiveTui: false,
     installHint: "Install DSH (0.2.1+) and make sure `dsh --profile acp` starts.",
     availability: dshAcpProfile,
-    // ACP asks the client before sensitive tools run; "auto" answers allow
-    // without a human in the loop.
+    // DSH's own permission presets: a sandbox mode bundled with an approval
+    // policy by `dsh-permission-presets` in the acp profile's base layer. ACP
+    // has no "select the mode" surface, so the preset is chosen at launch,
+    // before the handshake: the base layer reads `DSH_PERMISSION_MODE` into
+    // both `sandbox-policy.mode` and the approval policy (`never` only for
+    // full access), and the first session pins the matching preset. Approval
+    // requests are sandbox escalations — a denied write retried with a wider
+    // `sandbox_permissions` and a justification — so they are never answered
+    // for the user; the card asks.
     permissionModes: [
       {
-        id: "default",
-        label: "Ask",
-        description: "Ask in the card before a sensitive tool runs.",
+        id: "read-only",
+        label: "Read only",
+        description: "DSH's read-only sandbox: nothing outside /dev is writable.",
         args: [],
+        env: { DSH_PERMISSION_MODE: "read-only" },
         risky: false,
       },
       {
-        id: "auto",
-        label: "Auto-approve",
-        description: "Allow every tool permission request without asking.",
+        id: "workspace-write",
+        label: "Workspace write",
+        description: "DSH's workspace-write sandbox: writes stay inside the workspace folder and the temp dir.",
         args: [],
+        env: { DSH_PERMISSION_MODE: "workspace-write" },
+        risky: false,
+      },
+      {
+        id: "danger-full-access",
+        label: "Full access",
+        description: "No sandbox and no approval prompts — the harness process's full file permissions.",
+        args: [],
+        env: { DSH_PERMISSION_MODE: "danger-full-access" },
         risky: true,
       },
     ],
@@ -240,13 +260,17 @@ export interface KanbanAgentView {
   transport: KanbanSessionTransport;
   modelFlag: string | null;
   permissionModes: Array<{ id: string; label: string; risky: boolean }>;
+  /**
+   * The mode a card gets when it names none. Agents whose default is a real
+   * choice (DSH pins a sandbox preset) return that id; agents whose default is
+   * a no-op return `"default"`, which the board form's empty option selects.
+   */
+  defaultPermissionModeId: string;
   /** Absolute path of the CLI detection found; absent when not installed. */
   cliPath?: string;
-  /**
-   * The CLI is installed in a folder the terminal's PATH does not have, so
-   * `which <command>` there finds nothing — the case where a user is sure the
-   * tool is missing. False when the terminal's PATH could not be read.
-   */
+  /** Is the CLI installed in a folder the terminal's PATH does not have, so
+   *  `which <command>` there finds nothing — the case where a user is sure the
+   *  tool is missing. False when the terminal's PATH could not be read. */
   cliOffPath: boolean;
 }
 
@@ -266,6 +290,7 @@ export async function listKanbanAgents(): Promise<KanbanAgentView[]> {
         transport: entry.transport,
         modelFlag: entry.modelFlag,
         permissionModes: entry.permissionModes.map(({ id, label, risky }) => ({ id, label, risky })),
+        defaultPermissionModeId: entry.defaultPermissionModeId,
         ...(located.path ? { cliPath: located.path } : {}),
         cliOffPath: located.offPath,
       };

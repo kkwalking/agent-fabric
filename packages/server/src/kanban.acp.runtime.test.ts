@@ -381,7 +381,7 @@ test("a DSH card runs an interactive ACP turn, answers permission, continues, an
     const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
       prompt: "list the files",
       agentId: "dsh",
-      permissionModeId: "default",
+      permissionModeId: "workspace-write",
     });
     const startPromise = api<{ session: { id: string; transport: string; status: string } }>(
       h,

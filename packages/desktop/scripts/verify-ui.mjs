@@ -1218,6 +1218,42 @@ try {
     "the board dialog exposes the native folder bridge and has no browse button"
   );
 
+  // 9b-3. The task dialog's permission select is the agent's real choice set:
+  //       DSH exposes its three sandbox presets and preselects workspace write.
+  //       There is no "auto" row — approving is granting a sandbox escalation.
+  if (!emptyMode) {
+    const taskPermission = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1400));
+         const opener = [...document.querySelectorAll("button")]
+           .find((b) => /新建任务|New task/.test(b.textContent ?? ""));
+         opener?.click();
+         await new Promise((r) => setTimeout(r, 900));
+         const dialog = document.querySelector(".task-create-dialog");
+         const select = dialog?.querySelector("#task-create-permission");
+         const result = {
+           open: Boolean(dialog),
+           value: select?.value ?? null,
+           options: [...(select?.querySelectorAll("option") ?? [])].map((o) => ({
+             value: o.value,
+             text: o.textContent.trim(),
+           })),
+         };
+         dialog?.querySelector(".board-dialog-close")?.click();
+         return result;
+       })()`
+    );
+    check(taskPermission.open, "the board's new-task dialog opens");
+    check(
+      taskPermission.options.map((option) => option.value).join(",") === "read-only,workspace-write,danger-full-access",
+      `DSH offers its three sandbox presets (${taskPermission.options.map((option) => option.text).join(" | ")})`
+    );
+    check(taskPermission.value === "workspace-write", `DSH preselects workspace write (${taskPermission.value})`);
+  }
+
   // FIXTURE-DATA ONLY (9c - needs a board card)
   if (!emptyMode) {
   // 9c. A card never opens with its delete already armed.

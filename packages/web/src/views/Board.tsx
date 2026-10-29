@@ -1494,10 +1494,17 @@ function CardDetail({
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
   };
+  // A card that names no mode runs the agent's default: `"default"` is the
+  // no-op choice the "agent default" label already means, any other id is a
+  // real catalog row (DSH pins one of its sandbox presets).
+  const cardAgent = agents.find((agent) => agent.id === card.agentId);
+  const cardPermissionId =
+    card.permissionModeId ??
+    (cardAgent?.defaultPermissionModeId && cardAgent.defaultPermissionModeId !== "default"
+      ? cardAgent.defaultPermissionModeId
+      : "");
   const permissionLabel =
-    agents
-      .find((agent) => agent.id === card.agentId)
-      ?.permissionModes.find((mode) => mode.id === card.permissionModeId)?.label ??
+    cardAgent?.permissionModes.find((mode) => mode.id === cardPermissionId)?.label ??
     card.permissionModeId ??
     t("board.detail.agentDefault");
 
