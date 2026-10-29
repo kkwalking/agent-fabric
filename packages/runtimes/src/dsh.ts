@@ -281,7 +281,9 @@ export function mapDshEvent(
           type: "shell.output",
           level: isError ? "warn" : "info",
           source: "dsh",
-          data: { output: evt.result, isError, toolCallId: callId || undefined },
+          // `status` is the command's own verdict: the thread row stays
+          // spinning without it until the whole turn ends.
+          data: { output: evt.result, isError, status: isError ? "failed" : "completed", toolCallId: callId || undefined },
         };
       }
       const file = callId ? state.files.get(callId) : undefined;

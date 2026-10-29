@@ -1052,9 +1052,17 @@ function ToolRow({ item, open, onToggle }: { item: ToolActivity; open: boolean; 
 function CommandRow({ item, open, onToggle }: { item: CommandActivity; open: boolean; onToggle: () => void }) {
   const t = useT();
   return (
-    <div className={`activity clickable command`} onClick={onToggle}>
+    <div className={`activity clickable command${item.status === "error" ? " error" : ""}`} onClick={onToggle}>
       <div className="act-head">
-        <span className="act-icon">{item.running ? <span className="spinner" /> : <Icon name="terminal" size={13} />}</span>
+        <span className="act-icon">
+          {item.status === "running" ? (
+            <span className="spinner" />
+          ) : item.status === "error" ? (
+            "✗"
+          ) : (
+            <Icon name="terminal" size={13} />
+          )}
+        </span>
         <span className="act-label mono-target">{t("thread.ranPre")}<code>{item.command}</code></span>
         {item.summary && (
           <span className={`cmd-summary ${item.summaryOk === false ? "bad" : "good"}`}>{item.summary}</span>

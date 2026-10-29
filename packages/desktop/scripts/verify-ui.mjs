@@ -182,12 +182,15 @@ function writeFixture(dir) {
       workspace("ws_verify_beta", "verify-beta", "/tmp/af-verify-beta"),
       // A long workspace, so paging has something to page through.
       workspace("ws_verify_bulk", "verify-bulk", "/tmp/af-verify-bulk"),
+      // A live turn whose shell tool already finished (see the run below).
+      workspace("ws_verify_live", "verify-live", "/tmp/af-verify-live"),
     ],
     tasks: [
       task("task_verify_1", "verify task one", "ws_verify_alpha"),
       task("task_verify_2", "verify task two", "ws_verify_alpha"),
       task("task_verify_3", "verify task three", "ws_verify_beta"),
       task("task_verify_orphan", "verify orphan task", undefined),
+      task("task_verify_live", "verify live task", "ws_verify_live"),
       ...Array.from({ length: 25 }, (_, i) => task(`task_bulk_${i}`, `bulk session ${i}`, "ws_verify_bulk")),
     ],
   };
@@ -227,6 +230,34 @@ function writeFixture(dir) {
     taskTitle: "verify task two",
     inputInstruction: "verify task two",
   });
+  /**
+   * A turn that is still running: one shell tool already finished, one still
+   * streaming. The finished command's row must stop spinning while the turn
+   * goes on, and the streaming one must keep its spinner — both used to spin
+   * until the whole run ended.
+   */
+  const liveRunId = "run_verify_live";
+  const liveEvents = [
+    { type: "run.started", data: {} },
+    // The harness launch line is never an activity row.
+    { type: "shell.command", data: { command: "dsh --profile headless …", harnessInvocation: true } },
+    { type: "shell.command", data: { command: "verify-finished-cmd", toolCallId: "call_done" } },
+    { type: "shell.output", data: { output: "3 passing", status: "completed", toolCallId: "call_done" } },
+    { type: "shell.command", data: { command: "verify-open-cmd", toolCallId: "call_open" } },
+    { type: "shell.output", data: { line: "still running", stream: "stdout", toolCallId: "call_open" } },
+    { type: "tool.started", data: { tool: "read", toolCallId: "call_read", args: { file_path: "README.md" } } },
+    { type: "tool.completed", data: { tool: "read", toolCallId: "call_read", result: "ok" } },
+  ].map((e, i) => JSON.stringify({ id: `${liveRunId}-${i}`, runId: liveRunId, seq: i, timestamp: now, source: "runtime", ...e }));
+  db.runs.push({
+    ...db.runs[0],
+    id: liveRunId,
+    taskId: "task_verify_live",
+    taskTitle: "verify live task",
+    status: "running",
+    inputInstruction: "verify live task",
+    endTime: undefined,
+    eventCount: liveEvents.length,
+  });
   const shard = (runId) => ({
     runId,
     file: `events/${runId}.jsonl`,
@@ -236,7 +267,11 @@ function writeFixture(dir) {
     createdAt: now,
     updatedAt: now,
   });
-  db.eventShards = [shard(longRunId), shard(longRunId2)];
+  db.eventShards = [
+    shard(longRunId),
+    shard(longRunId2),
+    { runId: liveRunId, file: `events/${liveRunId}.jsonl`, count: liveEvents.length, bytes: 0, lastSeq: liveEvents.length - 1, createdAt: now, updatedAt: now },
+  ];
   mkdirSync(dir, { recursive: true });
   mkdirSync(join(dir, "events"), { recursive: true });
   const buildLines = (runId) => {
@@ -261,6 +296,7 @@ function writeFixture(dir) {
   for (const runId of [longRunId, longRunId2]) {
     writeFileSync(join(dir, "events", `${runId}.jsonl`), buildLines(runId));
   }
+  writeFileSync(join(dir, "events", `${liveRunId}.jsonl`), liveEvents.join("\n") + "\n");
   writeFileSync(join(dir, "db.json"), JSON.stringify(db, null, 2));
 }
 if (!emptyMode) writeFixture(dataDir);
@@ -673,6 +709,50 @@ try {
     taskSwitch.bAtBottom === true,
     `a thread scrolled up does not leave the next task parked at the top (${JSON.stringify(taskSwitch.bAtBottom)})`
   );
+
+  // 5f2. A shell tool's row closes when that tool finished, not when the whole
+  //      turn ends. The fixture's live run has one command that already
+  //      reported `status: completed` and one that is still streaming: the
+  //      first must be closed (no spinner, its result shown), the second must
+  //      still spin. Before the fix both spun until the run ended.
+  const commandRows = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/tasks/task_verify_live");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 2200));
+       const row = (needle) => [...document.querySelectorAll(".activity.command")]
+         .find((el) => (el.textContent ?? "").includes(needle));
+       const finished = row("verify-finished-cmd");
+       const open = row("verify-open-cmd");
+       return {
+         commands: document.querySelectorAll(".activity.command").length,
+         finishedFound: Boolean(finished),
+         finishedSpinning: finished ? Boolean(finished.querySelector(".spinner")) : null,
+         finishedSummary: finished?.querySelector(".cmd-summary")?.textContent ?? null,
+         openFound: Boolean(open),
+         openSpinning: open ? Boolean(open.querySelector(".spinner")) : null,
+         // The run is live, so the turn itself must still show it is working.
+         turnWorking: Boolean(document.querySelector(".live-row .spinner")),
+       };
+     })()`
+  );
+  if (!commandRows.finishedFound || !commandRows.openFound) {
+    failures.push(`command rows: ${JSON.stringify(commandRows)}`);
+  }
+  check(
+    commandRows.finishedSpinning === false,
+    `a finished command stops spinning while the turn is still live (${JSON.stringify(commandRows.finishedSpinning)})`
+  );
+  check(
+    /3 passing/.test(commandRows.finishedSummary ?? ""),
+    `the finished command shows its own result (${JSON.stringify(commandRows.finishedSummary)})`
+  );
+  check(
+    commandRows.openSpinning === true,
+    `a command that is still streaming keeps its spinner (${JSON.stringify(commandRows.openSpinning)})`
+  );
+  check(commandRows.turnWorking === true, "the live turn still reports that it is working");
 
   }
 

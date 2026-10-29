@@ -114,6 +114,16 @@ test("bash tool_call maps to shell.command, its result to shell.output", () => {
   assert.equal(done?.type, "shell.output");
   assert.equal(done?.data.output, "3 passing");
   assert.equal(done?.data.isError, false);
+  // The result is the command's own verdict: the thread row closes on it
+  // instead of spinning until the whole turn ends.
+  assert.equal(done?.data.status, "completed");
+  assert.equal(done?.data.toolCallId, "c1");
+
+  const failedStart = first('{"type":"tool_call","callId":"c2","tool":"bash","input":{"command":"false"}}', state);
+  assert.equal(failedStart?.type, "shell.command");
+  const failed = first('{"type":"tool_result","callId":"c2","status":"failed","result":"boom"}', state);
+  assert.equal(failed?.type, "shell.output");
+  assert.equal(failed?.data.status, "failed");
 });
 
 test("write/edit tool results map to file activity plus tool lifecycle", () => {

@@ -9,7 +9,9 @@
  *   swallowed — the thread surfaces them as lightweight turn metadata
  *   instead (v5 §19).
  * - tool.started + tool.completed merge into ONE ToolActivity.
- * - shell.command + shell.output merge into ONE CommandActivity.
+ * - shell.command + shell.output merge into ONE CommandActivity; the terminal
+ *   `shell.output` (one carrying `status`) closes it, so a finished command
+ *   stops spinning instead of waiting for the whole turn to end.
  * - The harness invocation (the `pi --print …` launch command, the run's
  *   first shell.command) is not an activity row and not shown on the turn
  *   header either — it stays in the Run Inspector (see projectTimeline).
@@ -52,7 +54,15 @@ export interface CommandActivity {
   cwd?: string;
   backend?: string;
   outputs: string[];
-  running: boolean;
+  /**
+   * `running` until the harness says the command ended. A shell tool reports
+   * its result as a terminal `shell.output` carrying `status`; producers that
+   * only stream lines (the container launcher) leave it running until the run
+   * itself ends.
+   */
+  status: "running" | "done" | "error";
+  /** The tool call that ran this command, when the harness names one. */
+  toolCallId?: string;
   /** Short outcome line, e.g. "✓ 148 tests passed" (v5 §9). */
   summary?: string;
   summaryOk?: boolean;
@@ -270,6 +280,21 @@ function eventText(data: Record<string, unknown> | undefined): string {
 }
 
 /**
+ * The verdict a finished command reports on its last `shell.output`.
+ *
+ * A harness that runs a shell tool emits that tool's result as one
+ * `shell.output` carrying `status` (claude-code, codex, dsh); producers that
+ * only stream lines (the container launcher) carry none, so their row stays
+ * open until the run ends. Without this the projector had no close signal at
+ * all and every command spun until the whole turn was over.
+ */
+function commandStatus(status: unknown): "done" | "error" | undefined {
+  if (status === "completed") return "done";
+  if (status === "failed") return "error";
+  return undefined;
+}
+
+/**
  * Projects one run's events into timeline items (v5 §25 merging rules).
  * The input must be sorted by seq. `live` marks whether the run is still
  * executing: once terminal, open activities close instead of spinning.
@@ -284,6 +309,7 @@ export function projectTimeline(
   const tl = t;
   const items: TimelineItem[] = [];
   const toolsByKey = new Map<string, ToolActivity>();
+  const commandsByCallId = new Map<string, CommandActivity>();
   const filesByPath = new Map<string, FileActivity>();
   let keySeq = 0;
   const nextKey = (p: string) => `${p}-${++keySeq}`;
@@ -301,6 +327,23 @@ export function projectTimeline(
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i];
       if (it.kind === "tool" && it.tool === tool && it.status === "running") return it;
+    }
+    return undefined;
+  };
+
+  /**
+   * Which command a `shell.output` belongs to: the call it names, else the
+   * newest command row (streamed producers report no call id).
+   */
+  const findCommand = (data: Record<string, unknown> | undefined): CommandActivity | undefined => {
+    const callId = data?.toolCallId;
+    if (typeof callId === "string") {
+      const named = commandsByCallId.get(callId);
+      if (named) return named;
+    }
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.kind === "command") return it;
     }
     return undefined;
   };
@@ -384,29 +427,39 @@ export function projectTimeline(
       case "shell.command": {
         // The launch command stays out of the timeline (Run Inspector only).
         if (e.id === harnessEventId) break;
-        items.push({
+        const callId = typeof data.toolCallId === "string" ? data.toolCallId : undefined;
+        const item: CommandActivity = {
           kind: "command",
           key: e.id ?? nextKey("cmd"),
           command: String(data.command ?? "(command)"),
           cwd: typeof data.cwd === "string" ? data.cwd : undefined,
           backend: typeof data.backend === "string" ? data.backend : undefined,
           outputs: [],
-          running: true,
-        });
+          status: "running",
+          ...(callId ? { toolCallId: callId } : {}),
+        };
+        if (callId) commandsByCallId.set(callId, item);
+        items.push(item);
         break;
       }
 
       case "shell.output": {
-        const line = eventText(data);
-        // Merge into the most recent open command activity (v5 §25).
-        for (let i = items.length - 1; i >= 0; i--) {
-          const it = items[i];
-          if (it.kind === "command") {
-            if (line) it.outputs.push(line);
-            const summary = summarizeOutput(it.outputs);
-            it.summary = summary?.text ?? it.summary;
-            it.summaryOk = summary?.ok;
-            break;
+        // `output` is the command's whole result (one event per shell tool);
+        // `line` is a single streamed line (the container launcher).
+        const text = typeof data.output === "string" ? data.output : eventText(data);
+        const item = findCommand(data);
+        if (item) {
+          if (text) item.outputs.push(text);
+          const summary = summarizeOutput(item.outputs);
+          if (summary) {
+            item.summary = summary.text;
+            item.summaryOk = summary.ok;
+          }
+          const finished = commandStatus(data.status);
+          if (finished) {
+            item.status = finished;
+            // The harness's own verdict outranks the output heuristic.
+            if (item.summary) item.summaryOk = finished === "done";
           }
         }
         break;
@@ -472,7 +525,8 @@ export function projectTimeline(
   if (!opts.live) {
     for (const it of items) {
       if (it.kind === "tool" && it.status === "running") it.status = "done";
-      if (it.kind === "command") it.running = false;
+      // A finished run closes whatever a line-streaming producer left open.
+      if (it.kind === "command" && it.status === "running") it.status = "done";
     }
   }
 
@@ -481,5 +535,5 @@ export function projectTimeline(
 
 /** True while any command activity is still open (used for live spinners). */
 export function isWorkRunning(items: TimelineItem[]): boolean {
-  return items.some((it) => (it.kind === "tool" && it.status === "running") || (it.kind === "command" && it.running));
+  return items.some((it) => (it.kind === "tool" && it.status === "running") || (it.kind === "command" && it.status === "running"));
 }

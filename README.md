@@ -328,7 +328,7 @@ Runs 页每个产生过 native session 的 Run 在操作列提供 **copy session
 
 ### Presentation Layer
 
-前端把 Raw Event 经 Presentation Projector 投影为 Timeline Item（事件合并：`tool.started`+`tool.completed` → 一个 Tool Activity，`shell.command`+`shell.output` → 一个 Command Activity），不修改 Core Event Schema；`GET /api/tasks/:id/thread` 提供只读聚合，未引入新的 Message / Conversation / Session 后端模型。
+前端把 Raw Event 经 Presentation Projector 投影为 Timeline Item（事件合并：`tool.started`+`tool.completed` → 一个 Tool Activity，`shell.command`+`shell.output` → 一个 Command Activity），不修改 Core Event Schema；命令结果带 `status`（completed / failed）时该行当即收尾（✓ / ✗），不等到整个 turn 结束；`GET /api/tasks/:id/thread` 提供只读聚合，未引入新的 Message / Conversation / Session 后端模型。
 
 ## Task 与 Run
 

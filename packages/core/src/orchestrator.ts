@@ -1674,7 +1674,12 @@ export class RunService {
           { type: "shell.command", data: { command: item.command, backend: "local" } },
           {
             type: "shell.output",
-            data: { output: item.output ?? "", exitCode: item.exitCode ?? null },
+            // The imported command already ran: its row must not stay open.
+            data: {
+              output: item.output ?? "",
+              exitCode: item.exitCode ?? null,
+              status: item.exitCode ? "failed" : "completed",
+            },
             level: item.exitCode ? "info" : "warn",
           },
         ];
