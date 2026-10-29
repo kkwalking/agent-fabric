@@ -65,6 +65,11 @@ body {
   position: sticky;
   top: 0;
   height: 100vh;
+  /* The rail owns a popover (the 更多 menu), and the pages it opens over draw
+     their own panels — the board's project column is one. Without a stacking
+     level of its own the rail's popover slid underneath those panels. It stays
+     below the overlays (90+), which must cover the rail. */
+  z-index: 50;
   transition: width 0.16s ease;
 }
 
@@ -4432,6 +4437,17 @@ button.stat.clickable:hover {
   right: auto;
   width: 190px;
   bottom: 0;
+}
+/* The collapsed rail puts 更多 at the *top* of the icon column, so there is no
+   room above it: the popover opens downward instead (and the rail measures
+   which side has room before choosing). */
+.rail-menu-down {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+.sidebar.collapsed .rail-menu-down {
+  top: 0;
+  bottom: auto;
 }
 .rail-menu-section {
   font-size: 12px;

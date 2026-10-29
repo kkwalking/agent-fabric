@@ -37,6 +37,12 @@ export function RailMenu({ currentPath }: { currentPath: string }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // Where the popover may go. The trigger sits at the bottom of the expanded
+  // rail but at the top of the collapsed one, so the side with room is measured
+  // when it opens: a fixed side (and a fixed `max-height` in the stylesheet) left
+  // the collapsed menu squeezed into the little space above the icon and cut its
+  // last rows off.
+  const [placement, setPlacement] = useState<{ maxHeight: number; down: boolean } | undefined>(undefined);
 
   // Click outside and Escape both close it: a popover that only closes on its
   // own item leaves the rail feeling stuck.
@@ -54,6 +60,19 @@ export function RailMenu({ currentPath }: { currentPath: string }) {
       window.removeEventListener("mousedown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      setPlacement(undefined);
+      return;
+    }
+    const rect = rootRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const above = rect.top - 16;
+    const below = window.innerHeight - rect.bottom - 16;
+    const down = below > above;
+    setPlacement({ maxHeight: Math.max(120, Math.round(down ? below : above)), down });
   }, [open]);
 
   const render = (entry: Entry) => {
@@ -82,11 +101,18 @@ export function RailMenu({ currentPath }: { currentPath: string }) {
         aria-haspopup="menu"
         title={t("sidebar.more")}
       >
-        <Icon name="grid" size={15} />
+        {/* Three dots, not the board's 2×2 grid: the board has its own row
+            directly above and two grid icons in one rail read as the same
+            control. */}
+        <Icon name="more" size={15} />
         <span>{t("sidebar.more")}</span>
       </button>
       {open && (
-        <div className="rail-menu" role="menu">
+        <div
+          className={`rail-menu ${placement?.down ? "rail-menu-down" : ""}`}
+          role="menu"
+          style={placement ? { maxHeight: placement.maxHeight } : undefined}
+        >
           <div className="rail-menu-section">{t("nav.resources")}</div>
           {RESOURCE_ENTRIES.map(render)}
           <div className="rail-menu-section">{t("nav.system")}</div>
