@@ -269,7 +269,7 @@ Settings 是一个带左侧导航的弹窗，按分区呈现，而不是把原�
 
 * **卡片就是 Task**：卡片第一次启动时创建一条**真正的 Task**（`workspaceId` = 该目录的工作区），每次启动是这条 Task 的一个 **Run**；续聊（`--resume` / ACP `session/resume`）复用同一个 Run。因此看板里跑起来的活儿和其它 Task 没有区别：侧边栏**工作区任务树**里按目录分组能看到它，点进去就是普通的 Task 线程（`/tasks/<id>`），**任务线程里直接显示该卡片的终端 / ACP 聊天输出**（和看板卡片详情是同一个会话），看板卡片详情里有 **Open task** 入口，任务页也有 **Board card** 回到看板。
   * **就地运行**：Task 的 Workspace 就是那个目录本身，平台**不复制**一份（`workspaceId` 指向的 Workspace，`path` 就是你的目录）。这也是任务树能把它归到那个文件夹下的原因。新建任务与看板走的是同一条执行路径。
-  * **一个目录只有一条 Workspace**：如果这个目录已经是普通工作区（侧边栏里挂着它的历史会话），看板沿用**那一条**并把 `board` 设置写进去，不再新建第二条同名记录——两个同名目录会让看板的 Task 落在用户没在看的那个分组里。
+  * **一个目录只有一条 Workspace**：如果这个目录已经是普通工作区（侧边栏里挂着它的历史会话），看板沿用**那一条**并把 `board` 设置写进去，不再新建第二条同名记录——两个同名目录会让看板的 Task 落在用户没在看的那个分组里。这条规则由 `WorkspaceService` 自己守着，不只看板：`POST /api/workspaces`、`/api/workspaces/import` 与改 `path` 的 `PUT` 遇到已被占用的目录都返回 `409 workspace-duplicate`，消息里给出**已有那条**的 id 与名字。侧边栏按 `workspaceId` 分组，同一目录两条记录就会显示成两个同名分组。
   * **Stopped ≠ Failed**：在卡片上按 Stop 只会把 agent 标成 `cancelled`，任务不会出现失败徽章或重试按钮；服务重启打断的会话才写 `failure`（Run 仍是 `cancelled`）。对**正在运行**的卡片再点 start 是幂等的，不会悄悄换掉正在跑的 agent（要换会话请用 restart）。
   * 状态映射（写入时投影，读取不重算）：会话 `running` → Run `running`；turn 结束（`awaiting_review` / `needs_attention`）→ Run `completed`，Task 仍是 `running` 且 `execution.agent.status = completed`（等你）；`failed` → Run `failed` + `execution.failure.code = kanban-agent-failed`；服务重启中断 → Run `cancelled` + `kanban-session-interrupted`；`stopped` → Run `cancelled`。`validation` / `publish` 永远是 `pending`——看板不跑判定也不 publish，不会伪造通过。
   * 看板不物理删除历史：删卡片（含「清空 Done」）只把 Task 软删除（回收站 30 天可恢复）并删掉进程句柄与聊天记录，工作区目录与 Run 历史都留着。

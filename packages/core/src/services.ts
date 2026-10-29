@@ -374,6 +374,32 @@ export class WorkspaceService {
   }
 
   /**
+   * The workspace already registered at this directory, if any.
+   *
+   * A workspace *is* a directory on this machine, so a second record for one
+   * directory is the same workspace twice: the sidebar splits one history
+   * across two groups and nothing can say which record owns the folder. The
+   * board already states the rule for its own list ("one board per folder");
+   * this is the same rule at the level where every record is created.
+   */
+  private workspaceAt(path: string, exceptId?: ID): Workspace | undefined {
+    return this.store
+      .list<Workspace>("workspaces")
+      .find((w) => w.id !== exceptId && w.path !== undefined && resolve(w.path) === path);
+  }
+
+  /** Refuses a second record for a directory that already has one. */
+  private assertDirectoryFree(path: string, exceptId?: ID): void {
+    const existing = this.workspaceAt(path, exceptId);
+    if (!existing) return;
+    throw new DomainError(
+      "workspace-duplicate",
+      `This directory is already a workspace: ${existing.name} (${existing.id}) — ${path}`,
+      existing.id
+    );
+  }
+
+  /**
    * Creates an external (user-owned) working directory.
    */
   async create(input: NewWorkspaceInput): Promise<Workspace> {
@@ -387,6 +413,7 @@ export class WorkspaceService {
     }
     const id = newId("ws");
     let path = input.path;
+    if (path) this.assertDirectoryFree(resolve(path));
     if (input.type === "local" && path) {
       const abs = resolve(path);
       await mkdir(abs, { recursive: true });
@@ -425,6 +452,7 @@ export class WorkspaceService {
       throw new Error(`Cannot import workspace: path does not exist: ${abs}`);
     }
     if (!st.isDirectory()) throw new Error(`Cannot import workspace: not a directory: ${abs}`);
+    this.assertDirectoryFree(abs);
     const id = newId("ws");
     const workspace: Workspace = {
       id,
@@ -471,6 +499,7 @@ export class WorkspaceService {
   }
 
   async update(id: ID, patch: Partial<NewWorkspaceInput>): Promise<Workspace | undefined> {
+    if (patch.path) this.assertDirectoryFree(resolve(patch.path), id);
     return this.store.update<Workspace>("workspaces", id, patch);
   }
 

@@ -23,6 +23,7 @@ import { HandoffService } from "./handoff.js";
 import { ContainerLeaseManager, DEFAULT_KEEP_ALIVE_IDLE_MS, taskLifecycle, type ContainerOps } from "./lifecycle.js";
 import { buildAssistedHandoffContent, renderHandoffPrompt } from "./handoff.js";
 import { testCompletionFactory } from "./testkit.js";
+import { httpStatusForCode } from "./errors.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import type { AgentRuntimeAdapter, RuntimeContext, RuntimeResult } from "./runtime.js";
 import type { Handoff, Run, Task } from "./types.js";
@@ -233,6 +234,40 @@ test("importing a non-existent directory fails with a clear error", async () => 
     () => h.workspaces.import({ name: "ghost", type: "local", path: "/definitely/not/here-12345" }),
     /does not exist/
   );
+});
+
+test("a directory is only ever one workspace", async () => {
+  const h = await freshHarness();
+  const wsDir = mkdtempSync(join(tmpdir(), "af-dup-"));
+  const first = await h.workspaces.import({ name: "code-vision", type: "local", path: wsDir });
+
+  // A second record for the same directory is the same workspace twice: it
+  // splits one history across two sidebar groups and nothing says which record
+  // owns the folder.
+  await assert.rejects(
+    () => h.workspaces.import({ name: "code-vision again", type: "local", path: wsDir }),
+    (err: any) => err.code === "workspace-duplicate" && err.message.includes(first.id)
+  );
+  // Same rule when the directory arrives through `create`, and when the path is
+  // written differently but resolves to the same folder.
+  await assert.rejects(
+    () => h.workspaces.create({ name: "same folder", type: "local", path: join(wsDir, ".") }),
+    (err: any) => err.code === "workspace-duplicate"
+  );
+  // Re-pointing an existing record at an occupied directory is refused too.
+  const other = await h.workspaces.create({
+    name: "other",
+    type: "local",
+    path: mkdtempSync(join(tmpdir(), "af-dup-other-")),
+  });
+  await assert.rejects(
+    () => h.workspaces.update(other.id, { path: wsDir }),
+    (err: any) => err.code === "workspace-duplicate"
+  );
+  assert.equal(h.workspaces.list().filter((w) => w.path === wsDir).length, 1);
+  // The API answers 409, not a generic 400: "this folder is already a
+  // workspace" is a conflict with the current state, not a malformed request.
+  assert.equal(httpStatusForCode("workspace-duplicate"), 409);
 });
 
 test("saving a workspace whose directory vanished marks it missing", async () => {

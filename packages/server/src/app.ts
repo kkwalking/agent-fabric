@@ -929,7 +929,7 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     try {
       ok(res, await workspaces.create(req.body), 201);
     } catch (e) {
-      fail(res, e);
+      failDomain(res, e);
     }
   });
   // Import an existing working directory or git repository (spec v1 §11).
@@ -937,7 +937,7 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     try {
       ok(res, await workspaces.import(req.body), 201);
     } catch (e) {
-      fail(res, e);
+      failDomain(res, e);
     }
   });
   app.get("/api/workspaces/:id", (req, res) => {

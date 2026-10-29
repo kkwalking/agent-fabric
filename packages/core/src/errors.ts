@@ -17,6 +17,7 @@ export type ErrorCode =
   | "workspace-create-failed"
   | "workspace-locked"
   | "workspace-invalid"
+  | "workspace-duplicate"
   /* Runtime */
   | "runtime-create-failed"
   | "runtime-start-failed"
@@ -133,6 +134,7 @@ export function httpStatusForCode(code: ErrorCode): number {
   if (code.endsWith("-not-found")) return 404;
   if (
     code === "workspace-locked" ||
+    code === "workspace-duplicate" ||
     code === "task-busy" ||
     code === "task-state-invalid" ||
     code === "kanban-session-not-startable" ||
