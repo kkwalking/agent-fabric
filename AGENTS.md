@@ -39,6 +39,22 @@
 * **失败要响**：不接受静默降级。能力不可用就报错（带 `code`），只有调用方/用户显式确认才降级，且降级必须可见（例如 `handoff.generation.method = "heuristic"`）。
 * **概念不要混**：会话内的 Context Compaction 属于 harness，AgentFabric 从不做；跨会话的 Handoff 是 AgentFabric 的显式动作。两者在代码、文案、UI 里都要分开表述。
 
+## 桌面端 UI 调试：先 CDP 脚本，再用 LCU 真机
+
+**改完 Web / 桌面端代码后，先跑 CDP 脚本确认 UI 没问题，再用 LCU 的 computer use 打开真实 App 跑一遍。两步都要做，不能只做其一。**
+
+1. **CDP 先验（自动、可回归）** —— 断言结构、文案、路由、禁用态：
+   ```bash
+   npm run desktop:dmg && npm run desktop:install   # install 内部会跑 verify-ui（61 项）
+   npm run desktop:verify                            # 只跑 UI 断言
+   npm run desktop:verify:empty                      # 空装首屏（44 项）
+   ```
+   `packages/desktop/scripts/verify-ui.mjs` 用 `--remote-debugging-port=9333` + 临时 `AGENTFABRIC_DATA_DIR` 启动 `/Applications/AgentFabric.app`，通过 CDP `Runtime.evaluate` 在渲染进程里点 DOM、读文本。它不截图、不看像素。
+
+2. **LCU 真机验证（人工观感 + 真实窗口）** —— 用 LCU 的 computer use 打开 `/Applications/AgentFabric.app`，在真实窗口里把本次改动的入口点一遍，看渲染、布局、焦点、原生菜单/弹窗。
+
+为什么两步都要：CDP 只能证明「DOM 结构和行为对」，证明不了「看起来对」。布局错位、字体、原生控件、真实焦点这类问题只能靠 LCU 看真实窗口发现；反过来，LCU 截图快但不可回归，不能替代 CDP 断言。
+
 ## 命令
 
 ```bash
