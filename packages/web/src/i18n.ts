@@ -682,9 +682,7 @@ const zh = {
   "sessions.adopt.newWorkspace": "新建工作区",
   "sessions.adopt.newWorkspaceTip": "新工作区记录的名称——目录本身就地使用",
   "sessions.adopt.existing": "已有工作区",
-  "sessions.adopt.noCwd": "该会话没有记录工作目录，没有可关联的目录。",
-  "sessions.adopt.none": "不关联工作区",
-  "sessions.adopt.noneHint": "只接手历史。之后继续运行时没有工作目录。",
+  "sessions.adopt.noCwd": "该会话没有记录工作目录，没有可关联的工作区，因此不能继续。",
   "sessions.adopt.mismatch": "会话运行在 {cwd}，该工作区指向 {path}。在那里继续会用工作区的目录，而不是会话的目录。",
   "sessions.adopt.continue": "继续",
 
@@ -1828,9 +1826,7 @@ const en: Record<MessageKey, string> = {
   "sessions.adopt.newWorkspace": "New workspace",
   "sessions.adopt.newWorkspaceTip": "Name for the new workspace record — the directory itself is used in place",
   "sessions.adopt.existing": "Existing workspace",
-  "sessions.adopt.noCwd": "This session never recorded a working directory, so there is nothing to associate.",
-  "sessions.adopt.none": "No workspace",
-  "sessions.adopt.noneHint": "Adopt the history only. Continuing it later runs without a working directory.",
+  "sessions.adopt.noCwd": "This session never recorded a working directory, so there is no workspace to continue it in — it cannot be adopted.",
   "sessions.adopt.mismatch": "The session ran in {cwd}, this workspace points at {path}. Continuing it there keeps the workspace's directory, not the session's.",
   "sessions.adopt.continue": "Continue",
 
