@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { del, fmtRelative, get, patch, put } from "../api";
+import { TASKS_CHANGED_EVENT } from "../appEvents";
 import { Icon } from "../components";
 import { useT } from "../i18n-react";
 import { navigate } from "../router";
@@ -197,6 +198,17 @@ export function WorkspaceTaskList({
     };
     window.addEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
     return () => window.removeEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
+  }, []);
+
+  // A board card's first start creates its Task; deleting a card soft-deletes
+  // it. Neither is a navigation, so without this the rail kept its old list
+  // until the user switched views. The board announces those writes.
+  useEffect(() => {
+    const onTasksChanged = () => {
+      void reload();
+    };
+    window.addEventListener(TASKS_CHANGED_EVENT, onTasksChanged);
+    return () => window.removeEventListener(TASKS_CHANGED_EVENT, onTasksChanged);
   }, []);
 
   const togglePinned = (id: string) => {

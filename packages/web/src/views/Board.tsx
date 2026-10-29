@@ -7,6 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { ApiError, del, fmtTime, get, patch, post, put, shortId } from "../api";
+import { notifyTasksChanged } from "../appEvents";
 import { ErrorBox, Icon, Modal } from "../components";
 import { useT } from "../i18n-react";
 import type { MessageKey } from "../i18n";
@@ -534,12 +535,16 @@ export function BoardView() {
       );
       if (selectedCardId === card.id) setDetailSession(response.session);
       await refreshNow();
+      // Starting a card for the first time creates its Task; the rail must show
+      // it now, not on the next navigation.
+      notifyTasksChanged();
       return true;
     } catch (error) {
       // A restore that finds the session already live is a success, not a
       // failure: the card ended up where the user wanted it.
       if (options.idleOk && errText(error).includes("already has a running session")) {
         await refreshNow();
+        notifyTasksChanged();
         return true;
       }
       setActionError(
@@ -593,6 +598,8 @@ export function BoardView() {
       await del(`/api/kanban/cards/${encodeURIComponent(card.id)}`);
       setSelectedCardId(null);
       await refreshNow();
+      // Deleting the card soft-deletes its Task; the rail must drop the row.
+      notifyTasksChanged();
       return true;
     } catch (error) {
       setActionError(t("board.action.deleteCardFailed", { error: errText(error) }));
@@ -656,6 +663,7 @@ export function BoardView() {
       await post(`/api/kanban/workspaces/${encodeURIComponent(workspaceId)}/trash/clear`);
       setClearTrashOpen(false);
       await refreshNow();
+      notifyTasksChanged();
     } catch (error) {
       setActionError(t("board.action.clearDoneFailed", { error: errText(error) }));
       setClearTrashOpen(false);
@@ -706,6 +714,9 @@ export function BoardView() {
         }
       }
       await refreshNow();
+      // Each card this form just started created its Task; the rail reads them
+      // from `/api/tasks`, which no navigation has refreshed yet.
+      if (options.start) notifyTasksChanged();
       if (startFailures.length > 0) {
         setActionError(t("board.action.startCardFailed", { error: startFailures[0]! }));
         setTaskDialogOpen(false);
