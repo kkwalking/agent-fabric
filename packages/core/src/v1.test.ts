@@ -23,7 +23,7 @@ import { HandoffService } from "./handoff.js";
 import { ContainerLeaseManager, DEFAULT_KEEP_ALIVE_IDLE_MS, taskLifecycle, type ContainerOps } from "./lifecycle.js";
 import { buildAssistedHandoffContent, renderHandoffPrompt } from "./handoff.js";
 import { testCompletionFactory } from "./testkit.js";
-import { httpStatusForCode } from "./errors.js";
+import { httpStatusForCode, stageForCode } from "./errors.js";
 import { mockAdapter } from "../../runtimes/src/mock.js";
 import type { AgentRuntimeAdapter, RuntimeContext, RuntimeResult } from "./runtime.js";
 import type { Handoff, Run, Task } from "./types.js";
@@ -266,8 +266,10 @@ test("a directory is only ever one workspace", async () => {
   );
   assert.equal(h.workspaces.list().filter((w) => w.path === wsDir).length, 1);
   // The API answers 409, not a generic 400: "this folder is already a
-  // workspace" is a conflict with the current state, not a malformed request.
+  // workspace" is a conflict with the current state, not a malformed request —
+  // and it is a workspace failure, not an agent one.
   assert.equal(httpStatusForCode("workspace-duplicate"), 409);
+  assert.equal(stageForCode("workspace-duplicate"), "workspace");
 });
 
 test("saving a workspace whose directory vanished marks it missing", async () => {

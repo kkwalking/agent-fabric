@@ -85,6 +85,7 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "workspace-create-failed": "workspace",
   "workspace-locked": "workspace",
   "workspace-invalid": "workspace",
+  "workspace-duplicate": "workspace",
   "runtime-create-failed": "runtime",
   "runtime-start-failed": "runtime",
   "runtime-lost": "runtime",
