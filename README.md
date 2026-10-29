@@ -663,7 +663,7 @@ Agent Profile 的 `systemInstructions` 在创建 Run 时快照到 `run.systemIns
 
 ## 本地会话发现与接管
 
-Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）是本地 Harness 会话的发现页——Codex Threads 与 Claude Code / ZCode / Pi / DSH Sessions 用页内 Tab 切换，可选 Workspace 过滤（默认全部，按最近更新排序），每个会话带 cwd / 更新时间 / turn 数 / 模型 / 来源与认证状态（检测，不读 credential），**Continue in AgentFabric** 读取该会话并进入 Task Thread。采纳前会先问工作目录归属：复用已有 Workspace / 用给定名字新建一条（会话 cwd 与某 Workspace 路径相同时默认复用）；采纳一定落在某个工作区里——没有记录 cwd 的会话没有可关联的目录，因此不能采纳（弹窗说明原因，继续按钮置灰）；AgentFabric 不会自己凭空建 Workspace 记录。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用。New task 页面只负责描述新任务，底部给一行指向该页。
+Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）是本地 Harness 会话的发现页——Codex Threads 与 Claude Code / ZCode / Pi / DSH Sessions 用页内 Tab 切换，可选 Workspace 过滤（默认全部，按最近更新排序），每个会话带 cwd / 更新时间 / turn 数 / 模型 / 来源与认证状态（检测，不读 credential），**Continue in AgentFabric** 读取该会话并进入 Task Thread。采纳前会先问工作目录归属：复用已有 Workspace / 用给定名字新建一条；**会话 cwd 已经是某个 Workspace 时这一项没有可选性**——弹窗只显示那一条、不可编辑（继续就是沿用该记录；一个目录只有一条 Workspace，服务端也会以 `409 workspace-duplicate` 拒绝第二条）；采纳一定落在某个工作区里——没有记录 cwd 的会话没有可关联的目录，因此不能采纳（弹窗说明原因，继续按钮置灰）；AgentFabric 不会自己凭空建 Workspace 记录。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用。New task 页面只负责描述新任务，底部给一行指向该页。
 
 **临时目录约束（所有探测源通用）**：记录在临时目录下的会话——CI 步骤、一次性探针、测试夹具的产物——不是用户的工作，探测一律不列出。判定对所有 harness 用同一个谓词：cwd 等于或位于 `/tmp`、`/var/tmp`、系统临时目录（macOS 的 `/var/folders/…/T`）之下，字面与符号链接解析两种形态都算；相对路径无法定位，不判为临时。约束只作用于发现列表，不删除任何会话数据。
 

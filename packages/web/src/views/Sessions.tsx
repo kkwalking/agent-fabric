@@ -301,6 +301,11 @@ function AdoptThreadModal({
   for (let n = 2; takenNames.has(suggested); n++) suggested = `${segments[segments.length - 1]}-${n}`;
 
   const exact = cwd ? workspaces.find((w: any) => w.path === cwd) : undefined;
+  // A session whose directory already has a workspace leaves nothing to choose:
+  // continuing it means continuing it in that record. Offering "new workspace"
+  // there only ever produced a second record for one directory, which the server
+  // now refuses (`workspace-duplicate`), so the form fixes the choice instead.
+  const locked = exact !== undefined;
   const [name, setName] = useState(suggested);
   const [mode, setMode] = useState<"create" | "reuse">(exact ? "reuse" : "create");
   const [reuseId, setReuseId] = useState<string>(exact?.id ?? workspaces[0]?.id ?? "");
@@ -311,8 +316,11 @@ function AdoptThreadModal({
   // new record — one of them, always: adoption without a workspace is not a
   // case the form offers, so a thread with no recorded directory has nothing
   // to continue in and stays unadoptable.
-  const choice =
-    mode === "reuse" && reuse ? { create: false, workspaceId: reuse.id } : { create: true, name: name.trim() };
+  const choice = locked
+    ? { create: false, workspaceId: exact.id }
+    : mode === "reuse" && reuse
+      ? { create: false, workspaceId: reuse.id }
+      : { create: true, name: name.trim() };
 
   return (
     <Modal
@@ -328,43 +336,57 @@ function AdoptThreadModal({
         </div>
 
         {cwd ? (
-          <>
-            <label className="adopt-choice">
-              <input type="radio" checked={mode === "create"} onChange={() => setMode("create")} />
-              <span>
-                {t("sessions.adopt.newWorkspace")}
-                <input
-                  type="text"
-                  value={name}
-                  disabled={mode !== "create"}
-                  onChange={(e) => setName(e.target.value)}
-                  title={t("sessions.adopt.newWorkspaceTip")}
-                />
-              </span>
-            </label>
-            <label className="adopt-choice">
-              <input
-                type="radio"
-                checked={mode === "reuse"}
-                disabled={workspaces.length === 0}
-                onChange={() => setMode("reuse")}
-              />
+          locked ? (
+            /* The session's directory is already a workspace, and the
+               continuation belongs to that record: one row, nothing to edit. */
+            <div className="adopt-choice adopt-choice-fixed">
               <span>
                 {t("sessions.adopt.existing")}
-                <select
-                  value={reuseId}
-                  disabled={mode !== "reuse" || workspaces.length === 0}
-                  onChange={(e) => setReuseId(e.target.value)}
-                >
-                  {workspaces.map((w: any) => (
-                    <option key={w.id} value={w.id} title={w.path ?? undefined}>
-                      {labels.get(w.id)}
-                    </option>
-                  ))}
-                </select>
+                <span className="adopt-fixed">
+                  {labels.get(exact.id) ?? exact.name}
+                  <span className="muted">{t("sessions.adopt.fixedHint")}</span>
+                </span>
               </span>
-            </label>
-          </>
+            </div>
+          ) : (
+            <>
+              <label className="adopt-choice">
+                <input type="radio" checked={mode === "create"} onChange={() => setMode("create")} />
+                <span>
+                  {t("sessions.adopt.newWorkspace")}
+                  <input
+                    type="text"
+                    value={name}
+                    disabled={mode !== "create"}
+                    onChange={(e) => setName(e.target.value)}
+                    title={t("sessions.adopt.newWorkspaceTip")}
+                  />
+                </span>
+              </label>
+              <label className="adopt-choice">
+                <input
+                  type="radio"
+                  checked={mode === "reuse"}
+                  disabled={workspaces.length === 0}
+                  onChange={() => setMode("reuse")}
+                />
+                <span>
+                  {t("sessions.adopt.existing")}
+                  <select
+                    value={reuseId}
+                    disabled={mode !== "reuse" || workspaces.length === 0}
+                    onChange={(e) => setReuseId(e.target.value)}
+                  >
+                    {workspaces.map((w: any) => (
+                      <option key={w.id} value={w.id} title={w.path ?? undefined}>
+                        {labels.get(w.id)}
+                      </option>
+                    ))}
+                  </select>
+                </span>
+              </label>
+            </>
+          )
         ) : (
           <p className="muted">{t("sessions.adopt.noCwd")}</p>
         )}
@@ -378,7 +400,7 @@ function AdoptThreadModal({
         <div className="row adopt-actions">
           <span className="right">
             <button className="small" onClick={onCancel} disabled={busy}>{t("common.cancel")}</button>
-            <button className="small primary" onClick={() => onConfirm(choice)} disabled={busy || !cwd || (mode === "create" && !name.trim())}>
+            <button className="small primary" onClick={() => onConfirm(choice)} disabled={busy || !cwd || (!locked && mode === "create" && !name.trim())}>
               {busy ? <span className="spinner" /> : t("sessions.adopt.continue")}
             </button>
           </span>
