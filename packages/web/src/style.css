@@ -118,21 +118,13 @@ body {
 .sidebar.collapsed .nav-item > span {
   display: none;
 }
-.sidebar.collapsed .foot {
-  justify-content: center;
-  padding: 10px 0 2px;
-}
-.sidebar.collapsed .foot-text {
-  display: none;
-}
-
 /* Expanded, this row is just the brand name: the controls that used to live
    here moved out (language → Settings; collapse → the workspace header). */
 .brand {
   display: flex;
   align-items: center;
-  min-height: 30px;
-  padding: 4px 4px 10px;
+  min-height: 0;
+  padding: 2px 4px 4px;
 }
 .brand-btn {
   display: flex;
@@ -140,7 +132,7 @@ body {
   gap: 3px;
   border: 0;
   background: transparent;
-  padding: 6px 8px;
+  padding: 3px 6px;
   border-radius: 9px;
   color: var(--text);
 }
@@ -217,47 +209,6 @@ body {
   background: var(--sidebar-active);
   color: var(--text);
   font-weight: 500;
-}
-
-.sidebar .foot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 8px 2px;
-  border-top: 1px solid var(--border-soft);
-  margin-top: 8px;
-}
-/* The footer badge is the app icon itself (the svg carries its own tile),
-   so it needs no background or lettering of its own. */
-.avatar {
-  display: block;
-  flex-shrink: 0;
-}
-.foot-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.foot-title {
-  font-size: 12.5px;
-  font-weight: 500;
-}
-.foot-sub {
-  font-size: 11px;
-  color: var(--dim);
-  display: flex;
-  align-items: center;
-}
-.foot-sub .dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dim);
-  margin-right: 5px;
-}
-.foot-sub .dot.on {
-  background: var(--green);
 }
 
 /* ---------- Main ---------- */
@@ -4314,7 +4265,7 @@ button.stat.clickable:hover {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 2px 4px 8px 2px;
+  padding: 2px 4px 4px 2px;
   flex-shrink: 0;
 }
 .rail-head-title {
@@ -4513,8 +4464,8 @@ button.stat.clickable:hover {
   align-items: center;
   gap: 8px;
   width: calc(100% - 16px);
-  margin: 2px 8px 12px;
-  padding: 9px 12px;
+  margin: 2px 8px 4px;
+  padding: 7px 12px;
   border: 1px solid var(--border-soft);
   border-radius: 12px;
   /* A soft tint, not a solid accent: it is the primary action, but the rail
@@ -4539,8 +4490,8 @@ button.stat.clickable:hover {
    it reads as a destination rather than a list item. */
 .rail-kanban {
   width: calc(100% - 16px);
-  margin: 0 8px 10px;
-  padding: 8px 12px;
+  margin: 0 8px 4px;
+  padding: 5px 12px;
   flex-shrink: 0;
   color: var(--text);
   font-size: 14px;

@@ -8,10 +8,10 @@ import { WorkspaceTaskList } from "./views/WorkspaceTaskList";
 import { RailMenu } from "./views/RailMenu";
 
 /**
- * Every view is its own chunk: the shell (sidebar, router, health polling) is
- * what a page load pays for, and a view costs one small request when it is
- * opened. Keeping them eager put all ~20 views — and whatever they import —
- * into the file the window must parse before it can paint anything.
+ * Every view is its own chunk: the shell (sidebar, router) is what a page load
+ * pays for, and a view costs one small request when it is opened. Keeping them
+ * eager put all ~20 views — and whatever they import — into the file the window
+ * must parse before it can paint anything.
  *
  * The Board is separate twice over: it pulls in xterm, the largest dependency
  * in the app (v13 §七 asks for a dedicated terminal chunk).
@@ -147,7 +147,6 @@ export function App() {
   // The rail's filter row.
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filterPinnedOnly, setFilterPinnedOnly] = useState(false);
-  const [health, setHealth] = useState<string>("connecting…");
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
@@ -163,13 +162,6 @@ export function App() {
       /* A layout preference that cannot be stored must not break the app. */
     }
   }, [sidebarCollapsed]);
-
-  useEffect(() => {
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then((d) => setHealth(d.status))
-      .catch(() => setHealth("offline"));
-  }, []);
 
   // The shell is painted; fetch the other views while nothing else is going on.
   useEffect(() => {
@@ -314,17 +306,6 @@ export function App() {
         )}
 
         <RailMenu currentPath={path} />
-
-        <div className="foot" title={`${t("nav.localServer")} — ${t("nav.api")}: ${health}`}>
-          <BrandMark variant="tile" size={28} className="avatar" />
-          <span className="foot-text">
-            <span className="foot-title">{t("nav.localServer")}</span>
-            <span className="foot-sub">
-              <span className={`dot ${health === "ok" ? "on" : ""}`} />
-              {t("nav.api")}: {health}
-            </span>
-          </span>
-        </div>
       </aside>
       <main className={`main ${fullBleed ? "fullbleed" : ""}`}>
         {/* One boundary for whichever view chunk is loading; the fallback is
