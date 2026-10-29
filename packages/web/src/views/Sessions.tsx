@@ -273,9 +273,10 @@ function HarnessThreadsPanel({
  * Where the adopted session's work belongs (v6 §8 "Associate Workspace").
  * Adoption reads a session that ran somewhere on this machine, and that
  * directory is the one judgement the user is better at than we are: it may
- * already be a workspace, it may be a scratch directory that deserves no
- * record at all, or it may be new. Everything here is explicit — the
- * server is told which of the three, and never guesses.
+ * already be a workspace, or it may be new. Every adoption therefore lands
+ * the task in a workspace — continuing a session means continuing it in its
+ * directory, so there is no "no workspace" adoption. The server is told
+ * which of the two, and never guesses.
  */
 function AdoptThreadModal({
   source,
@@ -301,19 +302,17 @@ function AdoptThreadModal({
 
   const exact = cwd ? workspaces.find((w: any) => w.path === cwd) : undefined;
   const [name, setName] = useState(suggested);
-  const [mode, setMode] = useState<"create" | "reuse" | "none">(exact ? "reuse" : "create");
+  const [mode, setMode] = useState<"create" | "reuse">(exact ? "reuse" : "create");
   const [reuseId, setReuseId] = useState<string>(exact?.id ?? workspaces[0]?.id ?? "");
 
   const labels = workspaceLabels(workspaces, t("sessions.filter.workspaceFallback"));
   const reuse = workspaces.find((w: any) => w.id === reuseId);
   // The server takes `workspaceId` for reuse and `createWorkspaceName` for a
-  // new record; neither means "adopt without a workspace".
+  // new record — one of them, always: adoption without a workspace is not a
+  // case the form offers, so a thread with no recorded directory has nothing
+  // to continue in and stays unadoptable.
   const choice =
-    mode === "reuse" && reuse
-      ? { create: false, workspaceId: reuse.id }
-      : mode === "create" && name.trim()
-        ? { create: true, name: name.trim() }
-        : { create: false };
+    mode === "reuse" && reuse ? { create: false, workspaceId: reuse.id } : { create: true, name: name.trim() };
 
   return (
     <Modal
@@ -370,14 +369,6 @@ function AdoptThreadModal({
           <p className="muted">{t("sessions.adopt.noCwd")}</p>
         )}
 
-        <label className="adopt-choice">
-          <input type="radio" checked={mode === "none"} onChange={() => setMode("none")} />
-          <span>
-            {t("sessions.adopt.none")}
-            <span className="muted">{t("sessions.adopt.noneHint")}</span>
-          </span>
-        </label>
-
         {mode === "reuse" && reuse && reuse.path !== cwd && (
           <p className="muted adopt-note">
             {t("sessions.adopt.mismatch", { cwd: cwd ?? "—", path: reuse.path })}
@@ -387,7 +378,7 @@ function AdoptThreadModal({
         <div className="row adopt-actions">
           <span className="right">
             <button className="small" onClick={onCancel} disabled={busy}>{t("common.cancel")}</button>
-            <button className="small primary" onClick={() => onConfirm(choice)} disabled={busy || (mode === "create" && !name.trim())}>
+            <button className="small primary" onClick={() => onConfirm(choice)} disabled={busy || !cwd || (mode === "create" && !name.trim())}>
               {busy ? <span className="spinner" /> : t("sessions.adopt.continue")}
             </button>
           </span>
