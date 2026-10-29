@@ -24,7 +24,7 @@ function relativeLabel(t: Translate, iso?: string): string {
   return new Date(at).toLocaleDateString();
 }
 
-export function TrashView() {
+export function TrashView({ embedded = false }: { embedded?: boolean } = {}) {
   const t = useT();
   const tasks = useAsync<any[]>(() => get("/api/tasks?deleted=true"), []);
   const [error, setError] = useState<string | null>(null);
@@ -54,15 +54,22 @@ export function TrashView() {
 
   return (
     <div>
-      <div className="row" style={{ marginBottom: 4 }}>
-        <h1>{t("trash.title")}</h1>
-        <span className="right">
-          <button className="small" onClick={tasks.reload}>{t("common.refresh")}</button>
-        </span>
-      </div>
-      <p className="sub">
-        {t("trash.sub")}
-      </p>
+      {!embedded && (
+        <>
+          <div className="row" style={{ marginBottom: 4 }}>
+            <h1>{t("trash.title")}</h1>
+            <span className="right">
+              <button className="small" onClick={tasks.reload}>{t("common.refresh")}</button>
+            </span>
+          </div>
+          <p className="sub">{t("trash.sub")}</p>
+        </>
+      )}
+      {embedded && (
+        <div className="settings-inline-actions settings-trash-actions">
+          <button className="btn-outline" onClick={tasks.reload}>{t("common.refresh")}</button>
+        </div>
+      )}
       <ErrorBox message={error} />
 
       {entries.length === 0 ? (

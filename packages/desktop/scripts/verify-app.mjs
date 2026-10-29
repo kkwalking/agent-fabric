@@ -55,6 +55,7 @@ export async function verifyApp(appPath) {
     const asar = join(resources, "app.asar");
     const entries = listPackage(asar);
     check(!entries.some((entry) => entry.endsWith(".mjs")), `app.asar contains an ESM entry (must be CommonJS)`);
+    check(entries.includes("/src/preload.js"), `app.asar does not contain src/preload.js (window bridge missing)`);
     const manifest = JSON.parse(extractFile(asar, "package.json").toString("utf8"));
     check(manifest.type !== "module", `app.asar package.json is "type": "module" (packaged main must be CommonJS)`);
   }

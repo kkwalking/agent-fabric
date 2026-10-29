@@ -21,6 +21,8 @@ export function DirectoryAutocomplete({
   disabled = false,
   autoFocus = false,
   onSubmit,
+  onBrowse,
+  nativeOnly = false,
   inputRef: externalRef,
 }: {
   value: string;
@@ -31,6 +33,10 @@ export function DirectoryAutocomplete({
   autoFocus?: boolean;
   /** Called on Enter when no suggestion is highlighted. */
   onSubmit?: () => void;
+  /** Called when the field itself should open the platform's native folder chooser. */
+  onBrowse?: () => void;
+  /** In the desktop app, clicking the field itself opens the native chooser. */
+  nativeOnly?: boolean;
   inputRef?: RefObject<HTMLInputElement>;
 }) {
   const t = useT();
@@ -54,7 +60,7 @@ export function DirectoryAutocomplete({
   const { requestPath, prefix } = splitPathInput(debounced);
 
   useEffect(() => {
-    if (disabled) {
+    if (disabled || nativeOnly) {
       setEntries([]);
       setOpen(false);
       return;
@@ -106,6 +112,11 @@ export function DirectoryAutocomplete({
   );
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (nativeOnly && onBrowse && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      onBrowse();
+      return;
+    }
     if (event.key === "Escape") {
       // The first Escape closes the dropdown; the dialog must not swallow it.
       event.preventDefault();
@@ -155,9 +166,14 @@ export function DirectoryAutocomplete({
           }}
           onKeyDown={handleKeyDown}
           onFocus={() => {
-            if (interactedRef.current && entries.length > 0) setOpen(true);
+            if (!nativeOnly && interactedRef.current && entries.length > 0) setOpen(true);
           }}
-          onMouseDown={() => {
+          onMouseDown={(event) => {
+            if (nativeOnly && onBrowse) {
+              event.preventDefault();
+              onBrowse();
+              return;
+            }
             interactedRef.current = true;
           }}
           placeholder={placeholder ?? t("board.dir.defaultPlaceholder")}

@@ -29,7 +29,7 @@ export default {
   copyright: "AgentFabric",
   // Only the Electron main process is packed into the asar; the server bundle,
   // web assets and native addon are unpacked resources (see extraResources).
-  files: ["src/main.js", "package.json"],
+  files: ["src/main.js", "src/preload.js", "package.json"],
   asar: true,
   directories: {
     output: "release",

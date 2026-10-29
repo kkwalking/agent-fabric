@@ -12,8 +12,7 @@ const SUPPRESS_DELETE_CONFIRM_KEY = "agentfabric.deleteTaskConfirmSuppressed";
  * Task List (v5 §16/§32): Tasks are the user's long-lived work threads;
  * Runs are executions inside them. Clicking a task opens its thread —
  * the primary surface — not a run page. The three-dot menu soft-deletes:
- * the task stays recoverable for 30 days, and the Trash entry in this page's
- * header is where it is restored from.
+ * the task stays recoverable for 30 days, and Trash lives in Settings.
  */
 /** Rows per page. */
 const TASKS_PAGE_SIZE = 50;
@@ -39,13 +38,6 @@ export function TasksView() {
   const tasks = useAsync<any[]>(() => get("/api/tasks"), []);
   const runs = useAsync<any[]>(() => get("/api/runs"), []);
   const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
-  // The Trash entry used to live on the Dashboard. It needs the number of
-  // soft-deleted tasks, which is what `/api/dashboard` reports; nothing else on
-  // this page uses that endpoint.
-  const summary = useAsync<{ counts: Record<string, number>; usage: { estimatedCost: number } }>(
-    () => get("/api/dashboard"),
-    []
-  );
   // Which task's action menu is open (one at a time).
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   // Task awaiting confirmation in the delete modal.
@@ -80,7 +72,6 @@ export function TasksView() {
   }
   // A lookup map, not a per-row `find`: the list re-renders on every menu open
   // and the workspaces array is scanned once per visible row otherwise.
-  const deletedCount = summary.data?.counts.deletedTasks ?? 0;
   const wsById = new Map<string, any>((workspaces.data ?? []).map((w: any) => [w.id, w]));
   const wsName = (id?: string) => (id ? wsById.get(id)?.name : undefined);
   const isLive = (s: string) => ["pending", "starting", "running"].includes(s);
@@ -135,29 +126,9 @@ export function TasksView() {
 
   return (
     <div>
-      <div className="row" style={{ marginBottom: 4 }}>
+      <div className="row" style={{ marginBottom: 18 }}>
         <h1>{t("tasks.title")}</h1>
-        <span className="right">
-          {deletedCount > 0 && (
-            <button className="small" onClick={() => navigate("/trash")} title={t("tasks.trashTitle")}>
-              {t("tasks.trash", { n: deletedCount })}
-            </button>
-          )}{" "}
-          <button className="small" onClick={() => { tasks.reload(); runs.reload(); summary.reload(); }}>{t("common.refresh")}</button>{" "}
-          <button className="small primary" onClick={() => navigate("/new")}>{t("tasks.new")}</button>
-        </span>
       </div>
-      <p className="sub">
-        {t("tasks.sub")}
-        {/* The Dashboard used to show the total cost; it lives on the Usage page
-            in full, and one line here keeps it from becoming invisible. */}
-        {typeof summary.data?.usage?.estimatedCost === "number" && (
-          <> {t("tasks.spent", { cost: `$${summary.data.usage.estimatedCost.toFixed(4)}` })}
-            <a onClick={() => navigate("/usage")}>{t("tasks.spentLink")}</a>
-            {t("tasks.spentAfter")}
-          </>
-        )}
-      </p>
 
       <ErrorBox message={actionError} />
 

@@ -38,6 +38,7 @@ const UsageView = load(() => import("./views/Usage"), "UsageView");
 const SettingsPanel = load(() => import("./views/Settings"), "SettingsView");
 const TaskLifecycleView = load(() => import("./views/TaskLifecycle"), "TaskLifecycleView");
 const KanbanView = load(() => import("./views/Board"), "BoardView");
+const NewWorkspaceDialog = load(() => import("./components/board/AddWorkspaceDialog"), "AddWorkspaceDialog");
 
 /**
  * The view importers, by route. Kept so the chunks a user is likely to open
@@ -147,6 +148,7 @@ export function App() {
   // The rail's filter row.
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filterPinnedOnly, setFilterPinnedOnly] = useState(false);
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
@@ -183,10 +185,23 @@ export function App() {
             <BrandMark variant={sidebarCollapsed ? "tile" : "glyph"} size={sidebarCollapsed ? 26 : 22} />
             {!sidebarCollapsed && <span className="brand-name">AgentFabric</span>}
           </button>
-          {/* The collapse control is not here: it sits in the workspace header
-              below, where the panel it controls starts, and it stays in the
-              collapsed rail's icon column so the rail can be reopened. The
-              language switch lives in Settings → General. */}
+          {/* The collapse control sits at the right edge of this row, above the
+              panel it controls. In the collapsed rail it moves into the icon
+              column so the rail can be reopened. The language switch lives in
+              Settings → General. */}
+          {!sidebarCollapsed && (
+            <span className="brand-actions">
+              <button
+                className="icon-btn sidebar-toggle"
+                title={t("nav.collapse")}
+                aria-label={t("nav.collapse")}
+                aria-expanded
+                onClick={() => setSidebarCollapsed(true)}
+              >
+                <Icon name="sidebar" size={16} />
+              </button>
+            </span>
+          )}
         </div>
 
         {/* The rail is the app's primary navigation: Tasks, grouped by the
@@ -214,15 +229,6 @@ export function App() {
               <span>{t("nav.kanban")}</span>
             </button>
             <div className="rail-head">
-              <button
-                className="icon-btn sidebar-toggle expanded"
-                title={t("nav.collapse")}
-                aria-label={t("nav.collapse")}
-                aria-expanded
-                onClick={() => setSidebarCollapsed(true)}
-              >
-                <Icon name="sidebar" size={16} />
-              </button>
               <span className="rail-head-title">{t("sidebar.workspaces")}</span>
               <span className="rail-head-actions">
                 <button
@@ -242,14 +248,15 @@ export function App() {
                 >
                   <Icon name="grid" size={15} />
                 </button>
-                {/* The one action that creates work, given a `+` like the
-                    reference UI. It used to be a folder icon, which read as
-                    "open a folder" rather than "start a session". */}
+                {/* The one action that creates a workspace, given a `+` like
+                    the reference UI. New tasks start from the full-width
+                    新会话 button above; this entry point belongs to the
+                    Workspaces heading. */}
                 <button
                   className="icon-btn"
-                  title={t("sidebar.newInWorkspace")}
-                  aria-label={t("sidebar.newInWorkspace")}
-                  onClick={() => navigate("/new")}
+                  title={t("sidebar.newWorkspace")}
+                  aria-label={t("sidebar.newWorkspace")}
+                  onClick={() => setNewWorkspaceOpen(true)}
                 >
                   <Icon name="plus" size={16} />
                 </button>
@@ -272,10 +279,9 @@ export function App() {
           </>
         )}
         {sidebarCollapsed && (
-          /* Collapsed rail: the same two controls as the expanded header, in the
-             same order and the same place — collapse/expand first, then the
-             icon that starts a new session (what the full-width 新会话 button
-             does). Both stay on the panel's own top row. */
+          /* Collapsed rail: expand leads the icon column, followed by the icons
+             that start a new session and open the Kanban (what the full-width
+             buttons do when expanded). */
           <div className="rail-head rail-head-collapsed">
             <button
               className="icon-btn sidebar-toggle"
@@ -343,6 +349,15 @@ export function App() {
         )}
         </Suspense>
       </main>
+      {newWorkspaceOpen && (
+        <Suspense fallback={null}>
+          <NewWorkspaceDialog
+            mode="workspace"
+            onClose={() => setNewWorkspaceOpen(false)}
+            onAdded={() => setNewWorkspaceOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
     </LanguageContext.Provider>
   );

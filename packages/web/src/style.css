@@ -74,9 +74,10 @@ body {
 }
 
 /* Collapsed rail: icons only, section titles become dividers. */
-/* Collapsed rail: a narrow icon column. The two controls that lead the expanded
-   header (collapse, new session) stack here — the user accepted "below rather
-   than to the right", which keeps the rail as thin as an icon column. */
+/* Collapsed rail: a narrow icon column. The expand control moves out of the
+   brand row and stacks here with the new-session and Kanban icons — the user
+   accepted "below rather than to the right", which keeps the rail as thin as
+   an icon column. */
 .sidebar.collapsed {
   width: 60px;
   padding: 12px 8px 10px;
@@ -89,10 +90,6 @@ body {
 }
 .sidebar.collapsed .brand-btn {
   padding: 3px;
-}
-.sidebar.collapsed .brand-actions {
-  margin-left: 0;
-  gap: 0;
 }
 /* Collapsed rail: the brand is the app icon's own tile, so no wrapper badge. */
 .sidebar.collapsed .brand-btn .brand-name {
@@ -123,8 +120,9 @@ body {
 .sidebar.collapsed .nav-item > span {
   display: none;
 }
-/* Expanded, this row is just the brand name: the controls that used to live
-   here moved out (language → Settings; collapse → the workspace header). */
+/* Expanded, this row is the brand plus the collapse control at its right edge.
+   In the collapsed rail the collapse control moves into the icon column; the
+   language switch lives in Settings → General. */
 .brand {
   display: flex;
   align-items: center;
@@ -4175,6 +4173,9 @@ button.stat.clickable:hover {
   flex-wrap: wrap;
   margin: 2px 0 8px;
 }
+.settings-trash-actions {
+  justify-content: flex-end;
+}
 .settings-result {
   font-size: 12px;
 }
@@ -4273,14 +4274,13 @@ button.stat.clickable:hover {
   min-height: 0;
 }
 
-/* The panel's own header row: collapse control, then the title, then the
-   panel's actions. The collapse control lives here (not in the brand row) so it
-   sits exactly where the panel it controls begins. */
+/* The panel's own header row: the Workspaces title, then the panel's actions.
+   The collapse control lives in the brand row above, at the right edge. */
 .rail-head {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 2px 4px 4px 2px;
+  padding: 2px 4px 4px 9px;
   flex-shrink: 0;
 }
 .rail-head-title {

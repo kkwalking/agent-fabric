@@ -23,7 +23,7 @@
  */
 const { mkdirSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
-const { app, BrowserWindow, dialog, Menu, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require("electron");
 
 // Chromium switches tuned for a long-lived local app rather than a browser
 // tab: never go dormant on the renderer (the window must stay interactive even
@@ -41,6 +41,26 @@ delete process.env.ELECTRON_RUN_AS_NODE;
 
 /** Loopback host. The bundled server is never exposed beyond the machine. */
 const HOST = "127.0.0.1";
+
+/**
+ * Renderer → native macOS folder chooser for "New workspace".
+ *
+ * The directory field stays a plain text input on the web, but the desktop
+ * window gets the real NSOpenPanel: choosing a folder is a native action on
+ * macOS, and a web autocomplete is a poor substitute for it. Only the app's
+ * own loopback page may call this.
+ */
+ipcMain.handle("agentfabric:pick-directory", async (event, defaultPath) => {
+  if (!/^http:\/\/127\.0\.0\.1:\d+\//.test(event.senderFrame?.url ?? "")) return null;
+  const options = {
+    properties: ["openDirectory", "createDirectory"],
+    defaultPath:
+      typeof defaultPath === "string" && defaultPath.trim() ? defaultPath : undefined,
+  };
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? null : result.filePaths[0] ?? null;
+});
 
 /**
  * Where the app's runtime files are.
@@ -246,7 +266,12 @@ async function createWindow(url) {
     // the first frame is the app's own surface, not a black flash.
     backgroundColor: "#ffffff",
     show: false,
-    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: join(__dirname, "preload.js"),
+    },
   });
   mainWindow = win;
 

@@ -56,6 +56,7 @@ export type SettingsSection =
   | "harness"
   | "docker"
   | "retry"
+  | "trash"
   | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
@@ -66,6 +67,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
   "harness",
   "docker",
   "retry",
+  "trash",
   "about",
 ];
 

@@ -458,6 +458,23 @@ try {
   const titled = await evaluate(cdp, `document.querySelector(".rail-head-title")?.textContent?.trim()`);
   check(/工作区|Workspaces/.test(titled ?? ""), `rail heading is "${titled}"`);
 
+  // 4b. The Tasks header is a title only: trash, refresh and new-task moved
+  //     out of it (Trash now lives in Settings).
+  const tasksHeader = await evaluate(
+    cdp,
+    `(() => {
+       const row = document.querySelector("main h1")?.closest(".row");
+       return {
+         buttons: [...(row?.querySelectorAll("button") ?? [])].map((b) => b.textContent.trim()),
+         subtitle: document.querySelector("main .row + .sub")?.textContent?.trim() ?? null,
+       };
+     })()`
+  );
+  check(
+    tasksHeader.buttons.length === 0 && tasksHeader.subtitle === null,
+    `the Tasks header is a title only — no buttons (${tasksHeader.buttons.join(", ") || "none"}), no subtitle`
+  );
+
   // FIXTURE-DATA ONLY (4-dist)
   if (!emptyMode) {
   }
@@ -544,6 +561,44 @@ try {
   check(railOps.headIcons === 3, `the workspace heading carries ${railOps.headIcons} icons (search / filter / new)`);
   check(railOps.items.length === 4, `session menu offers ${railOps.items.length} actions: ${railOps.items.join(", ")}`);
   check(railOps.menuOnScreen && railOps.closedByEscape, "the session menu stays on screen and closes on Escape");
+
+  // 5b-2. The rail's collapse control belongs to the brand row, at its right
+  //       edge, not to the Workspaces heading. The collapsed rail keeps a way
+  //       to expand it again.
+  const collapseOps = await evaluate(
+    cdp,
+    `(async () => {
+       const brandToggle = document.querySelector(".brand .sidebar-toggle");
+       const headToggle = document.querySelector(".rail-head .sidebar-toggle");
+       const brandRect = document.querySelector(".brand")?.getBoundingClientRect();
+       const toggleRect = brandToggle?.getBoundingClientRect();
+       const atRightEdge = Boolean(brandRect && toggleRect && brandRect.right - toggleRect.right < 12);
+       brandToggle?.click();
+       await new Promise((r) => setTimeout(r, 350));
+       const collapsed = document.querySelector(".sidebar")?.classList.contains("collapsed") ?? false;
+       const railWidth = document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0;
+       const expandToggle = document.querySelector(".rail-head-collapsed .sidebar-toggle");
+       expandToggle?.click();
+       await new Promise((r) => setTimeout(r, 350));
+       const expanded = !(document.querySelector(".sidebar")?.classList.contains("collapsed") ?? true);
+       return {
+         hasBrandToggle: Boolean(brandToggle),
+         hasHeadToggle: Boolean(headToggle),
+         atRightEdge,
+         collapsed,
+         railWidth,
+         expanded,
+       };
+     })()`
+  );
+  check(
+    collapseOps.hasBrandToggle && !collapseOps.hasHeadToggle && collapseOps.atRightEdge,
+    "the collapse control sits at the brand row's right edge (not in the Workspaces heading)"
+  );
+  check(
+    collapseOps.collapsed && collapseOps.railWidth <= 61 && collapseOps.expanded,
+    `the rail collapses to icons (${Math.round(collapseOps.railWidth)}px) and expands back`
+  );
 
   // FIXTURE-DATA ONLY (5c)
   if (!emptyMode) {
@@ -842,8 +897,8 @@ try {
     );
 
     // The first-use path has to be walkable: the composer is blocked (no
-    // workspace) and the way out is on the same page — a workspace *is* a
-    // directory, so adding one is a path field, not a detour to another view.
+    // workspace) and the way out is the rail's Workspaces + button — workspace
+    // creation does not live inside the task composer any more.
     const firstUse = await evaluate(
       cdp,
       `(async () => {
@@ -856,20 +911,27 @@ try {
          const hint = [...document.querySelectorAll("main .card")]
            .map((c) => c.textContent.trim())
            .find((t) => /工作区|workspace/i.test(t)) ?? "";
-         const addBtn = [...document.querySelectorAll("main button")]
-           .find((b) => /新建工作区|New workspace/.test(b.textContent));
+         const inlineAdd = [...document.querySelectorAll("main button")]
+           .some((b) => /新建工作区|New workspace/.test(b.textContent));
+         const headIcons = [...document.querySelectorAll(".rail-head-actions .icon-btn")];
+         const railAdd = headIcons[headIcons.length - 1];
          const out = {
            sendDisabled: sendBtn ? sendBtn.disabled : null,
            hintText: hint,
            hintMentionsWorkspace: /工作区|workspace/i.test(hint),
-           hasAddEntry: Boolean(addBtn),
-           addOpensForm: false,
+           hasInlineAdd: inlineAdd,
+           hasRailAdd: Boolean(railAdd),
+           dialogOpen: false,
+           nativeBridge: typeof window.agentfabric?.pickDirectory === "function",
+           nativeBrowse: false,
          };
-         if (addBtn) {
-           addBtn.click();
-           await new Promise((r) => setTimeout(r, 400));
-           out.addOpensForm = [...document.querySelectorAll("main input")]
-             .some((i) => /Users|路径|path/i.test(i.placeholder ?? ""));
+         if (railAdd) {
+           railAdd.click();
+           await new Promise((r) => setTimeout(r, 500));
+           out.dialogOpen = Boolean(document.querySelector(".add-workspace-dialog"));
+           out.nativeBrowse = Boolean(document.querySelector(".add-workspace-dialog .dir-input-browse"));
+           document.querySelector(".add-workspace-dialog .board-dialog-close")?.click();
+           await new Promise((r) => setTimeout(r, 300));
          }
          return out;
        })()`
@@ -879,21 +941,45 @@ try {
       firstUse.hintMentionsWorkspace === true,
       `the block message names the missing thing (${JSON.stringify((firstUse.hintText ?? "").slice(0, 60))})`
     );
-    check(firstUse.hasAddEntry === true, "the composer offers an inline workspace entry");
-    check(firstUse.addOpensForm === true, "clicking it opens the directory form");
+    check(firstUse.hasInlineAdd === false, "the New Task composer has no inline workspace creation");
+    check(firstUse.hasRailAdd === true, "the Workspaces header carries the new-workspace entry point");
+    check(firstUse.dialogOpen === true, "clicking it opens the workspace form");
+    check(firstUse.nativeBridge === true, "the packaged window exposes the native directory bridge");
+    check(firstUse.nativeBrowse === false, "the workspace form has no separate browse button");
 
     // Adding the workspace must clear the gate, and the runtime pill must offer
     // the host harnesses: the isolation gate that used to hide them is gone —
     // a workspace is a directory, and any runtime may work on it.
     const firstWorkspace = join(dataDir, "first-workspace");
     mkdirSync(firstWorkspace, { recursive: true });
-    await evaluate(
+    const createdViaRail = await evaluate(
       cdp,
-      `fetch("/api/workspaces", {
-         method: "POST",
-         headers: { "Content-Type": "application/json" },
-         body: JSON.stringify({ name: "first-workspace", type: "local", path: ${JSON.stringify(firstWorkspace)} }),
-       }).then((r) => r.status)`
+      `(async () => {
+         const headIcons = [...document.querySelectorAll(".rail-head-actions .icon-btn")];
+         headIcons[headIcons.length - 1]?.click();
+         await new Promise((r) => setTimeout(r, 500));
+         const dialog = document.querySelector(".add-workspace-dialog");
+         if (!dialog) return { error: "the rail did not open the workspace dialog" };
+         const input = dialog.querySelector(".dir-input-text");
+         if (!input) return { error: "the dialog has no directory field" };
+         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+         setter.call(input, ${JSON.stringify(firstWorkspace)});
+         input.dispatchEvent(new Event("input", { bubbles: true }));
+         await new Promise((r) => setTimeout(r, 400));
+         [...dialog.querySelectorAll("footer button")]
+           .find((b) => b.classList.contains("primary"))
+           ?.click();
+         await new Promise((r) => setTimeout(r, 1800));
+         return {
+           dialogClosed: !document.querySelector(".add-workspace-dialog"),
+           groups: [...document.querySelectorAll(".ws-group-name")].map((n) => n.textContent.trim()),
+         };
+       })()`
+    );
+    check(createdViaRail.dialogClosed === true, "the rail dialog adds the workspace and closes");
+    check(
+      (createdViaRail.groups ?? []).includes("first-workspace"),
+      `the new empty workspace appears in the rail (${(createdViaRail.groups ?? []).join(", ") || "none"})`
     );
     const afterWorkspace = await evaluate(
       cdp,
@@ -951,6 +1037,14 @@ try {
        await new Promise((r) => setTimeout(r, 1200));
        const sections = [...document.querySelectorAll(".settings-nav-cell")].map((b) => b.textContent.trim());
        const panel = Boolean(document.querySelector(".settings-panel"));
+       const trashNav = [...document.querySelectorAll(".settings-nav-cell")]
+         .find((b) => /回收站|Trash/i.test(b.textContent));
+       if (trashNav) {
+         trashNav.click();
+         await new Promise((r) => setTimeout(r, 800));
+       }
+       const trashTitle = document.querySelector(".settings-page-title")?.textContent?.trim() ?? null;
+       const trashRows = document.querySelectorAll(".settings-body .task-item").length;
        // The credentials page is a settings section now; visit it by URL.
        history.pushState({}, "", "/settings/credentials");
        window.dispatchEvent(new PopStateEvent("popstate"));
@@ -958,6 +1052,9 @@ try {
        return {
          panel,
          sections,
+         trashNav: Boolean(trashNav),
+         trashTitle,
+         trashRows,
          credentialsHeading: document.querySelector(".settings-page-title")?.textContent?.trim() ?? null,
          hasAddButton: [...document.querySelectorAll(".settings-panel button")].some((b) => /Add credential|新增凭据|添加/i.test(b.textContent)),
        };
@@ -965,6 +1062,10 @@ try {
   );
   check(settings.panel, `settings panel opens with ${settings.sections.length} sections: ${settings.sections.join(", ")}`);
   check(!settings.sections.some((s) => /凭据|credential/i.test(s)), `source credentials are gone from settings (${settings.sections.join(", ")})`);
+  check(
+    settings.trashNav && /回收站|Trash/i.test(settings.trashTitle ?? ""),
+    `Trash opens inside Settings (${JSON.stringify(settings.trashTitle)})`
+  );
 
   // 7b. The Harness CLI page shows what detection found on this machine — the
   //     whole point of the page: the app's PATH is launchd's, so a CLI installed

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { get, post } from "../api";
-import { ErrorBox, Field, Icon, useAsync } from "../components";
+import { ErrorBox, Icon, useAsync } from "../components";
 import { HARNESS_NATIVE_KINDS } from "../harness";
 import { useT } from "../i18n-react";
 import { modelOptionLabel } from "../presentation";
@@ -53,11 +53,14 @@ export function NewTaskView() {
   const [lifecycle, setLifecycle] = useState("ephemeral");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Inline workspace creation: a task needs a directory, and sending the user
-  // to another page to add one is a needless round trip.
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newPath, setNewPath] = useState("");
+
+  // The rail owns workspace creation. When its dialog adds one, this form's
+  // workspace select has to see it without a full page reload.
+  useEffect(() => {
+    const onWorkspacesChanged = () => workspaces.reload();
+    window.addEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
+    return () => window.removeEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
+  }, []);
 
   const workspaceList = workspaces.data ?? [];
   const providerList = providers.data ?? [];
@@ -108,33 +111,6 @@ export function NewTaskView() {
   const missingModel = !harnessNative && !models.loading && modelList.length === 0;
   const blocked = missingWorkspace || missingRuntime || missingModel;
 
-  const createWorkspace = async () => {
-    const path = newPath.trim();
-    if (!path || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await post<any>("/api/workspaces", {
-        name: newName.trim() || path.split("/").filter(Boolean).pop() || path,
-        type: "local",
-        path,
-      });
-      setCreating(false);
-      setNewName("");
-      setNewPath("");
-      workspaces.reload();
-      setWorkspaceChoice(created.id);
-      // The new workspace's own defaults decide the runtime/model until the
-      // user touches those pills.
-      setRuntimeTouched(false);
-      setModelTouched(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const submit = async () => {
     if (!prompt.trim() || busy || blocked) return;
     setBusy(true);
@@ -181,38 +157,8 @@ export function NewTaskView() {
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
-        {/* Inline workspace creation. The path is the whole definition of a
-            workspace: the task runs there in place, so nothing is cloned and
-            nothing is asked about branches. */}
-        {creating && (
-          <div className="new-task-details">
-            <div className="form-grid-2">
-              <Field label={t("newtask.workspace.name")}>
-                <input
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder={t("newtask.workspace.namePlaceholder")}
-                />
-              </Field>
-              <Field label={t("newtask.workspace.path")}>
-                <input
-                  value={newPath}
-                  onChange={(e) => setNewPath(e.target.value)}
-                  placeholder={t("newtask.workspace.pathPlaceholder")}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") createWorkspace();
-                  }}
-                />
-              </Field>
-            </div>
-            <div className="modal-actions">
-              <button onClick={() => setCreating(false)}>{t("newtask.workspace.cancel")}</button>
-              <button className="primary" disabled={busy || !newPath.trim()} onClick={createWorkspace}>
-                {t("newtask.workspace.create")}
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Workspace creation lives in the rail's Workspaces header now: this
+            page only selects an existing workspace. */}
         <div className="composer-bar">
           {workspaceList.length > 0 && (
             <select
@@ -233,9 +179,6 @@ export function NewTaskView() {
               ))}
             </select>
           )}
-          <button className="pill" onClick={() => setCreating((v) => !v)} title={t("newtask.workspace.newTitle")}>
-            {t("newtask.workspace.new")}
-          </button>
           {/* Hidden rather than rendered empty when no runtime is usable: the
               ErrorBox above already explains why, and submit is blocked. */}
           {selectableRuntimes.length > 0 && (

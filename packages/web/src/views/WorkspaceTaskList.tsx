@@ -189,6 +189,16 @@ export function WorkspaceTaskList({
     if (workspaceRows) setWorkspaces(workspaceRows);
   };
 
+  // Creating a workspace in the rail dialog must make its (empty) group appear
+  // here immediately; no navigation should be needed to see the result.
+  useEffect(() => {
+    const onWorkspacesChanged = () => {
+      void reload();
+    };
+    window.addEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
+    return () => window.removeEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
+  }, []);
+
   const togglePinned = (id: string) => {
     setPinned((prev) => {
       const next = new Set(prev);
@@ -298,6 +308,12 @@ export function WorkspaceTaskList({
   const groups = useMemo<Group[]>(() => {
     const byId = workspacesById;
     const buckets = new Map<string, TaskRow[]>();
+    // A workspace exists as a record before it has sessions. Showing it with a
+    // zero count is what makes "New workspace" in the header visibly do
+    // something, and gives the group menu a place to rename/delete it.
+    if (!pinnedOnly) {
+      for (const workspace of byId.values()) buckets.set(workspace.id, []);
+    }
     const shown = tasks.filter((task) => (pinnedOnly ? pinned.has(task.id) : true));
     for (const task of shown) {
       const key = folderFor(task);

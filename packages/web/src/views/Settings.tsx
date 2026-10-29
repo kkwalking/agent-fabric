@@ -3,6 +3,7 @@ import { get, post, put } from "../api";
 import { ErrorBox, Field, Icon, Modal, type IconName } from "../components";
 import { useI18n } from "../i18n-react";
 import { LlmView } from "./Llm";
+import { TrashView } from "./Trash";
 import { LANGUAGES, type Language, type MessageKey } from "../i18n";
 import { navigate, type SettingsSection } from "../router";
 
@@ -39,6 +40,7 @@ const SECTIONS: SectionDef[] = [
   { id: "harness", label: "settings.nav.harness", icon: "terminal" },
   { id: "docker", label: "settings.nav.docker", icon: "box" },
   { id: "retry", label: "settings.nav.retry", icon: "refresh" },
+  { id: "trash", label: "settings.nav.trash", icon: "archive" },
   { id: "about", label: "settings.nav.about", icon: "cpu" },
 ];
 
@@ -303,6 +305,13 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
             {config && current.id === "harness" && <HarnessSection config={config} save={saveSection} />}
             {config && current.id === "docker" && <DockerSection config={config} save={saveSection} />}
             {config && current.id === "retry" && <RetrySection config={config} save={saveSection} />}
+            {config && current.id === "trash" && (
+              <div className="settings-page settings-page-wide">
+                <h2 className="settings-page-title">{t("settings.nav.trash")}</h2>
+                <p className="settings-page-desc">{t("trash.sub")}</p>
+                <TrashView embedded />
+              </div>
+            )}
             {config && current.id === "about" && <AboutSection config={config} />}
           </div>
         </div>

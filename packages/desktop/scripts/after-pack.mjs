@@ -58,6 +58,9 @@ export default async function afterPack(context) {
   if (!entries.includes(`/${manifest.main}`)) {
     throw new Error(`afterPack: ${asar} does not contain the main entry ${manifest.main}`);
   }
+  if (!entries.includes("/src/preload.js")) {
+    throw new Error(`afterPack: ${asar} does not contain src/preload.js — the window bridge would be missing`);
+  }
   if (manifest.type === "module") {
     throw new Error(`afterPack: the app package is "type": "module" — a packaged Electron main must be CommonJS`);
   }
