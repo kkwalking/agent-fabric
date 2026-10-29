@@ -1188,6 +1188,36 @@ try {
     );
   }
 
+  // 9b-2. The board's Add workspace dialog can adopt an existing workspace and
+  //       exposes the same native folder bridge as the rail's dialog.
+  const boardDialog = await evaluate(
+    cdp,
+    `(async () => {
+       document.querySelector(".board-add-project")?.click();
+       await new Promise((r) => setTimeout(r, 700));
+       const dialog = document.querySelector(".add-workspace-dialog");
+       const select = dialog?.querySelector("select");
+       const options = [...(select?.querySelectorAll("option") ?? [])].map((o) => o.textContent.trim());
+       const result = {
+         open: Boolean(dialog),
+         options,
+         nativeBridge: typeof window.agentfabric?.pickDirectory === "function",
+         browseButton: Boolean(dialog?.querySelector(".dir-input-browse")),
+       };
+       dialog?.querySelector(".board-dialog-close")?.click();
+       return result;
+     })()`
+  );
+  check(boardDialog.open, `the board's Add workspace dialog opens (${boardDialog.options.length} options)`);
+  check(
+    boardDialog.options.length > 1,
+    `the board dialog lists existing workspaces to adopt (${boardDialog.options.slice(0, 4).join(" | ")})`
+  );
+  check(
+    boardDialog.nativeBridge && !boardDialog.browseButton,
+    "the board dialog exposes the native folder bridge and has no browse button"
+  );
+
   // FIXTURE-DATA ONLY (9c - needs a board card)
   if (!emptyMode) {
   // 9c. A card never opens with its delete already armed.

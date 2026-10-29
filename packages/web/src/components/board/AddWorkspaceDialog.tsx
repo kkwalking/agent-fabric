@@ -16,6 +16,12 @@ interface DesktopBridge {
   pickDirectory?: (defaultPath?: string) => Promise<string | null>;
 }
 
+/** A plain workspace that can be adopted by the board. */
+interface WorkspaceOption extends BoardWorkspace {
+  ownership?: string;
+  taskId?: string;
+}
+
 /** The desktop preload's folder chooser; absent in a plain browser. */
 function nativeDirectoryPicker(): DesktopBridge["pickDirectory"] {
   if (typeof window === "undefined") return undefined;
@@ -51,6 +57,8 @@ export function AddWorkspaceDialog({
   const t = useT();
   const [pathInput, setPathInput] = useState("");
   const [nameInput, setNameInput] = useState("");
+  const [existingWorkspaces, setExistingWorkspaces] = useState<WorkspaceOption[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const workspaceMode = mode === "workspace";
@@ -60,11 +68,43 @@ export function AddWorkspaceDialog({
     if (!pickDirectory) return;
     try {
       const picked = await pickDirectory(pathInput.trim() || undefined);
-      if (picked) setPathInput(picked);
+      if (picked) {
+        setPathInput(picked);
+        setSelectedWorkspaceId("");
+      }
     } catch (err) {
       setError(errorText(err));
     }
   };
+
+  // The board can adopt a workspace that already exists in the rail, instead of
+  // making the user type the same directory again. Only workspaces without board
+  // settings are offered: a board workspace is already in the list on the left.
+  useEffect(() => {
+    if (workspaceMode) return;
+    let alive = true;
+    get<WorkspaceOption[]>("/api/workspaces")
+      .then((rows) => {
+        if (!alive) return;
+        setExistingWorkspaces(
+          rows
+            .filter(
+              (workspace) =>
+                !workspace.board &&
+                Boolean(workspace.path) &&
+                workspace.ownership !== "managed" &&
+                workspace.taskId === undefined
+            )
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
+      })
+      .catch(() => {
+        /* The path field remains enough; the dropdown is a shortcut. */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [workspaceMode]);
 
   // Seed the field with the server's home directory so the picker lists
   // something useful before the user types anything.
@@ -127,6 +167,12 @@ export function AddWorkspaceDialog({
 
   const canAdd = Boolean(pathInput.trim()) && !busy;
 
+  const chooseExisting = (id: string) => {
+    setSelectedWorkspaceId(id);
+    const workspace = existingWorkspaces.find((candidate) => candidate.id === id);
+    if (workspace) setPathInput(workspace.path);
+  };
+
   return (
     <div
       className="modal-overlay"
@@ -173,20 +219,40 @@ export function AddWorkspaceDialog({
                 />
               </div>
             )}
+            {!workspaceMode && (
+              <div className="board-dialog-field">
+                <span className="board-dialog-label">{t("board.addWorkspace.existing")}</span>
+                <select
+                  value={selectedWorkspaceId}
+                  disabled={busy}
+                  onChange={(event) => chooseExisting(event.target.value)}
+                >
+                  <option value="">{t("board.addWorkspace.existingPlaceholder")}</option>
+                  {existingWorkspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name} — {workspace.path}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="board-dialog-field">
               <span className="board-dialog-label">
                 {t(workspaceMode ? "workspace.add.path" : "board.addWorkspace.folderPath")}
               </span>
               <DirectoryAutocomplete
                 value={pathInput}
-                onChange={setPathInput}
+                onChange={(value) => {
+                  setPathInput(value);
+                  setSelectedWorkspaceId("");
+                }}
                 disabled={busy}
                 placeholder={t(
                   workspaceMode ? "workspace.add.searchPath" : "board.addWorkspace.searchPath"
                 )}
                 onSubmit={() => void add()}
-                onBrowse={workspaceMode && pickDirectory ? () => void chooseDirectory() : undefined}
-                nativeOnly={workspaceMode && Boolean(pickDirectory)}
+                onBrowse={pickDirectory ? () => void chooseDirectory() : undefined}
+                nativeOnly={Boolean(pickDirectory)}
                 autoFocus
               />
             </div>
