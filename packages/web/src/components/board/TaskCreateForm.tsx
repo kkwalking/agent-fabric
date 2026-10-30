@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { get } from "../../api";
 import { Icon } from "../../components";
 import { useT } from "../../i18n-react";
 import type {
@@ -6,6 +7,7 @@ import type {
   KanbanAgent,
   KanbanCard,
   KanbanGitInfo,
+  KanbanModelOption,
   TaskDraft,
   TaskFormDefaults,
   WorkspaceType,
@@ -30,6 +32,34 @@ import type {
 export interface TaskCreateSubmissionOptions {
   start: boolean;
   keepOpen: boolean;
+}
+
+/** The catalog row matching a saved model value: exact value, model id, or name. */
+function modelValueFor(models: readonly KanbanModelOption[], wanted: string): string {
+  const needle = wanted.trim().toLowerCase();
+  if (!needle) return "";
+  const exact = models.find((model) => model.value.toLowerCase() === needle);
+  if (exact) return exact.value;
+  const byId = models.find((model) => {
+    try {
+      const parsed: unknown = JSON.parse(model.value);
+      return Array.isArray(parsed) && typeof parsed[1] === "string" && parsed[1].toLowerCase() === needle;
+    } catch {
+      return false;
+    }
+  });
+  return byId?.value ?? "";
+}
+
+/** Consecutive catalog rows sharing a provider become one optgroup. */
+function groupModels(models: readonly KanbanModelOption[]): Array<{ name?: string; options: KanbanModelOption[] }> {
+  const groups: Array<{ name?: string; options: KanbanModelOption[] }> = [];
+  for (const model of models) {
+    const last = groups[groups.length - 1];
+    if (last && last.name === model.group) last.options.push(model);
+    else groups.push({ ...(model.group ? { name: model.group } : {}), options: [model] });
+  }
+  return groups;
 }
 
 /** The values the form starts from: the workspace's last choices when creating,
@@ -156,6 +186,9 @@ export function TaskCreateForm({
   const [title, setTitle] = useState(initial.title ?? "");
   const [agentId, setAgentId] = useState(initial.agentId ?? "");
   const [model, setModel] = useState(initial.model ?? "");
+  /** ACP agents (DSH): the live model catalog, or why it could not be read. */
+  const [models, setModels] = useState<KanbanModelOption[] | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   /** ACP agents (DSH): reasoning effort, applied before the first turn. */
   const [reasoningEffort, setReasoningEffort] = useState(initial.reasoningEffort ?? "");
   const [permissionModeId, setPermissionModeId] = useState(initial.permissionModeId ?? "");
@@ -177,6 +210,31 @@ export function TaskCreateForm({
       agents.find((agent) => agent.available);
     if (preferred) setAgentId(preferred.id);
   }, [agents, agentId, initial.agentId]);
+
+  // Agents that enumerate their models expose the catalog over HTTP; the rest
+  // take a free `--model` flag and have nothing to fetch.
+  useEffect(() => {
+    if (!selectedAgent?.modelCatalog) {
+      setModels(null);
+      setModelsError(null);
+      return;
+    }
+    let cancelled = false;
+    setModels(null);
+    setModelsError(null);
+    get<{ models: KanbanModelOption[] }>(
+      `/api/kanban/agents/${encodeURIComponent(selectedAgent.id)}/models`
+    )
+      .then((result) => {
+        if (!cancelled) setModels(result.models);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setModelsError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAgent?.id, selectedAgent?.modelCatalog]);
 
   // Worktree mode is only meaningful when the workspace directory is a Git repository.
   useEffect(() => {
@@ -264,6 +322,13 @@ export function TaskCreateForm({
     ? permissionModeId
     : defaultPermissionModeId;
 
+  // ACP model picker: the selected value is the catalog's opaque value. A saved
+  // value that no catalog row matches falls back to "agent default" instead of
+  // being sent as a model the agent would reject.
+  const modelChoice = modelValueFor(models ?? [], model);
+  const modelGroups = useMemo(() => groupModels(models ?? []), [models]);
+  const submittedModel = selectedAgent?.modelCatalog ? modelChoice : model.trim();
+
   const submit = (start: boolean) => {
     if (!canSubmit) return;
     const prompts =
@@ -276,7 +341,7 @@ export function TaskCreateForm({
         prompts,
         ...(mode === "single" && title.trim() ? { title: title.trim() } : {}),
         agentId,
-        ...(model.trim() ? { model: model.trim() } : {}),
+        ...(submittedModel ? { model: submittedModel } : {}),
         ...(selectedAgent?.transport === "acp" && reasoningEffort
           ? { reasoningEffort }
           : {}),
@@ -415,6 +480,9 @@ export function TaskCreateForm({
                 title={agent.available ? agent.label : `${agent.label} — ${agent.installHint}`}
                 onClick={() => {
                   setAgentId(agent.id);
+                  // A model value only makes sense for the agent that advertised
+                  // it: one agent's opaque route must never be sent to another.
+                  setModel("");
                   setPermissionModeId("");
                 }}
               >
@@ -445,24 +513,64 @@ export function TaskCreateForm({
         </div>
 
         <div className="task-create-grid">
-          {(selectedAgent?.modelFlag || selectedAgent?.transport === "acp") && (
+          {(selectedAgent?.modelFlag || selectedAgent?.modelCatalog) && (
             <div className="board-dialog-field">
               <label className="board-dialog-label" htmlFor="task-create-model">
                 {t("board.form.model")}{" "}
                 <span className="task-create-optional">{t("board.form.optional")}</span>
               </label>
-              <input
-                id="task-create-model"
-                className="mono"
-                value={model}
-                onChange={(event) => setModel(event.target.value)}
-                placeholder={
-                  selectedAgent?.transport === "acp"
-                    ? t("board.form.modelAcpPlaceholder")
-                    : t("board.form.agentDefault")
-                }
-                disabled={busy}
-              />
+              {selectedAgent?.modelCatalog ? (
+                <>
+                  <select
+                    id="task-create-model"
+                    className="mono"
+                    value={modelChoice}
+                    onChange={(event) => setModel(event.target.value)}
+                    disabled={busy || models === null}
+                  >
+                    <option value="">
+                      {models === null && !modelsError
+                        ? t("board.form.modelLoading")
+                        : t("board.form.agentDefault")}
+                    </option>
+                    {modelGroups.map((group, index) =>
+                      group.name ? (
+                        <optgroup key={`${group.name}-${index}`} label={group.name}>
+                          {group.options.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ) : (
+                        group.options.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))
+                      )
+                    )}
+                  </select>
+                  {modelsError ? (
+                    <div className="board-hint warn">
+                      {t("board.form.modelCatalogFailed", { error: modelsError })}
+                    </div>
+                  ) : models && models.length > 0 ? (
+                    <div className="board-hint">{t("board.form.modelCatalogSource", { agent: selectedAgent?.label ?? "" })}</div>
+                  ) : models ? (
+                    <div className="board-hint warn">{t("board.form.modelCatalogEmpty")}</div>
+                  ) : null}
+                </>
+              ) : (
+                <input
+                  id="task-create-model"
+                  className="mono"
+                  value={model}
+                  onChange={(event) => setModel(event.target.value)}
+                  placeholder={t("board.form.agentDefault")}
+                  disabled={busy}
+                />
+              )}
             </div>
           )}
           {selectedAgent?.transport === "acp" && (

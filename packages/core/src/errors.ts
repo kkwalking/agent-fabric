@@ -65,6 +65,7 @@ export type ErrorCode =
   | "kanban-agent-profile-missing"
   | "kanban-agent-model-unavailable"
   | "kanban-agent-effort-unavailable"
+  | "kanban-model-catalog-unavailable"
   | "kanban-session-not-startable"
   | "kanban-execution-mode-unavailable"
   | "kanban-worktree-unavailable"

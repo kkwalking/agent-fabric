@@ -13,10 +13,11 @@
  */
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 import { DomainError } from "@agentfabric/core";
-import type { ID, KanbanColumn, KanbanService, Workspace, WorkspaceService } from "@agentfabric/core";
-import { listKanbanAgents } from "./agents.js";
+import type { ID, KanbanAgentKind, KanbanColumn, KanbanService, Workspace, WorkspaceService } from "@agentfabric/core";
+import { getKanbanAgent, listKanbanAgents } from "./agents.js";
 import { listKanbanDirectories } from "./fs.js";
 import { readGitInfo } from "./git.js";
+import { listAgentModels } from "./modelCatalog.js";
 import { addKanbanWorkspace } from "./workspaces.js";
 import type { KanbanSessionRuntime } from "./sessions.js";
 
@@ -85,6 +86,28 @@ export function registerKanbanRoutes(app: Express, deps: KanbanRouteDeps): void 
     "/api/kanban/agents",
     ah(async (_req, res) => {
       res.json({ agents: await listKanbanAgents() });
+    })
+  );
+
+  /**
+   * The models the agent's live catalog offers, for the new-task form's picker.
+   *
+   * Each harness has its own listing surface (Claude's settings picker, Pi's
+   * `--list-models`, `opencode models`, DSH's ACP handshake); `listAgentModels`
+   * hides that behind one endpoint. An agent without a catalog keeps a free-text
+   * model flag.
+   */
+  app.get(
+    "/api/kanban/agents/:id/models",
+    ah(async (req, res) => {
+      const agent = getKanbanAgent(req.params.id as KanbanAgentKind);
+      if (!agent.modelCatalog) {
+        throw new DomainError(
+          "kanban-model-catalog-unavailable",
+          `${agent.label} does not expose a model catalog; its model is free text`
+        );
+      }
+      res.json({ models: await listAgentModels(agent.id) });
     })
   );
 

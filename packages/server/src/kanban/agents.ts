@@ -51,6 +51,8 @@ export interface KanbanAgentEntry {
   permissionModes: KanbanPermissionMode[];
   defaultPermissionModeId: string;
   modelFlag: string | null;
+  /** The CLI can enumerate its models; the form then shows a picker. */
+  modelCatalog: boolean;
   interactiveTui: boolean;
   installHint: string;
   /**
@@ -106,6 +108,7 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     transport: "pty",
     defaultPermissionModeId: "default",
     modelFlag: "--model",
+    modelCatalog: true,
     interactiveTui: true,
     installHint: "Install Claude Code: https://docs.anthropic.com/en/docs/claude-code/quickstart",
     resumeArgs: (sessionId) => ["--resume", sessionId],
@@ -130,14 +133,37 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     binary: "pi",
     prompt: { kind: "positional" },
     transport: "pty",
-    defaultPermissionModeId: "default",
+    defaultPermissionModeId: "workspace-write",
     modelFlag: "--model",
+    modelCatalog: true,
     interactiveTui: true,
     installHint: "Install Pi: https://github.com/badlogic/pi-mono",
+    // Pi has no approval prompts and no OS sandbox. These presets narrow the
+    // tool surface instead: read-only tools; core edit/shell tools without
+    // project-local resources; or the fully trusted default. The middle tier
+    // keeps bash (builds/tests) but never claims a filesystem boundary.
     permissionModes: [
-      PERMISSION_DEFAULT,
-      { id: "approve", label: "Trust workspace files", description: "Trust workspace-local files for this run.", args: ["--approve"], risky: true },
-      { id: "no-approve", label: "Ignore workspace files", description: "Ignore workspace-local configuration for this run.", args: ["--no-approve"], risky: false },
+      {
+        id: "read-only",
+        label: "Read only",
+        description: "Read/grep/find/ls only: no edits and no shell. Project-local config is ignored.",
+        args: ["--tools", "read,grep,find,ls", "--no-approve"],
+        risky: false,
+      },
+      {
+        id: "workspace-write",
+        label: "Workspace write",
+        description: "Core read/edit/write/bash tools, no project extensions or MCP. Pi has no OS sandbox.",
+        args: ["--tools", "read,edit,write,bash,grep,find,ls", "--no-approve"],
+        risky: false,
+      },
+      {
+        id: "danger-full-access",
+        label: "Full access",
+        description: "Trusts workspace-local config and loads all tools and extensions.",
+        args: ["--approve"],
+        risky: true,
+      },
     ],
   },
   {
@@ -146,13 +172,74 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     binary: "opencode",
     prompt: { kind: "flag", flag: "--prompt" },
     transport: "pty",
-    defaultPermissionModeId: "default",
+    defaultPermissionModeId: "workspace-write",
     modelFlag: "--model",
+    modelCatalog: true,
     interactiveTui: true,
     installHint: "Install OpenCode: https://opencode.ai",
+    // OpenCode's permission config is per tool: allow / ask / deny. The
+    // presets are carried inline through OPENCODE_CONFIG_CONTENT, which
+    // OpenCode merges with the user's global config. Its defaults are
+    // permissive, so "workspace write" still means edits and shell run;
+    // external paths and network asks stay visible.
     permissionModes: [
-      PERMISSION_DEFAULT,
-      { id: "auto", label: "Auto-approve", description: "Auto-approve permissions that are not explicitly denied.", args: ["--auto"], risky: true },
+      {
+        id: "read-only",
+        label: "Read only",
+        description: "Edits, shell, subagents, web access and external writes are denied.",
+        args: [],
+        env: {
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            permission: {
+              edit: "deny",
+              bash: "deny",
+              task: "deny",
+              webfetch: "deny",
+              websearch: "deny",
+              external_directory: "allow",
+            },
+          }),
+        },
+        risky: false,
+      },
+      {
+        id: "workspace-write",
+        label: "Workspace write",
+        description: "Edits and shell run; external paths, web access and subagents ask first.",
+        args: [],
+        env: {
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            permission: {
+              edit: "allow",
+              bash: "allow",
+              task: "ask",
+              webfetch: "ask",
+              websearch: "ask",
+              external_directory: "ask",
+            },
+          }),
+        },
+        risky: false,
+      },
+      {
+        id: "danger-full-access",
+        label: "Full access",
+        description: "Auto-approves permission requests; explicit deny rules still apply.",
+        args: ["--auto"],
+        env: {
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            permission: {
+              edit: "allow",
+              bash: "allow",
+              task: "allow",
+              webfetch: "allow",
+              websearch: "allow",
+              external_directory: "allow",
+            },
+          }),
+        },
+        risky: true,
+      },
     ],
   },
   {
@@ -171,6 +258,7 @@ export const KANBAN_AGENTS: readonly KanbanAgentEntry[] = [
     // The ACP handshake advertises model config options; the card model is
     // not wired to them yet, so the catalog claims no model flag.
     modelFlag: null,
+    modelCatalog: true,
     interactiveTui: false,
     installHint: "Install DSH (0.2.1+) and make sure `dsh --profile acp` starts.",
     availability: dshAcpProfile,
@@ -259,6 +347,8 @@ export interface KanbanAgentView {
   interactiveTui: boolean;
   transport: KanbanSessionTransport;
   modelFlag: string | null;
+  /** The agent enumerates its models; the new-task form renders a picker. */
+  modelCatalog: boolean;
   permissionModes: Array<{ id: string; label: string; risky: boolean }>;
   /**
    * The mode a card gets when it names none. Agents whose default is a real
@@ -289,6 +379,7 @@ export async function listKanbanAgents(): Promise<KanbanAgentView[]> {
         interactiveTui: entry.interactiveTui,
         transport: entry.transport,
         modelFlag: entry.modelFlag,
+        modelCatalog: entry.modelCatalog,
         permissionModes: entry.permissionModes.map(({ id, label, risky }) => ({ id, label, risky })),
         defaultPermissionModeId: entry.defaultPermissionModeId,
         ...(located.path ? { cliPath: located.path } : {}),

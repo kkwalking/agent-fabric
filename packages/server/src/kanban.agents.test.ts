@@ -106,3 +106,56 @@ test("a permission mode's args sit between the launch and the prompt", () => {
   ]);
   assert.equal(getKanbanAgent("claude").permissionModes.some((mode) => mode.id === "plan"), true);
 });
+
+test("Pi exposes three tool-surface presets, not project trust switches", () => {
+  const pi = getKanbanAgent("pi");
+  assert.deepEqual(
+    pi.permissionModes.map((mode) => mode.id),
+    ["read-only", "workspace-write", "danger-full-access"]
+  );
+  assert.equal(pi.defaultPermissionModeId, "workspace-write");
+
+  const readOnly = buildKanbanLaunch(card("pi", { permissionModeId: "read-only" }), workspace);
+  assert.deepEqual(readOnly.args, [
+    "--tools",
+    "read,grep,find,ls",
+    "--no-approve",
+    "fix the failing test",
+  ]);
+
+  const defaultLaunch = buildKanbanLaunch(card("pi"), workspace);
+  assert.deepEqual(defaultLaunch.args, [
+    "--tools",
+    "read,edit,write,bash,grep,find,ls",
+    "--no-approve",
+    "fix the failing test",
+  ]);
+
+  const full = buildKanbanLaunch(card("pi", { permissionModeId: "danger-full-access" }), workspace);
+  assert.deepEqual(full.args, ["--approve", "fix the failing test"]);
+});
+
+test("OpenCode carries three permission presets through OPENCODE_CONFIG_CONTENT", () => {
+  const opencode = getKanbanAgent("opencode");
+  assert.deepEqual(
+    opencode.permissionModes.map((mode) => mode.id),
+    ["read-only", "workspace-write", "danger-full-access"]
+  );
+  assert.equal(opencode.defaultPermissionModeId, "workspace-write");
+
+  const readOnly = buildKanbanLaunch(card("opencode", { permissionModeId: "read-only" }), workspace);
+  const readPermission = JSON.parse(readOnly.env.OPENCODE_CONFIG_CONTENT ?? "{}").permission;
+  assert.equal(readPermission.edit, "deny");
+  assert.equal(readPermission.bash, "deny");
+  assert.equal(readPermission.task, "deny");
+
+  const workspaceMode = buildKanbanLaunch(card("opencode", { permissionModeId: "workspace-write" }), workspace);
+  const workspacePermission = JSON.parse(workspaceMode.env.OPENCODE_CONFIG_CONTENT ?? "{}").permission;
+  assert.equal(workspacePermission.edit, "allow");
+  assert.equal(workspacePermission.bash, "allow");
+  assert.equal(workspacePermission.external_directory, "ask");
+
+  const full = buildKanbanLaunch(card("opencode", { permissionModeId: "danger-full-access" }), workspace);
+  assert.deepEqual(full.args, ["--auto", "--prompt", "fix the failing test"]);
+  assert.equal(JSON.parse(full.env.OPENCODE_CONFIG_CONTENT ?? "{}").permission.external_directory, "allow");
+});

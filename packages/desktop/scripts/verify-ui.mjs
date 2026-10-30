@@ -1221,6 +1221,7 @@ try {
   // 9b-3. The task dialog's permission select is the agent's real choice set:
   //       DSH exposes its three sandbox presets and preselects workspace write.
   //       There is no "auto" row — approving is granting a sandbox escalation.
+  //       Its model field is a picker over the live acp catalog, not free text.
   if (!emptyMode) {
     const taskPermission = await evaluate(
       cdp,
@@ -1231,9 +1232,10 @@ try {
          const opener = [...document.querySelectorAll("button")]
            .find((b) => /新建任务|New task/.test(b.textContent ?? ""));
          opener?.click();
-         await new Promise((r) => setTimeout(r, 900));
+         await new Promise((r) => setTimeout(r, 2600));
          const dialog = document.querySelector(".task-create-dialog");
          const select = dialog?.querySelector("#task-create-permission");
+         const model = dialog?.querySelector("#task-create-model");
          const result = {
            open: Boolean(dialog),
            value: select?.value ?? null,
@@ -1241,8 +1243,10 @@ try {
              value: o.value,
              text: o.textContent.trim(),
            })),
+           modelTag: model?.tagName ?? null,
+           modelDisabled: model?.disabled ?? null,
+           modelOptions: [...(model?.querySelectorAll("option") ?? [])].map((o) => o.textContent.trim()),
          };
-         dialog?.querySelector(".board-dialog-close")?.click();
          return result;
        })()`
     );
@@ -1252,6 +1256,58 @@ try {
       `DSH offers its three sandbox presets (${taskPermission.options.map((option) => option.text).join(" | ")})`
     );
     check(taskPermission.value === "workspace-write", `DSH preselects workspace write (${taskPermission.value})`);
+    check(
+      taskPermission.modelTag === "SELECT" && taskPermission.modelDisabled === false,
+      `DSH's model field is a live catalog picker (${taskPermission.modelTag}, disabled: ${taskPermission.modelDisabled})`
+    );
+    check(
+      taskPermission.modelOptions.length > 5,
+      `the model picker lists the acp catalog (${taskPermission.modelOptions.length} rows, first: ${taskPermission.modelOptions.slice(1, 3).join(" | ")})`
+    );
+
+    // Every harness exposes a model picker: Claude's settings picker, Pi's
+    // `--list-models` and `opencode models`; none is free text any more.
+    const agentPickers = await evaluate(
+      cdp,
+      `(async () => {
+         const dialog = document.querySelector(".task-create-dialog");
+         const pickers = {};
+         for (const label of ["Claude Code", "Pi", "OpenCode"]) {
+           const chip = [...(dialog?.querySelectorAll(".task-agent-chip") ?? [])]
+             .find((b) => b.textContent.trim() === label);
+           chip?.click();
+           // opencode models may start its background service on the first
+           // call; the picker needs a little longer than the other CLIs.
+           await new Promise((r) => setTimeout(r, 2600));
+           const select = dialog?.querySelector("#task-create-model");
+           const permission = dialog?.querySelector("#task-create-permission");
+           pickers[label] = {
+             tag: select?.tagName ?? null,
+             disabled: select?.disabled ?? null,
+             count: select?.querySelectorAll("option").length ?? 0,
+             permission: [...(permission?.querySelectorAll("option") ?? [])].map((o) => o.textContent.trim()),
+           };
+         }
+         dialog?.querySelector(".board-dialog-close")?.click();
+         return pickers;
+       })()`
+    );
+    for (const [label, picker] of Object.entries(agentPickers)) {
+      check(
+        picker.tag === "SELECT" && picker.disabled === false && picker.count > 5,
+        `${label}'s model field is a live catalog picker (${picker.tag}, ${picker.count} rows)`
+      );
+    }
+    for (const label of ["Pi", "OpenCode"]) {
+      const permission = agentPickers[label].permission;
+      check(
+        permission.length === 3 &&
+          permission[0].startsWith("Read only") &&
+          permission[1].startsWith("Workspace write") &&
+          permission[2].startsWith("Full access"),
+        `${label} offers three permission presets (${permission.join(" | ")})`
+      );
+    }
   }
 
   // FIXTURE-DATA ONLY (9c - needs a board card)

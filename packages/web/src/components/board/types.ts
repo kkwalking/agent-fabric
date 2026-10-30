@@ -58,6 +58,16 @@ export interface KanbanAgentPermissionMode {
   risky?: boolean;
 }
 
+/** One model row from an agent's live catalog (`GET /api/kanban/agents/:id/models`). */
+export interface KanbanModelOption {
+  /** Exact value the agent accepts in `session/set_config_option`. */
+  value: string;
+  /** Display name the agent advertises. */
+  label: string;
+  /** Provider group, when the agent groups its catalog. */
+  group?: string;
+}
+
 export interface KanbanAgent {
   id: string;
   label: string;
@@ -74,6 +84,8 @@ export interface KanbanAgent {
    */
   defaultPermissionModeId: string;
   modelFlag: string | null;
+  /** The agent enumerates its models, so the form shows a picker. */
+  modelCatalog: boolean;
   /** Absolute path detection found the CLI at; absent when it is not installed. */
   cliPath?: string;
   /** Installed in a folder the terminal's PATH lacks — a terminal's `which` misses it. */
