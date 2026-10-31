@@ -1,10 +1,12 @@
-import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useState } from "react";
+import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useId, useRef, useState } from "react";
 import { copyText, subscribeClock } from "./api";
 import { useT } from "./i18n-react";
 import { STATUS_KEYS, type MessageKey } from "./i18n";
+import { navigate } from "./router";
 
 export type IconName =
   | "grid"
+  | "funnel"
   | "play"
   | "history"
   | "cloud"
@@ -51,6 +53,13 @@ const iconPaths: Record<IconName, ReactNode> = {
       <rect x="14" y="3" width="7" height="7" rx="1.5" />
       <rect x="3" y="14" width="7" height="7" rx="1.5" />
       <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </>
+  ),
+  // A funnel, not a grid: the rail's toggle reveals the workspace *filters*,
+  // and it used to share the grid glyph with the Kanban button directly above it.
+  funnel: (
+    <>
+      <path d="M3 4.5h18l-7 8.5v6.2l-4 1.8v-8z" />
     </>
   ),
   play: (
@@ -385,6 +394,38 @@ export function usePolling(reload: () => void, intervalMs: number, active: boole
 }
 
 /**
+ * An in-app link that behaves like a link.
+ *
+ * `<a onClick={() => navigate(...)}>` with no `href` is not focusable by
+ * keyboard, cannot be opened in a new tab or copied, and screen readers do not
+ * announce it as a link. These go somewhere inside the app, so they get a real
+ * `href` and keep the client-side navigation on plain left-clicks — a modified
+ * click (⌘/Ctrl, Shift, middle button) is left to the browser, so "open in new
+ * tab" and "copy link address" work.
+ */
+export function AppLink(props: {
+  href: string;
+  children: React.ReactNode;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <a
+      href={props.href}
+      className={props.className}
+      title={props.title}
+      onClick={(e) => {
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        navigate(props.href);
+      }}
+    >
+      {props.children}
+    </a>
+  );
+}
+
+/**
  * Props for a clickable row that should also be reachable by keyboard.
  *
  * `<div onClick>` is mouse-only: a keyboard user cannot tab to it, and screen
@@ -461,9 +502,19 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
+/** Everything the browser will focus with Tab, in document order. */
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 /**
  * Minimal confirmation dialog. Clicking the overlay or pressing Escape
  * counts as cancel — callers just close without committing.
+ *
+ * `aria-modal="true"` alone does not keep the keyboard inside: without a focus
+ * trap, Tab walks straight out into the page behind the dialog and the user
+ * ends up pressing buttons they cannot see. The dialog therefore takes focus
+ * when it opens (its first control), wraps Tab at both ends, and returns focus
+ * to whatever was focused before it closed.
  */
 export function Modal({
   title,
@@ -474,17 +525,59 @@ export function Modal({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const box = useRef<HTMLDivElement | null>(null);
+  const restore = useRef<HTMLElement | null>(null);
+  // The accessible name comes from the visible title rather than a copy of it:
+  // `aria-label={title}` says the same words, but a screen reader then reads a
+  // name that is not in the DOM, and the two can drift apart.
+  const titleId = useId();
+  useEffect(() => {
+    restore.current = document.activeElement as HTMLElement | null;
+    const first = box.current?.querySelector<HTMLElement>(FOCUSABLE);
+    (first ?? box.current)?.focus();
+    return () => restore.current?.focus?.();
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !box.current) return;
+      const items = [...box.current.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+        (el) => el.offsetParent !== null || el === document.activeElement
+      );
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      const active = document.activeElement as HTMLElement | null;
+      // Wrap at the ends; also catch focus that has already escaped.
+      if (e.shiftKey && (active === first || !box.current.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !box.current.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}>
-        <div className="modal-title">{title}</div>
+      <div
+        ref={box}
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-title" id={titleId}>{title}</div>
         {children}
       </div>
     </div>
@@ -525,9 +618,29 @@ export function CopyButton({ text, label, title, className = "small" }: {
   );
 }
 
-export function emptyTableHint(loading: boolean, error: string | null) {
+/**
+ * What an empty list means right now.
+ *
+ * Every list starts empty for one render, so "no items yet" printed during the
+ * first fetch is a wrong statement shown for a fraction of a second — and, if
+ * the request is slow, for as long as it takes. Views that render their own
+ * empty state call this instead of picking between loading / error / empty by
+ * hand; the wording is the caller's, since "no runs yet" and "no handoffs yet"
+ * are different sentences.
+ */
+export function emptyListHint(props: {
+  loading: boolean;
+  error: string | null;
+  empty: React.ReactNode;
+}) {
   const t = useT();
-  if (loading) return <div className="muted">{t("common.loading")}</div>;
-  if (error) return <div className="muted" style={{ color: "var(--red)" }}>{error}</div>;
-  return <div className="muted">{t("resources.empty")}</div>;
+  if (props.loading) return <div className="muted">{t("common.loading")}</div>;
+  if (props.error) {
+    return (
+      <div className="muted" style={{ color: "var(--red)" }}>
+        {props.error}
+      </div>
+    );
+  }
+  return <div className="muted">{props.empty}</div>;
 }

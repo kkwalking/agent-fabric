@@ -8,7 +8,7 @@ import {
 } from "react";
 import { ApiError, del, fmtTime, get, patch, post, put, shortId } from "../api";
 import { notifyTasksChanged } from "../appEvents";
-import { ErrorBox, Icon, Modal } from "../components";
+import { ErrorBox, Icon, Modal, AppLink } from "../components";
 import { useT } from "../i18n-react";
 import type { MessageKey } from "../i18n";
 import { navigate } from "../router";
@@ -1684,9 +1684,9 @@ function CardDetail({
                   <dt>{t("board.detail.field.task")}</dt>
                   <dd className="mono">
                     {taskId ? (
-                      <a onClick={() => navigate(`/tasks/${encodeURIComponent(taskId)}`)}>
+                      <AppLink href={`/tasks/${encodeURIComponent(taskId)}`}>
                         {taskId}
-                      </a>
+                      </AppLink>
                     ) : (
                       t("board.detail.notStarted")
                     )}

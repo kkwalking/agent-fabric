@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { del, get, post, put, fmtTime, shortId } from "../api";
 import { StatusBadge, useAsync, ErrorBox, Field, Modal } from "../components";
+import { AddRuntimeDialog } from "../components/AddRuntimeDialog";
 import { useI18n, useT } from "../i18n-react";
 import type { MessageKey, Translate } from "../i18n";
 
@@ -57,7 +58,11 @@ function Id({ value }: { value: string }) {
 /** "Sep 9, 11:15 PM" — minute precision keeps the column narrow; full ISO in the tooltip. */
 function fmtSaved(iso?: string): string {
   if (!iso) return "-";
-  return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return "-";
+  // Deliberately shorter than `fmtDateTime`: these two columns are narrow and
+  // a resource never needs its year. Same parsing, same 24-hour-safe options.
+  return new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 const configs: Record<string, Config> = {
@@ -70,7 +75,6 @@ const configs: Record<string, Config> = {
       { key: "name", label: "resources.col.name", render: (r) => <span className="nw">{r.name}</span> },
       { key: "kind", label: "resources.col.kind" },
       { key: "enabled", label: "resources.col.enabled", render: (r) => <StatusBadge status={r.enabled ? "running" : "cancelled"} /> },
-      { key: "usableInTask", label: "resources.col.usableInTask", render: (r) => (r.usableInTask ? "yes" : "no") },
       {
         // The column states whether the runtime runs in a container, so an
         // operator can see the execution backend without opening the record.
@@ -86,14 +90,12 @@ const configs: Record<string, Config> = {
       { key: "containerized", label: "resources.f.containerized", type: "select", options: ["true", "false"] },
       { key: "image", label: "resources.f.image", placeholder: "node:22-alpine" },
       { key: "command", label: "resources.f.command", placeholder: "sh -c echo hello" },
-      { key: "usableInTask", label: "resources.f.usableInTask", type: "select", options: ["true", "false"] },
       { key: "description", label: "resources.f.description" },
     ],
     rowActions: (row, reload, t) => (
       <>
         <button className="small" onClick={() => toggleRuntime(row, reload)}>{t(row.enabled ? "resources.a.disable" : "resources.a.enable")}</button>
-        <button className="small" onClick={() => toggleUsable(row, reload)}>{t(row.usableInTask ? "resources.a.disallow" : "resources.a.allow")}</button>
-        <button className="small danger" onClick={() => removeItem("/api/runtimes", row.id, reload)}>{t("resources.a.delete")}</button>
+        <button className="small danger" onClick={() => removeItem({ path: "/api/runtimes", id: row.id, name: row.name, reload, onError: reportActionError })}>{t("resources.a.delete")}</button>
       </>
     ),
     detailTitle: (r, t) => t("resources.detail.title", { name: r.name }),
@@ -107,7 +109,6 @@ const configs: Record<string, Config> = {
           <dt>{t("resources.detail.credentials")}</dt>
           <dd>{r.credentialSource === "harness-native" ? t("resources.detail.harnessNative") : "AgentFabric"}</dd>
           <dt>{t("resources.col.enabled")}</dt><dd>{r.enabled ? t("resources.yes") : t("resources.no")}</dd>
-          <dt>{t("resources.col.usableInTask")}</dt><dd>{r.usableInTask ? t("resources.yes") : t("resources.no")}</dd>
           <dt>{t("resources.f.executionBackend")}</dt><dd>{r.executionBackend ?? (r.containerized ? "isolated" : "host")}</dd>
           <dt>{t("resources.f.containerized")}</dt><dd>{String(Boolean(r.containerized))}</dd>
           <dt>{t("resources.f.image")}</dt><dd>{r.image ?? "—"}</dd>
@@ -122,8 +123,7 @@ const configs: Record<string, Config> = {
         <div className="row">
           <span className="right">
             <button className="small" onClick={() => toggleRuntime(r, reload)}>{r.enabled ? t("resources.a.disable") : t("resources.a.enable")}</button>
-            <button className="small" onClick={() => toggleUsable(r, reload)}>{r.usableInTask ? t("resources.a.disallow") : t("resources.a.allow")}</button>
-            <button className="small danger" onClick={() => { removeItem("/api/runtimes", r.id, reload); close(); }}>{t("resources.a.delete")}</button>
+            <button className="small danger" onClick={() => { removeItem({ path: "/api/runtimes", id: r.id, name: r.name, reload, onError: reportActionError }); close(); }}>{t("resources.a.delete")}</button>
           </span>
         </div>
       </>
@@ -148,7 +148,7 @@ const configs: Record<string, Config> = {
       { key: "systemInstructions", label: "resources.f.systemInstructions", type: "textarea" },
     ],
     rowActions: (row, reload, t) => (
-      <button className="small danger" onClick={() => removeItem("/api/agents", row.id, reload)}>{t("resources.a.delete")}</button>
+      <button className="small danger" onClick={() => removeItem({ path: "/api/agents", id: row.id, name: row.name, reload, onError: reportActionError })}>{t("resources.a.delete")}</button>
     ),
   },
   workspaces: {
@@ -183,7 +183,7 @@ const configs: Record<string, Config> = {
         >
           {t("resources.a.save")}
         </button>
-        <button className="small danger" onClick={() => removeItem("/api/workspaces", row.id, reload)}>{t("resources.a.delete")}</button>
+        <button className="small danger" onClick={() => removeItem({ path: "/api/workspaces", id: row.id, name: row.name, reload, onError: reportActionError })}>{t("resources.a.delete")}</button>
       </>
     ),
   },
@@ -202,24 +202,55 @@ let askDelete: ((label: string) => Promise<boolean>) | null = null;
 
 let refuseDeleteNoAsker = "Refusing to delete without a confirmation dialog installed";
 
-async function removeItem(path: string, id: string, reload: () => void) {
+/**
+ * Where a row action reports a failure, installed by the view for the same
+ * reason as `askDelete`: these actions are plain functions, not components.
+ * Before this existed a failed toggle or delete was an unhandled rejection —
+ * the button did nothing and said nothing.
+ */
+let reportActionError: (message: string) => void = (message) => {
+  console.error(message);
+};
+
+/**
+ * Deletes one row, after asking.
+ *
+ * `name` is what the question shows: an id identifies the row to the code, not
+ * to the person reading "Delete rt_mvven…?". Every failure is reported through
+ * `onError` — a delete used to be a bare `await del()`, so a rejected request
+ * became an unhandled rejection and the row simply stayed there with nothing
+ * said.
+ */
+async function removeItem(opts: {
+  path: string;
+  id: string;
+  name: string;
+  reload: () => void;
+  onError: (message: string) => void;
+}) {
+  const { path, id, name, reload, onError } = opts;
   if (!askDelete) {
-    throw new Error(refuseDeleteNoAsker);
+    onError(refuseDeleteNoAsker);
+    return;
   }
-  if (!(await askDelete(id))) return;
-  await del(path + "/" + id);
-  reload();
+  if (!(await askDelete(name))) return;
+  try {
+    await del(path + "/" + id);
+    reload();
+  } catch (e) {
+    onError(e instanceof Error ? e.message : String(e));
+  }
 }
 
 async function toggleRuntime(row: any, reload: () => void) {
-  await post(`/api/runtimes/${row.id}/${row.enabled ? "disable" : "enable"}`);
-  reload();
+  try {
+    await post(`/api/runtimes/${row.id}/${row.enabled ? "disable" : "enable"}`);
+    reload();
+  } catch (e) {
+    reportActionError(e instanceof Error ? e.message : String(e));
+  }
 }
 
-async function toggleUsable(row: any, reload: () => void) {
-  await put(`/api/runtimes/${row.id}`, { usableInTask: !row.usableInTask });
-  reload();
-}
 
 /**
  * Lightweight harness runtime status (v6 §12, v7 §16): for each enabled
@@ -256,12 +287,13 @@ function HarnessStatusRow({ kind, runtimes }: { kind: string; runtimes: any[] })
   return (
     <div style={{ marginBottom: 12 }}>
       <strong>{runtime?.name ?? kind}</strong>
+      <div className="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>{t("resources.harness.installed")}</th><th>{t("resources.harness.authenticated")}</th>
-            <th>{t("resources.harness.credentialSource")}</th><th>{t("resources.harness.backend")}</th>
-            <th>{t("resources.harness.detail")}</th>
+            <th scope="col">{t("resources.harness.installed")}</th><th scope="col">{t("resources.harness.authenticated")}</th>
+            <th scope="col">{t("resources.harness.credentialSource")}</th><th scope="col">{t("resources.harness.backend")}</th>
+            <th scope="col">{t("resources.harness.detail")}</th>
           </tr>
         </thead>
         <tbody>
@@ -277,6 +309,7 @@ function HarnessStatusRow({ kind, runtimes }: { kind: string; runtimes: any[] })
           </tr>
         </tbody>
       </table>
+      </div>
       {status && !status.ok && status.hint && <div className="muted">{status.hint}</div>}
       {auth.error && <div className="muted">{t("resources.harness.authUnavailable", { error: auth.error })}</div>}
     </div>
@@ -301,17 +334,22 @@ export function ResourceView({ kind }: { kind: string }) {
   // in a ref so the promise survives re-renders of the modal.
   const [deleteLabel, setDeleteLabel] = useState<string | null>(null);
   const deleteResolver = useRef<((ok: boolean) => void) | null>(null);
+  // A failed row action is not a load error: the list is fine, one click was
+  // not, so the message sits above the table and the list stays readable.
+  const [actionError, setActionError] = useState<string | null>(null);
   useEffect(() => {
     askDelete = (label) =>
       new Promise<boolean>((resolve) => {
         deleteResolver.current = resolve;
         setDeleteLabel(label);
       });
+    reportActionError = (message) => setActionError(message);
     return () => {
       // A row action awaiting an answer must not hang if the view goes away.
       deleteResolver.current?.(false);
       deleteResolver.current = null;
       askDelete = null;
+      reportActionError = (message) => console.error(message);
     };
   }, []);
   const answerDelete = (ok: boolean) => {
@@ -358,14 +396,32 @@ export function ResourceView({ kind }: { kind: string }) {
       <div className="row">
         <h1>{t(cfg.title)}</h1>
         <span className="right">
-          <button className="primary" onClick={() => setShowCreate((v) => !v)}>
-            {showCreate ? t("common.close") : t("resources.add")}
+          <button className="primary" onClick={() => setShowCreate(true)}>
+            {t("resources.add")}
           </button>
         </span>
       </div>
       <p className="sub">{t("resources.subtitle", { name: t(cfg.title) })}</p>
+      {actionError && (
+        <div className="card action-error" role="alert">
+          <span>{t("resources.actionFailed")}</span>
+          <span className="mono">{actionError}</span>
+          <button className="small" onClick={() => setActionError(null)}>{t("common.close")}</button>
+        </div>
+      )}
 
-      {showCreate && (
+      {showCreate && kind === "runtimes" && (
+        <AddRuntimeDialog
+          onClose={() => setShowCreate(false)}
+          onAdded={() => {
+            setShowCreate(false);
+            reload();
+          }}
+        />
+      )}
+      {/* Other resource kinds keep the inline card: their create forms are a few
+          plain fields, and only runtimes had grown into a page of choices. */}
+      {showCreate && kind !== "runtimes" && (
         <div className="card">
           <h2>{t("resources.addTitle", { name: t(cfg.titleOne) })}</h2>
           {cfg.createFields.map((f) => (
@@ -400,7 +456,7 @@ export function ResourceView({ kind }: { kind: string }) {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr>{cfg.columns.map((c) => <th key={c.key}>{t(c.label)}</th>)}<th className="actions"></th></tr>
+                <tr>{cfg.columns.map((c) => <th key={c.key} scope="col">{t(c.label)}</th>)}<th scope="col" className="actions"></th></tr>
               </thead>
               <tbody>
                 {data.map((row) => (

@@ -230,6 +230,64 @@ function writeFixture(dir) {
     taskTitle: "verify task two",
     inputInstruction: "verify task two",
   });
+  // A failed execution, with the record an inspector shows: the harness error,
+  // one inline artifact (previewable) and one on-disk artifact (a path), and a
+  // consumed handoff whose content has a summary plus checkpoint sections.
+  // Costs of different magnitudes, so the money format is observable: a
+  // fraction of a cent, a few cents, more than a dollar.
+  db.runs[0] = { ...db.runs[0], cost: 0.000012 };
+  db.runs[1] = { ...db.runs[1], cost: 1.2345 };
+  db.runs.push({
+    ...db.runs[0],
+    id: "run_verify_failed",
+    taskId: "task_verify_1",
+    taskTitle: "verify task one",
+    status: "failed",
+    phase: "failed",
+    error: "harness exited with code 2\n  stderr: spawn verify-harness ENOENT",
+    artifactIds: ["art_verify_inline", "art_verify_disk"],
+    previousHandoffId: "hof_verify",
+  });
+  db.artifacts = [
+    {
+      id: "art_verify_inline",
+      runId: "run_verify_failed",
+      name: "build.log",
+      kind: "log",
+      mime: "text/plain",
+      size: 64,
+      content: "line one of the build log\nline two of the build log",
+      createdAt: now,
+    },
+    {
+      id: "art_verify_disk",
+      runId: "run_verify_failed",
+      name: "report.html",
+      kind: "report",
+      path: "/workspace/report.html",
+      size: 4096,
+      createdAt: now,
+    },
+  ];
+  db.handoffs = [
+    {
+      id: "hof_verify",
+      taskId: "task_verify_1",
+      fromRunId: longRunId,
+      source: "agentfabric",
+      artifactIds: [],
+      createdAt: now,
+      workspaceId: "ws_verify_alpha",
+      content: {
+        summary: "The parser was rewritten to stream.",
+        contextBundle: {
+          checkpoint: "## Goal\nMake the parser streaming.\n\n## Decisions\nDropped the buffered reader.",
+          pinnedContext: [],
+          retainedContext: [],
+        },
+      },
+    },
+  ];
   /**
    * A turn that is still running: one shell tool already finished, one still
    * streaming. The finished command's row must stop spinning while the turn
@@ -388,6 +446,28 @@ app.stderr.on("data", collect);
 
 let cdp;
 let exitCode = 0;
+
+/**
+ * Creates one throwaway task through the API, so a check that deletes a row does
+ * not consume the records later checks read. The run itself fails harmlessly
+ * (a missing harness binary); the task record is all a list needs.
+ */
+const createThrowawayTask = async (cdp, title) =>
+  evaluate(
+    cdp,
+    `(async () => {
+       const runtimes = await (await fetch("/api/runtimes")).json();
+       const runtime = runtimes.find((r) => r.usableInTask);
+       if (!runtime) return null;
+       const created = await (await fetch("/api/runs", {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ prompt: ${JSON.stringify(title)}, title: ${JSON.stringify(title)}, workspaceId: "ws_verify_alpha", runtimeId: runtime.id }),
+       })).json();
+       return created?.task?.id ?? null;
+     })()`
+  );
+
 try {
   // 1. Wait for the DevTools endpoint, then attach to the window's page.
   const target = await (async () => {
@@ -558,9 +638,105 @@ try {
   check(/新会话|New session/.test(railOps.newLabel ?? ""), `the rail has a new-session button ("${railOps.newLabel}")`);
   check(/看板|Kanban/.test(railOps.kanbanLabel ?? ""), `the rail has a Kanban entry ("${railOps.kanbanLabel}")`);
   check(railOps.kanbanBetween, "the Kanban entry sits between New session and the Workspaces heading");
-  check(railOps.headIcons === 3, `the workspace heading carries ${railOps.headIcons} icons (search / filter / new)`);
+  // Two, not three: a "search" button that only navigated to the task list is
+  // gone (the brand button already goes there).
+  check(railOps.headIcons === 2, `the workspace heading carries ${railOps.headIcons} icons (filter / new)`);
   check(railOps.items.length === 4, `session menu offers ${railOps.items.length} actions: ${railOps.items.join(", ")}`);
   check(railOps.menuOnScreen && railOps.closedByEscape, "the session menu stays on screen and closes on Escape");
+
+  // FIXTURE-DATA ONLY (5b-1 - needs sessions to delete)
+  if (!emptyMode) {
+    // 5b-1. Deleting a session from the rail asks first, like every other
+    //       destructive action: it used to delete on the menu click and could
+    //       leave the open /tasks/<id> page pointing at a record that no longer
+    //       exists. Cancelling must change nothing; confirming removes exactly
+    //       the one row.
+    //
+    //       The row deleted is a disposable one created here, not a seeded
+    //       session: later checks read the fixture's own tasks.
+    const railDelete = await evaluate(
+      cdp,
+      `(async () => {
+         // A runtime the API accepts for a task: the mock agent is not usable in
+         // tasks, so the run is created on whichever host harness is available.
+         // The run itself fails harmlessly (spawn ENOENT and friends); its task
+         // record is all this check needs.
+         const runtimes = await (await fetch("/api/runtimes")).json();
+         const runtime = runtimes.find((r) => r.usableInTask);
+         if (!runtime) return { error: "no task-usable runtime" };
+         const created = await (await fetch("/api/runs", {
+           method: "POST",
+           headers: { "Content-Type": "application/json" },
+           body: JSON.stringify({
+             prompt: "rail delete probe",
+             title: "rail delete probe",
+             workspaceId: "ws_verify_alpha",
+             runtimeId: runtime.id,
+           }),
+         })).json();
+         const taskId = created?.task?.id ?? null;
+         if (!taskId) return { error: "the probe run was not created" };
+         // Another view's write is not visible to the mounted rail until its own
+         // five-second GET cache ages out or a write on this page invalidates it;
+         // the same event a real creation fires is what makes the row appear.
+         window.dispatchEvent(new Event("agentfabric:tasks-changed"));
+         const rowTitle = (r) => r.querySelector(".ws-task")?.getAttribute("title");
+         const deadline = Date.now() + 12000;
+         let row = null;
+         while (Date.now() < deadline && !row) {
+           row = [...document.querySelectorAll(".ws-task-row")]
+             .find((r) => rowTitle(r) === "rail delete probe") ?? null;
+           if (!row) await new Promise((r) => setTimeout(r, 250));
+         }
+         if (!row) return { error: "the probe session never appeared in the rail", taskId };
+         const rowCount = () => document.querySelectorAll(".ws-task-row").length;
+         const before = rowCount();
+         const openDanger = async () => {
+           row.querySelector(".ws-task-more")?.click();
+           await new Promise((r) => setTimeout(r, 350));
+           [...document.querySelectorAll(".ws-task-menu button")]
+             .find((b) => b.classList.contains("danger"))
+             ?.click();
+           await new Promise((r) => setTimeout(r, 600));
+           return [...document.querySelectorAll(".ws-rename[role=dialog]")]
+             .find((d) => /回收站|Trash/.test(d.textContent ?? "")) ?? null;
+         };
+         const dialog = await openDanger();
+         const text = dialog?.innerText ?? "";
+         [...(dialog?.querySelectorAll("button") ?? [])][0]?.click();
+         await new Promise((r) => setTimeout(r, 500));
+         const afterCancel = rowCount();
+         const cancelClosed = !document.querySelector(".ws-rename[role=dialog]");
+         const confirmed = await openDanger();
+         [...(confirmed?.querySelectorAll("button") ?? [])]
+           .find((b) => b.classList.contains("danger"))
+           ?.click();
+         await new Promise((r) => setTimeout(r, 1200));
+         return {
+           asked: Boolean(dialog),
+           saysRecoverable: /回收站|Trash/.test(text),
+           afterCancel,
+           before,
+           cancelClosed,
+           afterConfirm: rowCount(),
+         };
+       })()`
+    );
+    if (railDelete.error) failures.push(`rail session delete: ${railDelete.error}`);
+    check(railDelete.asked, "deleting a session from the rail asks first");
+    check(
+      railDelete.saysRecoverable,
+      "the session delete explains that it goes to Trash and can be restored"
+    );
+    check(
+      railDelete.cancelClosed && railDelete.afterCancel === railDelete.before,
+      `cancelling the session delete removes nothing (${railDelete.before} → ${railDelete.afterCancel})`
+    );
+    check(
+      railDelete.afterConfirm === railDelete.before - 1,
+      `confirming the session delete removes exactly one row (${railDelete.before} → ${railDelete.afterConfirm})`
+    );
+  }
 
   // 5b-2. The rail's collapse control belongs to the brand row, at its right
   //       edge, not to the Workspaces heading. The collapsed rail keeps a way
@@ -1188,11 +1364,981 @@ try {
     );
   }
 
+  // FIXTURE-DATA ONLY (9b-1 - needs the seeded runs)
+  if (!emptyMode) {
+    // 9b-1. Run phases are shown as words, not as their stored identifiers.
+    //       `agent.running` / `workspace.preparing` are record values; printing
+    //       one verbatim put the only untranslated, dotted label in the app.
+    const phaseLabels = await evaluate(
+      cdp,
+      `(async () => {
+         const phaseColumnIndex = (root) => {
+           const header = [...root.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+           const zh = header.indexOf("阶段");
+           return zh >= 0 ? zh : header.indexOf("Phase");
+         };
+         history.pushState({}, "", "/runs");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+         const column = phaseColumnIndex(document.querySelector("main"));
+         const cells = [...document.querySelectorAll("main tbody tr")].map((tr) =>
+           (tr.children[column]?.textContent ?? "").trim()
+         );
+         // A stored phase printed verbatim is the failure this check exists for:
+         // a dotted, lowercase identifier in a cell of its own.
+         const raw = [...document.querySelectorAll("main tbody td")].map((td) => td.textContent.trim())
+           .filter((text) => /^[a-z]+\\.[a-z]+$/.test(text));
+         // The inspector renders the same value as a stat of its own.
+         history.pushState({}, "", "/runs/run_verify_live");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+         const stats = [...document.querySelectorAll("main .stat")].map((s) => ({
+           label: s.querySelector(".lbl")?.textContent?.trim(),
+           value: s.querySelector(".num")?.textContent?.trim(),
+         }));
+         const phaseStat = stats.find((s) => s.label === "当前阶段" || s.label === "current phase");
+         return {
+           hasPhaseColumn: column >= 0,
+           cells,
+           rawIdentifiers: raw,
+           phaseStat: phaseStat?.value ?? null,
+         };
+       })()`
+    );
+    check(
+      phaseLabels.hasPhaseColumn && phaseLabels.cells.length > 0,
+      `the runs table has a phase column (${phaseLabels.cells.slice(0, 3).join(" | ")})`
+    );
+    check(
+      phaseLabels.rawIdentifiers.length === 0,
+      `no run phase is printed as a raw identifier (${phaseLabels.rawIdentifiers.join(", ") || "none"})`
+    );
+    check(
+      Boolean(phaseLabels.phaseStat) &&
+        phaseLabels.phaseStat !== "agent.running" &&
+        phaseLabels.phaseStat !== "undefined",
+      `the run inspector labels the current phase ("${phaseLabels.phaseStat}")`
+    );
+
+    // 9b-1b. The runs list can be narrowed by status, and it keeps refreshing
+    //        while anything is still executing. Executions accumulate for the
+    //        life of the install, so "the run I just started" and "what failed"
+    //        used to mean scrolling the whole history.
+    const runsFilters = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/runs");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1600));
+         const chips = () => [...document.querySelectorAll(".runs-filter")];
+         const rows = () => document.querySelectorAll("main tbody tr").length;
+         const before = rows();
+         const labels = chips().map((b) => b.textContent.trim());
+         const counts = chips().map((b) => Number(b.querySelector(".runs-filter-count")?.textContent ?? NaN));
+         const go = async (nth) => {
+           chips()[nth]?.click();
+           await new Promise((r) => setTimeout(r, 400));
+           return rows();
+         };
+         const completed = await go(3);
+         const failed = await go(2);
+         const all = await go(0);
+         return {
+           chipCount: chips().length,
+           labels,
+           counts,
+           firstPressed: chips()[0]?.getAttribute("aria-pressed") ?? null,
+           live: document.querySelector(".runs-live")?.textContent?.trim() ?? null,
+           before,
+           completed,
+           failed,
+           all,
+         };
+       })()`
+    );
+    check(
+      runsFilters.chipCount === 4 && runsFilters.firstPressed === "true",
+      `the runs list offers status filters (${runsFilters.labels.join(" | ")})`
+    );
+    check(
+      runsFilters.counts.every((n) => Number.isFinite(n)) &&
+        runsFilters.counts[0] === runsFilters.before,
+      `each filter carries its row count (${runsFilters.counts.join(" / ")})`
+    );
+    check(
+      runsFilters.completed <= runsFilters.before &&
+        runsFilters.failed <= runsFilters.before &&
+        runsFilters.all === runsFilters.before,
+      `filtering narrows the table and "all" restores it (all ${runsFilters.before} → completed ${runsFilters.completed} → failed ${runsFilters.failed} → all ${runsFilters.all})`
+    );
+    check(
+      /条正在执行|running/.test(runsFilters.live ?? ""),
+      `the runs list says it is live while something runs (${JSON.stringify(runsFilters.live)})`
+    );
+  }
+
+  // FIXTURE-DATA ONLY (9b-1c - needs a failed run and an artifact)
+  if (!emptyMode) {
+    // 9b-1c. The inspector answers the question it is opened for. A failed run's
+    //        reason used to be a bare string in the same red box as every load
+    //        error; an artifact row printed four cells and did nothing; a handoff
+    //        dumped the stored JSON. All three now lead somewhere.
+    const inspector = await evaluate(
+      cdp,
+      `(async () => {
+         const run = (await (await fetch("/api/runs")).json())
+           .find((r) => r.id === "run_verify_failed" && r.error);
+         if (!run) return { error: "no failed run in the fixture" };
+         history.pushState({}, "", "/runs/" + run.id);
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1800));
+         const card = document.querySelector(".run-error");
+         const out = {
+           errorTitle: card?.querySelector(".run-error-title")?.textContent?.trim() ?? null,
+           errorActions: [...(card?.querySelectorAll("button") ?? [])].map((b) => b.textContent.trim()),
+         };
+         const tab = (label) =>
+           [...document.querySelectorAll("main button")]
+             .find((b) => new RegExp(label, "i").test(b.textContent ?? ""));
+         tab("产物|artifacts")?.click();
+         await new Promise((r) => setTimeout(r, 700));
+         const rows = [...document.querySelectorAll("main tbody tr")];
+         out.artifactRows = rows.length;
+         const openBtn = rows.flatMap((tr) => [...tr.querySelectorAll("button")])
+           .find((b) => /打开|Open/.test(b?.textContent ?? ""));
+         const downloadLink = rows
+           .flatMap((tr) => [...tr.querySelectorAll("a")])
+           .find((a) => /下载|Download/.test(a.textContent ?? ""));
+         out.hasDownloadHref = Boolean(downloadLink?.getAttribute("href"));
+         openBtn?.click();
+         await new Promise((r) => setTimeout(r, 600));
+         const modal = document.querySelector(".modal");
+         out.previewOpen = Boolean(modal);
+         out.previewText = (modal?.innerText ?? "").slice(0, 60);
+         modal?.querySelector("button")?.click();
+         await new Promise((r) => setTimeout(r, 400));
+         tab("连续|continuity")?.click();
+         await new Promise((r) => setTimeout(r, 600));
+         out.handoffSections = [...document.querySelectorAll(".handoff-body h3")].map((h) =>
+           h.textContent.trim()
+         );
+         return out;
+       })()`
+    );
+    if (inspector.error) failures.push(`run inspector: ${inspector.error}`);
+    check(
+      /为什么失败|Why this run failed/.test(inspector.errorTitle ?? "") &&
+        (inspector.errorActions ?? []).length === 2,
+      `a failed run names its reason and offers its log and events (${inspector.errorTitle} / ${(inspector.errorActions ?? []).join(", ")})`
+    );
+    check(
+      inspector.artifactRows > 0 &&
+        inspector.hasDownloadHref &&
+        inspector.previewOpen &&
+        /产物内容|Artifact content/.test(inspector.previewText ?? ""),
+      `an artifact opens a preview and offers a download (${inspector.artifactRows} row(s), "${inspector.previewText}")`
+    );
+    check(
+      (inspector.handoffSections ?? []).length > 0 &&
+        !(inspector.handoffSections ?? []).some((s) => s.includes("{")),
+      `a handoff shows its sections instead of raw JSON (${(inspector.handoffSections ?? []).join(" | ")})`
+    );
+  }
+
+  // 9b-1d. Usage: money reads as money, and the heatmap's window is a choice
+  //        rather than a hard-coded 26 weeks.
+  const usage = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/usage");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1600));
+       const ranges = [...document.querySelectorAll(".heat-range button")];
+       const out = {
+         costTiles: [...document.querySelectorAll(".stat")]
+           .filter((s) => /预估费用|estimated/i.test(s.innerText))
+           .map((s) => s.querySelector(".num")?.textContent?.trim()),
+         ranges: ranges.map((b) => b.textContent.trim()),
+         pressedIndex: ranges.findIndex((b) => b.getAttribute("aria-pressed") === "true"),
+       };
+       const cols = () => {
+         const style = document.querySelector(".heat-grid")?.style.gridTemplateColumns ?? "";
+         const n = Number(/repeat\\((\\d+)\\b/.exec(style)?.[1] ?? 0);
+         return n;
+       };
+       out.colsBefore = cols();
+       ranges[0]?.click();
+       await new Promise((r) => setTimeout(r, 400));
+       out.colsAfter = cols();
+       ranges[ranges.length - 1]?.click();
+       await new Promise((r) => setTimeout(r, 400));
+       out.colsWidest = cols();
+       return out;
+     })()`
+  );
+  check(
+    (usage.costTiles ?? []).length > 0 && (usage.costTiles ?? []).every((c) => !/0{6}/.test(c ?? "")),
+    `usage prints money without six zeroes (${(usage.costTiles ?? []).join(", ")})`
+  );
+  check(
+    (usage.ranges ?? []).length === 4 && usage.pressedIndex === 2,
+    `the heatmap offers a time window and defaults to 26 weeks (${(usage.ranges ?? []).join(" / ")})`
+  );
+  check(
+    usage.colsAfter === 4 && usage.colsWidest === 52 && usage.colsBefore === 26,
+    `choosing a window resizes the heatmap (${usage.colsAfter} / ${usage.colsBefore} / ${usage.colsWidest} columns)`
+  );
+
+  // FIXTURE-DATA ONLY (9b-1e - needs a runtime row to delete)
+  if (!emptyMode) {
+    // 9b-1e. Deleting a row on a resource page names the row and reports a
+    //        failure. The question used to read "Delete rt_mvven…?" (the id),
+    //        and a rejected DELETE was an unhandled rejection: the row stayed
+    //        put with nothing said.
+    const resourceDelete = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/runtimes");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1600));
+         const row = document.querySelector("main tbody tr");
+         const name = row?.querySelector("td")?.getAttribute("title") ?? row?.querySelector("td")?.textContent ?? "";
+         const del = [...(row?.querySelectorAll("button") ?? [])].find((b) => b.classList.contains("danger"));
+         del?.click();
+         await new Promise((r) => setTimeout(r, 600));
+         const modal = document.querySelector(".modal");
+         const question = modal?.querySelector("p")?.textContent?.trim() ?? "";
+         const out = { question, hasRawId: /rt_[a-z0-9]{12,}/.test(question) };
+         modal?.querySelector("button")?.click();
+         await new Promise((r) => setTimeout(r, 400));
+         const originalFetch = window.fetch;
+         window.fetch = (input, init) => {
+           const url = typeof input === "string" ? input : input?.url ?? "";
+           if (url.includes("/api/runtimes/") && (init?.method ?? "GET").toUpperCase() === "DELETE") {
+             return Promise.reject(new Error("verify: simulated failure"));
+           }
+           return originalFetch(input, init);
+         };
+         try {
+           del?.click();
+           await new Promise((r) => setTimeout(r, 600));
+           const again = document.querySelector(".modal");
+           [...(again?.querySelectorAll("button") ?? [])]
+             .find((b) => /删除|Delete/.test(b.textContent ?? "") && b.classList.contains("danger"))
+             ?.click();
+           await new Promise((r) => setTimeout(r, 1000));
+           const banner = document.querySelector(".action-error");
+           out.banner = banner?.getAttribute("role") === "alert" ? (banner.textContent ?? "").trim() : null;
+         } finally {
+           window.fetch = originalFetch;
+           document.querySelector(".action-error button")?.click();
+         }
+         return out;
+       })()`
+    );
+    check(
+      /删除|Delete/.test(resourceDelete.question ?? "") && resourceDelete.hasRawId === false,
+      `deleting a resource names the row, not its id (${JSON.stringify(resourceDelete.question)})`
+    );
+    check(
+      /没有成功|did not go through/.test(resourceDelete.banner ?? ""),
+      `a failed resource delete is reported (${JSON.stringify(resourceDelete.banner)})`
+    );
+  }
+
+  // 9b-1f. A list never claims to be empty while it is still loading. The first
+  //        render of every list is empty, so the empty-state text was shown
+  //        during the fetch — briefly on a fast response, and indefinitely on a
+  //        slow one.
+  const loadingState = await evaluate(
+    cdp,
+    `(async () => {
+       const originalFetch = window.fetch;
+       const release = [];
+       window.fetch = (input, init) => {
+         const url = typeof input === "string" ? input : input?.url ?? "";
+         if (url.includes("/api/handoffs") && !url.includes("/api/handoffs/model")) {
+           return new Promise((resolve) => release.push(() => resolve(originalFetch(input, init))));
+         }
+         return originalFetch(input, init);
+       };
+       const out = {};
+       try {
+         // Leave first: remounting a view it is already on can be served from
+         // the GET cache without a request, and then nothing is pending at all.
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+         history.pushState({}, "", "/handoffs");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+         const text = document.querySelector("main")?.innerText ?? "";
+         out.loadingText = text.includes("加载中") || text.includes("Loading");
+         out.claimsEmpty = /还没有|No handoffs/.test(text);
+       } finally {
+         window.fetch = originalFetch;
+         release.forEach((fn) => fn());
+       }
+       return out;
+     })()`
+  );
+  check(
+    loadingState.loadingText === true && loadingState.claimsEmpty === false,
+    `a list says it is loading instead of claiming to be empty (loading: ${loadingState.loadingText}, claims empty: ${loadingState.claimsEmpty})`
+  );
+
+  // FIXTURE-DATA ONLY (9b-1g - deletes rows it creates itself)
+  if (!emptyMode) {
+    await createThrowawayTask(cdp, "verify skip-confirm A");
+    await createThrowawayTask(cdp, "verify skip-confirm B");
+    // The list is open on whichever page the previous check left; reload it so
+    // the new rows are on page 1.
+    await evaluate(cdp, `(async () => {
+      window.dispatchEvent(new Event("agentfabric:tasks-changed"));
+      await new Promise((r) => setTimeout(r, 600));
+      return true;
+    })()`);
+    // 9b-1g. "Don't ask again" is a preference, not a one-way door: the list
+    //        shows it, says when a delete went through unchecked, and offers
+    //        to turn the asking back on.
+    const skipConfirm = await evaluate(
+      cdp,
+      `(async () => {
+         const KEY = "agentfabric.deleteTaskConfirmSuppressed";
+         localStorage.removeItem(KEY);
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 900));
+         history.pushState({}, "", "/tasks");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1600));
+         const pref = () => document.querySelector(".tasks-pref input");
+         const out = { prefShown: Boolean(pref()), prefOffAtStart: pref()?.checked === false };
+         pref()?.click();
+         await new Promise((r) => setTimeout(r, 400));
+         out.prefOn = pref()?.checked === true && localStorage.getItem(KEY) === "1";
+         // The rows deleted here are created for this check: later checks read
+         // the fixture's own tasks.
+         const byTitle = (t) => [...document.querySelectorAll(".task-item")]
+           .find((r) => (r.querySelector(".task-item-title")?.textContent ?? "").trim() === t);
+         const target = byTitle("verify skip-confirm A");
+         out.found = Boolean(target);
+         const title = (target?.querySelector(".task-item-title")?.textContent ?? "").trim();
+         [...(target?.querySelectorAll("button") ?? [])].pop()?.click();
+         await new Promise((r) => setTimeout(r, 500));
+         const items = [...document.querySelectorAll("button")]
+           .filter((b) => /删除|Delete/.test(b.textContent ?? ""));
+         items[items.length - 1]?.click();
+         await new Promise((r) => setTimeout(r, 1200));
+         const notice = document.querySelector(".action-error");
+         out.notice = notice?.innerText ?? null;
+         out.saidDeleted = Boolean(title) && (notice?.innerText ?? "").includes(title);
+         const undo = [...(notice?.querySelectorAll("button") ?? [])]
+           .find((b) => /以后都询问|Ask me again/.test(b.textContent ?? ""));
+         undo?.click();
+         await new Promise((r) => setTimeout(r, 500));
+         out.undone = pref()?.checked === false && localStorage.getItem(KEY) === null;
+         // Turned back on: the next delete asks again.
+         const next = byTitle("verify skip-confirm B");
+         [...(next?.querySelectorAll("button") ?? [])].pop()?.click();
+         await new Promise((r) => setTimeout(r, 500));
+         const again = [...document.querySelectorAll("button")]
+           .filter((b) => /删除|Delete/.test(b.textContent ?? ""));
+         again[again.length - 1]?.click();
+         await new Promise((r) => setTimeout(r, 700));
+         out.asksAgain = Boolean(document.querySelector(".delete-confirm"));
+         document.querySelector(".delete-confirm")?.parentElement?.querySelector("button")?.click();
+         await new Promise((r) => setTimeout(r, 300));
+         localStorage.removeItem(KEY);
+         return out;
+       })()`
+    );
+    check(
+      skipConfirm.prefShown === true && skipConfirm.prefOffAtStart === true && skipConfirm.prefOn === true,
+      `the task list exposes the skip-confirmation preference and remembers it (shown: ${skipConfirm.prefShown}, off at start: ${skipConfirm.prefOffAtStart}, on: ${skipConfirm.prefOn})`
+    );
+    check(
+      skipConfirm.saidDeleted === true && /没有|without/i.test(skipConfirm.notice ?? ""),
+      `a delete that skipped the dialog says so (${JSON.stringify((skipConfirm.notice ?? "").slice(0, 40))})`
+    );
+    check(
+      skipConfirm.undone === true && skipConfirm.asksAgain === true,
+      `turning the preference back off restores the confirmation (cleared: ${skipConfirm.undone}, asks again: ${skipConfirm.asksAgain})`
+    );
+  }
+
+  // 9b-1h. In-app links are links: focusable by keyboard, with a real href, and
+  //        a modified click left to the browser (open in new tab still works).
+  const links = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/kanban");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 900));
+       history.pushState({}, "", "/runs");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1600));
+       const anchors = [...document.querySelectorAll("main a")];
+       const hrefs = anchors.map((a) => a.getAttribute("href"));
+       const out = {
+         total: anchors.length,
+         withHref: hrefs.filter((h) => h && h.startsWith("/")).length,
+         noHref: hrefs.filter((h) => !h).length,
+         // A link with no href is skipped by the tab order; one with an href is not.
+         focusable: anchors.filter((a) => a.hasAttribute("href") && a.tabIndex >= 0).length,
+       };
+       // Enter on a focused in-app link navigates through the router.
+       const first = anchors.find((a) => a.getAttribute("href")?.startsWith("/runs/"));
+       const before = location.pathname;
+       first?.focus();
+       if (first) {
+         first.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+         await new Promise((r) => setTimeout(r, 800));
+       }
+       out.navigated = Boolean(first) && location.pathname !== before;
+       // A Cmd-click must reach the browser (new tab), not the router.
+       history.pushState({}, "", "/runs");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1200));
+       const link = [...document.querySelectorAll("main a")].find((a) => a.getAttribute("href")?.startsWith("/runs/"));
+       let defaultPrevented = null;
+       if (link) {
+         const ev = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true });
+         link.dispatchEvent(ev);
+         defaultPrevented = ev.defaultPrevented;
+       }
+       out.metaClickFree = defaultPrevented === false;
+       return out;
+     })()`
+  );
+  // An empty list that names a next step links to it. Only an install with no
+  // runs renders that state, so this runs in empty mode.
+  if (emptyMode) {
+    const emptyHint = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 900));
+         history.pushState({}, "", "/runs");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1600));
+         const main = document.querySelector("main");
+         const link = [...(main?.querySelectorAll("a[href]") ?? [])]
+           .find((a) => a.getAttribute("href") === "/tasks");
+         return {
+           hint: (main?.innerText ?? "").slice(0, 200),
+           hasTasksLink: Boolean(link),
+         };
+       })()`
+    );
+    check(
+      emptyHint.hasTasksLink === true,
+      `an empty run list links to where runs are created (${emptyHint.hasTasksLink})`
+    );
+  }
+
+  // 9b-1o. Every data table can scroll instead of overflowing its card when the
+  //        window is narrow. Only one table used to sit in a `.table-wrap`; the
+  //        rest pushed the card wider than the page.
+  const tableWraps = await evaluate(
+    cdp,
+    `(async () => {
+       const unwrapped = [];
+       const count = (path) => {
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         return new Promise((r) => setTimeout(r, 900))
+           .then(() => {
+             history.pushState({}, "", path);
+             window.dispatchEvent(new PopStateEvent("popstate"));
+             return new Promise((r) => setTimeout(r, 1500));
+           })
+           .then(() => {
+             for (const table of document.querySelectorAll("main table")) {
+               if (!table.closest(".table-wrap")) unwrapped.push(path + ": " + (table.textContent ?? "").trim().slice(0, 30));
+             }
+             return document.querySelectorAll("main table").length;
+           });
+       };
+       const counts = {
+         runs: await count("/runs"),
+         handoffs: await count("/handoffs"),
+         usage: await count("/usage"),
+         runtimes: await count("/runtimes"),
+       };
+       return { unwrapped, counts, total: Object.values(counts).reduce((a, b) => a + b, 0) };
+     })()`
+  );
+  // 9b-1s. Adding a runtime is a dialog with two choices, and the table has no
+  //        per-record "usable in tasks" switch: a task is the unit of work and
+  //        a runtime is how it runs, so that question is not the user's.
+  const runtimeDialog = await evaluate(
+    cdp,
+    `(async () => {
+       history.pushState({}, "", "/runtimes");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1600));
+       const headers = [...document.querySelectorAll("main thead th")]
+         .map((h) => (h.textContent ?? "").trim())
+         .filter(Boolean);
+       const addBtn = [...document.querySelectorAll("main button")]
+         .find((b) => /新增|add/i.test(b.textContent ?? "") && !b.closest(".board-dialog"));
+       addBtn?.click();
+       await new Promise((r) => setTimeout(r, 800));
+       const dialog = document.querySelector(".add-runtime-dialog");
+       const labels = [...(dialog?.querySelectorAll(".board-dialog-label") ?? [])]
+         .map((l) => (l.textContent ?? "").trim());
+       const modes = [...(dialog?.querySelectorAll(".runtime-mode-card") ?? [])]
+         .map((c) => (c.textContent ?? "").trim());
+       const out = {
+         opened: Boolean(dialog),
+         inlineCard: [...document.querySelectorAll("main .card h2")]
+           .some((h) => /新增.*运行时|Add runtime/.test(h.textContent ?? "")),
+         labels,
+         modes: modes.length,
+         hasCommandField: [...(dialog?.querySelectorAll(".board-dialog-label") ?? [])]
+           .some((l) => /命令|command/i.test(l.textContent ?? "")),
+         hasUsableField: [...(dialog?.querySelectorAll(".board-dialog-label") ?? [])]
+           .some((l) => /可用于任务|usable/i.test(l.textContent ?? "")),
+         headers,
+       };
+       document.querySelector(".add-runtime-dialog .board-dialog-close")?.click();
+       return out;
+     })()`
+  );
+  check(
+    runtimeDialog.opened === true && runtimeDialog.inlineCard === false,
+    `adding a runtime opens a dialog, not a page (open: ${runtimeDialog.opened}, inline card: ${runtimeDialog.inlineCard})`
+  );
+  check(
+    runtimeDialog.hasCommandField === false && runtimeDialog.hasUsableField === false && runtimeDialog.modes === 2,
+    `the runtime dialog asks only how it runs (modes: ${runtimeDialog.modes}, command field: ${runtimeDialog.hasCommandField}, usable field: ${runtimeDialog.hasUsableField}, fields: ${JSON.stringify(runtimeDialog.labels)})`
+  );
+  check(
+    runtimeDialog.headers.some((h) => /可用于任务|usable in tasks/i.test(h)) === false,
+    `the runtime table has no per-record "usable in tasks" column (${JSON.stringify(runtimeDialog.headers)})`
+  );
+
+  // 9b-1r. The rail's header offers exactly the actions it can perform, and the
+  //        filter toggle says which panel it opens. A "search" button used to
+  //        sit here that only navigated to the task list, and the filter toggle
+  //        wore the same grid glyph as the Kanban button right above it.
+  const railActions = await evaluate(
+    cdp,
+    `(async () => {
+       const buttons = [...document.querySelectorAll(".rail-head-actions button")];
+       const filter = buttons.find((b) => b.getAttribute("aria-controls") === "rail-filters");
+       const out = {
+         count: buttons.length,
+         labels: buttons.map((b) => b.getAttribute("aria-label")),
+         hasSearch: buttons.some((b) => /搜索|Search/i.test(b.getAttribute("aria-label") ?? "")),
+         expandedBefore: filter?.getAttribute("aria-expanded"),
+       };
+       filter?.click();
+       await new Promise((r) => setTimeout(r, 500));
+       out.panel = Boolean(document.getElementById("rail-filters"));
+       out.expandedAfter = filter?.getAttribute("aria-expanded");
+       return out;
+     })()`
+  );
+  check(
+    railActions.hasSearch === false && railActions.panel === true,
+    `the rail header only offers actions it can perform (${JSON.stringify(railActions.labels)}, panel: ${railActions.panel})`
+  );
+  check(
+    railActions.expandedBefore === "false" && railActions.expandedAfter === "true",
+    `the filter toggle announces the panel it controls (${railActions.expandedBefore} → ${railActions.expandedAfter})`
+  );
+
+  // 9b-1q. A dialog is announced as one: role, modal, and a name taken from the
+  //        text a sighted user can see. The name used to be a copy passed in as
+  //        `aria-label`, so the two could disagree; it now points at the title.
+  const dialogNames = await evaluate(
+    cdp,
+    `(async () => {
+       const out = { checked: [], problems: [] };
+       const inspect = (el, where) => {
+         const label = el.getAttribute("aria-label");
+         const byId = el.getAttribute("aria-labelledby");
+         const labelled = byId ? document.getElementById(byId) : null;
+         const name = (label ?? labelled?.textContent ?? "").trim();
+         out.checked.push(where);
+         if (el.getAttribute("aria-modal") !== "true") out.problems.push(where + ": not modal");
+         if (!name) out.problems.push(where + ": no accessible name");
+         if (byId && !labelled) out.problems.push(where + ": aria-labelledby points at nothing");
+       };
+       history.pushState({}, "", "/kanban");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 900));
+       history.pushState({}, "", "/tasks");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1600));
+       // The task delete confirmation, opened through the row menu.
+       const row = document.querySelector(".task-item");
+       [...(row?.querySelectorAll("button") ?? [])].pop()?.click();
+       await new Promise((r) => setTimeout(r, 400));
+       [...document.querySelectorAll("button")]
+         .filter((b) => /删除|Delete/.test(b.textContent ?? ""))
+         .pop()?.click();
+       await new Promise((r) => setTimeout(r, 700));
+       // No copy to delete on a fresh install: fall back to the settings dialog,
+       // which every install has.
+       if (document.querySelectorAll('[role="dialog"]').length === 0) {
+         document.querySelector('.sidebar [title], .sidebar button')?.click();
+         history.pushState({}, "", "/settings");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+       }
+       for (const dialog of document.querySelectorAll('[role="dialog"]')) inspect(dialog, "delete or settings");
+       const box = document.querySelector(".modal[aria-labelledby]");
+       const titleEl = box ? document.getElementById(box.getAttribute("aria-labelledby")) : null;
+       out.titleLinked = Boolean(titleEl && titleEl.classList.contains("modal-title"));
+       document.querySelector(".modal-overlay")?.click();
+       await new Promise((r) => setTimeout(r, 400));
+       return out;
+     })()`
+  );
+  check(
+    dialogNames.checked.length > 0 && dialogNames.problems.length === 0,
+    `dialogs carry role, aria-modal and a visible name (${dialogNames.checked.length} checked: ${dialogNames.problems.join("; ")})`
+  );
+  // `Modal` only mounts for a record action; a fresh install has none, and the
+  // role/modal/name assertions above still ran on whatever dialog it does have.
+  if (!emptyMode) {
+    check(
+      dialogNames.titleLinked === true,
+      `a dialog's accessible name comes from its title element (${dialogNames.titleLinked === true})`
+    );
+  }
+
+  // 9b-1p. Table headers say what they are the header *of*. Without `scope`, a
+  //        screen reader reaches a cell and cannot say which column it is in.
+  const headerScopes = await evaluate(
+    cdp,
+    `(async () => {
+       const missing = [];
+       const count = (path) => {
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         return new Promise((r) => setTimeout(r, 900))
+           .then(() => {
+             history.pushState({}, "", path);
+             window.dispatchEvent(new PopStateEvent("popstate"));
+             return new Promise((r) => setTimeout(r, 1500));
+           })
+           .then(() => {
+             for (const th of document.querySelectorAll("main th")) {
+               if (th.getAttribute("scope") !== "col") missing.push(path + ": " + (th.textContent ?? "").trim());
+             }
+             return document.querySelectorAll("main th").length;
+           });
+       };
+       const totals = {
+         runs: await count("/runs"),
+         handoffs: await count("/handoffs"),
+         usage: await count("/usage"),
+         runtimes: await count("/runtimes"),
+       };
+       return { missing, total: Object.values(totals).reduce((a, b) => a + b, 0) };
+     })()`
+  );
+  check(
+    headerScopes.total > 0 && headerScopes.missing.length === 0,
+    `every column header declares its scope (${headerScopes.total} headers, ${headerScopes.missing.length} unmarked: ${headerScopes.missing.join("; ")})`
+  );
+
+  check(
+    tableWraps.total > 0 && tableWraps.unwrapped.length === 0,
+    `every table scrolls inside its card (${tableWraps.total} tables, ${tableWraps.unwrapped.length} unwrapped: ${tableWraps.unwrapped.join("; ")})`
+  );
+
+  check(
+    links.total > 0 && links.noHref === 0 && links.withHref === links.total,
+    `every in-app link carries an href (${links.withHref}/${links.total}, ${links.noHref} without)`
+  );
+  check(links.focusable === links.total, `in-app links are in the tab order (${links.focusable}/${links.total})`);
+  // An install with no runs has no /runs/:id link to click; the href checks
+  // above still apply, so only these two are skipped.
+  if (!emptyMode) {
+    check(links.navigated === true, "clicking an in-app link navigates");
+    check(links.metaClickFree === true, "a Cmd-click on an in-app link is left to the browser");
+  }
+
+  // FIXTURE-DATA ONLY (9b-1i - opens the delete dialog from a seeded task)
+  if (!emptyMode) {
+    // 9b-1i. A dialog keeps the keyboard. `aria-modal` alone does not: without a
+    //        trap, Tab walks out into the page behind the overlay.
+    const dialogFocus = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/tasks");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1600));
+         const row = document.querySelector(".task-item");
+         const opener = row?.querySelector("button");
+         opener?.focus();
+         [...(row?.querySelectorAll("button") ?? [])].pop()?.click();
+         await new Promise((r) => setTimeout(r, 500));
+         [...document.querySelectorAll("button")]
+           .filter((b) => /删除|Delete/.test(b.textContent ?? ""))
+           .pop()?.click();
+         await new Promise((r) => setTimeout(r, 700));
+         const modal = document.querySelector(".modal");
+         const out = {
+           opened: Boolean(modal),
+           focusInsideOnOpen: modal?.contains(document.activeElement) ?? false,
+         };
+         const stays = [];
+         for (let i = 0; i < 6; i++) {
+           window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+           await new Promise((r) => setTimeout(r, 40));
+           stays.push(modal?.contains(document.activeElement) ?? false);
+         }
+         out.trapped = stays.every(Boolean);
+         window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+         await new Promise((r) => setTimeout(r, 500));
+         out.closed = !document.querySelector(".modal");
+         out.restored = document.activeElement === opener;
+         return out;
+       })()`
+    );
+    check(
+      dialogFocus.opened === true && dialogFocus.focusInsideOnOpen === true && dialogFocus.trapped === true,
+      `a dialog keeps the keyboard inside it (opened: ${dialogFocus.opened}, focus inside: ${dialogFocus.focusInsideOnOpen}, trapped: ${dialogFocus.trapped})`
+    );
+    check(
+      dialogFocus.closed === true && dialogFocus.restored === true,
+      `closing a dialog returns focus to what opened it (closed: ${dialogFocus.closed}, restored: ${dialogFocus.restored})`
+    );
+  }
+
+  // FIXTURE-DATA ONLY (9b-1j - deletes a row it creates and expects both lists to agree)
+  if (!emptyMode) {
+    await createThrowawayTask(cdp, "verify cross-view delete");
+    await evaluate(cdp, `(async () => {
+      window.dispatchEvent(new Event("agentfabric:tasks-changed"));
+      await new Promise((r) => setTimeout(r, 600));
+      return true;
+    })()`);
+    // 9b-1j. A change written in one view reaches the others immediately. Before
+    //        the shared event, only the board announced task changes: a delete
+    //        in the task list left the rail showing the deleted row until the 5s
+    //        GET cache expired.
+    const crossView = await evaluate(
+      cdp,
+      `(async () => {
+         const railNames = () => [...document.querySelectorAll(".ws-task-row")]
+           .map((r) => (r.textContent ?? "").trim());
+         const TITLE = "verify cross-view delete";
+         const target = () => [...document.querySelectorAll(".task-item")]
+           .find((r) => (r.querySelector(".task-item-title")?.textContent ?? "").trim() === TITLE);
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1000));
+         history.pushState({}, "", "/tasks");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         // Wait for the row itself: the list is fetched after the route lands.
+         const deadline = Date.now() + 10000;
+         while (Date.now() < deadline && !target()) {
+           await new Promise((r) => setTimeout(r, 250));
+         }
+         const row = target();
+         const title = (row?.querySelector(".task-item-title")?.textContent ?? "").trim();
+         const out = { title, railHadItBefore: railNames().some((n) => n.includes(title)) };
+         [...(row?.querySelectorAll("button") ?? [])].pop()?.click();
+         await new Promise((r) => setTimeout(r, 400));
+         [...document.querySelectorAll("button")]
+           .filter((b) => /删除|Delete/.test(b.textContent ?? ""))
+           .pop()?.click();
+         await new Promise((r) => setTimeout(r, 600));
+         const modal = document.querySelector(".modal, [role=dialog]");
+         [...(modal?.querySelectorAll("button") ?? [])]
+           .find((b) => b.classList.contains("danger"))
+           ?.click();
+         // Well inside the 5s cache window: this can only pass if the rail was
+         // told, not if it waited for the cache to expire.
+         await new Promise((r) => setTimeout(r, 900));
+         out.railStillShowsIt = railNames().some((n) => n.includes(title));
+         // The board is the third place the same tasks appear.
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+         out.boardShowsIt = (document.querySelector("main")?.innerText ?? "").includes(title);
+         return out;
+       })()`
+    );
+    check(
+      Boolean(crossView.title) && crossView.railHadItBefore === true,
+      `the rail and the task list show the same tasks (${JSON.stringify(crossView.title)})`
+    );
+    check(
+      crossView.railStillShowsIt === false && crossView.boardShowsIt === false,
+      `a delete in the task list reaches the rail and the board at once (rail: ${crossView.railStillShowsIt}, board: ${crossView.boardShowsIt})`
+    );
+  }
+
+  // FIXTURE-DATA ONLY (9b-1k - needs two seeded tasks to tell "other" from "this one")
+  if (!emptyMode) {
+    // 9b-1k. A page about one task ignores changes to the others. It used to
+    //        reload whenever anything announced a task change, so deleting an
+    //        unrelated task from the rail re-read the whole detail page.
+    const scopedReload = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 900));
+         history.pushState({}, "", "/tasks/task_verify_1/lifecycle");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 2000));
+         // Watch the event as the page sees it: a listener registered here runs
+         // alongside the page's own, so the count says whether the page's
+         // filter let this change through. Network reads are the wrong probe —
+         // a reload inside the 5s GET cache never leaves the renderer.
+         const seen = [];
+         const spy = (e) => seen.push(e.detail?.taskId);
+         window.addEventListener("agentfabric:tasks-changed", spy);
+         const out = {};
+         try {
+           window.dispatchEvent(
+             new CustomEvent("agentfabric:tasks-changed", { detail: { taskId: "task_verify_2" } })
+           );
+           window.dispatchEvent(
+             new CustomEvent("agentfabric:tasks-changed", { detail: { taskId: "task_verify_1" } })
+           );
+           await new Promise((r) => setTimeout(r, 1200));
+           out.dispatchCount = seen.length;
+           // The page must still be the same task: an unrelated event must not
+           // have moved it (the rail navigations above are the only moves).
+           out.title = document.querySelector("main h1")?.textContent ?? "";
+         } finally {
+           window.removeEventListener("agentfabric:tasks-changed", spy);
+         }
+         return out;
+       })()`
+    );
+    check(
+      scopedReload.dispatchCount === 2,
+      `both task-change events reach the page (${scopedReload.dispatchCount} seen)`
+    );
+    check(
+      /verify task one/.test(scopedReload.title ?? ""),
+      `a task page stays on its own task when others change (${JSON.stringify(scopedReload.title)})`
+    );
+  }
+
+  // FIXTURE-DATA ONLY (9b-1m - needs run rows carrying costs of known size)
+  if (!emptyMode) {
+    // 9b-1m. One money format. The run list and the inspector printed
+    //        `toFixed(6)` (`$0.000012`, `$1.234500`) while Usage had already
+    //        learned to drop the noise; both now share `fmtCost`.
+    const money = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/runs");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1800));
+         const cells = [...document.querySelectorAll("main tbody tr")]
+           .map((r) => (r.children[7]?.textContent ?? "").trim())
+           .filter((c) => c.startsWith("$"));
+         return {
+           cells,
+           anySixZeroes: cells.some((c) => /0{6}/.test(c)),
+           // More than a dollar keeps two decimals, so it cannot be 1.234500-formatted.
+           dollarOk: cells.some((c) => c === "$1.23"),
+         };
+       })()`
+    );
+    check(
+      money.cells.length > 0 && money.anySixZeroes === false,
+      `costs are printed without padding zeroes (${JSON.stringify(money.cells)})`
+    );
+    check(
+      money.dollarOk === true,
+      `a cost above one dollar keeps two decimals (${JSON.stringify(money.cells)})`
+    );
+  }
+
+  // FIXTURE-DATA ONLY (9b-1l - needs a run row to read a timestamp from)
+  if (!emptyMode) {
+    // 9b-1l. One timestamp format. The rows used to render through bare
+    //        `toLocaleString()`, i.e. whatever the OS produced — seconds and
+    //        all — while the relative labels came from a shared helper. Task
+    //        and Trash had two private copies of that helper as well; those are
+    //        gone, so the same instant cannot read two ways on one screen.
+    const stamps = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/kanban");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1000));
+         history.pushState({}, "", "/runs");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         // Wait for a row that actually renders a full date — the point of the
+         // check — rather than for any row to exist.
+         // No backslash escapes here: inside a template literal a backslash before
+         // a letter is swallowed, so a shorthand class arrives as a bare letter
+         // and silently stops matching. [0-9] and [ ] say the same thing without
+         // needing one.
+         const STAMP = /([0-9]{4})[年/. -]([0-9]{1,2})[月/. -]([0-9]{1,2})日?[ ]+[0-9]{1,2}:[0-9]{2}(?![0-9])/;
+         const deadline = Date.now() + 20000;
+         let rowText = "";
+         while (Date.now() < deadline) {
+           // Route first, then read: a stale page from the previous check still
+           // has a <main>, so check which view is up before trusting its rows.
+           if (location.pathname !== "/runs") {
+             history.pushState({}, "", "/runs");
+             window.dispatchEvent(new PopStateEvent("popstate"));
+             await new Promise((r) => setTimeout(r, 400));
+             continue;
+           }
+           rowText = document.querySelector("main tbody tr")?.innerText ?? "";
+           if (STAMP.test(rowText)) break;
+           await new Promise((r) => setTimeout(r, 250));
+         }
+         const text = rowText;
+         const diag = { path: location.pathname, sample: rowText.slice(-60) };
+         // A full date: year, month, day, hour:minute. No seconds, no
+         // locale-specific noise.
+         const stamp = STAMP.exec(text);
+         const out = {
+           found: Boolean(stamp),
+           sample: stamp ? stamp[0] : null,
+           hasSeconds: /[0-9]{1,2}:[0-9]{2}:[0-9]{2}/.test(text),
+           path: diag.path,
+           tail: diag.sample,
+         };
+         history.pushState({}, "", "/tasks");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1200));
+         // The rail's labels and the list's labels come from one helper, so a
+         // freshly written record reads the same "just now" in both.
+         out.railRelative = document.querySelector(".ws-task-time")?.textContent?.trim() ?? null;
+         out.listRelative = document.querySelector(".task-item-time")?.textContent?.trim() ?? null;
+         return out;
+       })()`
+    );
+    check(
+      stamps.found === true && stamps.hasSeconds === false,
+      `timestamps use one explicit format (${JSON.stringify(stamps.sample)}, seconds: ${stamps.hasSeconds}, at ${stamps.path}: ${JSON.stringify(stamps.tail)})`
+    );
+    check(
+      Boolean(stamps.railRelative) && stamps.railRelative === stamps.listRelative,
+      `the rail and the task list label the same instant the same way (${JSON.stringify(stamps.railRelative)} / ${JSON.stringify(stamps.listRelative)})`
+    );
+  }
+
   // 9b-2. The board's Add workspace dialog can adopt an existing workspace and
   //       exposes the same native folder bridge as the rail's dialog.
   const boardDialog = await evaluate(
     cdp,
     `(async () => {
+       // The button only exists on the board: the checks above may have left the
+       // window on any route, so navigate first instead of clicking nothing.
+       history.pushState({}, "", "/kanban");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1600));
        document.querySelector(".board-add-project")?.click();
        await new Promise((r) => setTimeout(r, 700));
        const dialog = document.querySelector(".add-workspace-dialog");
@@ -1441,7 +2587,7 @@ try {
          window.dispatchEvent(new PopStateEvent("popstate"));
          await new Promise((r) => setTimeout(r, 1800));
          const btn = [...document.querySelectorAll("main button, .settings-body button")]
-           .filter((b) => b.className.split(/\\s+/).indexOf("danger") !== -1)
+           .filter((b) => b.className.split(/\s+/).indexOf("danger") !== -1)
            .find((b) => match.test(b.textContent));
          if (!btn) return "no delete button on " + path;
          const before = document.querySelectorAll(".modal, [role=dialog]").length;
@@ -1548,6 +2694,57 @@ try {
   );
   check(unsaved.stillEditing === true, "\"Keep editing\" leaves the panel open");
   check(unsaved.closed === true, "\"Discard and close\" closes the panel");
+
+  // 9e. A failed settings save says so where the click happened. Each editable
+  //     page's save used to end in `try/finally` with no `catch`: the request
+  //     failed, the panel's banner was hidden behind the section, and Save
+  //     looked like it had worked while the file was never written. The PUT is
+  //     failed here by rejecting it in the page, which is the only way to reach
+  //     this path without corrupting a real config.
+  const saveFailure = await evaluate(
+    cdp,
+    `(async () => {
+       const originalFetch = window.fetch;
+       window.fetch = (input, init) => {
+         const url = typeof input === "string" ? input : input?.url ?? "";
+         const method = (init?.method ?? "GET").toUpperCase();
+         if (url.endsWith("/api/config") && method !== "GET") {
+           return Promise.reject(new Error("verify: simulated network failure"));
+         }
+         return originalFetch(input, init);
+       };
+       try {
+         history.pushState({}, "", "/settings/retry");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 1400));
+         const toggle = document.querySelector(".settings-page .settings-switch input");
+         // Make the page dirty: the save button only exists to save a change.
+         toggle?.click();
+         await new Promise((r) => setTimeout(r, 500));
+         const saveBtn = [...document.querySelectorAll(".settings-page .settings-save-row button")]
+           .find((b) => b.classList.contains("btn-primary"));
+         const enabled = saveBtn ? !saveBtn.disabled : false;
+         saveBtn?.click();
+         await new Promise((r) => setTimeout(r, 1200));
+         const banner = document.querySelector(".settings-save-row .settings-error-line");
+         const out = {
+           saveEnabled: enabled,
+           bannerText: (banner?.textContent ?? "").trim(),
+           role: banner?.getAttribute("role") ?? null,
+         };
+         // Put the toggle back so the run leaves no dirty state behind.
+         toggle?.click();
+         return out;
+       } finally {
+         window.fetch = originalFetch;
+       }
+     })()`
+  );
+  check(saveFailure.saveEnabled, "a settings page can be saved once a field changes");
+  check(
+    saveFailure.role === "alert" && /没有保存成功|Not saved/.test(saveFailure.bannerText ?? ""),
+    `a failed settings save reports itself next to the Save button (${JSON.stringify(saveFailure.bannerText?.slice(0, 80))})`
+  );
 
   // 10. A terminal session actually spawns a PTY process inside the bundle.
   //     (The UI half: the board's project list — the shared Project collection —

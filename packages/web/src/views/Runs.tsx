@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get, post, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
-import { StatusBadge, useMinuteClock, useAsync, ErrorBox, CopyButton, Pager, usePolling } from "../components";
+import { StatusBadge, useMinuteClock, useAsync, ErrorBox, CopyButton, Modal, Pager, usePolling, AppLink } from "../components";
+import { phaseLabel } from "../i18n";
 import { useI18n } from "../i18n-react";
 import { navigate } from "../router";
+import { RUNS_CHANGED_EVENT, onAppEvent, notifyRunsChanged } from "../appEvents";
 
 /** How each harness resumes a native session by id (matches runtimes' buildArgs). */
 const NATIVE_RESUME_CMD: Record<string, string> = {
@@ -20,12 +22,38 @@ const NATIVE_RESUME_CMD: Record<string, string> = {
 /** Rows per page: one row per execution, and executions accumulate. */
 const RUNS_PAGE_SIZE = 50;
 
+/**
+ * The status groups the list can be narrowed to.
+ *
+ * Executions accumulate for the life of the install, so "where is the run I
+ * just started" and "what failed last night" — the two questions this page
+ * exists to answer — otherwise mean scrolling past hundreds of finished rows.
+ * The groups are coarse on purpose: they follow what a person is looking for,
+ * not the record's exact status value.
+ */
+const STATUS_FILTERS = ["all", "active", "failed", "completed"] as const;
+type StatusFilter = (typeof STATUS_FILTERS)[number];
+
+/** A run counts as active while it can still move: the same set Cancel offers for. */
+const ACTIVE_STATUSES = ["pending", "starting", "running"];
+
+function matchesFilter(run: any, filter: StatusFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "active") return ACTIVE_STATUSES.includes(run.status);
+  if (filter === "failed") return run.status === "failed" || run.status === "timeout";
+  return run.status === "completed";
+}
+
 export function RunsView() {
   const { t } = useI18n();
   const { data, error, loading, reload } = useAsync<any[]>((force) => get("/api/runs", undefined, force), []);
+  // A run started, cancelled or finished elsewhere: read again now instead of
+  // waiting for the next poll (which only runs while something is active).
+  useEffect(() => onAppEvent(RUNS_CHANGED_EVENT, reload), [reload]);
   // Runs accumulate one per execution: page them, for the same reason the task
   // list is paged (flat DOM and re-render cost).
   const [page, setPage] = useState(0);
+  const [filter, setFilter] = useState<StatusFilter>("all");
   // Cancel in flight per run, and the last failure. A cancel that fails used to
   // be an unhandled rejection: the row simply stayed there with nothing said.
   const [cancelling, setCancelling] = useState<Record<string, boolean>>({});
@@ -37,6 +65,7 @@ export function RunsView() {
     setActionError(null);
     try {
       await post(`/api/runs/${runId}/cancel`);
+      notifyRunsChanged({ runId });
       reloadAll();
     } catch (e) {
       setActionError(t("runs.cancelFailed", { id: runId, error: e instanceof Error ? e.message : String(e) }));
@@ -52,11 +81,17 @@ export function RunsView() {
     [sessionRefs]
   );
   const reloadAll = () => { reload(); reloadSessions(); };
-  const pageCount = Math.max(1, Math.ceil((data?.length ?? 0) / RUNS_PAGE_SIZE));
+  // A run's status and phase move while it executes. The Board and the task
+  // lifecycle both refresh on their own; this list used to sit still until the
+  // user pressed Refresh, so a starting run looked stuck at "starting".
+  const activeCount = (data ?? []).filter((r: any) => ACTIVE_STATUSES.includes(r.status)).length;
+  usePolling(reloadAll, 3000, activeCount > 0);
+  const filtered = (data ?? []).filter((r: any) => matchesFilter(r, filter));
+  const pageCount = Math.max(1, Math.ceil(filtered.length / RUNS_PAGE_SIZE));
   // Clamped: a refresh can shrink the list (a run deleted elsewhere) while the
   // view is on the last page, which would otherwise show an empty table.
   const currentPage = Math.min(page, pageCount - 1);
-  const pageRows = (data ?? []).slice(currentPage * RUNS_PAGE_SIZE, (currentPage + 1) * RUNS_PAGE_SIZE);
+  const pageRows = filtered.slice(currentPage * RUNS_PAGE_SIZE, (currentPage + 1) * RUNS_PAGE_SIZE);
   return (
     <div>
       <div className="row" style={{ marginBottom: 4 }}>
@@ -65,18 +100,43 @@ export function RunsView() {
       </div>
       <p className="sub">
         {t("runs.subtitle")} 
-        <a onClick={() => navigate("/tasks")}>{t("runs.subtitle.threadLink")}</a>
+        <AppLink href={"/tasks"}>{t("runs.subtitle.threadLink")}</AppLink>
         {"。"}
       </p>
       <ErrorBox message={actionError ?? error} />
+      <div className="runs-filters" role="group" aria-label={t("runs.filterLabel")}>
+        {STATUS_FILTERS.map((option) => {
+          const count =
+            option === "all"
+              ? (data?.length ?? 0)
+              : (data ?? []).filter((r: any) => matchesFilter(r, option)).length;
+          return (
+            <button
+              key={option}
+              className={`runs-filter ${filter === option ? "active" : ""}`}
+              aria-pressed={filter === option}
+              onClick={() => {
+                setFilter(option);
+                setPage(0);
+              }}
+            >
+              {t(`runs.filter.${option}` as Parameters<typeof t>[0])}
+              <span className="runs-filter-count">{count}</span>
+            </button>
+          );
+        })}
+        {activeCount > 0 && <span className="runs-live">{t("runs.live", { n: activeCount })}</span>}
+      </div>
       {data && data.length > 0 ? (
       <div className="card">
+          <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>{t("runs.col.run")}</th><th>{t("runs.col.task")}</th><th>{t("runs.col.status")}</th>
-                <th>{t("runs.col.runtime")}</th><th>{t("runs.col.continuity")}</th><th>{t("runs.col.model")}</th>
-                <th>{t("runs.col.cost")}</th><th>{t("runs.col.created")}</th><th></th>
+                <th scope="col">{t("runs.col.run")}</th><th scope="col">{t("runs.col.task")}</th><th scope="col">{t("runs.col.status")}</th>
+                <th scope="col">{t("runs.col.phase")}</th>
+                <th scope="col">{t("runs.col.runtime")}</th><th scope="col">{t("runs.col.continuity")}</th><th scope="col">{t("runs.col.model")}</th>
+                <th scope="col">{t("runs.col.cost")}</th><th scope="col">{t("runs.col.created")}</th><th scope="col"></th>
               </tr>
             </thead>
             <tbody>
@@ -85,9 +145,10 @@ export function RunsView() {
                 const resumeCmd = sessionRef && NATIVE_RESUME_CMD[sessionRef.runtimeKind];
                 return (
                 <tr key={r.id}>
-                  <td className="mono"><a onClick={() => navigate(`/runs/${r.id}`)}>{shortId(r.id)}</a></td>
-                  <td><a onClick={() => navigate(`/tasks/${r.taskId}`)}>{r.taskTitle}</a></td>
+                  <td className="mono"><AppLink href={`/runs/${r.id}`}>{shortId(r.id)}</AppLink></td>
+                  <td><AppLink href={`/tasks/${r.taskId}`}>{r.taskTitle}</AppLink></td>
                   <td><StatusBadge status={r.status} /></td>
+                  <td className="muted">{phaseLabel(t, r.phase)}</td>
                   <td>{r.runtimeName ?? "-"}</td>
                   <td className="muted">{continuityLabel(t, r.continuity ?? "new")}</td>
                   <td>{r.modelName ?? "-"}</td>
@@ -121,10 +182,27 @@ export function RunsView() {
               })}
             </tbody>
           </table>
-          <Pager page={currentPage} pageCount={pageCount} total={data?.length ?? 0} pageSize={RUNS_PAGE_SIZE} onChange={setPage} />
+          </div>
+          {pageRows.length === 0 && (
+            <div className="muted table-empty-hint">{t("runs.emptyFilter")}</div>
+          )}
+          <Pager page={currentPage} pageCount={pageCount} total={filtered.length} pageSize={RUNS_PAGE_SIZE} onChange={setPage} />
       </div>
       ) : (
-        <div className="card muted">{loading ? t("common.loading") : t("runs.empty")}</div>
+        <div className="card muted">
+          {loading
+            ? t("common.loading")
+            : (data?.length ?? 0) > 0
+              ? // Rows exist, this filter just matches none of them: saying "no
+                // runs yet" here would be false.
+                t("runs.emptyFilter")
+              : (
+                  <>
+                    {t("runs.empty")}{" "}
+                    <AppLink href="/tasks">{t("runs.empty.link")}</AppLink>
+                  </>
+                )}
+        </div>
       )}
     </div>
   );
@@ -165,6 +243,8 @@ export function RunDetailView({ runId }: { runId: string }) {
   const [generatedHandoff, setGeneratedHandoff] = useState<any>(null);
   const [sessionRef, setSessionRef] = useState<any>(null);
   const [nativeState, setNativeState] = useState<any>(null);
+  // The artifact whose inline content is open in a dialog.
+  const [previewArtifact, setPreviewArtifact] = useState<any | null>(null);
 
   useEffect(() => {
     let unsub: () => void = () => {};
@@ -246,8 +326,8 @@ export function RunDetailView({ runId }: { runId: string }) {
     <div>
       {actionError && <ErrorBox message={actionError} />}
       <div className="row">
-        <a onClick={() => navigate("/runs")}>{t("runs.detail.back")}</a>
-        <a onClick={() => navigate(`/tasks/${run.taskId}`)}>{t("runs.detail.thread")}</a>
+        <AppLink href={"/runs"}>{t("runs.detail.back")}</AppLink>
+        <AppLink href={`/tasks/${run.taskId}`}>{t("runs.detail.thread")}</AppLink>
         <span className="right">
           {isLive && (
             <button
@@ -258,6 +338,7 @@ export function RunDetailView({ runId }: { runId: string }) {
                 setActionError(null);
                 try {
                   await post(`/api/runs/${runId}/cancel`);
+                  notifyRunsChanged({ runId });
                   reload();
                 } catch (e) {
                   setActionError(t("runs.cancelFailed", { id: runId, error: e instanceof Error ? e.message : String(e) }));
@@ -276,12 +357,16 @@ export function RunDetailView({ runId }: { runId: string }) {
       <h1 className="mono">{runId}</h1>
       <p className="sub">
         <strong>{t("runs.detail.inspector")}</strong>{" "}
-        <a onClick={() => navigate(`/tasks/${run.taskId}`)}>{t("runs.subtitle.threadLink")}</a>
+        <AppLink href={`/tasks/${run.taskId}`}>{t("runs.subtitle.threadLink")}</AppLink>
         {t("runs.detail.inspectorTail")}
       </p>
 
       <div className="grid">
         <div className="stat"><div className="num"><StatusBadge status={run.status} /></div><div className="lbl">{t("runs.stat.status")}</div></div>
+        {/* The inspector is where "what is it doing right now" gets answered:
+            status is the coarse verdict, the phase is the step it is on. It was
+            missing here entirely while the task page had it. */}
+        <div className="stat"><div className="num">{phaseLabel(t, run.phase)}</div><div className="lbl">{t("runs.stat.phase")}</div></div>
         <div className="stat">
           <div className="num">
             {purpose}
@@ -349,7 +434,24 @@ export function RunDetailView({ runId }: { runId: string }) {
         </div>
       )}
 
-      {run.error && <ErrorBox message={String(run.error)} />}
+      {/* A failed run's reason is the first thing this page is opened for. It
+          used to be a bare string in the same red box every other error uses;
+          now it names what happened and puts the two places that explain it one
+          click away, instead of making the reader hunt through the tabs. */}
+      {run.error && (
+        <div className="card run-error">
+          <div className="run-error-title">{t("runs.error.title")}</div>
+          <pre className="run-error-body">{String(run.error)}</pre>
+          <div className="run-error-actions">
+            <button className="small" onClick={() => setTab("logs")}>
+              {t("runs.error.openLogs")}
+            </button>
+            <button className="small" onClick={() => setTab("events")}>
+              {t("runs.error.openEvents")}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="row" style={{ margin: "16px 0" }}>
         {(["events", "logs", "artifacts", "continuity"] as const).map((entry) => (
@@ -383,24 +485,47 @@ export function RunDetailView({ runId }: { runId: string }) {
         {tab === "artifacts" && (
           <div>
             {artifacts.length === 0 && <div className="muted">{t("runs.artifacts.empty")}</div>}
+            <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>{t("runs.artifacts.name")}</th><th>{t("runs.artifacts.kind")}</th>
-                  <th>{t("runs.artifacts.size")}</th><th>{t("runs.artifacts.id")}</th>
+                  <th scope="col">{t("runs.artifacts.name")}</th><th scope="col">{t("runs.artifacts.kind")}</th>
+                  <th scope="col">{t("runs.artifacts.size")}</th><th scope="col">{t("runs.artifacts.id")}</th><th scope="col"></th>
                 </tr>
               </thead>
               <tbody>
                 {artifacts.map((a) => (
                   <tr key={a.id}>
                     <td className="mono">{a.name}</td>
-                    <td>{a.kind}</td>
-                    <td>{a.size}</td>
+                    <td>
+                      {a.kind}
+                      {!a.content && a.path && <div className="muted">{t("runs.artifacts.onDisk")}</div>}
+                    </td>
+                    <td>{a.size ?? "-"}</td>
                     <td className="mono">{a.id}</td>
+                    <td>
+                      {a.content != null ? (
+                        <>
+                          <button className="small" onClick={() => setPreviewArtifact(a)}>
+                            {t("runs.artifacts.open")}
+                          </button>{" "}
+                          <a
+                            className="small"
+                            href={`/api/artifacts/${encodeURIComponent(a.id)}/content`}
+                            download={a.name}
+                          >
+                            {t("runs.artifacts.download")}
+                          </a>
+                        </>
+                      ) : (
+                        <span className="muted" title={a.path ?? ""}>{a.path ?? "-"}</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         )}
         {tab === "continuity" && (
@@ -409,13 +534,13 @@ export function RunDetailView({ runId }: { runId: string }) {
             {previousHandoff && (
               <>
                 <h2 style={{ marginTop: 14 }}>{t("runs.continuity.consumed")}</h2>
-                <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(previousHandoff.content, null, 2)}</pre>
+                <HandoffBody content={previousHandoff.content} />
               </>
             )}
             {generatedHandoff && (
               <>
                 <h2 style={{ marginTop: 14 }}>{t("runs.continuity.generated")}</h2>
-                <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(generatedHandoff.content, null, 2)}</pre>
+                <HandoffBody content={generatedHandoff.content} />
               </>
             )}
             {sessionRef && (
@@ -457,8 +582,97 @@ export function RunDetailView({ runId }: { runId: string }) {
           </div>
         )}
       </div>
+
+      {previewArtifact && (
+        <Modal title={previewArtifact.name} onClose={() => setPreviewArtifact(null)}>
+          <p className="muted" style={{ margin: "0 0 8px" }}>
+            {t("runs.artifacts.preview")} · {previewArtifact.kind}
+            {previewArtifact.mime ? ` · ${previewArtifact.mime}` : ""}
+          </p>
+          <pre className="artifact-preview" style={{ whiteSpace: "pre-wrap" }}>
+            {String(previewArtifact.content)}
+          </pre>
+        </Modal>
+      )}
     </div>
   );
+}
+
+/**
+ * A handoff's content, shown as the three things it carries instead of as the
+ * JSON the record is stored in: the summary the reader is looking for, the
+ * context bundle's checkpoint sections, and every other field folded away.
+ *
+ * The content is projected exactly once, when the handoff is generated (see
+ * AGENTS.md); this only chooses how to display what is already there, and falls
+ * back to the raw JSON for a record whose shape it does not recognise.
+ */
+function HandoffBody({ content }: { content: unknown }) {
+  const { t } = useI18n();
+  if (content == null) return <div className="muted">-</div>;
+  if (typeof content === "string") return <pre style={{ whiteSpace: "pre-wrap" }}>{content}</pre>;
+  if (typeof content !== "object") return <pre style={{ whiteSpace: "pre-wrap" }}>{String(content)}</pre>;
+  const record = content as Record<string, any>;
+  const summary: string | undefined =
+    typeof record.summary === "string"
+      ? record.summary
+      : typeof record.summary?.summary === "string"
+        ? record.summary.summary
+        : undefined;
+  const checkpoint: string | undefined =
+    record.contextBundle?.checkpoint ?? record.checkpoint ?? undefined;
+  const sections = checkpoint ? splitCheckpoint(checkpoint) : [];
+  const rest = { ...record };
+  delete rest.summary;
+  delete rest.contextBundle;
+  if (record.checkpoint) delete rest.checkpoint;
+  const hasRest = Object.keys(rest).length > 0;
+  return (
+    <div className="handoff-body">
+      {summary && (
+        <section>
+          <h3>{t("runs.handoff.summary")}</h3>
+          <p style={{ whiteSpace: "pre-wrap" }}>{summary}</p>
+        </section>
+      )}
+      {sections.map((section) => (
+        <section key={section.title}>
+          <h3>{section.title}</h3>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{section.body}</pre>
+        </section>
+      ))}
+      {(hasRest || !summary) && (
+        <details>
+          <summary>{t("runs.handoff.raw")}</summary>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(content, null, 2)}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A checkpoint is Markdown whose `## Heading` lines are its sections. Splitting
+ * on them is display only: the text of each section is shown verbatim, never
+ * re-summarised or re-ordered.
+ */
+function splitCheckpoint(checkpoint: string): Array<{ title: string; body: string }> {
+  const lines = checkpoint.split("\n");
+  const out: Array<{ title: string; body: string }> = [];
+  let current: { title: string; body: string[] } | null = null;
+  for (const line of lines) {
+    const heading = /^##\s+(.*)$/.exec(line.trim());
+    if (heading) {
+      if (current && (current.body.length > 0 || current.title)) {
+        out.push({ title: current.title, body: current.body.join("\n").trim() });
+      }
+      current = { title: heading[1]!.trim(), body: [] };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  if (current) out.push({ title: current.title, body: current.body.join("\n").trim() });
+  return out.filter((section) => section.title || section.body);
 }
 
 /** `label: value` lines aligned in two columns, for the inspector's raw blocks. */

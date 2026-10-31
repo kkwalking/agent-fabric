@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { get, post, subscribeSSE, fmtCostShort, fmtDuration, fmtTime, fmtTokens, ApiError } from "../api";
-import { ErrorBox, Icon, Modal, StatusBadge, useAsync } from "../components";
+import { ErrorBox, Icon, Modal, StatusBadge, useAsync, AppLink } from "../components";
 import { AcpChat } from "../components/AcpChat";
 import { BoardTerminal } from "../components/BoardTerminal";
 import { Markdown } from "../markdown";
@@ -19,6 +19,7 @@ import {
   type ToolActivity,
 } from "../presentation";
 import { statusLabel, type MessageKey } from "../i18n";
+import { onAppEvent, TASKS_CHANGED_EVENT } from "../appEvents";
 import { useT } from "../i18n-react";
 import { navigate } from "../router";
 
@@ -106,6 +107,12 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   const [thread, setThread] = useState<ThreadData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+  // A task changed elsewhere: reload this thread only if it is the one on
+  // screen (or the writer could not say which task it meant).
+  useEffect(
+    () => onAppEvent(TASKS_CHANGED_EVENT, () => setReloadTick((n) => n + 1), (c) => c.taskId === undefined || c.taskId === taskId),
+    [taskId]
+  );
   const [showJump, setShowJump] = useState(false);
   const [pendingHandoff, setPendingHandoff] = useState<PendingHandoff | null>(null);
   /** Composer runtime preselection requested from outside (quota flow aim). */
@@ -288,7 +295,7 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
     return (
       <div className="page-pad">
         <ErrorBox message={error} />
-        <p><a onClick={() => navigate("/tasks")}>{t("thread.backToTasks")}</a></p>
+        <p><AppLink href={"/tasks"}>{t("thread.backToTasks")}</AppLink></p>
       </div>
     );
   }
@@ -391,24 +398,32 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
           <span className="meta-chip" title={lastModelLabel ?? "—"}>
             <Icon name="cpu" size={13} /> {lastModelLabel ?? "—"}
           </span>
-          <a className="switch-link" onClick={() => { focusComposer(); composerRuntimeRef.current?.focus(); }}>
+          {/* Not a link: this focuses the composer, it does not go anywhere. */}
+          <button
+            type="button"
+            className="switch-link"
+            onClick={() => {
+              focusComposer();
+              composerRuntimeRef.current?.focus();
+            }}
+          >
             <Icon name="refresh" size={12} /> {t("thread.switchRuntime")}
-          </a>
+          </button>
           {/* The lifecycle page is a detail view of this task: workspace,
               runtime, current phase, agent status and its runs. The entry
               point lives here rather than being the page the composer lands
               on. */}
-          <a className="switch-link" onClick={() => navigate(`/tasks/${thread.task.id}/lifecycle`)}>
+          <AppLink href={`/tasks/${thread.task.id}/lifecycle`} className="switch-link">
             <Icon name="box" size={12} /> {t("thread.lifecycle")}
-          </a>
+          </AppLink>
           {/* A board card's Task keeps living on the board it came from: the
               card owns the column, the terminal and the chat. Without this
               link the board conversation would be a dead end from the task
               side, since the thread only shows run events. */}
           {boardCardId && (
-            <a className="switch-link" onClick={() => navigate("/kanban")} title={t("thread.boardCardTitle")}>
+            <AppLink href="/kanban" className="switch-link" title={t("thread.boardCardTitle")}>
               <Icon name="grid" size={12} /> {t("thread.boardCard")}
-            </a>
+            </AppLink>
           )}
         </div>
         {syncError && <ErrorBox message={t("thread.syncFailed", { error: syncError })} />}

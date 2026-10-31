@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Icon, IconName } from "./components";
 import { LanguageContext, useLanguageState } from "./i18n-react";
 import type { MessageKey } from "./i18n";
@@ -123,10 +123,37 @@ const SIDEBAR_COLLAPSED_KEY = "agentfabric.sidebarCollapsed";
  * holds, not a separate surface with its own save button. `/proxy` still routes
  * there so an old bookmark lands on the section instead of the task list.
  */
-/** The sidebar's language switch: one click between the two dictionaries. */
-/** Where closing the settings panel returns to (its opener, else the task list). */
-function closeSettings(): void {
-  navigate("/tasks");
+/**
+ * Where the settings panel goes when it closes: back to where it was opened,
+ * not to a fixed page. The comment above the panel has always said it is a
+ * modal "over whatever view is behind it" — but closing it always landed on
+ * the task list, so opening settings from the board or a thread and closing it
+ * moved the user somewhere they had not been.
+ *
+ * Kept in a ref rather than in the URL: it is local view state, it should not
+ * survive a reload (a reload of /settings does open the panel over nothing), and
+ * it must not add history entries.
+ */
+function useSettingsReturn(open: boolean): { close: () => void } {
+  const where = useRef<string | null>(null);
+  const path = usePath();
+  // The last URL that was *not* the panel. Updated while the panel is closed,
+  // so when the panel opens the ref still holds where it opened from — the
+  // effect runs after the URL has already changed to /settings, and recording
+  // the current path would record the panel itself and make "close" reopen it.
+  useEffect(() => {
+    if (open) return;
+    where.current = path;
+  }, [open, path]);
+  return {
+    close: () => {
+      const target = where.current;
+      // Never navigate back into the panel, and never request the page already
+      // showing: `navigate` ignores that, which would leave the panel up.
+      const safe = target && !target.startsWith("/settings") ? target : "/tasks";
+      navigate(safe);
+    },
+  };
 }
 
 export function App() {
@@ -134,16 +161,27 @@ export function App() {
   const t = language.t;
   const path = usePath();
   const parsed: Route = parsePath(path);
+  const settingsReturn = useSettingsReturn(parsed.view === "settings");
   // Reopened after a dev-server reload: the route says where to go, the session
   // flag says the settings panel is still open over it.
-  const [settingsOpen, setSettingsOpen] = useState(readSettingsOpen);
+  // The flag alone never opens the panel: it is consulted only when the URL
+  // already says `/settings`, where it decides whether the panel is up at all
+  // (a reload) — see the effect below.
+  const [settingsOpen, setSettingsOpen] = useState(() => parsed.view === "settings" && readSettingsOpen());
   const route: Route = settingsOpen && parsed.view !== "settings" ? { view: "settings", section: "general" } : parsed;
 
   // Keep the session flag in step with where the user actually is.
+  //
+  // The flag exists so a dev-server reload keeps the panel open, but it has to
+  // be able to come back *down*. A reload of `/tasks` still had the flag set
+  // from an earlier visit, so the panel was drawn over the task list while the
+  // URL read `/tasks` — and closing it navigated to `/tasks`, the page already
+  // showing, which `navigate` ignores. The panel then could not be closed at
+  // all. The rule is now the one in the comment above: the URL carries the
+  // panel, the flag only survives a reload that happens *on* it.
   useEffect(() => {
-    const open = parsed.view === "settings";
-    setSettingsOpen(open);
-    writeSettingsOpen(open);
+    setSettingsOpen(parsed.view === "settings");
+    writeSettingsOpen(parsed.view === "settings");
   }, [parsed.view]);
   // The rail's filter row.
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -231,22 +269,18 @@ export function App() {
             <div className="rail-head">
               <span className="rail-head-title">{t("sidebar.workspaces")}</span>
               <span className="rail-head-actions">
-                <button
-                  className="icon-btn"
-                  title={t("sidebar.search")}
-                  aria-label={t("sidebar.search")}
-                  onClick={() => navigate("/tasks")}
-                >
-                  <Icon name="search" size={15} />
-                </button>
+                {/* No search button: it navigated to the full task list, which
+                    is not search. The task list is reachable from the overflow
+                    menu, where the other destinations live. */}
                 <button
                   className="icon-btn"
                   title={t("sidebar.filter")}
                   aria-label={t("sidebar.filter")}
-                  onClick={() => setFiltersOpen((open) => !open)}
                   aria-expanded={filtersOpen}
+                  aria-controls="rail-filters"
+                  onClick={() => setFiltersOpen((open) => !open)}
                 >
-                  <Icon name="grid" size={15} />
+                  <Icon name="funnel" size={15} />
                 </button>
                 {/* The one action that creates a workspace, given a `+` like
                     the reference UI. New tasks start from the full-width
@@ -264,7 +298,7 @@ export function App() {
             </div>
             <nav className="rail-scroll" aria-label={t("sidebar.workspaces")}>
               {filtersOpen && (
-                <div className="rail-filters">
+                <div className="rail-filters" id="rail-filters">
                   <label>
                     <input type="checkbox" checked={filterPinnedOnly} onChange={(e) => setFilterPinnedOnly(e.target.checked)} />
                     {t("sidebar.filterPinned")}
@@ -344,7 +378,7 @@ export function App() {
           <SettingsPanel
             section={route.section ?? "general"}
             onSection={(section: SettingsSection) => navigate(`/settings/${section}`)}
-            onClose={closeSettings}
+            onClose={settingsReturn.close}
           />
         )}
         </Suspense>

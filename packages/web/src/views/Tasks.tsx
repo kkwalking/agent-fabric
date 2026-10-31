@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { del, get, fmtRelative } from "../api";
-import { Icon, Modal, Pager, StatusBadge, clickableRow, useMinuteClock, useAsync, ErrorBox } from "../components";
-import { statusLabel, type Translate } from "../i18n";
+import { Icon, Modal, Pager, StatusBadge, clickableRow, useMinuteClock, useAsync, ErrorBox, AppLink } from "../components";
+import { statusLabel } from "../i18n";
 import { useT } from "../i18n-react";
 import { navigate } from "../router";
+import { notifyTasksChanged } from "../appEvents";
 
 // Per-browser UI preference: when set, deleting a task skips the confirm modal.
 const SUPPRESS_DELETE_CONFIRM_KEY = "agentfabric.deleteTaskConfirmSuppressed";
@@ -17,22 +18,6 @@ const SUPPRESS_DELETE_CONFIRM_KEY = "agentfabric.deleteTaskConfirmSuppressed";
 /** Rows per page. */
 const TASKS_PAGE_SIZE = 50;
 
-/**
- * Relative timestamp in the interface language. `fmtRelative` is deliberately
- * not translated in place: it is shared with views this module does not own.
- */
-function relativeLabel(t: Translate, iso?: string): string {
-  if (!iso) return "—";
-  const at = Date.parse(iso);
-  if (Number.isNaN(at)) return "—";
-  const diff = Date.now() - at;
-  if (diff < 60_000) return t("status.justNow");
-  if (diff < 3_600_000) return t("status.minutesAgo", { n: Math.floor(diff / 60_000) });
-  if (diff < 86_400_000) return t("status.hoursAgo", { n: Math.floor(diff / 3_600_000) });
-  if (diff < 7 * 86_400_000) return t("status.daysAgo", { n: Math.floor(diff / 86_400_000) });
-  return new Date(at).toLocaleDateString();
-}
-
 export function TasksView() {
   const t = useT();
   const tasks = useAsync<any[]>(() => get("/api/tasks"), []);
@@ -43,6 +28,18 @@ export function TasksView() {
   // Task awaiting confirmation in the delete modal.
   const [confirmTask, setConfirmTask] = useState<any | null>(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
+  // Read once into state: the preference is a checkbox the page renders, so it
+  // has to re-render when it changes. It used to be read straight from
+  // localStorage at click time and only ever written — turning it on was a
+  // one-way door with no way back inside the app.
+  const [suppressConfirm, setSuppressConfirm] = useState(
+    () => localStorage.getItem(SUPPRESS_DELETE_CONFIRM_KEY) === "1"
+  );
+  const setSuppression = (on: boolean) => {
+    if (on) localStorage.setItem(SUPPRESS_DELETE_CONFIRM_KEY, "1");
+    else localStorage.removeItem(SUPPRESS_DELETE_CONFIRM_KEY);
+    setSuppressConfirm(on);
+  };
   const [actionError, setActionError] = useState<string | null>(null);
   // "3m ago" labels move on their own (see `useMinuteClock`).
   useMinuteClock();
@@ -87,10 +84,15 @@ export function TasksView() {
         runs: taskRuns,
         last,
         status: taskRuns.some((r) => isLive(r.status)) ? "running" : (last?.status ?? "pending"),
-        lastActivity: last?.endTime ?? last?.createdAt ?? t.createdAt,
+        // Newest sign of life: the run's own timestamps, else the task's. Parsed
+        // as time, not compared as strings — a record written by a different
+        // path can carry a different but equally valid ISO form (with or without
+        // milliseconds), and `localeCompare` then orders it against a real date
+        // instead of by when it happened.
+        lastActivity: last?.endTime ?? last?.createdAt ?? t.metadata?.lastActivityAt ?? t.createdAt,
       };
     })
-    .sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+    .sort((a, b) => Date.parse(b.lastActivity) - Date.parse(a.lastActivity));
 
   const pageCount = Math.max(1, Math.ceil(entries.length / TASKS_PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
@@ -101,6 +103,8 @@ export function TasksView() {
     setActionError(null);
     try {
       await del(`/api/tasks/${task.id}`);
+      // The rail renders the same tasks and is not part of this page's state.
+      notifyTasksChanged({ taskId: task.id });
       tasks.reload();
       runs.reload();
     } catch (e) {
@@ -108,9 +112,13 @@ export function TasksView() {
     }
   };
 
+  // The task whose deletion skipped the dialog, kept long enough to say so —
+  // a delete that happens without asking has to announce itself.
+  const [skipped, setSkipped] = useState<string | null>(null);
   const requestDelete = (task: any) => {
     setMenuTaskId(null);
-    if (localStorage.getItem(SUPPRESS_DELETE_CONFIRM_KEY) === "1") {
+    if (suppressConfirm) {
+      setSkipped(task.title);
       void deleteTask(task);
     } else {
       setDontAskAgain(false);
@@ -120,7 +128,11 @@ export function TasksView() {
 
   const confirmDelete = async () => {
     if (!confirmTask) return;
-    if (dontAskAgain) localStorage.setItem(SUPPRESS_DELETE_CONFIRM_KEY, "1");
+    const title = confirmTask.title;
+    if (dontAskAgain) {
+      setSuppression(true);
+      setSkipped(title);
+    }
     await deleteTask(confirmTask);
   };
 
@@ -128,15 +140,54 @@ export function TasksView() {
     <div>
       <div className="row" style={{ marginBottom: 18 }}>
         <h1>{t("tasks.title")}</h1>
+        <span className="right">
+          {/* The one place the preference can be turned back on: it is a
+              per-browser setting, so it has to live where the affected list
+              is, not buried in Settings. */}
+          <label className="check tasks-pref">
+            <input
+              type="checkbox"
+              checked={suppressConfirm}
+              onChange={(e) => {
+                setSuppression(e.target.checked);
+                if (!e.target.checked) setSkipped(null);
+              }}
+            />
+            {t("tasks.skipConfirm")}
+          </label>
+        </span>
       </div>
+      {skipped && (
+        <div className="card action-error" role="status">
+          <span>{t("tasks.deletedWithoutAsking", { title: skipped })}</span>
+          <button
+            className="small"
+            onClick={() => {
+              setSuppression(false);
+              setSkipped(null);
+            }}
+          >
+            {t("tasks.askAgain")}
+          </button>
+          <button className="small" onClick={() => setSkipped(null)}>{t("common.close")}</button>
+        </div>
+      )}
 
       <ErrorBox message={actionError} />
 
       {entries.length === 0 ? (
         <div className="card muted">
-          {t("tasks.empty")}
-          <a onClick={() => navigate("/new")}>{t("tasks.new")}</a>
-          {t("tasks.emptyAfter")}
+          {/* Same rule as every other list: the first render is empty for one
+              frame, and "no tasks yet" during a fetch is simply wrong. */}
+          {tasks.loading ? (
+            t("common.loading")
+          ) : (
+            <>
+              {t("tasks.empty")}
+              <AppLink href={"/new"}>{t("tasks.new")}</AppLink>
+              {t("tasks.emptyAfter")}
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -161,7 +212,7 @@ export function TasksView() {
                   the title. */}
               <div className="task-item-side">
                 <StatusBadge status={status} />
-                <span className="muted task-item-time">{relativeLabel(t, lastActivity)}</span>
+                <span className="muted task-item-time">{fmtRelative(t, lastActivity)}</span>
               </div>
               <div className="task-item-menu" onClick={(e) => e.stopPropagation()}>
                 <button

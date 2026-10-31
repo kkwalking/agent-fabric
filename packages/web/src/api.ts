@@ -183,22 +183,50 @@ export function subscribeSSE(path: string, onEvent: (data: unknown) => void): ()
   return () => es.close();
 }
 
-export function fmtTime(iso?: string): string {
+/**
+ * Absolute timestamp, in the one format the app shows.
+ *
+ * `toLocaleString()` with no options gives whatever the host locale and OS
+ * settings produce — a 12-hour clock in one window and 24-hour in the next,
+ * and a different separator for every field order. Exported so the places that
+ * used to format dates themselves (and drift) share this one.
+ */
+export function fmtDateTime(iso?: string): string {
   if (!iso) return "-";
-  return new Date(iso).toLocaleString();
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return "-";
+  return new Date(at).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
+/** Alias kept for the call sites that read as "the time". */
+export const fmtTime = fmtDateTime;
+
+/**
+ * Money, with only the digits it actually has.
+ *
+ * `toFixed(6)` printed `$0.000012` for one cheap request and `$0.000000` for a
+ * free one — six characters of noise on every figure in every table. The Usage
+ * page grew its own copy of this rule; this is that rule, so the run list, the
+ * run inspector and Usage cannot disagree about what a number looks like.
+ */
 export function fmtCost(cost?: number): string {
-  if (cost == null) return "-";
-  return `$${cost.toFixed(6)}`;
+  if (cost == null || !Number.isFinite(cost)) return "-";
+  if (cost === 0) return "$0";
+  if (cost >= 1) return `$${cost.toFixed(2)}`;
+  if (cost >= 0.01) return `$${cost.toFixed(3)}`;
+  return `$${cost.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
 }
 
-/** Compact cost for turn metadata, e.g. $0.002 / $1.23 (v5 §11). */
+/** "—" instead of "$0" when there is nothing to report (turn metadata, v5 §11). */
 export function fmtCostShort(cost?: number): string {
   if (cost == null || cost === 0) return "-";
-  if (cost < 0.01) return `$${cost.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
-  if (cost < 1) return `$${cost.toFixed(3)}`;
-  return `$${cost.toFixed(2)}`;
+  return fmtCost(cost);
 }
 
 /** Compact duration for turn metadata, e.g. 840ms / 18s / 1m 2s (v5 §11). */
@@ -237,7 +265,7 @@ export function fmtRelative(t: Translate, iso?: string): string {
   if (diff < 3_600_000) return t("rel.minutesAgo", { n: Math.floor(diff / 60_000) });
   if (diff < 86_400_000) return t("rel.hoursAgo", { n: Math.floor(diff / 3_600_000) });
   if (diff < 7 * 86_400_000) return t("rel.daysAgo", { n: Math.floor(diff / 86_400_000) });
-  return new Date(at).toLocaleDateString();
+  return fmtDateTime(iso);
 }
 
 export function shortId(id: string): string {

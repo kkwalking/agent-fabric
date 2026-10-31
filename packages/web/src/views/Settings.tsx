@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { get, post, put } from "../api";
+import { get, post, put, fmtDateTime } from "../api";
 import { ErrorBox, Field, Icon, Modal, type IconName } from "../components";
 import { useI18n } from "../i18n-react";
 import { LlmView } from "./Llm";
@@ -426,9 +426,9 @@ function FileCard(props: {
 }
 
 function formatTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString();
+  // Same absolute format as everywhere else (see `fmtDateTime`).
+  const formatted = fmtDateTime(iso);
+  return formatted === "-" ? iso : formatted;
 }
 
 /**
@@ -454,6 +454,8 @@ function SaveRow(props: {
   onSave: () => void;
   onDiscard: () => void;
   hint: MessageKey;
+  /** Why the last save failed, if it did; the row is where Save was pressed. */
+  error?: string | null;
 }) {
   const { t } = useI18n();
   const reportDirty = useContext(DirtyContext);
@@ -470,6 +472,11 @@ function SaveRow(props: {
         {t("settings.discard")}
       </button>
       <span className="settings-hint">{t(props.hint)}</span>
+      {props.error && (
+        <div className="settings-error-line" role="alert">
+          {t("settings.saveFailed")} {props.error}
+        </div>
+      )}
     </div>
   );
 }
@@ -543,6 +550,7 @@ function ProxySection(props: { config: Record<string, unknown>; save: SaveSectio
       return;
     }
     setBusy(true);
+    setFormError(null);
     try {
       await props.save({
         proxy: {
@@ -552,6 +560,11 @@ function ProxySection(props: { config: Record<string, unknown>; save: SaveSectio
           ...(portValid ? { port } : {}),
         },
       });
+    } catch (e) {
+      // The panel's error banner is not where the user is looking: the click was
+      // here, so the failure has to land here too. Swallowing it made Save look
+      // like it worked while nothing was written.
+      setFormError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -614,7 +627,7 @@ function ProxySection(props: { config: Record<string, unknown>; save: SaveSectio
         )}
       </div>
       <div className="settings-hint">{t("proxy.hint")}</div>
-      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" />
+      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" error={formError} />
     </Page>
   );
 }
@@ -628,7 +641,6 @@ function ProxySection(props: { config: Record<string, unknown>; save: SaveSectio
  */
 function NotificationsSection(props: { config: Record<string, unknown>; save: SaveSection }) {
   const { t } = useI18n();
-  headerLineError = (line: string) => t("settings.notifications.badHeader", { line });
   const raw = (props.config.notifications ?? {}) as {
     enabled?: boolean;
     url?: string;
@@ -660,8 +672,11 @@ function NotificationsSection(props: { config: Record<string, unknown>; save: Sa
       return;
     }
     setBusy(true);
+    setFormError(null);
     try {
-      const headers = parseHeaderLines(form.headers);
+      const headers = parseHeaderLines(form.headers, (line) =>
+        t("settings.notifications.badHeader", { line })
+      );
       await props.save({
         notifications: {
           enabled: form.enabled,
@@ -672,6 +687,8 @@ function NotificationsSection(props: { config: Record<string, unknown>; save: Sa
         },
       });
       setForm((f) => ({ ...f, url: "", clearUrl: false }));
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -731,7 +748,7 @@ function NotificationsSection(props: { config: Record<string, unknown>; save: Sa
       </Field>
 
       {formError && <div className="settings-error-line">{formError}</div>}
-      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" />
+      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" error={formError} />
     </Page>
   );
 }
@@ -742,18 +759,22 @@ function headerLines(headers: Record<string, string>): string {
     .join("\n");
 }
 
-/** The message a malformed header line reports; set from the dictionary at render time. */
-let headerLineError = (line: string) => `Header line is not "name: value": ${line}`;
-
-/** Parses `name: value` lines; `null` when there are none (nothing to send). */
-function parseHeaderLines(text: string): Record<string, string> | null {
+/**
+ * Parses `name: value` lines; `null` when there are none (nothing to send).
+ *
+ * The message for a malformed line comes from the caller's dictionary rather
+ * than a module-level variable assigned during render: a module `let` written on
+ * every render keeps whichever language rendered last, so a second form (or the
+ * English copy) reported the other language's wording.
+ */
+function parseHeaderLines(text: string, badLine: (line: string) => string): Record<string, string> | null {
   const entries = text
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
       const at = line.indexOf(":");
-      if (at < 0) throw new Error(headerLineError(line));
+      if (at < 0) throw new Error(badLine(line));
       return [line.slice(0, at).trim(), line.slice(at + 1).trim()];
     });
   return entries.length > 0 ? Object.fromEntries(entries) : null;
@@ -800,6 +821,7 @@ function HarnessSection(props: { config: Record<string, unknown>; save: SaveSect
   };
   const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const [report, setReport] = useState<HarnessCliReport | null>(null);
   const [detecting, setDetecting] = useState(false);
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
@@ -841,6 +863,8 @@ function HarnessSection(props: { config: Record<string, unknown>; save: SaveSect
       });
       // The saved override changes what detection answers, so look again.
       void detect(true);
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -877,7 +901,7 @@ function HarnessSection(props: { config: Record<string, unknown>; save: SaveSect
           </div>
         </div>
       )}
-      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" />
+      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" error={formError} />
     </Page>
   );
 }
@@ -912,11 +936,15 @@ function DockerSection(props: { config: Record<string, unknown>; save: SaveSecti
   const initial = { socket: stored.socket ?? "", image: stored.defaultImage ?? "" };
   const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
   const save = async () => {
     setBusy(true);
+    setFormError(null);
     try {
       await props.save({ docker: { socket: form.socket.trim(), defaultImage: form.image.trim() } });
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -940,7 +968,7 @@ function DockerSection(props: { config: Record<string, unknown>; save: SaveSecti
         />
       </Field>
       <DockerStatus />
-      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" />
+      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.restartHint" error={formError} />
     </Page>
   );
 }
@@ -1008,10 +1036,12 @@ function RetrySection(props: { config: Record<string, unknown>; save: SaveSectio
   };
   const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
   const numberOrUndefined = (text: string) => (text.trim() === "" ? undefined : Number(text));
   const save = async () => {
     setBusy(true);
+    setFormError(null);
     try {
       await props.save({
         autoRetry: {
@@ -1021,6 +1051,8 @@ function RetrySection(props: { config: Record<string, unknown>; save: SaveSectio
           ...(numberOrUndefined(form.maxDelay) !== undefined ? { maxDelayMs: Number(form.maxDelay) } : {}),
         },
       });
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -1061,7 +1093,7 @@ function RetrySection(props: { config: Record<string, unknown>; save: SaveSectio
         />
       </Field>
       <div className="settings-hint">{t("retry.formula")}</div>
-      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.retryLive" />
+      <SaveRow dirty={dirty} saving={busy} onSave={() => void save()} onDiscard={() => setForm(initial)} hint="settings.retryLive" error={formError} />
     </Page>
   );
 }

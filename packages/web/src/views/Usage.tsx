@@ -1,11 +1,17 @@
 import { useState } from "react";
-import { get } from "../api";
+import { fmtCost, get } from "../api";
 import { useAsync, ErrorBox } from "../components";
 import { useT } from "../i18n-react";
 
-/** Calendar heatmap window: half a year of weeks, like the contribution
- *  grid this follows. Cells are one day, columns are Monday-start weeks. */
-const WEEKS = 26;
+/**
+ * Calendar heatmap windows, in weeks. The grid used to be fixed at 26 weeks:
+ * long enough that a busy month sat in the corner of a wall of grey, and short
+ * enough that the whole history could not be seen at all. Cells are one day,
+ * columns are Monday-start weeks.
+ */
+const RANGES = [4, 12, 26, 52] as const;
+type Range = (typeof RANGES)[number];
+const WEEKS = RANGES[2];
 const CELL = 14; // px, matches --heat-cell in style.css
 const GAP = 3;
 /** Room for a month label: a month only gets one if it clears this many columns. */
@@ -25,7 +31,7 @@ interface DayBucket {
  * weeks earlier, padded to whole Monday-start weeks so every column has
  * seven rows. Days without a run are zeroes, not gaps.
  */
-function heatWeeks(today: Date, weeks = WEEKS): Date[][] {
+function heatWeeks(today: Date, weeks: number = WEEKS): Date[][] {
   const day = 24 * 60 * 60 * 1000;
   const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const end = new Date(midnight.getTime() + (7 - ((midnight.getDay() + 6) % 7)) * day); // coming Sunday
@@ -59,10 +65,6 @@ function monthTicks(weeks: Date[][], monthLabel: (n: number) => string): Array<{
   return starts.filter((tick, i) => i === 0 || tick.index - starts[i - 1].index >= MONTH_LABEL_MIN_COLUMNS);
 }
 
-function formatCost(v: number): string {
-  return `$${v >= 1 ? v.toFixed(2) : v.toFixed(4)}`;
-}
-
 export function UsageView() {
   const t = useT();
   const { data, error } = useAsync<any>(() => get("/api/usage"), []);
@@ -80,7 +82,7 @@ export function UsageView() {
         <div className="stat"><div className="num">{data.inputTokens.toLocaleString()}</div><div className="lbl">{t("usage.stat.inputTokens")}</div></div>
         <div className="stat"><div className="num">{data.outputTokens.toLocaleString()}</div><div className="lbl">{t("usage.stat.outputTokens")}</div></div>
         <div className="stat"><div className="num">{data.modelRequests}</div><div className="lbl">{t("usage.stat.modelRequests")}</div></div>
-        <div className="stat"><div className="num">${data.estimatedCost.toFixed(6)}</div><div className="lbl">{t("usage.stat.estimatedCost")}</div></div>
+        <div className="stat"><div className="num">{fmtCost(data.estimatedCost)}</div><div className="lbl">{t("usage.stat.estimatedCost")}</div></div>
       </div>
 
       <Heatmap history={data.history ?? []} metric={metric} onMetric={setMetric} />
@@ -88,11 +90,12 @@ export function UsageView() {
       <h2>{t("usage.byModel")}</h2>
       <div className="card">
         {Object.entries(data.byModel ?? {}).length === 0 && <div className="muted">{t("usage.noModel")}</div>}
+        <div className="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>{t("usage.col.model")}</th><th>{t("usage.col.requests")}</th><th>{t("usage.col.input")}</th>
-              <th>{t("usage.col.output")}</th><th>{t("usage.col.cached")}</th><th>{t("usage.col.cost")}</th>
+              <th scope="col">{t("usage.col.model")}</th><th scope="col">{t("usage.col.requests")}</th><th scope="col">{t("usage.col.input")}</th>
+              <th scope="col">{t("usage.col.output")}</th><th scope="col">{t("usage.col.cached")}</th><th scope="col">{t("usage.col.cost")}</th>
             </tr>
           </thead>
           <tbody>
@@ -108,23 +111,26 @@ export function UsageView() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <h2>{t("usage.byProvider")}</h2>
       <div className="card">
         {Object.entries(data.byProvider ?? {}).length === 0 && <div className="muted">{t("usage.noProvider")}</div>}
+        <div className="table-wrap">
         <table>
-          <thead><tr><th>{t("usage.col.provider")}</th><th>{t("usage.col.requests")}</th><th>{t("usage.col.cost")}</th></tr></thead>
+          <thead><tr><th scope="col">{t("usage.col.provider")}</th><th scope="col">{t("usage.col.requests")}</th><th scope="col">{t("usage.col.cost")}</th></tr></thead>
           <tbody>
             {Object.entries(data.byProvider ?? {}).map(([id, p]: [string, any]) => (
               <tr key={id}>
                 <td className="mono">{id}</td>
                 <td>{p.requests}</td>
-                <td>${p.cost.toFixed(6)}</td>
+                <td>{fmtCost(p.cost)}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
@@ -138,7 +144,8 @@ export function UsageView() {
  */
 function Heatmap({ history, metric, onMetric }: { history: DayBucket[]; metric: Metric; onMetric: (m: Metric) => void }) {
   const t = useT();
-  const weeks = heatWeeks(new Date());
+  const [weeks_count, setWeeks] = useState<Range>(WEEKS);
+  const weeks = heatWeeks(new Date(), weeks_count);
   const byDate = new Map(history.map((h) => [h.date, h]));
   const valueOf = (h: DayBucket | undefined) => (h ? (metric === "cost" ? h.cost : h.tokens) : 0);
 
@@ -155,7 +162,7 @@ function Heatmap({ history, metric, onMetric }: { history: DayBucket[]; metric: 
   const total = inWindow.reduce((sum, d) => sum + valueOf(byDate.get(localDayKey(d))), 0);
   const best = inWindow.reduce((max, d) => Math.max(max, valueOf(byDate.get(localDayKey(d)))), 0);
   const unit = metric === "cost" ? t("usage.unit.cost") : t("usage.unit.tokens");
-  const show = (v: number) => (metric === "cost" ? formatCost(v) : v.toLocaleString());
+  const show = (v: number) => (metric === "cost" ? fmtCost(v) : v.toLocaleString());
 
   return (
     <>
@@ -171,11 +178,20 @@ function Heatmap({ history, metric, onMetric }: { history: DayBucket[]; metric: 
       <div className="card">
         <div className="heat-legend">
           <span className="muted">
-            {t("usage.summary", { total: show(total), unit, best: show(best), weeks: WEEKS })}
+            {t("usage.summary", { total: show(total), unit, best: show(best), weeks: weeks_count })}
           </span>
           <span className="right muted">
             {t("usage.legend.less")} <i className="heat-cell" /> <i className="heat-cell l1" /> <i className="heat-cell l2" />{" "}
             <i className="heat-cell l3" /> <i className="heat-cell l4" /> {t("usage.legend.more")}
+          </span>
+          {/* The window is a choice: 4 weeks answers "what have I done lately",
+              52 answers "what does a year of this look like". */}
+          <span className="right segmented heat-range" role="group" aria-label={t("usage.range.label")}>
+            {RANGES.map((n) => (
+              <button key={n} aria-pressed={weeks_count === n} onClick={() => setWeeks(n)}>
+                {t("usage.range.weeks", { n })}
+              </button>
+            ))}
           </span>
         </div>
         <div className="heat-scroll">
@@ -189,7 +205,7 @@ function Heatmap({ history, metric, onMetric }: { history: DayBucket[]; metric: 
               const key = localDayKey(d);
               const bucket = byDate.get(key);
               const value = valueOf(bucket);
-              const valueText = metric === "cost" ? formatCost(value) : t("usage.cellTip.tokens", { n: value.toLocaleString() });
+              const valueText = metric === "cost" ? fmtCost(value) : t("usage.cellTip.tokens", { n: value.toLocaleString() });
               const requests = bucket ? ` · ${t("usage.cellTip.requests", { n: bucket.requests })}` : "";
               return (
                 <div

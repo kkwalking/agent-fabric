@@ -255,24 +255,25 @@ export interface NewRuntimeInput {
 }
 
 /**
- * Kind-level default for `Runtime.usableInTask` — which runtime kinds
- * start out allowed to execute AgentFabric tasks. `codex` /
- * `claude-code` stay false until the user opts in even though adapters
- * exist; discovery-only kinds (zcode: sessions are found and adopted,
- * but no runner adapter exists yet) and the mock default to false; the
- * Runtimes page toggles the per-record value, so this table only decides
- * what a *new* runtime record starts at.
+ * A Task is the unit of work and a runtime is how it runs, so every runtime a
+ * user is meant to own is usable in a task. The exceptions are wiring, not
+ * configuration: `mock` is the test double, and `zcode` is discovery-only (its
+ * sessions are found and adopted, but no runner adapter exists yet).
+ *
+ * This used to be a per-kind table the Runtimes page let a user override per
+ * record — a switch that could only ever break things, since turning it off
+ * removed the runtime from every composer.
  */
 const USABLE_IN_TASK_BY_KIND: Record<Runtime["kind"], boolean> = {
   opencode: true,
   pi: true,
-  codex: false,
-  "claude-code": false,
+  codex: true,
+  "claude-code": true,
   zcode: false,
   dsh: true,
-  docker: false,
+  docker: true,
   mock: false,
-  custom: false,
+  custom: true,
 };
 
 export function defaultUsableInTask(kind: Runtime["kind"]): boolean {
@@ -1300,12 +1301,17 @@ export async function seedDefaults(store: Store): Promise<void> {
         env: {},
       });
     }
-    // `usableInTask` postdates the seeded runtimes: write the kind default
-    // once, at boot, so every record carries a definite value. This is a
-    // write-time seeding step — reads never derive or repair the field.
+    // `usableInTask` is a property of the *kind* now, not of the record: a
+    // Task is the unit of work and a runtime is how it runs, so the answer for
+    // `codex` cannot differ between two codex records. The value is still
+    // written into the record (reads never derive it), but it is seeded on
+    // every boot rather than only when absent — otherwise a record written
+    // under the old per-record toggle would keep answering "no" forever with
+    // nothing in the UI left to change it.
     for (const r of existing) {
-      if (r.usableInTask === undefined) {
-        await runtimeService.update(r.id, { usableInTask: defaultUsableInTask(r.kind) });
+      const usable = defaultUsableInTask(r.kind);
+      if (r.usableInTask !== usable) {
+        await runtimeService.update(r.id, { usableInTask: usable });
       }
     }
     return;

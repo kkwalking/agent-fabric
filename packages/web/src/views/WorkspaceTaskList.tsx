@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { del, fmtRelative, get, patch, put } from "../api";
-import { TASKS_CHANGED_EVENT } from "../appEvents";
+import { TASKS_CHANGED_EVENT, notifyTasksChanged } from "../appEvents";
 import { Icon } from "../components";
 import { useT } from "../i18n-react";
 import { navigate } from "../router";
@@ -148,6 +148,7 @@ export function WorkspaceTaskList({
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<TaskRow | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [confirmDeleteTask, setConfirmDeleteTask] = useState<TaskRow | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
   const menuRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -235,8 +236,12 @@ export function WorkspaceTaskList({
 
   const removeTask = async (id: string) => {
     setMenuTaskId(null);
+    setConfirmDeleteTask(null);
     try {
       await del(`/api/tasks/${id}`);
+      // The task list page shows the same rows; tell it rather than leaving it
+      // to notice on its next 5s cache expiry.
+      notifyTasksChanged({ taskId: id });
       await reload();
     } catch (e) {
       setRowError(e instanceof Error ? e.message : String(e));
@@ -503,7 +508,14 @@ export function WorkspaceTaskList({
                         <Icon name="close" size={13} />
                         {t("sidebar.copyId")}
                       </button>
-                      <button role="menuitem" className="danger" onClick={() => void removeTask(task.id)}>
+                      <button
+                        role="menuitem"
+                        className="danger"
+                        onClick={() => {
+                          setMenuTaskId(null);
+                          setConfirmDeleteTask(task);
+                        }}
+                      >
                         <Icon name="trash" size={13} />
                         {t("sidebar.delete")}
                       </button>
@@ -546,6 +558,25 @@ export function WorkspaceTaskList({
             <button onClick={() => setRenamingGroup(null)}>{t("sidebar.cancel")}</button>
             <button className="primary" disabled={!groupRenameDraft.trim()} onClick={() => void submitGroupRename()}>
               {t("sidebar.save")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmDeleteTask && (
+        <div
+          className="ws-rename"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("sidebar.delete")}
+        >
+          <p className="ws-rename-label">
+            {t("sidebar.deleteConfirm").replace("{title}", confirmDeleteTask.title)}
+          </p>
+          <div className="ws-rename-actions">
+            <button onClick={() => setConfirmDeleteTask(null)}>{t("sidebar.cancel")}</button>
+            <button className="danger" onClick={() => void removeTask(confirmDeleteTask.id)}>
+              {t("sidebar.delete")}
             </button>
           </div>
         </div>

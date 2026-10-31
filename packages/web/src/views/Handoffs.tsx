@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { get, del, put, fmtTime, shortId } from "../api";
-import { useAsync, ErrorBox, CopyButton, Modal } from "../components";
+import { useAsync, ErrorBox, CopyButton, Modal, emptyListHint, AppLink } from "../components";
 import { useI18n, useT } from "../i18n-react";
 import { navigate } from "../router";
 import type { MessageKey, Translate } from "../i18n";
@@ -322,7 +322,7 @@ function HandoffModelCard() {
 
 export function HandoffsView() {
   const t = useT();
-  const { data, error, reload } = useAsync<any[]>((force) => get("/api/handoffs", undefined, force), []);
+  const { data, error, loading, reload } = useAsync<any[]>((force) => get("/api/handoffs", undefined, force), []);
 
   return (
     <div>
@@ -334,17 +334,18 @@ export function HandoffsView() {
 
       <div className="card">
         {data && data.length > 0 ? (
+          <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>{t("handoffs.col.id")}</th><th>{t("handoffs.col.task")}</th><th>{t("handoffs.col.source")}</th>
-                <th>{t("handoffs.col.created")}</th><th></th>
+                <th scope="col">{t("handoffs.col.id")}</th><th scope="col">{t("handoffs.col.task")}</th><th scope="col">{t("handoffs.col.source")}</th>
+                <th scope="col">{t("handoffs.col.created")}</th><th scope="col"></th>
               </tr>
             </thead>
             <tbody>
               {data.map((h) => (
                 <tr key={h.id}>
-                  <td className="mono"><a onClick={() => navigate(`/handoffs/${h.id}`)}>{shortId(h.id)}</a></td>
+                  <td className="mono"><AppLink href={`/handoffs/${h.id}`}>{shortId(h.id)}</AppLink></td>
                   <td className="mono">{shortId(h.taskId)}</td>
                   <td><SourceBadge source={h.source} /></td>
                   <td className="muted">{fmtTime(h.createdAt)}</td>
@@ -353,8 +354,18 @@ export function HandoffsView() {
               ))}
             </tbody>
           </table>
+          </div>
         ) : (
-          <div className="muted">{t("handoffs.empty")}</div>
+          emptyListHint({
+            loading,
+            error,
+            empty: (
+              <>
+                {t("handoffs.empty")}{" "}
+                <AppLink href="/tasks">{t("handoffs.empty.link")}</AppLink>
+              </>
+            ),
+          })
         )}
         <div className="row" style={{ marginTop: 10 }}>
           <button className="small" onClick={reload}>{t("common.refresh")}</button>
@@ -395,9 +406,9 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
   return (
     <div>
       <div className="row">
-        <a onClick={() => navigate("/handoffs")}>{t("handoffs.detail.back")}</a>
-        <a onClick={() => navigate(`/tasks/${detail.taskId}`)}>{t("handoffs.detail.thread")}</a>
-        <a onClick={() => navigate(`/runs/${detail.fromRunId}`)}>{t("handoffs.detail.sourceRun")}</a>
+        <AppLink href={"/handoffs"}>{t("handoffs.detail.back")}</AppLink>
+        <AppLink href={`/tasks/${detail.taskId}`}>{t("handoffs.detail.thread")}</AppLink>
+        <AppLink href={`/runs/${detail.fromRunId}`}>{t("handoffs.detail.sourceRun")}</AppLink>
         <span className="right">
           {(detail.sources ?? [detail.source]).map((s: string) => <SourceBadge key={s} source={s} />)}
         </span>
@@ -520,7 +531,7 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
               {covered.map((id, i) => (
                 <span key={id}>
                   {i > 0 ? ", " : ""}
-                  <a className="mono" onClick={() => navigate(`/runs/${id}`)}>{shortId(id)} ↗</a>
+                  <AppLink href={`/runs/${id}`} className="mono">{shortId(id)} ↗</AppLink>
                 </span>
               ))}{" "}
               <span className="muted">— {t("handoffs.gen.coversNote")}</span>

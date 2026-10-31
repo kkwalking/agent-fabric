@@ -2190,6 +2190,11 @@ export class RunService {
     try {
       run = await this.store.update<Run>("runs", runId, {
         status: "starting",
+        // The phase is written on every transition, not only by a board session:
+        // it is the one field that answers "what is happening right now", and a
+        // run that never reaches the agent step (the workspace could not be
+        // prepared) would otherwise have no phase at all to report.
+        phase: "workspace.preparing",
         startTime: now(),
         updatedAt: now(),
       });
@@ -2276,11 +2281,14 @@ export class RunService {
         });
       }
 
-      run = (await this.store.update<Run>("runs", runId, { status: "running", updatedAt: now() })) ?? run;
-      // Runs with a producer-recorded phase advance to the agent phase.
-      if (run.phase) {
-        await this.store.update<Run>("runs", runId, { phase: "agent.running", updatedAt: now() });
-      }
+      // Workspace and runtime are both live by now: the agent step is the next
+      // thing that happens, whatever producer created the record.
+      run =
+        (await this.store.update<Run>("runs", runId, {
+          status: "running",
+          phase: "agent.running",
+          updatedAt: now(),
+        })) ?? run;
 
       let result: RuntimeResult;
       try {
@@ -2630,6 +2638,16 @@ export class RunService {
     usage.estimatedCost = cost;
     await this.store.update<Run>("runs", runId, {
       status,
+      // The phase ends the same way the status does: a finished run that still
+      // reported `agent.running` was the last raw value a reader saw.
+      phase:
+        status === "completed"
+          ? "completed"
+          : status === "cancelled"
+            ? "cancelled"
+            : status === "failed" || status === "timeout"
+              ? "failed"
+              : run.phase,
       error,
       errorKind,
       usage,

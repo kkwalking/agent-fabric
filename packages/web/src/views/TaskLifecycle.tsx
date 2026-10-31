@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { get, post, fmtRelative, shortId } from "../api";
 import { ErrorBox, Icon, StatusBadge, useAsync, usePolling } from "../components";
-import { statusLabel } from "../i18n";
+import { statusLabel, phaseLabel } from "../i18n";
 import { useT } from "../i18n-react";
 import { navigate } from "../router";
+import { onAppEvent, TASKS_CHANGED_EVENT } from "../appEvents";
 
 /**
  * Task detail view.
@@ -24,6 +25,13 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
     setBusy(null);
     setError(null);
   }, [taskId]);
+  // This page is about one task: only a change to that task is news. Before the
+  // event carried an id, deleting any other task from the rail re-read this
+  // whole page for nothing.
+  useEffect(
+    () => onAppEvent(TASKS_CHANGED_EVENT, () => detail.reload(), (c) => c.taskId === undefined || c.taskId === taskId),
+    [taskId, detail.reload]
+  );
 
   const inFlight = detail.data && ["preparing", "running"].includes(detail.data.status);
   // A failed task with a retry scheduled is still moving: poll it too, so the
@@ -66,7 +74,7 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
         </span>
       </div>
       <p className="sub">
-        {t("lifecycle.sub", { phase: d.phase })}
+        {t("lifecycle.sub", { phase: phaseLabel(t, d.phase) })}
         {d.running ? t("lifecycle.runningSuffix") : ""}
       </p>
       <ErrorBox message={error} />
@@ -111,7 +119,7 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
           <dt>{t("lifecycle.field.runtime")}</dt>
           <dd>{d.runtime ? `${d.runtime.name} (${d.runtime.kind})` : "-"}</dd>
           <dt>{t("lifecycle.field.phase")}</dt>
-          <dd>{d.phase}</dd>
+          <dd>{phaseLabel(t, d.phase)}</dd>
           <dt>{t("lifecycle.field.agent")}</dt>
           <dd>{statusLabel(t, d.agent?.status)}{d.agent?.attempts ? t("lifecycle.agentAttempts", { n: d.agent.attempts }) : ""}</dd>
         </dl>
@@ -121,14 +129,14 @@ export function TaskLifecycleView({ taskId }: { taskId: string }) {
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>{t("lifecycle.thRun")}</th><th>{t("lifecycle.thStatus")}</th><th>{t("lifecycle.thPhase")}</th><th>{t("lifecycle.thContinuity")}</th><th>{t("lifecycle.thRuntime")}</th><th>{t("lifecycle.thStarted")}</th><th /></tr>
+            <tr><th scope="col">{t("lifecycle.thRun")}</th><th scope="col">{t("lifecycle.thStatus")}</th><th scope="col">{t("lifecycle.thPhase")}</th><th scope="col">{t("lifecycle.thContinuity")}</th><th scope="col">{t("lifecycle.thRuntime")}</th><th scope="col">{t("lifecycle.thStarted")}</th><th /></tr>
           </thead>
           <tbody>
             {(d.runs ?? []).map((run: any) => (
               <tr key={run.id}>
                 <td>{shortId(run.id)}</td>
                 <td>{statusLabel(t, run.status)}</td>
-                <td>{run.phase ?? "-"}</td>
+                <td>{phaseLabel(t, run.phase)}</td>
                 <td>{run.continuity ? statusLabel(t, run.continuity) : t("lifecycle.continuity.new")}</td>
                 <td>{run.runtimeName ?? "-"}</td>
                 <td className="muted">{fmtRelative(t, run.startTime ?? run.createdAt)}</td>
