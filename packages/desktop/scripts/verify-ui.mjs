@@ -247,6 +247,16 @@ function writeFixture(dir) {
     error: "harness exited with code 2\n  stderr: spawn verify-harness ENOENT",
     artifactIds: ["art_verify_inline", "art_verify_disk"],
     previousHandoffId: "hof_verify",
+    // Usage on this run, so the heatmap has a day with work to hover. Without
+    // it every cell is level 0 and the hover readout can only say "$0".
+    usage: {
+      inputTokens: 1200,
+      outputTokens: 400,
+      cachedTokens: 0,
+      modelRequests: 3,
+      estimatedCost: 0.25,
+      durationMs: 60000,
+    },
   });
   db.artifacts = [
     {
@@ -276,6 +286,12 @@ function writeFixture(dir) {
       fromRunId: longRunId,
       source: "agentfabric",
       artifactIds: [],
+      // The fields the detail page reads as arrays and the body it exports:
+      // a record written by an older build without them renders as an error
+      // page, not as a handoff.
+      consumedByRunIds: [],
+      sources: ["agentfabric"],
+      renderedPrompt: "# Handoff\n\nThe parser was rewritten to stream.\n\n## Goal\nMake the parser streaming.",
       createdAt: now,
       workspaceId: "ws_verify_alpha",
       content: {
@@ -284,6 +300,15 @@ function writeFixture(dir) {
           checkpoint: "## Goal\nMake the parser streaming.\n\n## Decisions\nDropped the buffered reader.",
           pinnedContext: [],
           retainedContext: [],
+          budget: {
+            contextWindow: 200000,
+            maxTokens: 100000,
+            estimatedTokens: 1200,
+            checkpointTokens: 200,
+            pinnedTokens: 0,
+            retainedTokens: 1000,
+            charsPerToken: 4,
+          },
         },
       },
     },
@@ -1545,6 +1570,104 @@ try {
     );
   }
 
+  // 9b-1c-2. A handoff's own actions are one toolbar in the page head, not
+  //          three loose buttons under the title. Each is a glyph + label, and
+  //          discarding is still the only one that is red.
+  //          (Fixture data: an empty install has no handoff record.)
+  const handoffActions = emptyMode ? null : await evaluate(
+    cdp,
+    `(async () => {
+       let out_diag = null;
+       // Through the list, as a person gets there: the handoff list rows link
+       // to the detail page with real hrefs.
+       history.pushState({}, "", "/runs");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 1000));
+       history.pushState({}, "", "/handoffs");
+       window.dispatchEvent(new PopStateEvent("popstate"));
+       await new Promise((r) => setTimeout(r, 3500));
+       const rowLink = [...document.querySelectorAll("main a[href^='/handoffs/']")][0];
+       rowLink?.click();
+       await new Promise((r) => setTimeout(r, 1200));
+       const head = document.querySelector(".page-head");
+       out_diag = { url: location.href, hasRow: Boolean(rowLink) };
+       const buttons = head ? [...head.querySelectorAll(".page-head-actions button")] : [];
+       return {
+         inHead: Boolean(head),
+         count: buttons.length,
+         labels: buttons.map((b) => b.textContent.trim()),
+         glyphs: buttons.map((b) => b.querySelectorAll("svg").length),
+         danger: buttons.filter((b) => b.classList.contains("danger-prominent")).map((b) => b.textContent.trim()),
+         strayBelowTitle: document.querySelectorAll("h1 ~ .row button").length,
+         bodyHead: document.body.innerText.slice(0, 400),
+         diag: out_diag,
+       };
+     })()`
+  );
+  if (process.env.AF_VERIFY_DEBUG) console.log("DEBUG handoff", JSON.stringify(handoffActions));
+
+  if (!emptyMode) {
+    check(handoffActions.inHead, "the handoff page has a page head");
+    check(
+      handoffActions.count === 3 && handoffActions.glyphs.every((n) => n >= 1),
+      `the handoff's actions are one labelled toolbar (${(handoffActions.labels ?? []).join(" / ")})`
+    );
+    check(
+      (handoffActions.danger ?? []).length === 1 && /丢弃|Discard/.test(handoffActions.danger[0] ?? ""),
+      `only discarding the handoff is the destructive action (${(handoffActions.danger ?? []).join(", ")})`
+    );
+  }
+
+  // 9b-1c-3. Settings shows its configuration file once, in the panel header —
+  //          not as an identical card repeated at the top of every section.
+  const settingsFile = await evaluate(
+    cdp,
+    `(async () => {
+       const out = { sections: [] };
+       // Opening the panel the way a user does: the rail's "More" trigger, then
+       // the Settings entry inside it. Pushing the URL directly only works
+       // while the panel is already mounted — on the first page it is not.
+       document.querySelector(".rail-menu-trigger")?.click();
+       await new Promise((r) => setTimeout(r, 400));
+       [...document.querySelectorAll(".rail-menu-item")]
+         .find((b) => /设置|Settings/.test((b.textContent ?? "").trim()))?.click();
+       const waitForPanel = async () => {
+         for (let i = 0; i < 40; i++) {
+           if (document.querySelector(".settings-header")) return true;
+           await new Promise((r) => setTimeout(r, 150));
+         }
+         return false;
+       };
+       out.opened = await waitForPanel();
+       if (out.opened) {
+         // Three well-spaced stops across the panel, rather than a burst that
+         // lands in the first page's mount.
+         for (const id of ["proxy", "harness", "retry"]) {
+           history.pushState({}, "", "/settings/" + id);
+           window.dispatchEvent(new PopStateEvent("popstate"));
+           await new Promise((r) => setTimeout(r, 1100));
+           const header = document.querySelector(".settings-header");
+         out.sections.push({
+           id,
+           inHeader: Boolean(header?.querySelector(".settings-file-state")),
+           inBody: document.querySelectorAll(".settings-body .settings-file-state, .settings-body .settings-filecard").length,
+           path: header?.querySelector(".settings-file-path")?.textContent?.trim() ?? "",
+           label: header?.querySelector(".settings-file-label")?.textContent?.trim() ?? "",
+         });
+         }
+       }
+       return out;
+     })()`
+  );
+  check(
+    settingsFile.opened === true &&
+      (settingsFile.sections ?? []).length >= 3 &&
+      settingsFile.sections.every((s) => s.inHeader && s.inBody === 0 && s.path.length > 0 && s.label.length > 0),
+    `every settings page carries the file status once, in the header (${(settingsFile.sections ?? [])
+      .map((s) => `${s.id}:${s.inHeader ? "header" : "missing"}${s.inBody ? `+${s.inBody}dup` : ""}`)
+      .join(" ")})`
+  );
+
   // 9b-1d. Usage: money reads as money, and the heatmap's window is a choice
   //        rather than a hard-coded 26 weeks.
   const usage = await evaluate(
@@ -1588,6 +1711,69 @@ try {
     usage.colsAfter === 4 && usage.colsWidest === 52 && usage.colsBefore === 26,
     `choosing a window resizes the heatmap (${usage.colsAfter} / ${usage.colsBefore} / ${usage.colsWidest} columns)`
   );
+
+  // 9b-1d-2. Hovering a heatmap cell says what that day cost. The grid used to
+  //          answer only with the browser's own `title` tooltip, which the
+  //          WebView renders late, unstyled, and only for one fact at a time.
+  const heatTip = await evaluate(
+    cdp,
+    `(async () => {
+       const out = { before: document.querySelector(".heat-tip") !== null, shown: null, days: null };
+       // Ask the API which days have work, and find the cell for the busiest
+       // one: the level-0 cells are days with nothing to report.
+       out.days = await (async () => {
+         const res = await fetch("/api/usage");
+         const body = await res.json();
+         const history = body.history ?? body.daily ?? [];
+         const active = history.filter((d) => (d.cost ?? 0) > 0 || (d.tokens ?? 0) > 0);
+         return { total: history.length, active: active.reduce((best, d) => (d.cost ?? 0) > (best.cost ?? 0) ? d : best, active[0] ?? {}) };
+       })();
+       // Move onto the day the API reported as busiest, if the current window
+       // holds it; otherwise walk backwards from today for the first cell with
+       // a level above 0.
+       // The heatmap may still be on an empty window from an earlier check;
+       // put it back to the default 26 weeks, then find a shaded cell.
+       [...document.querySelectorAll(".heat-range button")]
+         .find((b) => b.getAttribute("aria-pressed") !== "true") && null;
+       const defaultRange = [...document.querySelectorAll(".heat-range button")][2];
+       defaultRange?.click();
+       await new Promise((r) => setTimeout(r, 600));
+       const active = [...document.querySelectorAll(".heat-grid .heat-cell")]
+         .filter((c) => /\bl[1-4]\b/.test(c.className));
+       const cell = active[active.length - 1] ?? null;
+       out.activeCells = active.length;
+       out.levels = [...document.querySelectorAll(".heat-grid .heat-cell")].slice(-10).map((c) => c.className);
+       if (cell) {
+         cell.dispatchEvent(new MouseEvent("mouseenter", { clientX: 0, clientY: 0 }));
+         await new Promise((r) => setTimeout(r, 200));
+         const tip = document.querySelector(".heat-tip");
+         if (tip) {
+           const card = document.querySelector(".heat-card")?.getBoundingClientRect();
+           const rect = tip.getBoundingClientRect();
+           out.shown = {
+             text: tip.innerText.replace(/\s+/g, " ").trim(),
+             inside: card ? rect.left >= card.left && rect.right <= card.right && rect.top >= card.top && rect.bottom <= card.bottom : false,
+             labelled: cell.getAttribute("aria-label") ?? "",
+             level: cell.className,
+           };
+         }
+       }
+       out.cells = document.querySelectorAll(".heat-grid .heat-cell").length;
+       return out;
+     })()`
+  );
+  if (process.env.AF_VERIFY_DEBUG) console.log("DEBUG heat", JSON.stringify(heatTip.shown ?? heatTip.days));
+  check(heatTip.before === false, "no hover readout is drawn before a cell is hovered");
+  check(
+    Boolean(heatTip.shown) && /预估费用|Estimated cost/i.test(heatTip.shown.text) && /请求|Request/i.test(heatTip.shown.text),
+    `hovering a heatmap cell reads out that day (${JSON.stringify(heatTip.shown?.text?.slice(0, 90))})`
+  );
+  check(heatTip.shown?.inside === true, "the heatmap readout stays inside its card");
+  check(
+    /预估费用|Estimated cost/i.test(heatTip.shown?.labelled ?? ""),
+    `a heatmap cell also carries its readout as a label, for readers that do not hover (${JSON.stringify(heatTip.shown?.labelled?.slice(0, 80))})`
+  );
+
 
   // FIXTURE-DATA ONLY (9b-1e - needs a runtime row to delete)
   if (!emptyMode) {

@@ -254,6 +254,18 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
 
         <div className="settings-content">
           <header className="settings-header">
+            {/* The file is one thing for the whole panel, so it appears once,
+                here — not as a card repeated at the top of every section. */}
+            <FileStatus
+              info={file}
+              applying={applying}
+              note={applyNote}
+              onReload={async () => {
+                setApplyNote(null);
+                await load();
+              }}
+              onApply={applyFile}
+            />
             <span className="settings-actions">
               {openError && (
                 <span className="settings-action-error" role="alert">
@@ -262,10 +274,12 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
               )}
               {saving && <span className="settings-status">{t("settings.saving")}</span>}
               {!saving && justSaved && <span className="settings-status ok">{t("settings.saved")}</span>}
-              <button className="btn-outline" onClick={openFile} title={file?.path}>
-                {t("settings.openFile")}
-              </button>
-              <button className="settings-close" onClick={requestClose} aria-label={t("settings.close")} title={t("settings.close")}>
+              <button
+                className="settings-close"
+                onClick={requestClose}
+                aria-label={t("settings.close")}
+                title={t("settings.close")}
+              >
                 <Icon name="close" size={16} />
               </button>
             </span>
@@ -274,19 +288,6 @@ export function SettingsView({ section, onSection, onClose }: SettingsProps) {
           <div className="settings-body">
             {error && <ErrorBox message={error} />}
             {!config && !error && <div className="settings-loading" role="status" />}
-            {config && (
-              <FileCard
-                info={file}
-                applying={applying}
-                note={applyNote}
-                onReload={async () => {
-                  setApplyNote(null);
-                  await load();
-                }}
-                onApply={applyFile}
-                onOpen={openFile}
-              />
-            )}
             {config && current.id === "general" && <GeneralSection config={config} />}
             {/* Providers and models live in the same file as the other pages
                 (its `providers` section), so they are a section here rather
@@ -362,18 +363,21 @@ async function waitForServer(timeoutMs = 30_000): Promise<boolean> {
 }
 
 /**
- * The configuration file card: path, whether what is on disk is what is
- * running, and the two actions that make hand editing usable (open it; apply
- * and restart). A file that does not parse is reported with its error and
- * cannot be applied — it does not replace the running config.
+ * The configuration file, as one status cluster in the panel's header.
+ *
+ * It used to be a card at the top of *every* section — the same path, the same
+ * state, the same two buttons drawn again on all nine pages, pushing the actual
+ * settings down and reading as if it belonged to whichever page was open. The
+ * file belongs to the whole panel, so it lives in the panel's own header, once:
+ * a dot that says whether what runs matches what is on disk, the path as the
+ * tooltip, and the two actions that make hand editing usable.
  */
-function FileCard(props: {
+function FileStatus(props: {
   info: FileInfo | null;
   applying: boolean;
   note: string | null;
   onReload: () => Promise<void>;
   onApply: () => Promise<void>;
-  onOpen: () => Promise<void>;
 }) {
   const { info, applying, note } = props;
   const { t } = useI18n();
@@ -381,47 +385,39 @@ function FileCard(props: {
   if (!info) return null;
   const broken = info.file.error !== undefined;
   const canApply = info.pending && !broken;
+  const state = broken ? "broken" : info.pending ? "pending" : "applied";
+  // One sentence, spelled out in the tooltip: the header has room for a state
+  // word and a dot, not for the whole explanation.
+  const detail = broken
+    ? t("settings.file.broken", { error: info.file.error ?? "" })
+    : info.pending
+      ? `${t("settings.file.pending")} ${t("settings.file.pendingApplied", { at: formatTime(info.applied.at) })}`
+      : `${t("settings.file.appliedMark", { at: formatTime(info.applied.at) })} · ${t("settings.file.updated")} ${
+          info.file.mtimeMs ? formatTime(new Date(info.file.mtimeMs).toISOString()) : "—"
+        }${loopback ? "" : ` · ${t("settings.file.notLocal")}`}`;
+  const labelKey =
+    state === "broken"
+      ? "settings.file.stateBroken"
+      : state === "pending"
+        ? "settings.file.statePending"
+        : "settings.file.stateApplied";
   return (
-    <section className="settings-filecard">
-      <div className="settings-filecard-head">
-        <div>
-          <div className="settings-filecard-title">{t("settings.file.title")}</div>
-          <div className="settings-filecard-path mono" title={info.path}>
-            {info.path}
-          </div>
-        </div>
-        <div className="settings-filecard-actions">
-          <button className="btn-outline" onClick={() => void props.onReload()} disabled={applying}>
-            {t("settings.file.reload")}
-          </button>
-          <button className="btn-primary" onClick={() => void props.onApply()} disabled={!canApply || applying}>
-            {applying ? t("settings.file.applying") : t("settings.file.apply")}
-          </button>
-        </div>
-      </div>
-
-      <div className="settings-filecard-state">
-        {broken ? (
-          <span className="settings-filecard-error" role="alert">
-            {t("settings.file.broken", { error: info.file.error ?? "" })}
-          </span>
-        ) : info.pending ? (
-          <span className="settings-filecard-pending">
-            {t("settings.file.pending")} {t("settings.file.pendingApplied", { at: formatTime(info.applied.at) })}
-          </span>
-        ) : (
-          <span className="muted">
-            {t("settings.file.appliedMark", { at: formatTime(info.applied.at) })} ·{" "}
-            {t("settings.file.updated")} {info.file.mtimeMs ? formatTime(new Date(info.file.mtimeMs).toISOString()) : "—"}
-          </span>
-        )}
-      </div>
-      {note && <div className="settings-filecard-note">{note}</div>}
-      <div className="settings-hint">
-        {t("settings.file.hint")}
-        {!loopback && <> {t("settings.file.notLocal")}</>}
-      </div>
-    </section>
+    <div className={`settings-file-state settings-file-state-${state}`}>
+      <span className="settings-file-dot" aria-hidden="true" />
+      <span className="settings-file-label" title={detail}>
+        {t(labelKey)}
+      </span>
+      <span className="settings-file-path mono" title={info.path}>
+        {info.path}
+      </span>
+      <button className="btn-outline" onClick={() => void props.onReload()} disabled={applying}>
+        {t("settings.file.reload")}
+      </button>
+      <button className="btn-primary" onClick={() => void props.onApply()} disabled={!canApply || applying}>
+        {applying ? t("settings.file.applying") : t("settings.file.apply")}
+      </button>
+      {note && <span className="settings-file-note">{note}</span>}
+    </div>
   );
 }
 

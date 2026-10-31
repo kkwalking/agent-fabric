@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get, post, fmtTime, fmtCost, shortId, subscribeSSE } from "../api";
-import { StatusBadge, useMinuteClock, useAsync, ErrorBox, CopyButton, Modal, Pager, usePolling, AppLink } from "../components";
+import { StatusBadge, useMinuteClock, useAsync, ErrorBox, CopyButton, Icon, Modal, Pager, usePolling, AppLink } from "../components";
 import { phaseLabel } from "../i18n";
 import { useI18n } from "../i18n-react";
 import { navigate } from "../router";
@@ -325,10 +325,25 @@ export function RunDetailView({ runId }: { runId: string }) {
   return (
     <div>
       {actionError && <ErrorBox message={actionError} />}
+      {/* Back out on its own line, in the same quiet style as every other
+          detail page; the record's own actions belong in the page head, not
+          in a link row above the title. */}
       <div className="row">
-        <AppLink href={"/runs"}>{t("runs.detail.back")}</AppLink>
-        <AppLink href={`/tasks/${run.taskId}`}>{t("runs.detail.thread")}</AppLink>
-        <span className="right">
+        <AppLink href={"/runs"} className="back-link">
+          <Icon name="arrowLeft" size={12} /> {t("runs.detail.back")}
+        </AppLink>
+      </div>
+      <div className="page-head">
+        <div className="page-head-text">
+          <h1 className="mono">{runId}</h1>
+          <p className="sub">
+            <AppLink href={`/tasks/${run.taskId}`}>{t("runs.subtitle.threadLink")}</AppLink>
+            {" · "}
+            {t("runs.detail.inspector")}
+            {t("runs.detail.inspectorTail")}
+          </p>
+        </div>
+        <div className="page-head-actions">
           {isLive && (
             <button
               className="danger"
@@ -350,16 +365,12 @@ export function RunDetailView({ runId }: { runId: string }) {
               {cancelling ? t("runs.cancelling") : t("runs.cancel")}
             </button>
           )}
-          {" "}
-          <button className="small" onClick={reload}>{t("common.refresh")}</button>
-        </span>
+          <button className="small icon-text" onClick={reload}>
+            <Icon name="refresh" size={12} />
+            {t("common.refresh")}
+          </button>
+        </div>
       </div>
-      <h1 className="mono">{runId}</h1>
-      <p className="sub">
-        <strong>{t("runs.detail.inspector")}</strong>{" "}
-        <AppLink href={`/tasks/${run.taskId}`}>{t("runs.subtitle.threadLink")}</AppLink>
-        {t("runs.detail.inspectorTail")}
-      </p>
 
       <div className="grid">
         <div className="stat"><div className="num"><StatusBadge status={run.status} /></div><div className="lbl">{t("runs.stat.status")}</div></div>

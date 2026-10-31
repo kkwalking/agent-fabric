@@ -41,7 +41,9 @@ export type IconName =
   | "star"
   | "compass"
   | "sidebar"
-  | "newSession";
+  | "newSession"
+  | "download"
+  | "copy";
 
 const iconPaths: Record<IconName, ReactNode> = {
   star: (
@@ -216,6 +218,19 @@ const iconPaths: Record<IconName, ReactNode> = {
     <>
       <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
       <path d="M3 3v5h5" />
+    </>
+  ),
+  download: (
+    <>
+      <path d="M12 3v12" />
+      <path d="m7 11 5 5 5-5" />
+      <path d="M4 20h16" />
+    </>
+  ),
+  copy: (
+    <>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H6a2 2 0 0 0-2 2v7.5A1.5 1.5 0 0 0 5.5 15" />
     </>
   ),
   folderOpen: (
@@ -595,11 +610,13 @@ export function ErrorBox({ message }: { message: string | null }) {
  * "copied ✓" briefly, or to "copy failed" when the clipboard write
  * fails (possible outside secure contexts) — never silently.
  */
-export function CopyButton({ text, label, title, className = "small" }: {
+export function CopyButton({ text, label, title, className = "small", icon }: {
   text: string;
   label: string;
   title?: string;
   className?: string;
+  /** Glyph shown before the label, matching the other toolbar actions. */
+  icon?: IconName;
 }) {
   const t = useT();
   const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
@@ -613,6 +630,7 @@ export function CopyButton({ text, label, title, className = "small" }: {
         window.setTimeout(() => setState("idle"), 1500);
       }}
     >
+      {icon && <Icon name={icon} size={12} />}
       {state === "ok" ? t("common.copied") : state === "fail" ? t("common.copyFailed") : label}
     </button>
   );

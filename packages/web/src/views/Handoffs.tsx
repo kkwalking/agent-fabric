@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { get, del, put, fmtTime, shortId } from "../api";
-import { useAsync, ErrorBox, CopyButton, Modal, emptyListHint, AppLink } from "../components";
+import { useAsync, ErrorBox, CopyButton, Icon, Modal, emptyListHint, AppLink } from "../components";
 import { useI18n, useT } from "../i18n-react";
 import { navigate } from "../router";
 import type { MessageKey, Translate } from "../i18n";
@@ -406,47 +406,64 @@ export function HandoffDetailView({ handoffId }: { handoffId: string }) {
   return (
     <div>
       <div className="row">
-        <AppLink href={"/handoffs"}>{t("handoffs.detail.back")}</AppLink>
-        <AppLink href={`/tasks/${detail.taskId}`}>{t("handoffs.detail.thread")}</AppLink>
-        <AppLink href={`/runs/${detail.fromRunId}`}>{t("handoffs.detail.sourceRun")}</AppLink>
+        <AppLink href={"/handoffs"} className="back-link">
+          <Icon name="arrowLeft" size={12} /> {t("handoffs.detail.back")}
+        </AppLink>
         <span className="right">
           {(detail.sources ?? [detail.source]).map((s: string) => <SourceBadge key={s} source={s} />)}
         </span>
       </div>
-      <h1 className="mono">{detail.id}</h1>
-      <p className="sub">
-        {t("handoffs.detail.run")} <span className="mono">{shortId(detail.fromRunId)}</span>
-        {detail.workspaceId ? (
-          <> · {t("handoffs.detail.workspace")} <span className="mono">{shortId(detail.workspaceId)}</span></>
-        ) : null}
-        {" "}· {fmtTime(detail.createdAt)}
-      </p>
-      <div className="row">
-        {/* The exported file is the same rendered body shown below — a pure
-            download of what the record already carries, nothing re-rendered. */}
-        <button
-          className="small"
-          onClick={() => downloadMarkdown(`handoff-${shortId(detail.id)}.md`, detail.renderedPrompt)}
-        >
-          {t("handoffs.detail.export")}
-        </button>
-        {/* Same rendered body the export downloads and the card below shows —
-            copying it hands the next agent exactly what this record carries. */}
-        <CopyButton
-          label={t("handoffs.detail.copy")}
-          text={detail.renderedPrompt}
-          title={t("handoffs.detail.copyTip")}
-        />
-        {/* Wrong context is discarded, never repaired in place: a handoff is
-            whatever the model produced at generation time, so a bad one is
-            deleted and regenerated from the task thread (AGENTS.md). Destructive,
-            so it lives alone on the right behind an explicit confirmation. */}
-        <button
-          className="small danger-prominent right"
-          onClick={() => setConfirmingDiscard(true)}
-        >
-          {t("handoffs.discard")}
-        </button>
+      <div className="page-head">
+        <div className="page-head-text">
+          <h1 className="mono">{detail.id}</h1>
+          <p className="sub">
+            {fmtTime(detail.createdAt)}
+            {" · "}
+            <AppLink href={`/tasks/${detail.taskId}`}>{t("handoffs.detail.thread")}</AppLink>
+            {" · "}
+            <AppLink href={`/runs/${detail.fromRunId}`} className="mono">
+              {t("handoffs.detail.sourceRun")} {shortId(detail.fromRunId)}
+            </AppLink>
+            {detail.workspaceId ? (
+              <>
+                {" · "}
+                {t("handoffs.detail.workspace")} <span className="mono">{shortId(detail.workspaceId)}</span>
+              </>
+            ) : null}
+          </p>
+        </div>
+        {/* The record's own actions, one toolbar in the page head where every
+            other detail page keeps them — not three loose buttons under the
+            title, one of them across the page from the other two. Export and
+            copy are pure reads of `renderedPrompt`; discard is destructive and
+            sits apart at the end of the same row behind a confirmation. */}
+        <div className="page-head-actions">
+          <button
+            className="small icon-text"
+            onClick={() => downloadMarkdown(`handoff-${shortId(detail.id)}.md`, detail.renderedPrompt)}
+          >
+            <Icon name="download" size={12} />
+            {t("handoffs.detail.export")}
+          </button>
+          <CopyButton
+            className="small icon-text"
+            icon="copy"
+            label={t("handoffs.detail.copy")}
+            text={detail.renderedPrompt}
+            title={t("handoffs.detail.copyTip")}
+          />
+          <span className="action-sep" aria-hidden="true" />
+          {/* Wrong context is discarded, never repaired in place: a handoff is
+              whatever the model produced at generation time, so a bad one is
+              deleted and regenerated from the task thread (AGENTS.md). */}
+          <button
+            className="small danger-prominent icon-text"
+            onClick={() => setConfirmingDiscard(true)}
+          >
+            <Icon name="trash" size={12} />
+            {t("handoffs.discard")}
+          </button>
+        </div>
       </div>
       {confirmingDiscard && (
         <Modal title={t("handoffs.discard")} onClose={() => setConfirmingDiscard(false)}>
