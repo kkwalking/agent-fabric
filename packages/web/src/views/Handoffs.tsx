@@ -313,7 +313,7 @@ function HandoffModelCard() {
         {saving && <span className="muted">{t("common.saving")}</span>}
       </div>
       {configuredUnavailable && (
-        <p className="hint" style={{ color: "var(--red)" }}>{t("handoffs.model.warn")}</p>
+        <p className="hint" style={{ color: "var(--signal-red)" }}>{t("handoffs.model.warn")}</p>
       )}
       <ErrorBox message={error} />
     </div>

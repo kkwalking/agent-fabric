@@ -348,6 +348,16 @@ Runs 页每个产生过 native session 的 Run 在操作列提供 **copy session
 
 前端把 Raw Event 经 Presentation Projector 投影为 Timeline Item（事件合并：`tool.started`+`tool.completed` → 一个 Tool Activity，`shell.command`+`shell.output` → 一个 Command Activity），不修改 Core Event Schema；命令结果带 `status`（completed / failed）时该行当即收尾（✓ / ✗），不等到整个 turn 结束；`GET /api/tasks/:id/thread` 提供只读聚合，未引入新的 Message / Conversation / Session 后端模型。
 
+### 视觉令牌与组件验收标准
+
+界面的颜色、字号、圆角、阴影全部来自 `packages/web/src/style.css` 顶部 `:root` 里的令牌层，它镜像设计系统 artifact（`designs/agentfabric-design-system/project/tokens.json`）的品牌层。`:root` 之外不写字面量：**每个** `font-size`、`border-radius`、颜色都是令牌引用，加一个新尺寸是加令牌而不是加字面量。
+
+所有文字色按 WCAG 2.1 AA 校准，而且**按最深的那个表面**（选中行的 `--surface-active`）算，不是按白底算——只按白底校准的颜色在选中行上会掉到 4.1:1。`--accent`（品牌橙）因此只用于填充、边框、图标与大字号，正文链接用它的文字步进 `--accent-text`。
+
+`npm test -w @agentfabric/web` 先跑 `packages/web/scripts/check-style-tokens.mjs` 再跑测试：每个 `var()` 必须有定义、不许内联兜底、括号必须配平、字号与圆角不许写字面量、`:root` 之外不许出现颜色字面量。这些规则针对的是一类**不报错的 bug**——`var()` 引用未定义令牌时浏览器只是丢掉整条声明，元素看起来不对但没有任何日志能指出来。
+
+组件（按钮 / 徽章 / 卡片 / 字段 / 对话框）的验收标准和暗色主题的现状见 `docs/ui-design-system.md`。**产品 UI 没有暗色主题**：设计系统里的 dark token 是试点与未来取值来源，`html` 上的 `color-scheme: light` 是显式声明。
+
 ## Task 与 Run
 
 **Users interact with Tasks. The system executes Runs.** Task 是产品界面，Run 是执行细节。

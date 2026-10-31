@@ -8,7 +8,7 @@
     "build": "vite build",
     "build:watch": "vite build --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
+    "test": "node scripts/check-style-tokens.mjs && node --import tsx --test --test-concurrency=1 test/*.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

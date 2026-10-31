@@ -1293,12 +1293,12 @@ export function BoardView() {
 function ColumnIndicator({ columnId, size = 14 }: { columnId: BoardColumnId; size?: number }) {
   const color =
     columnId === "backlog"
-      ? "var(--dim)"
+      ? "var(--ink-dim)"
       : columnId === "in_progress"
-        ? "var(--blue)"
+        ? "var(--signal-blue)"
         : columnId === "review"
-          ? "var(--purple)"
-          : "var(--red)";
+          ? "var(--signal-purple)"
+          : "var(--signal-red)";
   const r = size * 0.4;
   const cx = size / 2;
   const cy = size / 2;

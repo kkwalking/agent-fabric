@@ -443,7 +443,7 @@ export function ResourceView({ kind }: { kind: string }) {
               )}
             </Field>
           ))}
-          {saveError && <div className="muted" style={{ color: "var(--red)" }}>{saveError}</div>}
+          {saveError && <div className="muted" style={{ color: "var(--signal-red)" }}>{saveError}</div>}
           <button className="primary" disabled={saving} onClick={submit}>
             {saving ? t("common.saving") : t("common.create")}
           </button>
