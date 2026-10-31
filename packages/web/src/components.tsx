@@ -602,7 +602,7 @@ export function Modal({
 export function ErrorBox({ message }: { message: string | null }) {
   const t = useT();
   if (!message) return null;
-  return <div className="card" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{t("common.error", { message })}</div>;
+  return <div className="card" style={{ borderColor: "var(--signal-red)", color: "var(--signal-red)" }}>{t("common.error", { message })}</div>;
 }
 
 /**
@@ -655,7 +655,7 @@ export function emptyListHint(props: {
   if (props.loading) return <div className="muted">{t("common.loading")}</div>;
   if (props.error) {
     return (
-      <div className="muted" style={{ color: "var(--red)" }}>
+      <div className="muted" style={{ color: "var(--signal-red)" }}>
         {props.error}
       </div>
     );
