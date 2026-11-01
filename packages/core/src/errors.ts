@@ -17,6 +17,7 @@ export type ErrorCode =
   | "workspace-create-failed"
   | "workspace-locked"
   | "workspace-invalid"
+  | "workspace-not-found"
   | "workspace-duplicate"
   /* Runtime */
   | "runtime-create-failed"
@@ -58,6 +59,7 @@ export type ErrorCode =
   | "kanban-session-not-found"
   | "kanban-workspace-path-invalid"
   | "kanban-workspace-duplicate"
+  | "kanban-workspace-not-board"
   | "kanban-path-invalid"
   | "kanban-git-command-failed"
   | "kanban-agent-unknown"
@@ -72,8 +74,16 @@ export type ErrorCode =
   | "kanban-worktree-failed"
   | "kanban-terminal-unauthorized"
   | "kanban-agent-failed"
+  /* Why a board session died. Each is a distinct, diagnosable failure. */
+  | "kanban-agent-exited"
+  | "kanban-turn-failed"
+  | "kanban-turn-error"
+  | "kanban-hooks-failed"
+  | "kanban-session-resume-failed"
   | "kanban-session-interrupted"
   | "kanban-runtime-missing"
+  /* A cancel that cannot stop what the caller thinks it is stopping. */
+  | "task-not-cancellable"
   /* Platform */
   | "config-invalid"
   | "settings-open-failed"
@@ -101,6 +111,11 @@ const STAGE_BY_CODE: Partial<Record<ErrorCode, FailureStage>> = {
   "model-not-found": "runtime",
   // A board card's agent failure is an agent-stage failure of the card task.
   "kanban-agent-failed": "agent",
+  "kanban-agent-exited": "agent",
+  "kanban-turn-failed": "agent",
+  "kanban-turn-error": "agent",
+  "kanban-hooks-failed": "agent",
+  "kanban-session-resume-failed": "agent",
   "kanban-session-interrupted": "agent",
 };
 
@@ -138,10 +153,15 @@ export function httpStatusForCode(code: ErrorCode): number {
     code === "workspace-locked" ||
     code === "workspace-duplicate" ||
     code === "task-busy" ||
+    // The action is refused because of what the record currently is (a board
+    // card's live session is stopped through the board, not through the task
+    // API), which is the same class of answer as `task-busy`.
+    code === "task-not-cancellable" ||
     code === "task-state-invalid" ||
     code === "kanban-session-not-startable" ||
     code === "kanban-card-not-editable" ||
-    code === "kanban-workspace-duplicate"
+    code === "kanban-workspace-duplicate" ||
+    code === "kanban-workspace-not-board"
   ) {
     return 409;
   }

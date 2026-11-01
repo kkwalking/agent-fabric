@@ -65,6 +65,18 @@ export class ExecutionSupervisor {
   /**
    * Cancels the Task's in-flight Run. The workspace and every uncommitted
    * modification in it are preserved.
+   *
+   * Reporting is gated on a cancellation actually happening. The write used to
+   * be unconditional, which produced two lies:
+   *
+   * - a **board card** has no supervisor Run at all — its Run is created
+   *   `running` and the agent is a PTY/ACP child — so `active` was always
+   *   absent, nothing was stopped, and the Task was still rewritten to
+   *   `cancelled` / `failure.code: "agent-cancelled"` while the agent kept
+   *   writing. A board card is stopped through the board
+   *   (`POST /api/kanban/cards/:id/stop`), so this says so instead;
+   * - clicking Cancel a second time, or after the Run already settled,
+   *   relaunched a finished Task's report as a user-cancelled failure.
    */
   async cancelTask(taskId: ID): Promise<Task | undefined> {
     const task = this.tasks().get(taskId);
@@ -72,7 +84,22 @@ export class ExecutionSupervisor {
     const active = this.runService
       .forTask(taskId)
       .find((run) => this.runService.isExecuting(run.id) || run.status === "pending" || run.status === "starting");
-    if (active) await this.runService.cancel(active.id);
+    if (!active) {
+      // Nothing of ours was in flight, so nothing may be reported as cancelled.
+      // A live board session is a different cancellation path, named here so
+      // the caller learns where the stop actually lives.
+      const live = this.runService
+        .forTask(taskId)
+        .find((run) => run.status === "running");
+      if (live) {
+        throw new DomainError(
+          "task-not-cancellable",
+          `Run ${live.id} is not a supervisor run — a board session is stopped with POST /api/kanban/cards/:id/stop`
+        );
+      }
+      return this.tasks().get(taskId);
+    }
+    await this.runService.cancel(active.id);
     if (task.execution) {
       await this.tasks().update(taskId, {
         execution: {
@@ -91,6 +118,15 @@ export class ExecutionSupervisor {
    * Retry Agent Run: a **new** Run continues on the same Workspace. The
    * workspace keeps every modification made so far, so the new Run picks the
    * work up where it stopped.
+   *
+   * The new attempt is projected onto the Task immediately, before the Run is
+   * handed to the executor. Without that write `Task.execution.agent.runId` kept
+   * naming the *previous* attempt, and every reader of the stored record went
+   * wrong in a different way: the task page's `status` stayed at whatever the
+   * old attempt ended as (so it stopped polling a live retry), the per-Run
+   * Cancel button pointed at the finished Run, and `retry.agent` could be `true`
+   * while a Run was executing — offering a button that the server then refused
+   * with `task-busy`.
    */
   async retryRun(
     taskId: ID,
@@ -108,6 +144,24 @@ export class ExecutionSupervisor {
       continuity: "new",
       inputInstruction: instruction,
       userPrompt: instruction,
+    });
+    const at = now();
+    const previous = task.execution;
+    await this.tasks().update(taskId, {
+      execution: {
+        phase: "agent.running",
+        status: "running",
+        // The superseded attempt's failure is gone: it is no longer the state of
+        // the Task. `stages` carries forward, like the board's projection does.
+        failure: undefined,
+        agent: {
+          status: "pending",
+          runId: run.id,
+          attempts: (previous?.agent?.attempts ?? 0) + 1,
+        },
+        stages: { ...(previous?.stages ?? {}) },
+        updatedAt: at,
+      },
     });
     void this.runService.executeRun(run.id).catch(() => {});
     return { task: this.tasks().get(taskId)!, run };

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -383,10 +384,31 @@ export class WorkspaceService {
    * board already states the rule for its own list ("one board per folder");
    * this is the same rule at the level where every record is created.
    */
+  /**
+   * The directory identity two spellings of one path share.
+   *
+   * `resolve()` is textual and does not follow symlinks, so it answered "two
+   * directories" for `/var/folders/x` and `/private/var/folders/x` — the same
+   * folder on macOS, where `/var` *is* a symlink. Two records over one tree is
+   * the state this whole guard exists to prevent, and it slipped through
+   * whenever the user picked the folder through a different (equally valid)
+   * path. `realpath` asks the filesystem what the directory is; a path that no
+   * longer exists falls back to the textual form, which is all there is.
+   */
+  private static identity(path: string): string {
+    const absolute = resolve(path);
+    try {
+      return realpathSync(absolute);
+    } catch {
+      return absolute;
+    }
+  }
+
   private workspaceAt(path: string, exceptId?: ID): Workspace | undefined {
+    const wanted = WorkspaceService.identity(path);
     return this.store
       .list<Workspace>("workspaces")
-      .find((w) => w.id !== exceptId && w.path !== undefined && resolve(w.path) === path);
+      .find((w) => w.id !== exceptId && w.path !== undefined && WorkspaceService.identity(w.path) === wanted);
   }
 
   /** Refuses a second record for a directory that already has one. */
@@ -412,6 +434,13 @@ export class WorkspaceService {
         "A git repository is just a directory on this machine — add it as a workspace instead"
       );
     }
+    // A name is a fact of the record, not decoration: it is what the sidebar and
+    // the board sort and label by. A record without one used to be storable, and
+    // then `GET /api/kanban/workspaces` threw on `a.name.localeCompare(...)` —
+    // one nameless workspace took the whole Kanban page down.
+    if (typeof input.name !== "string" || input.name.trim() === "") {
+      throw new DomainError("config-invalid", "A workspace needs a name");
+    }
     const id = newId("ws");
     let path = input.path;
     if (path) this.assertDirectoryFree(resolve(path));
@@ -422,7 +451,7 @@ export class WorkspaceService {
     }
     const workspace: Workspace = {
       id,
-      name: input.name,
+      name: input.name.trim(),
       type: input.type,
       path,
       mountPath: input.mountPath ?? "/workspace",
@@ -444,15 +473,21 @@ export class WorkspaceService {
    */
   async import(input: NewWorkspaceInput): Promise<Workspace> {
     const rawPath = input.path;
-    if (!rawPath) throw new Error("workspace import requires `path` (a local directory)");
+    // Coded failures: the HTTP layer turns a plain `Error` into a bare 400 with
+    // no `code`, so a client could not tell "the path vanished" from "it is a
+    // file" from "it is already a workspace" — every other workspace failure
+    // carries a code, and the web prints the code when it is there.
+    if (!rawPath) throw new DomainError("workspace-invalid", "Importing a workspace requires `path` (a local directory)");
     const abs = resolve(rawPath);
     let st;
     try {
       st = await stat(abs);
     } catch {
-      throw new Error(`Cannot import workspace: path does not exist: ${abs}`);
+      throw new DomainError("workspace-invalid", `Cannot import workspace: path does not exist: ${abs}`);
     }
-    if (!st.isDirectory()) throw new Error(`Cannot import workspace: not a directory: ${abs}`);
+    if (!st.isDirectory()) {
+      throw new DomainError("workspace-invalid", `Cannot import workspace: not a directory: ${abs}`);
+    }
     this.assertDirectoryFree(abs);
     const id = newId("ws");
     const workspace: Workspace = {
@@ -481,14 +516,15 @@ export class WorkspaceService {
    */
   async save(id: ID, runId?: ID): Promise<Workspace> {
     const ws = this.get(id);
-    if (!ws) throw new Error(`Workspace not found: ${id}`);
+    if (!ws) throw new DomainError("workspace-not-found", `Workspace not found: ${id}`);
     if (ws.path) {
-      try {
-        const st = await stat(ws.path);
-        if (!st.isDirectory()) throw new Error(`Workspace path is not a directory: ${ws.path}`);
-      } catch {
+      const st = await stat(ws.path).catch(() => undefined);
+      if (!st) {
         await this.store.update<Workspace>("workspaces", id, { status: "missing" });
-        throw new Error(`Workspace directory is missing: ${ws.path}`);
+        throw new DomainError("workspace-invalid", `Workspace directory is missing: ${ws.path}`);
+      }
+      if (!st.isDirectory()) {
+        throw new DomainError("workspace-invalid", `Workspace path is not a directory: ${ws.path}`);
       }
     }
     const saved = await this.store.update<Workspace>("workspaces", id, {
@@ -499,12 +535,73 @@ export class WorkspaceService {
     return saved!;
   }
 
-  async update(id: ID, patch: Partial<NewWorkspaceInput>): Promise<Workspace | undefined> {
-    if (patch.path) this.assertDirectoryFree(resolve(patch.path), id);
-    return this.store.update<Workspace>("workspaces", id, patch);
+  /**
+   * Fields a caller may change through `update()`.
+   *
+   * Not `Partial<Workspace>` on purpose. `store.update` is a shallow merge, so a
+   * `Partial` parameter is a promise the type cannot keep: any extra key in the
+   * request body is written verbatim. That made two fields reachable that must
+   * never be writable after creation:
+   *
+   * - `ownership` and `taskId` arm the retention purger, which `rm -rf`s a
+   *   directory when `ownership === "managed" && taskId === <a purged task>`.
+   *   A board workspace is `external` and has no `taskId`; letting a request set
+   *   them would mark the user's own project folder as a platform-owned copy of
+   *   a task and have it deleted when that task ages out;
+   * - `board` is what makes a workspace a board (`listWorkspaces` filters on it).
+   *   Writing `board: null` through a generic update stranded every card of that
+   *   board: no board route can reach a workspace whose settings are gone.
+   *
+   * A record's identity — which directory it is, who owns it, which task it was
+   * made for — is fixed when it is created.
+   */
+  private static readonly UPDATABLE = ["name", "path", "mountPath", "persistent", "runtimeId", "modelId", "board"] as const;
+
+  async update(id: ID, patch: Partial<NewWorkspaceInput & Pick<Workspace, "board">>): Promise<Workspace | undefined> {
+    const current = this.get(id);
+    if (!current) return undefined;
+    const next: Partial<Workspace> = {};
+    for (const key of WorkspaceService.UPDATABLE) {
+      const value = (patch as Record<string, unknown>)[key];
+      // `null` is a value here, not "absent": a body carrying `board: null`
+      // cleared the settings that make this record a board and stranded every
+      // card on it. Board settings are replaced, never removed.
+      if (key === "board" && value === null) {
+        throw new DomainError(
+          "config-invalid",
+          "A workspace's board settings cannot be cleared — that would strand the cards on it"
+        );
+      }
+      if (value !== undefined) (next as Record<string, unknown>)[key] = value;
+    }
+    const unknown = Object.keys(patch).filter((key) => !(WorkspaceService.UPDATABLE as readonly string[]).includes(key));
+    if (unknown.length > 0) {
+      throw new DomainError(
+        "config-invalid",
+        `A workspace cannot change ${unknown.join(", ")} — which directory it is, who owns it and which task it was made for are fixed at creation`
+      );
+    }
+    if (next.path) this.assertDirectoryFree(resolve(next.path as string), id);
+    return this.store.update<Workspace>("workspaces", id, next);
   }
 
+  /**
+   * Removes the record, detaching every Task that pointed at it first.
+   *
+   * A Task must never point at a workspace that no longer exists: the sidebar
+   * groups tasks by their workspace id and falls back to rendering the raw id as
+   * a folder heading, so one dangling reference puts a `ws_mvw…` group in the
+   * rail for ever. The rail already did this detach by hand before deleting;
+   * putting it here means the board's delete — which called `remove` directly —
+   * cannot skip it.
+   *
+   * The directories on disk are never touched: deleting a record must never
+   * delete someone's files.
+   */
   async remove(id: ID): Promise<boolean> {
+    for (const task of this.store.list<Task>("tasks").filter((t) => t.workspaceId === id)) {
+      await this.store.update<Task>("tasks", task.id, { workspaceId: undefined });
+    }
     return this.store.remove("workspaces", id);
   }
 
@@ -516,9 +613,23 @@ export class WorkspaceService {
     };
   }
 
+  /**
+   * The workspace at this directory, created if there is none.
+   *
+   * The comparison goes through the same identity check the duplicate guard
+   * uses. It compared raw text, while every stored `path` is normalized, so a
+   * profile whose `workspaceConfig.path` was written as `~/code/x/` or
+   * `./code/x` missed its own existing record and then tripped
+   * `workspace-duplicate` inside `create()` — "Run this task from the profile"
+   * failed on the workspace the profile had been using all along. On a
+   * symlinked spelling the miss went the other way and made a second record for
+   * one directory.
+   */
   async ensureExists(input: NewWorkspaceInput): Promise<Workspace> {
-    const existing = this.list().find((w) => w.type === input.type && w.path === input.path);
-    return existing ?? this.create(input);
+    if (!input.path) return this.create(input);
+    const existing = this.workspaceAt(input.path);
+    if (existing) return existing;
+    return this.create({ ...input, path: resolve(input.path) });
   }
 }
 

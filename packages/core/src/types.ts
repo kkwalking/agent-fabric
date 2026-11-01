@@ -1451,5 +1451,14 @@ export interface KanbanSession {
   startedAt: string;
   endedAt?: string;
   exitCode?: number;
+  /** Human-readable reason the session last failed. */
   error?: string;
+  /**
+   * Machine-readable reason the session last failed, carried into the Task's
+   * `failure.code`. Distinct causes stay distinct here (a worktree that could
+   * not be created, hooks that could not be prepared, an ACP turn that threw,
+   * the process exiting) so an automatic-retry decision can tell a transient
+   * blip from a permanent misconfiguration.
+   */
+  errorCode?: string;
 }

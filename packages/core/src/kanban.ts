@@ -58,6 +58,9 @@ export const KANBAN_ACTIVE_STATUSES: readonly KanbanSessionStatus[] = [
   "needs_attention",
 ];
 
+
+
+
 /**
  * The harness `Runtime.kind` each board agent runs on. A board agent without a
  * matching runtime is a configuration error, never a silent fallback.
@@ -272,6 +275,14 @@ export interface KanbanSessionPatch {
   endedAt?: string;
   exitCode?: number;
   error?: string;
+  /**
+   * The machine-readable reason a `failed` status happened. It becomes the
+   * Task's `failure.code` instead of the generic `kanban-agent-failed`.
+   *
+   * A session patch holds facts, not derivations, so a code is only meaningful
+   * together with a failed status; it is ignored otherwise.
+   */
+  errorCode?: string;
 }
 
 export interface KanbanStartInput {
@@ -317,8 +328,15 @@ interface SessionOutcome {
  * is over and the work waits for the user. The Task stays `running` — it is
  * not failed, cancelled or done, and the board has no validation or publish
  * stage to advance it to.
+ *
+ * `errorCode` replaces the generic `kanban-agent-failed` when the caller knows
+ * which failure this was. Without it every distinct way a turn can die — a
+ * refused secret scope, an unsupported `session/resume`, a handshake error —
+ * landed on the Task under one code, which also made
+ * `autoRetry.planAutoRetry`'s `isTransientErrorCode()` branch unreachable: a
+ * retryable blip and a permanent misconfiguration were indistinguishable.
  */
-function sessionOutcome(status: KanbanSessionStatus, at: string): SessionOutcome {
+function sessionOutcome(status: KanbanSessionStatus, at: string, errorCode?: string): SessionOutcome {
   switch (status) {
     case "starting":
       return { run: "starting", phase: "agent.running", status: "running", agent: "pending", stage: undefined };
@@ -333,15 +351,17 @@ function sessionOutcome(status: KanbanSessionStatus, at: string): SessionOutcome
         agent: "completed",
         stage: { status: "completed", at },
       };
-    case "failed":
+    case "failed": {
+      const code = errorCode ?? "kanban-agent-failed";
       return {
         run: "failed",
         phase: "failed",
         status: "failed",
         agent: "failed",
-        stage: { status: "failed", at, errorCode: "kanban-agent-failed" },
-        failureCode: "kanban-agent-failed",
+        stage: { status: "failed", at, errorCode: code },
+        failureCode: code,
       };
+    }
     case "interrupted":
       // A restart cut the process off. That is worth failing loudly for — the
       // agent's turn may have been half done — but the Run is `cancelled`: it
@@ -372,8 +392,22 @@ function sessionOutcome(status: KanbanSessionStatus, at: string): SessionOutcome
 
 /**
  * The complete `Task.execution` a board session change writes: every field is
- * produced here, every time. Only `stages` carries forward from the previous
- * value.
+ * produced here, every time.
+ *
+ * Two fields are cumulative and therefore read the previous value:
+ *
+ * - `stages` — a stage that already finished must not be forgotten because a
+ *   later status lacks an entry for it;
+ * - `agent.attempts` — how many times this card has been started. It was
+ *   hardcoded to `1`, so the task page reported "1 attempt" after the third
+ *   restart.
+ *
+ * An attempt is a Run, so the count moves only when the recorded `runId`
+ * changes from one real Run to another. The placeholder write that creates the
+ * Task carries `runId: ""` (the Run does not exist yet); counting that as an
+ * attempt and then counting the Run it is replaced by made the very first start
+ * report "2 attempts". A *resume* reopens the same Run and writes no execution
+ * at all, so resuming never inflates the count.
  */
 function projectExecution(input: {
   previous?: TaskExecution;
@@ -385,6 +419,9 @@ function projectExecution(input: {
   const { previous, outcome, runId, at, error } = input;
   const stages: TaskStageStates = { ...(previous?.stages ?? {}) };
   if (outcome.stage) stages.agent = { ...outcome.stage };
+  const before = previous?.agent?.attempts ?? 0;
+  const previousRunId = previous?.agent?.runId;
+  const attempts = !previousRunId || previousRunId === runId ? Math.max(before, 1) : before + 1;
   return {
     phase: outcome.phase,
     status: outcome.status,
@@ -401,7 +438,7 @@ function projectExecution(input: {
           },
         }
       : { failure: undefined }),
-    agent: { status: outcome.agent, runId, attempts: 1, ...(error ? { error } : {}) },
+    agent: { status: outcome.agent, runId, attempts, ...(error ? { error } : {}) },
     stages,
     updatedAt: at,
   };
@@ -416,10 +453,44 @@ function assertSessionPatch(patch: KanbanSessionPatch & Partial<KanbanSession>):
 }
 
 export class KanbanService {
+  /**
+   * One queue per card, holding the start that is currently running.
+   *
+   * `startAttempt` is read-modify-write across `await`s: it reads
+   * `card.taskId`, and when there is none it creates a Task, records a Run and
+   * only then links them. Two starts that interleave inside that window both see
+   * `taskId === undefined` and both create a Task — one card became four Tasks
+   * with four live agents when four start requests arrived together, which is
+   * exactly the "a card is one task, one start is one run" rule this service
+   * exists to hold. A double-click, a retried request or two windows are enough
+   * to hit it; no adversarial timing is needed.
+   *
+   * The second caller is not rejected outright — it waits, and by then the card
+   * has a live session, so it gets the honest "already has a running session"
+   * refusal instead of a second agent.
+   */
+  private readonly starting = new Map<ID, Promise<unknown>>();
+
   constructor(
     private store: Store,
     private deps: KanbanServiceDeps
   ) {}
+
+  /** Runs `work` after every earlier start of the same card has finished. */
+  private async serialised<T>(cardId: ID, work: () => Promise<T>): Promise<T> {
+    const previous = this.starting.get(cardId) ?? Promise.resolve();
+    // The tail never rejects: a failed start must not wedge the queue, and the
+    // caller still receives its own error through `next`.
+    const next = previous.then(work, work);
+    const tail = next.catch(() => undefined);
+    this.starting.set(cardId, tail);
+    try {
+      return await next;
+    } finally {
+      // Only the last waiter clears the entry, so a queued start still sees it.
+      if (this.starting.get(cardId) === tail) this.starting.delete(cardId);
+    }
+  }
 
   /* ---------------- workspaces: they are Workspaces ---------------- */
 
@@ -576,10 +647,19 @@ export class KanbanService {
     const card = this.getCard(id);
     const board = this.boardSettings(this.getWorkspace(card.workspaceId));
     const next: Partial<KanbanCard> = { updatedAt: now() };
-    if (patch.title !== undefined) next.title = String(patch.title);
     if (patch.prompt !== undefined) {
       if (!String(patch.prompt).trim()) throw new DomainError("kanban-session-not-startable", "A card needs a prompt");
       next.prompt = String(patch.prompt);
+    }
+    if (patch.title !== undefined) {
+      // A cleared title is not a stored fact: a card without one made the Task
+      // it starts inherit the empty string (only `undefined` is defaulted when
+      // the Task is created), and the sidebar and the task list rendered a blank
+      // row while the board hid it behind its own display fallback. Derive it
+      // from the prompt exactly as `createCard` does.
+      const typed = String(patch.title).trim();
+      const prompt = next.prompt ?? card.prompt;
+      next.title = typed || deriveKanbanCardTitle(prompt) || prompt.slice(0, 80);
     }
     if (patch.agentId !== undefined) next.agentId = assertAgentKind(patch.agentId);
     if (patch.model !== undefined) next.model = patch.model || undefined;
@@ -671,6 +751,10 @@ export class KanbanService {
    * no second Run is recorded for it.
    */
   async startAttempt(cardId: ID, input: KanbanStartInput): Promise<KanbanStartResult> {
+    return this.serialised(cardId, () => this.startAttemptNow(cardId, input));
+  }
+
+  private async startAttemptNow(cardId: ID, input: KanbanStartInput): Promise<KanbanStartResult> {
     const card = this.getCard(cardId);
     const { tasks, runs } = this.writeServices();
     const workspace = this.getWorkspace(card.workspaceId);
@@ -812,7 +896,7 @@ export class KanbanService {
       await this.recordNativeSession(next);
     }
     if (patch.status !== undefined) {
-      await this.syncSession(next, patch.status, next.error);
+      await this.syncSession(next, patch.status, next.error, next.errorCode);
     }
     return next;
   }
@@ -865,13 +949,14 @@ export class KanbanService {
    */
   async settleSession(
     id: ID,
-    input: { status: KanbanSessionStatus; exitCode?: number; error?: string }
+    input: { status: KanbanSessionStatus; exitCode?: number; error?: string; errorCode?: string }
   ): Promise<KanbanSession> {
     const session = await this.updateSession(id, {
       status: input.status,
       endedAt: now(),
       ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
       ...(input.error !== undefined ? { error: input.error } : {}),
+      ...(input.errorCode !== undefined ? { errorCode: input.errorCode } : {}),
     });
     if (input.status === "awaiting_review") {
       await this.setColumn(session.cardId, "review");
@@ -881,8 +966,14 @@ export class KanbanService {
 
   /**
    * Restart recovery: no board process survived, so every session that was
-   * still active is settled as interrupted and its Run + Task say so
+   * still *mid-turn* is settled as interrupted and its Run + Task say so
    * (`kanban-session-interrupted`). Returns the settled session ids.
+   *
+   * Every active session is settled, `awaiting_review` included: its process did
+   * not survive the restart, and a record claiming otherwise would show the card
+   * as live when nothing is listening. What must NOT move is the *outcome* of the
+   * turn it already finished — that is `syncSession`'s job, one layer down, and it
+   * is what keeps a `completed` Run from being rewritten as `cancelled`.
    */
   async recoverInterrupted(): Promise<ID[]> {
     const interrupted: ID[] = [];
@@ -912,8 +1003,12 @@ export class KanbanService {
 
   private boardSettings(workspace: Workspace): BoardSettings {
     if (!workspace.board) {
+      // Its own code: `kanban-workspace-path-invalid` means "this folder is not
+      // a usable directory", and a caller told that about a workspace whose
+      // folder is perfectly fine cannot act on it — it would go looking at the
+      // path instead of at the missing board settings.
       throw new DomainError(
-        "kanban-workspace-path-invalid",
+        "kanban-workspace-not-board",
         `Workspace ${workspace.id} (${workspace.name}) is not a board workspace — it has no board settings`
       );
     }
@@ -936,15 +1031,41 @@ export class KanbanService {
    * Mirrors one session status onto its Run (and its lifecycle event) — the
    * whole projection table, in one place. The Task is written by the same
    * status change through `writeTaskExecution`.
+   *
+   * The Run's `phase` moves with its `status`. `sessionOutcome` already carries
+   * the end phase for every session state; leaving it out left a board Run that
+   * failed or was cancelled reporting `phase: "agent.running"` forever, so the
+   * Run Inspector printed "Agent running" beside a status badge reading
+   * "failed" — the stored record contradicting itself (`RunService.finish()`
+   * keeps the two in step on the supervisor path for exactly this reason).
+   *
+   * **A finished turn is never un-finished.** `awaiting_review` records the
+   * agent's turn as *completed*; releasing the process afterwards (archiving the
+   * card to Done stops it, a restart interrupts it) is bookkeeping about a
+   * process, not a new outcome for the work. Writing `cancelled` over `completed`
+   * made dragging a finished card to Done flip its task page from "completed" to
+   * "cancelled" and erase the `stages.agent = completed` fact — the only record
+   * of what the agent actually did. The session record still moves to `stopped`/
+   * `interrupted` (that is what happened to the process); the Run and the Task's
+   * execution keep the outcome the turn earned.
    */
-  private async syncSession(session: KanbanSession, status: KanbanSessionStatus, error?: string): Promise<void> {
+  private async syncSession(
+    session: KanbanSession,
+    status: KanbanSessionStatus,
+    error?: string,
+    errorCode?: string
+  ): Promise<void> {
     const at = now();
-    const outcome = sessionOutcome(status, at);
+    const outcome = sessionOutcome(status, at, errorCode);
     const run = this.store.get<Run>("runs", session.runId);
     if (!run) {
       throw new DomainError("task-not-found", `Board session ${session.id} points at a missing run: ${session.runId}`);
     }
-    await this.store.update<Run>("runs", run.id, { status: outcome.run, updatedAt: at });
+    if (run.status === "completed" && outcome.run === "cancelled") {
+      // The turn already succeeded; this transition only releases the process.
+      return;
+    }
+    await this.store.update<Run>("runs", run.id, { status: outcome.run, phase: outcome.phase, updatedAt: at });
     const eventType =
       outcome.run === "completed"
         ? "run.completed"
