@@ -113,6 +113,10 @@ body {
 
 /* ---------- Sidebar ---------- */
 
+/* The rail's width is the user's drag: it arrives as an inline width from the
+   shell (see `SIDEBAR_WIDTH_KEY` in App.tsx), and this rule is the value before
+   that first paint and the width of the collapsed icon column. The default
+   lives with the preference it is the default of, not here. */
 .sidebar {
   width: 260px;
   background: var(--surface);
@@ -130,6 +134,58 @@ body {
      below the overlays (90+), which must cover the rail. */
   z-index: 50;
   transition: width 0.16s ease;
+}
+
+/* ---------- The rail / page divider ---------- */
+
+/* A 6px grab strip straddling the hairline between the two panes. It is a flex
+   child of `.app`, so its own width is part of the layout: the page takes the
+   rest. The negative margin pulls the hairline it draws back over the rail's own
+   border, so a resize does not leave a doubled line. */
+.rail-resizer {
+  width: 6px;
+  margin-left: -1px;
+  flex: 0 0 auto;
+  cursor: col-resize;
+  background: transparent;
+  /* A drag here is the divider moving, not the page scrolling under a touch
+     gesture: without this a trackpad/touch drag scrolls the workspace list. */
+  touch-action: none;
+  /* The whole point of the control is that it can be found: at rest it is the
+     pane's hairline, and the grip inside it is what says "this moves". */
+  display: grid;
+  place-items: center;
+  z-index: 51;
+  transition: background 0.12s ease;
+}
+.rail-resizer::after {
+  content: "";
+  width: 2px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  background: var(--line-strong);
+  /* The grip is painted at rest, not only on hover: a 6px transparent strip
+     over an already hairline-fine border is not something a user discovers by
+     accident, and the whole point of this change is that the divider is a
+     control. The hover state adds the surface, not the existence. */
+  opacity: 1;
+  transition: background 0.12s ease;
+}
+.rail-resizer:hover,
+.rail-resizer:active,
+.rail-resizer.active {
+  background: var(--surface-active);
+}
+.rail-resizer:hover::after,
+.rail-resizer:active::after,
+.rail-resizer.active::after,
+.rail-resizer:focus-visible::after {
+  background: var(--ink-dim);
+}
+/* A drag must not be fed by CSS transitions: a width that lags the pointer by
+   160ms reads as a broken drag, so the panes snap while the divider is held. */
+.app.resizing .sidebar {
+  transition: none;
 }
 
 /* Collapsed rail: icons only, section titles become dividers. */
@@ -780,12 +836,6 @@ a:hover {
 
 /* ---------- Usage: calendar heatmap ---------- */
 
-.heat-head {
-  align-items: baseline;
-}
-.heat-head h2 {
-  margin-bottom: 0;
-}
 /* Segmented control (Usage metric switch): a grey track whose active
    option is a white pill. */
 .segmented {
@@ -842,10 +892,12 @@ a:hover {
   border: 0;
 }
 
-/* The history's controls: what it colours by, and how far back it goes. */
+/* The history's controls: what it colours by, and how far back it goes.
+   This bar now sits directly under the stat tiles, because its section heading
+   is gone — the old negative top margin was pulling it up onto the tiles. */
 .usage-toolbar {
   gap: 18px;
-  margin: -4px 0 10px;
+  margin: 18px 0 10px;
 }
 .usage-control {
   display: inline-flex;
@@ -1224,8 +1276,12 @@ textarea + .hint {
 
 /* ---------- Thread header ---------- */
 
+/* One row, and as short as one row can be: the title, its status, the refresh
+   control and the details menu all sit on the same line, and the row's own
+   padding is tight. This bar costs the conversation vertical space that the
+   conversation itself never gets back. */
 .thread-header {
-  padding: 14px 28px 12px;
+  padding: 8px 20px 7px;
   border-bottom: 1px solid var(--line-soft);
   background: var(--surface);
   flex-shrink: 0;
@@ -1233,11 +1289,20 @@ textarea + .hint {
 .thread-title-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
+}
+/* `.right` only carries `margin-left: auto`; the actions themselves need to be
+   a row, or the refresh button and the menu stack and the "one row" header
+   becomes three rows tall — which is exactly what happened. */
+.thread-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
 }
 .thread-title {
   font-family: var(--font-serif);
-  font-size: var(--fs-xl);
+  font-size: var(--fs-lg);
   font-weight: 600;
   margin: 0;
   letter-spacing: 0;
@@ -1255,6 +1320,79 @@ textarea + .hint {
   gap: 8px;
   margin-top: 7px;
   flex-wrap: wrap;
+}
+/* The "···" menu in the title row. Same popover shape as the rail's overflow
+   menu (see .rail-menu), right-aligned because its trigger sits at the right
+   edge of the row. */
+.thread-menu-root {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.thread-actions .icon-btn.active {
+  background: var(--surface-active);
+  color: var(--ink);
+}
+.thread-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 260px;
+  max-width: 340px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-overlay);
+}
+/* The facts read here and nowhere else: label on the left, value on the right,
+   the value allowed to truncate rather than widen the panel. */
+.thread-menu-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 9px;
+}
+.thread-menu-key {
+  flex: 0 0 auto;
+  color: var(--ink-dim);
+  font-size: var(--fs-sm);
+}
+.thread-menu-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-menu-sep {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--line-soft);
+}
+.thread-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+}
+.thread-menu-item:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
 }
 .meta-chip {
   display: inline-flex;
@@ -5043,38 +5181,25 @@ button.stat.clickable:hover {
   border-color: transparent;
 }
 
-/* Runs: the status filter above the table. Same shape as the rail's segmented
-   controls (one row, counts as small badges) so the two read as one system. */
+/* Runs: the status filter above the table. It is Usage's segmented control
+   (`.segmented`) carrying counts, so the two read as one system instead of a
+   pill-shaped button row that only resembled it. */
 .runs-filters {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 12px;
   flex-wrap: wrap;
   margin: 14px 0 10px;
 }
 .runs-filter {
+  /* The shared `.segmented button` sets the shape; these keep the counts on the
+     same baseline as the label. */
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--ink-muted);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-.runs-filter:hover {
-  background: var(--surface-hover);
-  color: var(--ink);
-}
-.runs-filter.active {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 .runs-filter-count {
-  font-variant-numeric: tabular-nums;
   font-size: var(--fs-xs);
   opacity: 0.7;
 }

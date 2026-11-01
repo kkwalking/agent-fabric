@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Icon, IconName } from "./components";
 import { LanguageContext, useLanguageState } from "./i18n-react";
 import type { MessageKey } from "./i18n";
@@ -118,6 +118,53 @@ function writeSettingsOpen(open: boolean): void {
 const SIDEBAR_COLLAPSED_KEY = "agentfabric.sidebarCollapsed";
 
 /**
+ * The rail's width, as a dragged preference.
+ *
+ * The shell used to be a fixed 260px rail beside a main area capped at
+ * 1180px, so a wide window left a dead gutter and a long workspace name was
+ * still cut off. The divider between the two panes is now the control: drag it
+ * to trade width between the task tree and the page it opens, and the choice is
+ * remembered across launches (it is a layout preference of this window, so it
+ * lives in `localStorage` next to the collapsed flag — not in the server's
+ * configuration).
+ *
+ * The bounds are what the rail needs to stay legible: below the minimum the
+ * workspace rows lose their names, and above the maximum the main area is the
+ * one squeezed. The default is the width the rail always had.
+ */
+const SIDEBAR_WIDTH_KEY = "agentfabric.sidebarWidth";
+const SIDEBAR_WIDTH_DEFAULT = 260;
+const SIDEBAR_WIDTH_MIN = 200;
+const SIDEBAR_WIDTH_MAX = 480;
+/**
+ * What the main area keeps whatever the rail takes. A drag stops at this
+ * rather than at `SIDEBAR_WIDTH_MAX` alone, so the rail cannot eat a small
+ * window's page: the maximum is a preference, the window is a fact.
+ */
+const MAIN_MIN_WIDTH = 420;
+
+/** A rail width inside the allowed range; anything else falls back to default. */
+function clampSidebarWidth(width: number, limit = SIDEBAR_WIDTH_MAX): number {
+  if (!Number.isFinite(width)) return SIDEBAR_WIDTH_DEFAULT;
+  return Math.max(SIDEBAR_WIDTH_MIN, Math.min(Math.min(SIDEBAR_WIDTH_MAX, limit), Math.round(width)));
+}
+
+/** The rail width this window last used, or the default. */
+function readStoredSidebarWidth(): number {
+  try {
+    const stored = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    // `Number(null)` is 0, which is finite: read the string, not the absence.
+    if (stored !== null) {
+      const width = Number(stored);
+      if (Number.isFinite(width)) return clampSidebarWidth(width);
+    }
+  } catch {
+    /* fall through to the default */
+  }
+  return SIDEBAR_WIDTH_DEFAULT;
+}
+
+/**
  * System nav. Proxy is not a page of its own: it is a settings section (see
  * `views/Settings.tsx`), because a proxy is one of the settings the config file
  * holds, not a separate surface with its own save button. `/proxy` still routes
@@ -203,6 +250,120 @@ export function App() {
     }
   }, [sidebarCollapsed]);
 
+  // The rail's dragged width. Kept as state while dragging (so the divider
+  // follows the pointer) and written once the drag settles — the write is a
+  // preference, not a render input.
+  const [sidebarWidth, setSidebarWidth] = useState<number>(readStoredSidebarWidth);
+  const [resizing, setResizing] = useState(false);
+
+  useEffect(() => {
+    // One write per gesture, not one per pointermove: the drag updates state on
+    // every move, and the stored value only has to be right when it settles.
+    if (resizing) return;
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    } catch {
+      /* A width preference that cannot be stored must not break the app. */
+    }
+  }, [sidebarWidth, resizing]);
+
+  // The window decides how much of the remembered width is actually usable. It
+  // is tracked as state rather than read off the DOM at drag time because the
+  // *rendered* width has to react to it: a rail remembered at 480px in a wide
+  // window must give way when the window shrinks, without overwriting the
+  // preference (growing the window again restores it).
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  /** The widest the rail may be in this window, so the page keeps room. */
+  const railWidthLimit = () => clampSidebarWidth(windowWidth - MAIN_MIN_WIDTH, SIDEBAR_WIDTH_MAX);
+  /** What the rail is actually painted at. */
+  const railWidth = clampSidebarWidth(sidebarWidth, railWidthLimit());
+
+  /**
+   * Drag the divider to trade width between the rail and the page.
+   *
+   * Listeners are on `window` for the whole gesture: a pointer that leaves the
+   * 6px handle (which it will, immediately) must keep resizing, and pointer
+   * capture on a div would not survive the pointerup outside the window either.
+   * The text cursor and selection are suppressed for the drag so the gesture
+   * does not paint a selection across the rail.
+   *
+   * The global side effects are undone by one `finish` that the listeners and
+   * the component's own unmount both call: dragging the divider is the only
+   * thing that ever sets `body`'s cursor/selection, and a gesture interrupted by
+   * a route change (the shell is not remounted, but the pointerup can land on a
+   * page that navigated) must not leave the whole app unable to select text.
+   */
+  const endRailResize = useRef<() => void>(() => {});
+
+  const beginRailResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = railWidth;
+    const limit = railWidthLimit();
+    setResizing(true);
+    const move = (moveEvent: PointerEvent) => {
+      setSidebarWidth(clampSidebarWidth(startWidth + (moveEvent.clientX - startX), limit));
+    };
+    const finish = () => {
+      endRailResize.current = () => {};
+      setResizing(false);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    endRailResize.current = finish;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
+
+  // A gesture that outlives its component cannot happen by itself (the shell is
+  // the app's root), but an unmounted drag is still the one way `body` keeps the
+  // suppressed selection for good, so it is released here too.
+  useEffect(() => () => endRailResize.current(), []);
+
+  /**
+   * Keyboard resizing, because the divider is a `role="separator"` with a
+   * focusable handle: arrows step it, Home/End take it to the bounds, and
+   * Enter resets it to the default width. Without this the control would be
+   * pointer-only, which is exactly the accessibility gap a drag handle usually
+   * has.
+   */
+  const onRailResizeKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16;
+    const limit = railWidthLimit();
+    switch (event.key) {
+      case "ArrowLeft":
+        setSidebarWidth((width) => clampSidebarWidth(width - step, limit));
+        break;
+      case "ArrowRight":
+        setSidebarWidth((width) => clampSidebarWidth(width + step, limit));
+        break;
+      case "Home":
+        setSidebarWidth(clampSidebarWidth(SIDEBAR_WIDTH_MIN, limit));
+        break;
+      case "End":
+        setSidebarWidth(clampSidebarWidth(limit, limit));
+        break;
+      case "Enter":
+        setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  };
+
   // The shell is painted; fetch the other views while nothing else is going on.
   useEffect(() => {
     prefetchViews();
@@ -214,8 +375,16 @@ export function App() {
 
   return (
     <LanguageContext.Provider value={language}>
-    <div className="app">
-      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+    <div className={`app ${resizing ? "resizing" : ""}`}>
+      {/* The two panes are width-controlled here rather than in the stylesheet:
+          the rail's width is the user's drag, and the main area takes the rest
+          (`.app` is a flex row, so `flex: 1` on the page and a fixed rail width
+          are the whole layout). The collapsed rail is still an icon column, and
+          its width is the stylesheet's. */}
+      <aside
+        className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}
+        style={sidebarCollapsed ? undefined : { width: railWidth }}
+      >
         <div className="brand">
           <button className="brand-btn" onClick={() => navigate("/tasks")} title={t("nav.tasks")}>
             {/* The app icon in both states: the full tile when the rail is an
@@ -347,6 +516,27 @@ export function App() {
 
         <RailMenu currentPath={path} />
       </aside>
+      {/* The divider between the two panes. It is only meaningful while the rail
+          is expanded: the collapsed rail is a fixed icon column, so its width is
+          not the user's to trade and the handle goes away with the tree. */}
+      {!sidebarCollapsed && (
+        <div
+          className={`rail-resizer ${resizing ? "active" : ""}`}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("rail.resize")}
+          aria-valuenow={railWidth}
+          aria-valuemin={SIDEBAR_WIDTH_MIN}
+          aria-valuemax={railWidthLimit()}
+          tabIndex={0}
+          title={t("rail.resizeHint")}
+          onPointerDown={beginRailResize}
+          onKeyDown={onRailResizeKey}
+          // The handle is a drag target, not a text selection: a double click on
+          // it would otherwise start one on the page beneath.
+          onDoubleClick={() => setSidebarWidth(SIDEBAR_WIDTH_DEFAULT)}
+        />
+      )}
       <main className={`main ${fullBleed ? "fullbleed" : ""}`}>
         {/* One boundary for whichever view chunk is loading; the fallback is
             deliberately quiet so a fast chunk swap does not flash a message. */}
