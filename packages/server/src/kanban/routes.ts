@@ -20,6 +20,7 @@ import { readGitInfo } from "./git.js";
 import { listAgentModels } from "./modelCatalog.js";
 import { addKanbanWorkspace } from "./workspaces.js";
 import type { KanbanSessionRuntime } from "./sessions.js";
+import type { KanbanSession } from "@agentfabric/core";
 
 const COLUMNS: readonly KanbanColumn[] = ["backlog", "in_progress", "review", "trash"];
 
@@ -295,7 +296,27 @@ export function registerKanbanRoutes(app: Express, deps: KanbanRouteDeps): void 
       if (req.body?.restart === true && latest && runtime.isLive(latest.id)) {
         await runtime.stop(latest.id);
       }
-      const session = await runtime.start(cardId);
+      let session: KanbanSession;
+      try {
+        session = await runtime.start(cardId);
+      } catch (err) {
+        // Two starts can arrive together (a double-click, a retried request, two
+        // windows). The runtime serialises them per card, so the loser reaches the
+        // live-session check *after* the winner registered — a check it could not
+        // have passed above. "Already has a running session" in that situation
+        // means "this card is already starting, here it is", which is exactly what
+        // the no-op path above returns; turning it into a 409 would make an
+        // ordinary double-click look like an error on one of the two requests.
+        const stillLive = req.body?.restart !== true ? kanban.latestSessionForCard(cardId) : undefined;
+        const lostTheRace =
+          err instanceof DomainError &&
+          err.code === "kanban-session-not-startable" &&
+          stillLive !== undefined &&
+          runtime.isLive(stillLive.id);
+        if (!lostTheRace) throw err;
+        res.json({ session: stillLive, card: kanban.getCard(cardId) });
+        return;
+      }
       res.json({ session, card: kanban.getCard(cardId) });
     })
   );

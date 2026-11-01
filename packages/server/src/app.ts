@@ -966,9 +966,30 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
     if (!w) return fail(res, new Error("Workspace not found"), 404);
     ok(res, workspaces.usage(req.params.id));
   });
+  /**
+   * Deleting a workspace never takes its cards with it, and never leaves them
+   * behind either: the board owns cards by workspace id, so a card whose
+   * workspace is gone is unreachable — no board route can list, start or delete
+   * it, and re-adding the same folder mints a *new* workspace id that the old
+   * cards do not point at. A board workspace that still has cards therefore
+   * refuses with the count, the way clearing Done refuses live sessions: the
+   * caller has to deal with the cards first.
+   */
   app.delete(
     "/api/workspaces/:id",
     ah(async (req, res) => {
+      const workspace = workspaces.get(req.params.id);
+      if (!workspace) return fail(res, new Error("Workspace not found"), 404);
+      if (workspace.board) {
+        const cards = kanban.listCards(workspace.id);
+        if (cards.length > 0) {
+          throw new DomainError(
+            "kanban-card-not-editable",
+            `This board workspace still has ${cards.length} card${cards.length === 1 ? "" : "s"} — ` +
+              "delete them from the board before removing the workspace"
+          );
+        }
+      }
       const removed = await workspaces.remove(req.params.id);
       removed ? ok(res, { ok: true }) : fail(res, new Error("Workspace not found"), 404);
     })

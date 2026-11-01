@@ -310,6 +310,132 @@ test("worktree mode runs in a git worktree and leaves the project tree untouched
   }
 });
 
+test("a card whose folder vanished fails with the folder, not a spawn error", async () => {
+  // Moving or deleting the project folder used to surface as `spawn <binary>
+  // ENOENT` or "Agent exited with code 1", which sends the user to look at the
+  // harness. The folder is what is missing, so that is what the error must name.
+  const h = await makeHarness();
+  try {
+    const projectDir = join(h.dir, "vanishing");
+    mkdirSync(projectDir);
+    initGitRepo(projectDir);
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: projectDir,
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
+      prompt: "the folder is about to go away",
+      agentId: "claude",
+    });
+    rmSync(projectDir, { recursive: true, force: true });
+
+    const res = await rawApi(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    assert.notEqual(res.status, 200, "starting in a folder that is gone must fail");
+    assert.equal(res.data.code, "kanban-workspace-path-invalid", JSON.stringify(res.data));
+    assert.match(String(res.data.error), /no longer exists/, "the message names the missing folder");
+    assert.match(String(res.data.error), new RegExp(projectDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "and says which one");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("concurrent starts of one card spawn exactly one agent and one Task", async () => {
+  // `startAttempt` reads `card.taskId`, and when there is none it creates a Task
+  // and only later links them — read-modify-write across awaits. Five simultaneous
+  // starts used to all observe `taskId === undefined` and each create a Task: one
+  // card became five Tasks with five live agents. A double-click is enough; no
+  // adversarial timing is needed. The second start must be refused (it is a
+  // duplicate), not silently spawn a second process.
+  const h = await makeHarness();
+  try {
+    const projectDir = join(h.dir, "project");
+    initGitRepo(projectDir);
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: projectDir,
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
+      prompt: "concurrent start probe",
+      agentId: "claude",
+    });
+
+    const attempts = await Promise.all(
+      Array.from({ length: 5 }, () => rawApi(h, "POST", `/api/kanban/cards/${card.id}/start`, {}))
+    );
+    // Starting an already-live card is a documented no-op that returns the live
+    // session, so every response may be 200. What must never happen is a second
+    // agent, a second session, a second Task or a second Run.
+    const sessionIds = new Set(
+      attempts.map((a) => (a.data as { session?: { id: string } }).session?.id).filter(Boolean)
+    );
+    assert.equal(sessionIds.size, 1, `every start must name the same session, got ${[...sessionIds].join(", ")}`);
+    for (const a of attempts) {
+      assert.equal(a.status, 200, `start returned ${a.status}: ${JSON.stringify(a.data)}`);
+    }
+
+    // One card is one Task, however many times start was called.
+    const tasks = await api<Array<{ id: string }>>(h, "GET", "/api/tasks");
+    assert.equal(tasks.length, 1, `one card must be one Task, got ${tasks.length}`);
+    const runs = await api<Array<unknown>>(h, "GET", `/api/tasks/${tasks[0]!.id}/runs`);
+    assert.equal(runs.length, 1, `and one Run, got ${runs.length}`);
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a worktree card that resumes stays in its own worktree, not the board root", async () => {
+  // Isolation is the whole point of worktree mode. The resume path used to record
+  // the board root as the session's `cwd` and correct only a local variable, so
+  // the *next* resume of that card ran the agent in the user's own working tree
+  // and the worktree on disk became unreachable. This drives start → stop →
+  // start (the resume) and asserts the second attempt is still in the worktree.
+  const h = await makeHarness();
+  try {
+    const projectDir = join(h.dir, "resume-worktree");
+    mkdirSync(projectDir);
+    initGitRepo(projectDir);
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: projectDir,
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
+      prompt: "resume me in a worktree",
+      agentId: "claude",
+      executionMode: "worktree",
+    });
+
+    const first = await api<{ session: { id: string; cwd: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    const worktree = first.session.cwd;
+    assert.ok(worktree.startsWith(join(h.dir, "kanban", "worktrees")), `first cwd: ${worktree}`);
+
+    // A harness session id makes the next start a *resume* of this session.
+    const settings = readFileSync(join(h.dir, "kanban", "provisioning", first.session.id, "claude-settings.json"), "utf8");
+    const hookToken = (settings.match(/x-kanban-hook-token: ([a-f0-9]+)/) ?? [])[1]!;
+    await fetch(`${h.baseUrl}/kanban-hooks/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-kanban-hook-token": hookToken },
+      body: JSON.stringify({ sessionId: first.session.id, event: "to_review", nativeSessionId: "claude-wt-1" }),
+    });
+
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+    const parked = await api<{ session: { cwd: string } }>(h, "GET", `/api/kanban/cards/${card.id}/session`);
+    assert.equal(parked.session.cwd, worktree, "a stopped worktree session still records its worktree");
+
+    const resumed = await api<{ session: { id: string; cwd: string } }>(
+      h,
+      "POST",
+      `/api/kanban/cards/${card.id}/start`,
+      {}
+    );
+    assert.equal(resumed.session.id, first.session.id, "the resume reopens the same record");
+    assert.equal(resumed.session.cwd, worktree, "the resume runs in its own worktree, not the board root");
+    assert.notEqual(resumed.session.cwd, projectDir, "the board root is never the working directory of a worktree card");
+    const inside = execFileSync("git", ["-C", resumed.session.cwd, "rev-parse", "--is-inside-work-tree"]).toString().trim();
+    assert.equal(inside, "true");
+    await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("Claude Stop hook moves the card to Review; typing moves it back to In Progress", async () => {
   const hookScript = [
     "#!/bin/sh",
@@ -609,14 +735,29 @@ test("a Backlog card's edit form round-trips through PATCH, and only while it is
     assert.equal(cleared.baseRef, undefined);
     assert.equal(cleared.executionMode, "direct");
 
-    // An empty title is allowed: the board derives the display title again.
+    // A cleared title is not stored as an empty string: it is derived from the
+    // prompt, exactly as creation derives it. Storing `""` produced a card whose
+    // Task inherited the empty title (only `undefined` is defaulted when the Task
+    // is created), so the sidebar and the task list showed a blank row while the
+    // board's own display fallback hid it.
     const { card: untitled } = await api<{ card: Record<string, any> }>(
       h,
       "PATCH",
       `/api/kanban/cards/${card.id}`,
       { title: "" }
     );
-    assert.equal(untitled.title, "");
+    assert.equal(untitled.title, "the task, rewritten", "a cleared title is re-derived from the prompt");
+    // …and a clear in the *same* save that changes the prompt derives from the
+    // new one. The prompt is put back afterwards so the later assertions about a
+    // started card being unchanged still compare against the same value.
+    const { card: retitled } = await api<{ card: Record<string, any> }>(
+      h,
+      "PATCH",
+      `/api/kanban/cards/${card.id}`,
+      { title: "", prompt: "a different job" }
+    );
+    assert.equal(retitled.title, "a different job");
+    await api(h, "PATCH", `/api/kanban/cards/${card.id}`, { prompt: "  the task, rewritten  " });
 
     // Failures are loud, not silently ignored.
     const emptyPrompt = await rawApi(h, "PATCH", `/api/kanban/cards/${card.id}`, { prompt: "   " });
@@ -1029,6 +1170,11 @@ test("a started card is a Task of its Workspace, with one Run per start", async 
     const secondRuns = await api<Run[]>(h, "GET", `/api/tasks/${taskId}/runs`);
     assert.equal(secondRuns.length, firstRuns.length + 1);
     assert.equal(secondRuns.filter((run) => run.taskId === taskId).length, 2);
+    // The attempt count follows the restarts instead of being pinned at 1: the
+    // task page read "1 attempt" however many times a card was started.
+    const afterRerun = await api<Task>(h, "GET", `/api/tasks/${taskId}`);
+    assert.equal(afterRerun.execution?.agent?.attempts, 2, "a restart is the second attempt");
+    assert.equal(afterRerun.execution?.agent?.runId, secondRuns[1]?.id, "execution names the newest run");
     await api(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
   } finally {
     await h.cleanup();
@@ -1057,12 +1203,19 @@ test("a failed board session writes the failure into its Run and Task", async ()
     assert.equal(task.execution?.phase, "failed");
     assert.equal(task.execution?.status, "failed");
     assert.equal(task.execution?.failure?.stage, "agent");
-    assert.equal(task.execution?.failure?.code, "kanban-agent-failed");
+    // The code names what actually happened — the process exited non-zero —
+    // instead of one generic bucket every distinct death used to share.
+    assert.equal(task.execution?.failure?.code, "kanban-agent-exited");
     assert.equal(task.execution?.agent?.status, "failed");
+    assert.ok(task.execution?.agent?.attempts === 1, "a first start is attempt 1");
 
     const runs = await api<Run[]>(h, "GET", `/api/tasks/${taskId}/runs`);
     assert.equal(runs.length, 1);
     assert.equal(runs[0]?.status, "failed");
+    // A Run's terminal status and its phase agree. A failed run that kept
+    // reporting `agent.running` was the last raw value a reader saw, so the Run
+    // Inspector printed "Agent running" beside a "failed" badge.
+    assert.equal(runs[0]?.phase, "failed");
 
     // Deleting the card sends the Task to the recycle bin, never a hard delete.
     await api(h, "DELETE", `/api/kanban/cards/${card.id}`);
@@ -1070,6 +1223,56 @@ test("a failed board session writes the failure into its Run and Task", async ()
     assert.deepEqual(liveTasks, []);
     const deletedTasks = await api<Task[]>(h, "GET", "/api/tasks?deleted=true");
     assert.deepEqual(deletedTasks.map((task) => task.id), [taskId]);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("cancelling a board card's task neither lies nor leaves the agent running", async () => {
+  // A board card's Run is created `running` and its agent is a child process, so
+  // it is never a supervisor run. `cancelTask` used to rewrite the Task to
+  // `cancelled` + `agent-cancelled` anyway: nothing was stopped, the agent kept
+  // writing, and the task page offered a retry for work still in flight.
+  const h = await makeHarness();
+  try {
+    const { workspace: project } = await api<{ workspace: BoardProject }>(h, "POST", "/api/kanban/workspaces", {
+      rootPath: join(h.dir, "project"),
+    });
+    const { card } = await api<{ card: { id: string } }>(h, "POST", `/api/kanban/workspaces/${project.id}/cards`, {
+      prompt: "keep running",
+      agentId: "claude",
+    });
+    const started = await api<{ card: { taskId?: string } }>(h, "POST", `/api/kanban/cards/${card.id}/start`, {});
+    const taskId = started.card.taskId;
+    assert.ok(taskId);
+    await pollSession(h, card.id, (session) => session.status === "running");
+
+    // Cancel through the task API must say where a board stop actually lives
+    // rather than pretend to have cancelled it.
+    const cursor = await fetch(`${h.baseUrl}/api/tasks/${taskId}/cancel`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${h.token}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const body = (await cursor.json()) as { code?: string; error?: string };
+    assert.equal(cursor.status, 409, `a board card cannot be cancelled through the task API (${cursor.status})`);
+    assert.equal(body.code, "task-not-cancellable");
+
+    // …and the truth on disk is unchanged: the session and the task are still
+    // running, with no invented failure.
+    const session = (await api<{ session: { status: string } }>(
+      h,
+      "GET",
+      `/api/kanban/cards/${card.id}/session`
+    )).session;
+    assert.equal(session.status, "running");
+    const task = await api<Task>(h, "GET", `/api/tasks/${taskId}`);
+    assert.notEqual(task.execution?.status, "cancelled");
+    assert.equal(task.execution?.failure, undefined);
+
+    // The real stop path does work, and it is the one the message names.
+    const stopped = await api<{ session: { status: string } }>(h, "POST", `/api/kanban/cards/${card.id}/stop`, {});
+    assert.equal(stopped.session.status, "stopped");
   } finally {
     await h.cleanup();
   }

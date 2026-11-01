@@ -12,6 +12,13 @@
  *   `~/.claude/settings.json` (the aliases Sonnet/Opus/Haiku when unset).
  * - Pi: `pi --list-models` prints a provider/model table.
  * - OpenCode: `opencode models` prints `provider/model` rows.
+ *
+ * A listing command that answers with **nothing** is treated as a failed read,
+ * not as an agent that offers no models: `opencode models` talks to OpenCode's
+ * background service, and on a machine where that service is not up yet the
+ * first invocation starts it, prints an empty list and exits 0 — the next
+ * invocation sees the catalog. Believing the first answer cached "no models"
+ * for a minute and left the New Task form with an empty picker.
  */
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -35,6 +42,16 @@ export interface KanbanModelOption {
 }
 
 const CACHE_TTL_MS = 60_000;
+/**
+ * How many times a listing command is polled before its answer is believed.
+ *
+ * OpenCode's catalog arrives in stages after its background service starts
+ * (0 → 18 → 40 rows measured), so the read waits for two agreeing answers. Four
+ * attempts at 250 ms covers that warm-up in well under a second while keeping a
+ * broken CLI from holding the request open.
+ */
+const LISTING_POLL_ATTEMPTS = 4;
+const LISTING_POLL_DELAY_MS = 250;
 const cached = new Map<string, { at: number; models: KanbanModelOption[] }>();
 const inFlight = new Map<string, Promise<KanbanModelOption[]>>();
 
@@ -143,15 +160,67 @@ async function probe(agent: KanbanAgentKind): Promise<KanbanModelOption[]> {
     case "claude":
       return probeClaude();
     case "pi":
-      return parsePiModels(await runCli("pi", ["--list-models"]));
+      return parsePiModels(await runListingCli("pi", ["--list-models"]));
     case "opencode":
-      return parseOpenCodeModels(await runCli("opencode", ["models"]));
+      return parseOpenCodeModels(await runListingCli("opencode", ["models"]));
     default:
       throw new DomainError(
         "kanban-model-catalog-unavailable",
         `${agent} does not expose a model catalog`
       );
   }
+}
+
+/**
+ * Polls a listing command until its answer settles, and returns the settled text.
+ *
+ * `opencode models` is answered by OpenCode's own background service. On a cold
+ * machine the first invocation starts that service and returns **nothing**; the
+ * next ones return a growing list as providers finish loading (measured here:
+ * 0 rows, then 18, then the full 40). Believing any of the early answers made
+ * the New Task form show no models at all, or a picker missing two thirds of
+ * them, and the wrong answer was then cached for a minute.
+ *
+ * "Settled" is therefore *two consecutive non-empty reads that agree*, not "a
+ * read that returned something". The wait is bounded: after the attempts run
+ * out the last non-empty read is returned as the catalog (it is what the CLI
+ * said, and an incomplete list is still usable), while a command that answered
+ * **only** with nothing is a failed read — reported loudly, never cached as
+ * "this agent offers no models".
+ */
+async function runListingCli(id: HarnessCliId, args: string[]): Promise<string> {
+  const settled = await pollListingUntilSettled(() => runCli(id, args));
+  if (settled === undefined) {
+    throw new DomainError(
+      "kanban-model-catalog-unavailable",
+      `${id} listed no models (ran \`${id} ${args.join(" ")}\` ${LISTING_POLL_ATTEMPTS} times)`
+    );
+  }
+  return settled;
+}
+
+/**
+ * The decision above, separated from process launching so it can be tested: it
+ * reads until two consecutive non-empty answers carry the same number of rows,
+ * and returns `undefined` when every attempt answered with nothing.
+ */
+export async function pollListingUntilSettled(
+  read: () => Promise<string>,
+  attempts: number = LISTING_POLL_ATTEMPTS,
+  delayMs: number = LISTING_POLL_DELAY_MS
+): Promise<string | undefined> {
+  let last: string | undefined;
+  let previousCount = -1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0 && delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const output = await read();
+    const lines = output.split(/\r?\n/u).filter((line) => line.trim() !== "");
+    if (lines.length === 0) continue;
+    if (lines.length === previousCount) return output;
+    previousCount = lines.length;
+    last = output;
+  }
+  return last;
 }
 
 /** Models the DSH acp profile offers, read from one throwaway handshake. */

@@ -133,6 +133,21 @@ export class KanbanSessionRuntime {
   private readonly agentAttaches = new Map<ID, Promise<boolean>>();
   private readonly transcripts: KanbanTranscriptStore;
   private readonly stopping = new Set<ID>();
+  /**
+   * One queue per card, holding the start that is currently running.
+   *
+   * `startAttempt` decides "is this card already running?" and then awaits its
+   * way to creating the process and the records. Five simultaneous
+   * `POST /cards/:id/start` for one card all read "no live session" before any of
+   * them registered one, and each went on to spawn its own agent with its own
+   * Run — one card, five live agents, five Runs. A double-click or a retried
+   * request reaches the same place; this is not an adversarial scenario.
+   *
+   * The queue makes the decision and the registration atomic per card. The second
+   * caller then sees a live session and takes the documented no-op path (the route
+   * returns the live session instead of a second agent).
+   */
+  private readonly starting = new Map<ID, Promise<unknown>>();
   private readonly hookTokens = new Map<ID, { token: string; dir?: string }>();
   /**
    * Set during process shutdown. A SIGTERM'd PTY reports `exitCode: 0` with
@@ -178,6 +193,28 @@ export class KanbanSessionRuntime {
    * failure settlements that follow from a process that could not start.
    */
   async startAttempt(cardId: ID): Promise<KanbanStart> {
+    return this.serialisedStart(cardId, () => this.startAttemptNow(cardId));
+  }
+
+  /**
+   * Runs `work` after every earlier start of the same card has settled.
+   *
+   * The tail promise never rejects, so one failed start cannot wedge the queue for
+   * that card; the caller still receives its own outcome through `next`.
+   */
+  private async serialisedStart<T>(cardId: ID, work: () => Promise<T>): Promise<T> {
+    const previous = this.starting.get(cardId) ?? Promise.resolve();
+    const next = previous.then(work, work);
+    const tail = next.catch(() => undefined);
+    this.starting.set(cardId, tail);
+    try {
+      return await next;
+    } finally {
+      if (this.starting.get(cardId) === tail) this.starting.delete(cardId);
+    }
+  }
+
+  private async startAttemptNow(cardId: ID): Promise<KanbanStart> {
     const card = this.kanban.getCard(cardId);
     const workspace = this.kanban.getWorkspace(card.workspaceId);
 
@@ -188,6 +225,19 @@ export class KanbanSessionRuntime {
     const previous = this.kanban.latestSessionForCard(card.id);
     if (previous && this.isLive(previous.id)) {
       throw new DomainError("kanban-session-not-startable", "This card already has a running session");
+    }
+
+    // The board root has to exist before anything is spawned. A folder the user
+    // moved or deleted would otherwise surface as `spawn <binary> ENOENT` or
+    // "Agent exited with code 1" — a diagnosis that points at the harness when the
+    // problem is the directory. `cwd` is what the child is spawned in, so this is
+    // the last place that can still say so plainly.
+    const plannedCwd = this.kanban.rootOf(workspace);
+    if (!existsSync(plannedCwd)) {
+      throw new DomainError(
+        "kanban-workspace-path-invalid",
+        `This board's folder no longer exists: ${plannedCwd} — re-add the project from where it lives now`
+      );
     }
 
     const approved = await assertKanbanAgentAvailable(card);
@@ -221,18 +271,27 @@ export class KanbanSessionRuntime {
 
     // The records are written before the process exists: a PTY/ACP child that
     // dies instantly must still leave a Task and a Run that say why.
+    //
+    // A resumed session must be recorded with the directory it actually runs in.
+    // Passing the board root and correcting the local variable afterwards (as
+    // this did) meant the stored record claimed the board root for ever: the
+    // next resume ran a worktree card in the user's own working tree — isolation
+    // silently lost — and the worktree on disk became unreachable. `existsSync`
+    // above is the last check that can still notice a worktree being gone, and
+    // it reads the value this call is about to overwrite.
+    const resumeCwd = canReuse ? previous.cwd : undefined;
     const attempt = await this.kanban.startAttempt(card.id, {
-      cwd,
+      cwd: resumeCwd ?? cwd,
       interactiveTui: launch.interactiveTui,
       transport: launch.transport,
       ...(canReuse ? { resume: true } : {}),
     });
     let session = attempt.session;
-    if (canReuse) {
+    if (resumeCwd !== undefined) {
       // The launch already carries the harness resume flag; point the card at
       // the reopened record and run in its directory. The worktree (if any)
       // already exists, so the creation step below must not run again.
-      cwd = previous.cwd;
+      cwd = resumeCwd;
       await this.kanban.setColumn(card.id, "in_progress");
     }
 
@@ -250,6 +309,9 @@ export class KanbanSessionRuntime {
         await this.kanban.settleSession(session.id, {
           status: "failed",
           error: err instanceof Error ? err.message : String(err),
+          // The code names the step that failed, so a retry can tell "the
+          // worktree could not be created" from "the agent itself failed".
+          errorCode: "kanban-worktree-failed",
         });
         throw err;
       }
@@ -283,6 +345,7 @@ export class KanbanSessionRuntime {
       await this.kanban.settleSession(session.id, {
         status: "failed",
         error: `Could not prepare ${card.agentId} hooks: ${err instanceof Error ? err.message : String(err)}`,
+        errorCode: "kanban-hooks-failed",
       });
       throw err;
     }
@@ -309,6 +372,7 @@ export class KanbanSessionRuntime {
       await this.kanban.settleSession(session.id, {
         status: "failed",
         error: `Could not start ${launch.file}: ${err instanceof Error ? err.message : String(err)}`,
+        errorCode: "agent-start-failed",
       });
       throw new DomainError(
         "agent-start-failed",
@@ -318,7 +382,12 @@ export class KanbanSessionRuntime {
 
     this.terminals.set(session.id, terminal);
     terminal.on("exit", (event: { exitCode: number; signal?: number }) => {
-      void this.onExit(session, event);
+      // `background`, not a bare `void`: `onExit` settles the session and reads
+      // it back, and both throw once the row is gone — which happens whenever a
+      // card is deleted while its process is still exiting. An unhandled
+      // rejection terminates the process, so one deleted card could take the
+      // whole server, every other live session and every in-flight Run with it.
+      this.background(this.onExit(session, event), "PTY exit handling");
     });
 
     const current = this.kanban.getSession(session.id);
@@ -384,7 +453,11 @@ export class KanbanSessionRuntime {
       const message = `Could not start ${launch.file} over ACP: ${
         err instanceof Error ? err.message : String(err)
       }${detail}`;
-      await this.kanban.settleSession(session.id, { status: "failed", error: message });
+      await this.kanban.settleSession(session.id, {
+        status: "failed",
+        error: message,
+        errorCode: "agent-start-failed",
+      });
       throw new DomainError("agent-start-failed", message);
     }
 
@@ -452,6 +525,7 @@ export class KanbanSessionRuntime {
         state.session = await this.kanban.updateSession(state.session.id, {
           status: "failed",
           error: message,
+          errorCode: "kanban-turn-failed",
           lastHookEvent: "turn_failed",
           lastHookAt: new Date().toISOString(),
         });
@@ -469,6 +543,7 @@ export class KanbanSessionRuntime {
       state.session = await this.kanban.updateSession(state.session.id, {
         status: "failed",
         error: message,
+        errorCode: "kanban-turn-error",
         lastHookEvent: "turn_error",
         lastHookAt: new Date().toISOString(),
       });
@@ -541,6 +616,7 @@ export class KanbanSessionRuntime {
         status: "failed",
         ...(event.exitCode !== null && event.exitCode !== undefined ? { exitCode: event.exitCode } : {}),
         error: message,
+        errorCode: "kanban-agent-exited",
       });
       const item = state.projector.addError(message);
       this.broadcast(state, { type: "agent_item", item });
@@ -573,10 +649,13 @@ export class KanbanSessionRuntime {
       return false;
     }
     await this.stop(latest.id);
-    // `stop` settles the record as `stopped`; a released card is not a user
-    // stop — it is waiting to be resumed — so mark it resumable explicitly.
+    // `stop` already settled the record as `stopped` and drove the whole
+    // projection (Run `cancelled`, its `run.cancelled` event, the Task's
+    // execution). Only the bookkeeping is left to add: writing `status:
+    // "stopped"` a second time re-ran all of that, which showed up as two
+    // `run.cancelled` events on one Run and a `lastActivityAt` that drifted past
+    // the real stop.
     await this.kanban.updateSession(latest.id, {
-      status: "stopped",
       lastHookEvent: "released_to_done",
       lastHookAt: new Date().toISOString(),
     });
@@ -815,7 +894,7 @@ export class KanbanSessionRuntime {
           // it back to In Progress without waiting for a hook.
           const current = this.kanban.getSession(sessionId);
           if (current.status === "awaiting_review" || current.status === "needs_attention") {
-            void this.markWorking(sessionId, "user-input");
+            this.background(this.markWorking(sessionId, "user-input"), "marking the card working");
           }
           return;
         }
@@ -824,7 +903,7 @@ export class KanbanSessionRuntime {
         if (message.type === "resize" && typeof message.cols === "number" && typeof message.rows === "number") {
           terminal.resize(message.cols, message.rows);
         } else if (message.type === "stop") {
-          void this.stop(sessionId);
+          this.background(this.stop(sessionId), "stopping the session");
         }
       } catch {
         // A malformed frame never takes the PTY down; the next frame is still valid.
@@ -1133,7 +1212,17 @@ export class KanbanSessionRuntime {
         err instanceof Error ? err.message : String(err)
       }${detail}`;
       try {
-        state.session = await this.kanban.updateSession(session.id, { error: message });
+        // A resume that could not be performed is a real failure of the card:
+        // record it with its own code and a failed status, so the record does
+        // not keep claiming the session is awaiting review after the process
+        // that would have resumed it is gone.
+        state.session = await this.kanban.updateSession(session.id, {
+          status: "failed",
+          error: message,
+          errorCode: "kanban-session-resume-failed",
+          lastHookEvent: "resume_failed",
+          lastHookAt: new Date().toISOString(),
+        });
       } catch {
         // The card may have been deleted while the resume was in flight.
       }
@@ -1548,6 +1637,7 @@ export class KanbanSessionRuntime {
       status: "failed",
       exitCode: event.exitCode,
       error: `Agent exited with code ${event.exitCode}${signalled ? ` (signal ${event.signal})` : ""}`,
+      errorCode: "kanban-agent-exited",
     });
   }
 
