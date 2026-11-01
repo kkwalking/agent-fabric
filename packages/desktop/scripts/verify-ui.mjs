@@ -51,16 +51,65 @@ if (!existsSync(join(appPath, "Contents", "MacOS", "AgentFabric"))) {
 const DEBUG_PORT = 9333;
 const failures = [];
 const notes = [];
+/**
+ * Progress markers for the watchdog below.
+ *
+ * A run that hangs used to print nothing at all — results are collected and
+ * printed at the end — so "which check wedged it" could only be answered by
+ * attaching to the process. Two markers are kept: the last check that *settled*,
+ * and the `evaluate` currently *in flight* (its line in this file). A hang
+ * happens inside the second one, so reporting only the first would always name
+ * the check before it.
+ *
+ * Each `ok` is also echoed as it happens: a hang then shows up as a last line in
+ * the terminal, with no tooling at all. The collected `notes` are still printed
+ * as the summary at the end, so nothing downstream changes.
+ */
+let currentSection = "startup";
+let inFlight = "none";
 const check = (ok, message) => {
-  if (ok) notes.push(`  ok   ${message}`);
-  else failures.push(message);
+  currentSection = message;
+  if (ok) {
+    notes.push(`  ok   ${message}`);
+    // stderr so it is not reordered against the summary on stdout.
+    console.error(`  ok   ${message}`);
+  } else {
+    failures.push(message);
+  }
 };
 
-/** Minimal CDP client: one websocket, request ids, event-free. */
+/**
+ * Minimal CDP client: one websocket, request ids, event-free.
+ *
+ * Every request has a deadline. A CDP reply that never arrives used to leave
+ * the whole run waiting forever: `send` put a resolver in `pending` and nothing
+ * ever settled it, so a dropped socket, a renderer that stopped answering, or
+ * an expression that never resolved looked exactly like a check that was simply
+ * slow. One run in this repo sat for six hours on 0.26s of CPU with no output.
+ *
+ * Closing the socket is now an error for every request still in flight (that is
+ * the case that hung: the peer went away and the waiters were never told), and
+ * each request carries its own timeout so a live socket whose reply never comes
+ * fails the check that asked instead of the whole run.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function connect(wsUrl) {
   const socket = new WebSocket(wsUrl);
   const pending = new Map();
   let nextId = 1;
+  /** Fails every request in flight, once, with the reason the channel died. */
+  const failAll = (reason) => {
+    for (const [id, waiter] of pending) {
+      pending.delete(id);
+      waiter.reject(new Error(reason));
+    }
+  };
+  // Registered before the `open` await on purpose: a socket that dies while the
+  // connection is still being established would otherwise reach no handler at
+  // all, which is the same hole these two exist to close.
+  socket.addEventListener("close", () => failAll("the DevTools websocket closed while a request was in flight"));
+  socket.addEventListener("error", () => failAll("the DevTools websocket reported an error"));
   await new Promise((done, fail) => {
     socket.addEventListener("open", done, { once: true });
     socket.addEventListener("error", () => fail(new Error("could not open the DevTools websocket")), { once: true });
@@ -73,26 +122,51 @@ async function connect(wsUrl) {
     if (message.error) waiter.reject(new Error(`${message.error.message} (${message.error.code})`));
     else waiter.resolve(message.result);
   });
-  const send = (method, params = {}) =>
+  const send = (method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS) =>
     new Promise((res, rej) => {
       const id = nextId++;
-      pending.set(id, { resolve: res, reject: rej });
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        rej(new Error(`${method} got no reply within ${timeoutMs}ms`));
+      }, timeoutMs);
+      pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          res(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          rej(error);
+        },
+      });
       socket.send(JSON.stringify({ id, method, params }));
     });
   return { send, close: () => socket.close() };
 }
 
-/** Evaluates an expression in the page and returns its JSON value. */
+/**
+ * Evaluates an expression in the page and returns its JSON value.
+ *
+ * It records the calling line here rather than relying on the last settled
+ * check: when a run wedges, the thing wedged is the reply to *this* call, and
+ * the line that asked is the only precise answer to "where did it stop".
+ */
 async function evaluate(cdp, expression) {
-  const result = await cdp.send("Runtime.evaluate", {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
-  });
-  if (result.exceptionDetails) {
-    throw new Error(`page threw: ${result.exceptionDetails.exception?.description ?? result.exceptionDetails.text}`);
+  const site = (new Error().stack ?? "").split("\n")[2]?.trim() ?? "unknown call site";
+  inFlight = site;
+  try {
+    const result = await cdp.send("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (result.exceptionDetails) {
+      throw new Error(`page threw: ${result.exceptionDetails.exception?.description ?? result.exceptionDetails.text}`);
+    }
+    return result.result.value;
+  } finally {
+    inFlight = "none";
   }
-  return result.result.value;
 }
 
 /** Waits until `expression` is truthy in the page. */
@@ -493,6 +567,32 @@ const createThrowawayTask = async (cdp, title) =>
      })()`
   );
 
+/**
+ * Last-resort watchdog: no single check may hold the run open forever.
+ *
+ * The per-request deadline above covers a reply that never arrives; this covers
+ * everything else — a `waitFor` whose expression never becomes true, a page that
+ * never finishes navigating, a promise in the script itself that never settles.
+ * A wedged run used to be indistinguishable from a slow one and sat overnight
+ * (6h on 0.26s of CPU, no output at all).
+ *
+ * Deliberately **not** `unref()`ed. An unref'd timer does not keep the event
+ * loop alive, so in exactly the failure it exists for — a promise that never
+ * settles, with no other handle left — the loop would drain and Node would exit
+ * 0, silently, without ever firing this. Every normal exit reaches
+ * `process.exit()` at the end of this file, so a referenced timer cannot stretch
+ * a healthy run either.
+ */
+const RUN_TIMEOUT_MS = Number(process.env.AGENTFABRIC_VERIFY_TIMEOUT_MS ?? 15 * 60_000);
+const watchdog = setTimeout(() => {
+  console.error(`\n[verify-ui] TIMEOUT — no result after ${Math.round(RUN_TIMEOUT_MS / 1000)}s.`);
+  console.error(`[verify-ui] last check that settled: ${currentSection}`);
+  console.error(`[verify-ui] in flight when it stopped: ${inFlight}`);
+  console.error(`[verify-ui] ${notes.length} check(s) had passed when it stopped, ${failures.length} failing.`);
+  for (const note of notes.slice(-5)) console.error(note);
+  process.exit(3);
+}, RUN_TIMEOUT_MS);
+
 try {
   // 1. Wait for the DevTools endpoint, then attach to the window's page.
   const target = await (async () => {
@@ -801,10 +901,384 @@ try {
     `the rail collapses to icons (${Math.round(collapseOps.railWidth)}px) and expands back`
   );
 
-  // FIXTURE-DATA ONLY (5c)
-  if (!emptyMode) {
+  // The fixture gate that opened before section 4 ends here. 5b-3 is about the
+  // shell, not about data: the divider exists before the first task does, and
+  // an empty install is exactly where a rail that cannot be resized would go
+  // unnoticed. 5c reopens the gate for the fixture's workspaces.
   }
 
+  // 5b-3. The rail's width belongs to the user: the strip between the rail and
+  //       the page is a divider, not a painted hairline. Every other check in
+  //       this file reads text, so a handle that never moved, a width that was
+  //       never stored, or a clamp that let the page collapse to nothing would
+  //       all look like a working rail.
+  //
+  //       The whole gesture sequence is one evaluate: the width reaches
+  //       localStorage from a React effect *after* a drag settles, so every
+  //       step has to be read in the document that performed it, a beat later.
+  const railResize = await evaluate(
+    cdp,
+    `(async () => {
+       const KEY = "agentfabric.sidebarWidth";
+       const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+       const railEl = () => document.querySelector(".sidebar");
+       const handleEl = () => document.querySelector(".rail-resizer");
+       const mainEl = () => document.querySelector(".main");
+       const railWidth = () => Math.round(railEl()?.getBoundingClientRect().width ?? 0);
+       const mainWidth = () => Math.round(mainEl()?.getBoundingClientRect().width ?? 0);
+       const stored = () => localStorage.getItem(KEY);
+       const aria = (name) => Number(handleEl()?.getAttribute(name) ?? NaN);
+       /**
+        * Waits until the rail's width stops changing.
+        *
+        * The sidebar transitions its width over 160ms, so every fixed sleep here
+        * was a race against that transition: measure a moment early and the next
+        * check reads the previous width, which is how one bad read turned into a
+        * cascade of failures that each looked like a different bug. This waits
+        * for the value itself to hold still across frames instead — but only
+        * after it has started moving, or a call made before the transition
+        * begins would see it "stable" at the old width.
+        */
+       const settleWidth = async (quietFrames = 4, deadlineMs = 2000) => {
+         const deadline = performance.now() + deadlineMs;
+         let last = railWidth();
+         let quiet = 0;
+         let moved = false;
+         while (performance.now() < deadline) {
+           await new Promise((r) => requestAnimationFrame(() => r()));
+           const now = railWidth();
+           if (now !== last) moved = true;
+           quiet = now === last ? quiet + 1 : 0;
+           last = now;
+           // Before anything moves, require more quiet frames so that a
+           // not-yet-started transition cannot satisfy the wait.
+           if (quiet >= (moved ? quietFrames : quietFrames + 3)) return now;
+         }
+         return last;
+       };
+       // Where a drag stops: the smaller of the rail's own maximum and what the
+       // window can spare once the page keeps 420px. Recomputed here from the
+       // same rule the shell uses, so one number checks the handle and the
+       // layout both.
+       const limit = () => Math.min(480, Math.max(200, Math.round(window.innerWidth - 420)));
+
+       // An earlier gesture could have left the rail collapsed; this section
+       // needs it expanded, and the click that gets there is the shell's own.
+       if (railEl()?.classList.contains("collapsed")) {
+         document.querySelector(".rail-head-collapsed .sidebar-toggle")?.click();
+         await settle(350);
+       }
+
+       const handle = handleEl();
+       const box = handle?.getBoundingClientRect();
+       const railBox = railEl()?.getBoundingClientRect();
+       const shell = {
+         present: Boolean(box),
+         role: handle?.getAttribute("role") ?? null,
+         orientation: handle?.getAttribute("aria-orientation") ?? null,
+         label: handle?.getAttribute("aria-label") ?? null,
+         hint: handle?.getAttribute("title") ?? null,
+         tabIndex: handle ? handle.tabIndex : null,
+         // Both panes and the handle are siblings inside the flex row, so the
+         // handle being *between* them is the only arrangement where dragging
+         // it moves the divider instead of dragging a stray overlay.
+         between: Boolean(handle && railBox && handle.previousElementSibling === railEl() && handle.nextElementSibling === mainEl()),
+         // The negative margin pulls the strip back over the rail's hairline.
+         atRailEdge: Boolean(box && railBox && Math.abs(box.left - (railBox.right - 1)) <= 2),
+         handleWidth: box ? Math.round(box.width * 10) / 10 : 0,
+         handleHeight: box ? Math.round(box.height) : 0,
+         viewportHeight: window.innerHeight,
+         windowWidth: window.innerWidth,
+         railWidth: railWidth(),
+         stored: stored(),
+         ariaNow: aria("aria-valuenow"),
+         ariaMin: aria("aria-valuemin"),
+         ariaMax: aria("aria-valuemax"),
+         limit: limit(),
+       };
+
+       // Real pointer events. React 18 delegates from the root container, so
+       // bubbles is what reaches onPointerDown; the move and the up are
+       // dispatched on window because that is where the gesture puts its
+       // listeners — the pointer leaves the 6px strip immediately and has to
+       // keep resizing.
+       const pointer = (type, target, clientX) =>
+         target.dispatchEvent(new PointerEvent(type, {
+           clientX, clientY: 200, bubbles: true, cancelable: true,
+           pointerId: 1, pointerType: "mouse", isPrimary: true,
+         }));
+       const drag = async (deltaX) => {
+         const at = handleEl()?.getBoundingClientRect();
+         if (!at) return { error: "the divider is not there to drag" };
+         const from = Math.round(at.left + 3);
+         const start = railWidth();
+         pointer("pointerdown", handleEl(), from);
+         // A beat between down and move: the gesture's own affordances
+         // (cursor, resizing class) are React state and need a render.
+         await settle(120);
+         const whileDragging = {
+           bodyCursor: document.body.style.cursor,
+           selectionOff: document.body.style.userSelect === "none",
+           appResizing: document.querySelector(".app")?.classList.contains("resizing") ?? false,
+         };
+         pointer("pointermove", window, from + deltaX);
+         pointer("pointerup", window, from + deltaX);
+         // Wait for the rail to stop moving rather than for a guessed duration:
+         // the transition, and the effect that stores the width, both land after
+         // pointerup, and a fixed sleep was a race against them.
+         await settleWidth();
+         return {
+           start,
+           end: railWidth(),
+           main: mainWidth(),
+           stored: stored(),
+           ariaNow: aria("aria-valuenow"),
+           whileDragging,
+           cleanedUp:
+             document.body.style.cursor === "" &&
+             document.body.style.userSelect === "" &&
+             !(document.querySelector(".app")?.classList.contains("resizing") ?? true),
+         };
+       };
+
+       // A collapsed rail is a fixed icon column: there is no width to trade,
+       // so the handle has to go with the tree — and come back with it.
+       document.querySelector(".brand .sidebar-toggle")?.click();
+       await settleWidth();
+       const collapsed = {
+         collapsed: railEl()?.classList.contains("collapsed") ?? false,
+         hasHandle: Boolean(handleEl()),
+         railWidth: railWidth(),
+       };
+       document.querySelector(".rail-head-collapsed .sidebar-toggle")?.click();
+       await settleWidth();
+       const expanded = {
+         collapsed: railEl()?.classList.contains("collapsed") ?? true,
+         hasHandle: Boolean(handleEl()),
+       };
+
+       // A fresh profile has no stored width: the rail starts at the default,
+       // and the start of a drag is the painted width, not the preference.
+       const widened = await drag(100);
+       // Far past the far end, and far past the near end.
+       const clampedMax = await drag(2000);
+       const clampedMin = await drag(-2000);
+
+       // Keyboard, because the separator is focusable: a drag-only divider is
+       // exactly the accessibility gap this control would otherwise have.
+       // A key press has no \`resizing\` gesture around it, so the rail's own
+       // 160ms width transition is live: measure after it, not during it.
+       const press = async (key) => {
+         handleEl()?.focus();
+         handleEl()?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+         return settleWidth();
+       };
+       const arrowRight = await press("ArrowRight");
+       const home = await press("Home");
+       const enter = await press("Enter");
+
+       // A width of its own for the reload below: neither the default nor a
+       // bound, so a restored 260 or 480 cannot pass as "remembered".
+       const remembered = await drag(120);
+       return { shell, collapsed, expanded, widened, clampedMax, clampedMin, arrowRight, home, enter, remembered };
+     })()`
+  );
+  check(
+    railResize.shell.present &&
+      railResize.shell.role === "separator" &&
+      railResize.shell.orientation === "vertical" &&
+      /调整侧边栏宽度|Resize the sidebar/.test(railResize.shell.label ?? "") &&
+      railResize.shell.tabIndex === 0,
+    `the rail/page divider is a focusable vertical separator ("${railResize.shell.label}", tabIndex ${railResize.shell.tabIndex})`
+  );
+  check(
+    Math.abs(railResize.shell.handleWidth - 6) <= 1 &&
+      Math.abs(railResize.shell.handleHeight - railResize.shell.viewportHeight) <= 4 &&
+      railResize.shell.between &&
+      railResize.shell.atRailEdge &&
+      Boolean(railResize.shell.hint),
+    `the divider is a ${railResize.shell.handleWidth}px strip between the rail and the page, ${railResize.shell.handleHeight}px of ${railResize.shell.viewportHeight}px tall, with a tooltip`
+  );
+  check(
+    railResize.shell.ariaMin === 200 &&
+      railResize.shell.ariaMax === railResize.shell.limit &&
+      railResize.shell.ariaNow === railResize.shell.railWidth,
+    `the divider reports the rail's real range (${railResize.shell.ariaNow}px of ${railResize.shell.ariaMin}–${railResize.shell.ariaMax} in a ${railResize.shell.windowWidth}px window)`
+  );
+  check(
+    railResize.shell.railWidth === 260 &&
+      (railResize.shell.stored === null || Number(railResize.shell.stored) === 260),
+    `a rail that was never dragged sits at the 260px default (${railResize.shell.railWidth}px, localStorage ${JSON.stringify(railResize.shell.stored)})`
+  );
+  check(
+    railResize.collapsed.collapsed &&
+      !railResize.collapsed.hasHandle &&
+      !railResize.expanded.collapsed &&
+      railResize.expanded.hasHandle,
+    `the divider goes away with the collapsed rail (${railResize.collapsed.railWidth}px, no handle) and comes back when it expands`
+  );
+  check(
+    !railResize.widened.error &&
+      Math.abs(railResize.widened.end - (railResize.widened.start + 100)) <= 6 &&
+      Math.abs(Number(railResize.widened.stored) - railResize.widened.end) <= 2,
+    `dragging the divider 100px right widens the rail by the same (${railResize.widened.start} → ${railResize.widened.end}px) and remembers it (localStorage "${railResize.widened.stored}")`
+  );
+  check(
+    railResize.widened.whileDragging.bodyCursor === "col-resize" &&
+      railResize.widened.whileDragging.selectionOff &&
+      railResize.widened.whileDragging.appResizing &&
+      railResize.widened.cleanedUp,
+    `the drag says it is resizing (cursor ${JSON.stringify(railResize.widened.whileDragging.bodyCursor)}, selection off) and cleans up after`
+  );
+  check(
+    // The rail stops at the far end of its range rather than following the
+    // pointer: `<= 480` alone would pass on an unclamped rail that ran off
+    // screen. `main` is what makes it a layout guarantee and not just a number.
+    Math.abs(railResize.clampedMax.end - Math.min(480, Math.max(200, railResize.shell.windowWidth - 420))) <= 1 &&
+      railResize.clampedMax.main >= 420 - 8 &&
+      railResize.clampedMax.ariaNow === railResize.clampedMax.end,
+    `the rail stops at its 480px maximum and leaves the page room (rail ${railResize.clampedMax.end}px, page ${railResize.clampedMax.main}px)`
+  );
+  check(
+    // Exactly the floor, not merely "not below it": a drag of -2000px from the
+    // maximum overshoots the floor by a mile, so an optimistic `>=` would also
+    // pass on a rail with no clamp at all (it just stops wherever the pointer
+    // left it).
+    Math.abs(railResize.clampedMin.end - 200) <= 1,
+    `the rail stops at its 200px minimum (${railResize.clampedMin.end}px)`
+  );
+  check(
+    railResize.arrowRight === railResize.clampedMin.end + 16 &&
+      railResize.home === 200 &&
+      railResize.enter === 260,
+    `the divider resizes from the keyboard (→ ${railResize.arrowRight}px, Home → ${railResize.home}px, Enter → ${railResize.enter}px)`
+  );
+
+  // The width is a preference, not a session value: it has to survive the
+  // relaunch that a reload stands in for. A page-side `location.reload()` would
+  // race the evaluate that asked for it, so the protocol call is used — it
+  // returns once the navigation has started, and the shell then re-renders
+  // from localStorage — with the page call as fallback if it is refused.
+  const rememberedWidth = railResize.remembered.end ?? 0;
+  // A marker in the *old* document. Reading it back after the wait is how the
+  // poll below proves it is looking at the new one: a stale execution context
+  // would happily report the width the drag had just set, and that is exactly
+  // the failure this check exists to catch.
+  await evaluate(cdp, `(() => { window.__railReloadMarker = true; return true; })()`);
+  try {
+    await cdp.send("Page.reload", { ignoreCache: false });
+  } catch {
+    try {
+      await evaluate(cdp, `(() => { setTimeout(() => location.reload(), 0); return true; })()`);
+    } catch {
+      /* the reload destroys the context that asked for it */
+    }
+  }
+  // The old document's context dies with the navigation: the first evaluates
+  // throw ("cannot find context") until the new one exists, so the poll below
+  // tolerates that instead of failing the run on it. It waits for the rail's
+  // tree as well as the shell, so the checks after this one find a loaded rail
+  // rather than one that is still fetching.
+  const reloadReady = `document.querySelectorAll(".ws-group").length > 0 || Boolean(document.querySelector(".ws-tree-empty"))`;
+  const restored = await (async () => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      try {
+        // A `Runtime.evaluate` issued into a context that is being torn down can
+        // be dropped rather than answered, and `evaluate` waits for its reply
+        // forever. Racing it against a timer keeps the poll a poll; the \`.catch\`
+        // is what keeps a late rejection from becoming an unhandled one (which
+        // ends the whole run rather than this check).
+        const seen = await Promise.race([
+          evaluate(
+            cdp,
+            `(() => {
+               // Still the pre-reload document: keep waiting.
+               if (window.__railReloadMarker === true) return null;
+               const rail = document.querySelector(".sidebar");
+               if (!rail || !(${reloadReady})) return null;
+               return {
+                 width: Math.round(rail.getBoundingClientRect().width),
+                 hasHandle: Boolean(document.querySelector(".rail-resizer")),
+                 stored: localStorage.getItem("agentfabric.sidebarWidth"),
+               };
+             })()`
+          ).catch(() => null),
+          new Promise((resolve) => setTimeout(() => resolve(null), 2_000)),
+        ]);
+        if (seen) return seen;
+      } catch {
+        /* the navigation is still swapping the execution context */
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return { width: 0, hasHandle: false, stored: null };
+  })();
+  check(
+    restored.hasHandle && Math.abs(restored.width - rememberedWidth) <= 2,
+    `the dragged width survives a reload (${rememberedWidth}px → ${restored.width}px, localStorage "${restored.stored}")`
+  );
+
+  // Leave the layout where the checks after this one expect it: the default
+  // width. They measure the rail and the page, and a rail left at 380px would
+  // change what they measure. The double click is the shell's own reset; Enter
+  // on the focused handle is the second documented path, used only if the
+  // double click did not land.
+  const railReset = await evaluate(
+    cdp,
+    `(async () => {
+       const railWidth = () => Math.round(document.querySelector(".sidebar")?.getBoundingClientRect().width ?? 0);
+       // Same reason as the drag gesture above: the reset animates, so wait for
+       // the width to hold still instead of sleeping for a guessed duration.
+       const settleWidth = async (quietFrames = 4, deadlineMs = 2000) => {
+         const deadline = performance.now() + deadlineMs;
+         let last = railWidth();
+         let quiet = 0;
+         let moved = false;
+         while (performance.now() < deadline) {
+           await new Promise((r) => requestAnimationFrame(() => r()));
+           const now = railWidth();
+           if (now !== last) moved = true;
+           quiet = now === last ? quiet + 1 : 0;
+           last = now;
+           if (quiet >= (moved ? quietFrames : quietFrames + 3)) return now;
+         }
+         return last;
+       };
+       const before = railWidth();
+       const handle = document.querySelector(".rail-resizer");
+       handle?.dispatchEvent(new MouseEvent("dblclick", { clientX: 0, clientY: 0, bubbles: true, cancelable: true }));
+       const afterDoubleClick = await settleWidth();
+       let afterEnter = null;
+       if (afterDoubleClick !== 260) {
+         handle?.focus();
+         handle?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+         afterEnter = await settleWidth();
+       }
+       return {
+         before,
+         afterDoubleClick,
+         afterEnter,
+         after: railWidth(),
+         stored: localStorage.getItem("agentfabric.sidebarWidth"),
+       };
+     })()`
+  );
+  check(
+    Math.abs(railReset.afterDoubleClick - 260) <= 2,
+    `double-clicking the divider restores the 260px default (${railReset.before} → ${railReset.afterDoubleClick}px)`
+  );
+  // Not an assertion about the feature but about this run: every check after
+  // this one measures a 260px rail, so a reset that silently did not happen
+  // would show up as someone else's failure.
+  check(
+    Math.abs(railReset.after - 260) <= 2 &&
+      Math.abs(Number(railReset.stored) - railReset.after) <= 2,
+    `the rail is left at the default width for the checks after this one (${railReset.after}px, localStorage "${railReset.stored}"${railReset.afterEnter === null ? "" : `, via Enter on the handle (${railReset.afterEnter}px)`})`
+  );
+
+  // FIXTURE-DATA ONLY (5c-5d)
+  if (!emptyMode) {
   // 5c. Workspaces collapse, and each workspace has its own ··· menu.
   const groupOps = await evaluate(
     cdp,
@@ -1712,6 +2186,66 @@ try {
     `choosing a window resizes the heatmap (${usage.colsAfter} / ${usage.colsBefore} / ${usage.colsWidest} columns)`
   );
 
+  // 9b-1d-1. The history's control bar sits in its own band between the stat
+  //          tiles and the heatmap card. It used to tuck up under a section
+  //          heading with `margin-top: -4px`; when that heading was removed the
+  //          negative margin pulled the bar up over the tiles' labels. Geometry
+  //          is the only way to see this: both elements paint, so nothing about
+  //          their text is wrong.
+  const usageBands = await evaluate(
+    cdp,
+    `(() => {
+       const rect = (sel) => {
+         const el = document.querySelector(sel);
+         if (!el) return null;
+         const r = el.getBoundingClientRect();
+         return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) };
+       };
+       return { tiles: rect("main .grid"), bar: rect(".usage-toolbar"), card: rect(".heat-card") };
+     })()`
+  );
+  check(
+    Boolean(usageBands.tiles && usageBands.bar && usageBands.card) &&
+      usageBands.bar.top >= usageBands.tiles.bottom &&
+      usageBands.bar.bottom <= usageBands.card.top,
+    `the heatmap controls sit in their own band, clear of the tiles and the card ` +
+      `(tiles end ${usageBands.tiles?.bottom}, bar ${usageBands.bar?.top}–${usageBands.bar?.bottom}, card starts ${usageBands.card?.top})`
+  );
+
+  // 9b-1d-1b. About is a facts page: it lists the service address, the version
+  //           and the environment variables. The "Usage" button at its foot was
+  //           a navigation that belonged to the rail's menu, not under a table of
+  //           environment variables.
+  //
+  //           This check visits another page, and the checks after it drive the
+  //           heatmap on the assumption that Usage is already open: leaving the
+  //           window on About made them find no grid at all and report
+  //           "undefined". It ends by landing back on `/usage`.
+  const aboutPage = await evaluate(
+    cdp,
+    `(async () => {
+       const go = async (path, wait) => {
+         history.pushState({}, "", path);
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, wait));
+       };
+       await go("/settings/about", 1200);
+       const body = document.querySelector(".settings-body");
+       const out = {
+         title: document.querySelector(".settings-page-title")?.textContent?.trim() ?? null,
+         buttons: [...(body?.querySelectorAll("button") ?? [])].map((b) => b.textContent.trim()),
+       };
+       await go("/usage", 1600);
+       out.backOnUsage = Boolean(document.querySelector(".heat-grid"));
+       return out;
+     })()`
+  );
+  check(
+    aboutPage.buttons.length === 0,
+    `the About section is facts only — no buttons (${aboutPage.buttons.join(", ") || "none"})`
+  );
+  check(aboutPage.backOnUsage, "the About check leaves the window on Usage for the heatmap checks");
+
   // 9b-1d-2. Hovering a heatmap cell says what that day cost. The grid used to
   //          answer only with the browser's own `title` tooltip, which the
   //          WebView renders late, unstyled, and only for one fact at a time.
@@ -1722,6 +2256,15 @@ try {
   // event does not bubble and React synthesises `onMouseEnter` from `mouseover`,
   // so a hand-made native `mouseenter` is invisible to the component and this
   // check could never pass however correct the UI was.
+  //
+  // Park the pointer in the corner first. The pointer keeps its position across
+  // a `pushState` navigation, so whatever the previous check left it over can
+  // already be a heatmap cell here — and then "no readout before a cell is
+  // hovered" fails on a perfectly correct grid. That is what happened once the
+  // About check started landing back on Usage: on an empty install the grid is
+  // short enough for the stale position to sit inside it.
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 4, y: 4, button: "none", buttons: 0 });
+  await new Promise((r) => setTimeout(r, 250));
   const heatTarget = await evaluate(
     cdp,
     `(async () => {
@@ -2409,7 +2952,101 @@ try {
     );
   }
 
-  // FIXTURE-DATA ONLY (9b-1k - needs two seeded tasks to tell "other" from "this one")
+  // 9b-1j2. The task thread's header is one row. Workspace, runtime and model
+  //         used to sit on a second row of chips under the title, and the two
+  //         detail pages (switch runtime, lifecycle) had links beside them: a
+  //         whole line of the conversation's vertical space spent on facts read
+  //         once. They are behind a "···" button now, and the menu has to hold
+  //         everything the row did, or the facts move to a place nobody finds.
+  // FIXTURE-DATA ONLY (9b-1j2 - needs a seeded task, so the page is not an empty one)
+  if (!emptyMode) {
+    const threadHeader = await evaluate(
+      cdp,
+      `(async () => {
+         history.pushState({}, "", "/tasks/task_verify_1");
+         window.dispatchEvent(new PopStateEvent("popstate"));
+         await new Promise((r) => setTimeout(r, 2000));
+         const header = document.querySelector(".thread-header");
+         const headerRect = header?.getBoundingClientRect();
+         const titleRow = document.querySelector(".thread-title-row");
+         const trigger = document.querySelector(".thread-menu-root > button");
+         const closed = {
+           hasHeader: Boolean(header),
+           headerHeight: headerRect ? Math.round(headerRect.height) : 0,
+           titleRowHeight: titleRow ? Math.round(titleRow.getBoundingClientRect().height) : 0,
+           // The old second row: gone, not merely hidden behind the menu.
+           metaRow: Boolean(document.querySelector(".thread-meta")),
+           trigger: Boolean(trigger),
+           expanded: trigger?.getAttribute("aria-expanded") ?? null,
+           menuClosed: !document.querySelector(".thread-menu"),
+           // The title, its status badge and BOTH icon buttons have to share one
+           // baseline. The right-alignment class only sets margin-left: auto, so
+           // without a row on the actions wrapper the refresh button and the
+           // menu stacked and the "single row" header was silently three rows
+           // tall — the height check below would not have caught it on its own,
+           // and this one names it.
+           onOneLine: (() => {
+             const parts = [
+               document.querySelector(".thread-title"),
+               document.querySelector(".thread-title-row .badge"),
+               ...document.querySelectorAll(".thread-title-row .icon-btn"),
+             ].filter(Boolean);
+             if (parts.length < 3) return false;
+             const tops = parts.map((el) => Math.round(el.getBoundingClientRect().top));
+             return Math.max(...tops) - Math.min(...tops) <= 3;
+           })(),
+         };
+         trigger?.click();
+         await new Promise((r) => setTimeout(r, 300));
+         const menu = document.querySelector(".thread-menu");
+         const rect = menu?.getBoundingClientRect();
+         const open = {
+           present: Boolean(menu),
+           rows: [...document.querySelectorAll(".thread-menu-row")]
+             .map((row) => (row.textContent ?? "").trim().replace(/\\s+/g, " ")),
+           items: [...document.querySelectorAll(".thread-menu-item")].map((b) => (b.textContent ?? "").trim()),
+           expanded: trigger?.getAttribute("aria-expanded") ?? null,
+           onScreen: rect ? rect.left >= 0 && rect.right <= window.innerWidth && rect.top >= 0 && rect.bottom <= window.innerHeight : false,
+         };
+         // Escape closes it, like the rail's menu.
+         window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+         await new Promise((r) => setTimeout(r, 250));
+         const afterEscape = !document.querySelector(".thread-menu");
+         return { closed, open, afterEscape };
+       })()`
+    );
+    check(
+      threadHeader.closed.hasHeader &&
+        !threadHeader.closed.metaRow &&
+        threadHeader.closed.onOneLine &&
+        // A single row of a title, a badge and two 28px buttons comes to ~44px
+        // including padding. The bar used to be 83px and spent the difference on
+        // the conversation, which is the thing this page exists for; 60 is a
+        // generous ceiling that only a stacked-layout regression can cross.
+        threadHeader.closed.headerHeight <= 60,
+      `the task header is one tight row — title, status and both buttons on one line (header ${threadHeader.closed.headerHeight}px, title row ${threadHeader.closed.titleRowHeight}px)`
+    );
+    check(
+      threadHeader.closed.trigger &&
+        threadHeader.closed.expanded === "false" &&
+        threadHeader.closed.menuClosed,
+      `a "···" button in the title row opens the task details (closed at rest)`
+    );
+    check(
+      threadHeader.open.present &&
+        threadHeader.open.rows.length === 3 &&
+        // Workspace, runtime and model: the three chips the old row carried.
+        threadHeader.open.rows.every((row) => row.length > 0) &&
+        threadHeader.open.items.length >= 2 &&
+        threadHeader.open.expanded === "true",
+      `the menu holds what the row did — ${threadHeader.open.rows.join(" | ")} — plus ${threadHeader.open.items.join(" / ")}`
+    );
+    check(
+      threadHeader.open.onScreen && threadHeader.afterEscape,
+      `the details menu stays on screen and closes on Escape`
+    );
+  }
+
   if (!emptyMode) {
     // 9b-1k. A page about one task ignores changes to the others. It used to
     //        reload whenever anything announced a task change, so deleting an
