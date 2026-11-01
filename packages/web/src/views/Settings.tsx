@@ -5,7 +5,7 @@ import { useI18n } from "../i18n-react";
 import { LlmView } from "./Llm";
 import { TrashView } from "./Trash";
 import { LANGUAGES, type Language, type MessageKey } from "../i18n";
-import { navigate, type SettingsSection } from "../router";
+import type { SettingsSection } from "../router";
 
 /**
  * The settings panel.
@@ -1126,11 +1126,6 @@ function AboutSection({ config }: { config: Record<string, unknown> }) {
         </tbody>
       </table>
       <div className="settings-hint">{t("general.env.hint")}</div>
-      <div className="settings-inline-actions">
-        <button className="btn-outline" onClick={() => navigate("/usage")}>
-          {t("nav.usage")}
-        </button>
-      </div>
     </Page>
   );
 }

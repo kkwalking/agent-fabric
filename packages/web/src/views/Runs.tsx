@@ -104,27 +104,33 @@ export function RunsView() {
         {"。"}
       </p>
       <ErrorBox message={actionError ?? error} />
-      <div className="runs-filters" role="group" aria-label={t("runs.filterLabel")}>
-        {STATUS_FILTERS.map((option) => {
-          const count =
-            option === "all"
-              ? (data?.length ?? 0)
-              : (data ?? []).filter((r: any) => matchesFilter(r, option)).length;
-          return (
-            <button
-              key={option}
-              className={`runs-filter ${filter === option ? "active" : ""}`}
-              aria-pressed={filter === option}
-              onClick={() => {
-                setFilter(option);
-                setPage(0);
-              }}
-            >
-              {t(`runs.filter.${option}` as Parameters<typeof t>[0])}
-              <span className="runs-filter-count">{count}</span>
-            </button>
-          );
-        })}
+      <div className="runs-filters">
+        {/* The status filter is the same segmented control as Usage's metric
+            switch — one grey track, the chosen option lifted onto a white pill.
+            It used to be a row of standalone outlined chips with the active one
+            tinted accent, which read as buttons rather than as one choice. */}
+        <span className="segmented" role="group" aria-label={t("runs.filterLabel")}>
+          {STATUS_FILTERS.map((option) => {
+            const count =
+              option === "all"
+                ? (data?.length ?? 0)
+                : (data ?? []).filter((r: any) => matchesFilter(r, option)).length;
+            return (
+              <button
+                key={option}
+                className="runs-filter"
+                aria-pressed={filter === option}
+                onClick={() => {
+                  setFilter(option);
+                  setPage(0);
+                }}
+              >
+                {t(`runs.filter.${option}` as Parameters<typeof t>[0])}
+                <span className="runs-filter-count">{count}</span>
+              </button>
+            );
+          })}
+        </span>
         {activeCount > 0 && <span className="runs-live">{t("runs.live", { n: activeCount })}</span>}
       </div>
       {data && data.length > 0 ? (

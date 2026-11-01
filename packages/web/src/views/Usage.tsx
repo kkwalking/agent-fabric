@@ -252,13 +252,10 @@ function Heatmap({ history, metric, onMetric }: { history: DayBucket[]; metric: 
 
   return (
     <>
-      <div className="row heat-head">
-        <h2>{t("usage.costHistory")}</h2>
-      </div>
       {/* Every control the history has — which metric it shades by and which
-          window it covers — in one toolbar under the heading. The window used
-          to sit in the legend line as a second, unlabelled segment, at the far
-          right of a row that also carried the totals and the colour key. */}
+          window it covers — in one toolbar. The heading above this block was
+          removed: the page is already titled 用量与费用, and the section title
+          only repeated it above a control row that explains itself. */}
       <div className="row usage-toolbar" role="group" aria-label={t("usage.controls.label")}>
         <span className="usage-control">
           <span className="usage-control-label">{t("usage.metric.label")}</span>

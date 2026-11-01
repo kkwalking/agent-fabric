@@ -152,6 +152,29 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
   // thread with an error page (the thread is still perfectly readable — the
   // generation just did not happen).
   const [handoffError, setHandoffError] = useState<string | null>(null);
+  /**
+   * The title row's "···" menu: workspace, runtime, model and the two detail
+   * pages. It replaces the second header row those facts used to occupy — the
+   * page is a conversation, and a line of chips above it was costing more space
+   * than the information was worth.
+   */
+  const [metaMenuOpen, setMetaMenuOpen] = useState(false);
+  const metaMenuRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!metaMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!metaMenuRef.current?.contains(event.target as Node)) setMetaMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMetaMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [metaMenuOpen]);
   /** Guards the refresh button against a second sync while one is in flight. */
   const syncingRef = useRef(false);
 
@@ -388,43 +411,88 @@ export function TaskThreadView({ taskId }: { taskId: string }) {
             >
               <Icon name="refresh" />
             </button>
+            {/* Workspace / runtime / model / the two detail pages used to hold a
+                second row of their own under the title, which cost this page a
+                whole line of vertical space above the conversation for facts
+                read once and then never again. They live behind this button. */}
+            <span className="thread-menu-root" ref={metaMenuRef}>
+              <button
+                className={`icon-btn ${metaMenuOpen ? "active" : ""}`}
+                title={t("thread.details")}
+                aria-label={t("thread.details")}
+                aria-expanded={metaMenuOpen}
+                aria-haspopup="menu"
+                onClick={() => setMetaMenuOpen((open) => !open)}
+              >
+                <Icon name="more" />
+              </button>
+              {metaMenuOpen && (
+                <div className="thread-menu" role="menu">
+                  <div className="thread-menu-row">
+                    <span className="thread-menu-key">{t("thread.workspaceLabel")}</span>
+                    <span className="thread-menu-value" title={thread.workspace?.path ?? ""}>
+                      <Icon name="folder" size={13} /> {thread.workspace?.name ?? t("thread.noWorkspace")}
+                    </span>
+                  </div>
+                  <div className="thread-menu-row">
+                    <span className="thread-menu-key">{t("thread.runtimeLabel")}</span>
+                    <span className="thread-menu-value">
+                      <Icon name="box" size={13} /> {lastTurn?.run.runtimeName ?? "—"}
+                    </span>
+                  </div>
+                  <div className="thread-menu-row">
+                    <span className="thread-menu-key">{t("thread.modelLabel")}</span>
+                    <span className="thread-menu-value" title={lastModelLabel ?? "—"}>
+                      <Icon name="cpu" size={13} /> {lastModelLabel ?? "—"}
+                    </span>
+                  </div>
+                  <div className="thread-menu-sep" />
+                  {/* Not a link: this focuses the composer, it does not go anywhere. */}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="thread-menu-item"
+                    onClick={() => {
+                      setMetaMenuOpen(false);
+                      focusComposer();
+                      composerRuntimeRef.current?.focus();
+                    }}
+                  >
+                    <Icon name="refresh" size={13} /> {t("thread.switchRuntime")}
+                  </button>
+                  {/* The lifecycle page is a detail view of this task: workspace,
+                      runtime, current phase, agent status and its runs. */}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="thread-menu-item"
+                    onClick={() => {
+                      setMetaMenuOpen(false);
+                      navigate(`/tasks/${thread.task.id}/lifecycle`);
+                    }}
+                  >
+                    <Icon name="box" size={13} /> {t("thread.lifecycle")}
+                  </button>
+                  {/* A board card's Task keeps living on the board it came from:
+                      the card owns the column, the terminal and the chat. */}
+                  {boardCardId && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="thread-menu-item"
+                      title={t("thread.boardCardTitle")}
+                      onClick={() => {
+                        setMetaMenuOpen(false);
+                        navigate("/kanban");
+                      }}
+                    >
+                      <Icon name="grid" size={13} /> {t("thread.boardCard")}
+                    </button>
+                  )}
+                </div>
+              )}
+            </span>
           </span>
-        </div>
-        <div className="thread-meta">
-          <span className="meta-chip" title={t("thread.workspaceTitle", { path: thread.workspace?.path ?? "" })}>
-            <Icon name="folder" size={13} /> {thread.workspace?.name ?? t("thread.noWorkspace")}
-          </span>
-          <span className="meta-chip"><Icon name="box" size={13} /> {lastTurn?.run.runtimeName ?? "—"}</span>
-          <span className="meta-chip" title={lastModelLabel ?? "—"}>
-            <Icon name="cpu" size={13} /> {lastModelLabel ?? "—"}
-          </span>
-          {/* Not a link: this focuses the composer, it does not go anywhere. */}
-          <button
-            type="button"
-            className="switch-link"
-            onClick={() => {
-              focusComposer();
-              composerRuntimeRef.current?.focus();
-            }}
-          >
-            <Icon name="refresh" size={12} /> {t("thread.switchRuntime")}
-          </button>
-          {/* The lifecycle page is a detail view of this task: workspace,
-              runtime, current phase, agent status and its runs. The entry
-              point lives here rather than being the page the composer lands
-              on. */}
-          <AppLink href={`/tasks/${thread.task.id}/lifecycle`} className="switch-link">
-            <Icon name="box" size={12} /> {t("thread.lifecycle")}
-          </AppLink>
-          {/* A board card's Task keeps living on the board it came from: the
-              card owns the column, the terminal and the chat. Without this
-              link the board conversation would be a dead end from the task
-              side, since the thread only shows run events. */}
-          {boardCardId && (
-            <AppLink href="/kanban" className="switch-link" title={t("thread.boardCardTitle")}>
-              <Icon name="grid" size={12} /> {t("thread.boardCard")}
-            </AppLink>
-          )}
         </div>
         {syncError && <ErrorBox message={t("thread.syncFailed", { error: syncError })} />}
         {handoffError && <ErrorBox message={t("thread.handoffFailed", { error: handoffError })} />}
