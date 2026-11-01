@@ -1,0 +1,51 @@
+{
+  "v": 4,
+  "createdOnFiles": { "v": 1, "at": "2026-10-30T02:36:00Z" },
+  "lists": "css",
+  "title": "AgentFabric · 产品介绍",
+  "cover": "cover",
+  "order": [
+    "cover",
+    "problem",
+    "thesis",
+    "architecture",
+    "model",
+    "runtime",
+    "models",
+    "kanban",
+    "observability",
+    "delivery",
+    "audience",
+    "close"
+  ],
+  "sections": {
+    "s1": { "description": "产品开场：把本机 Agent 收进一个控制平面", "start": "cover" },
+    "s2": { "description": "问题与主张：不是框架，是运行底座", "start": "problem" },
+    "s3": { "description": "系统结构：对象、运行时与模型", "start": "architecture" },
+    "s4": { "description": "日常工作流：看板与可观测性", "start": "kanban" },
+    "s5": { "description": "交付形态、使用人群与收束", "start": "delivery" }
+  },
+  "faces": {
+    "noto-sans-sc": {
+      "family": "Noto Sans SC",
+      "href": "https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
+    },
+    "ibm-plex-sans": {
+      "family": "IBM Plex Sans",
+      "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    },
+    "jetbrains-mono": {
+      "family": "JetBrains Mono",
+      "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap"
+    }
+  },
+  "designSystems": [
+    {
+      "title": "AgentFabric",
+      "namespace": "agentfabricds",
+      "artifact": "/Users/zhouzekun/code/agent-fabric/designs/agentfabric-design-system",
+      "version": null,
+      "copiedAt": "2026-10-30T02:36:00Z"
+    }
+  ]
+}

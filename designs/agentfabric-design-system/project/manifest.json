@@ -1,0 +1,59 @@
+{
+  "manifestVersion": 3,
+  "name": "AgentFabric",
+  "namespace": "AgentFabricDS",
+  "files": [
+    "assets/Logos/README.md",
+    "components/Badge/README.md",
+    "components/Button/README.md",
+    "components/Card/README.md",
+    "components/bundle.css",
+    "components/bundle.js",
+    "components/index.d.ts",
+    "tokens.css"
+  ],
+  "libraries": [],
+  "components": [
+    {
+      "name": "Button",
+      "group": "Actions",
+      "summary": "The product has one button shape."
+    },
+    {
+      "name": "Badge",
+      "group": "Status",
+      "summary": "A compact status pill with a 6px dot."
+    },
+    {
+      "name": "Card",
+      "group": "Surfaces",
+      "summary": "The default surface for a task, board card or settings group: white, hairline border, 12px radius and one low shadow."
+    }
+  ],
+  "assetGroups": [
+    {
+      "name": "Logos",
+      "tile": "l",
+      "order": [
+        "AgentFabric-logo.svg"
+      ],
+      "files": [
+        {
+          "path": "assets/Logos/AgentFabric-logo.svg",
+          "id": "8bcb14816a2d483a466bc3abbe001236"
+        }
+      ]
+    }
+  ],
+  "storage": {
+    "files": {
+      "assets/Logos/AgentFabric-logo.svg": {
+        "store": "blob",
+        "id": "8bcb14816a2d483a466bc3abbe001236",
+        "bytes": 4094,
+        "type": "image/svg+xml"
+      }
+    },
+    "blobBytesUsed": 4094
+  }
+}

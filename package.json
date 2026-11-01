@@ -24,7 +24,8 @@
     "test": "npm run test --workspaces --if-present",
     "postinstall": "node scripts/fix-node-pty.js",
     "desktop:perf": "npm run perf -w @agentfabric/desktop",
-    "desktop:verify:empty": "npm run verify:ui:empty -w @agentfabric/desktop"
+    "desktop:verify:empty": "npm run verify:ui:empty -w @agentfabric/desktop",
+    "e2e": "node scripts/e2e-workspace-board-task.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

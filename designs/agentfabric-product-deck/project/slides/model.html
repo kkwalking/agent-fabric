@@ -1,0 +1,35 @@
+<section id="model" data-transition="fade" style="background:#fbfaf7;color:#211f1a;font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between">
+<div style="display:flex;align-items:center;justify-content:space-between">
+<p style="font-size:24px;font-weight:600;letter-spacing:4px;color:#a84300">04 / THE MODEL</p>
+<p style="font-size:24px;color:#716f66">三个对象，一条生命周期</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:18px">
+<h2 style="font-size:88px;line-height:1.12;font-weight:700;letter-spacing:-2px">Workspace → Task → Run。</h2>
+<p style="font-size:32px;line-height:1.55;color:#5d5a52;width:1180px">工作区定义位置，任务定义意图，运行执行一次 Agent。Runtime 只负责“在哪里跑”。</p>
+</div>
+<div style="display:flex;align-items:stretch;gap:0;border:1px solid #d8d5cc;border-radius:18px;background:#ffffff;overflow:hidden">
+<div style="flex:1;padding:34px 38px;display:flex;flex-direction:column;gap:16px;border-right:1px solid #e8e8e6">
+<p style="font-size:22px;font-family:'JetBrains Mono',monospace;color:#a84300">01 / DURABLE</p>
+<p style="font-size:42px;font-weight:700;letter-spacing:-1px">Workspace</p>
+<p style="font-size:28px;line-height:1.5;color:#716f66">本机上的一个目录，也可以只是一个空目录。任务在原地执行，不 clone，不 checkout，不建分支。</p>
+<p style="font-size:24px;line-height:1.45;color:#211f1a;border-top:1px solid #e8e8e6;padding-top:16px">默认 Runtime / Model / 看板设置</p>
+</div>
+<div style="flex:1;padding:34px 38px;display:flex;flex-direction:column;gap:16px;border-right:1px solid #e8e8e6">
+<p style="font-size:22px;font-family:'JetBrains Mono',monospace;color:#a84300">02 / ONE INTENT</p>
+<p style="font-size:42px;font-weight:700;letter-spacing:-1px">Task</p>
+<p style="font-size:28px;line-height:1.5;color:#716f66">一次任务只指定：工作区、运行时、模型，以及可选的 Env、Secrets、资源限制与超时。</p>
+<p style="font-size:24px;line-height:1.45;color:#211f1a;border-top:1px solid #e8e8e6;padding-top:16px">没有 Project 层，没有分支决策</p>
+</div>
+<div style="flex:1;padding:34px 38px;display:flex;flex-direction:column;gap:16px">
+<p style="font-size:22px;font-family:'JetBrains Mono',monospace;color:#a84300">03 / DISPOSABLE</p>
+<p style="font-size:42px;font-weight:700;letter-spacing:-1px">Run</p>
+<p style="font-size:28px;line-height:1.5;color:#716f66">每个 Run 记录 phase 与 status，失败可按阶段重试；日志、事件与产出挂在这次执行上。</p>
+<p style="font-size:24px;line-height:1.45;color:#211f1a;border-top:1px solid #e8e8e6;padding-top:16px">Pending → Running → Completed / Failed</p>
+</div>
+</div>
+<div style="display:flex;gap:48px;align-items:center;border-top:1px solid #e8e8e6;padding-top:24px">
+<p style="font-size:24px;color:#716f66">一条原则：<b>容器可丢弃，工作区是持久的。</b></p>
+<p style="font-size:24px;color:#716f66">Harness 的原生 Session 只保存不透明引用，不统一、不转换。</p>
+<p style="font-size:24px;color:#716f66;font-family:'JetBrains Mono',monospace">05 / 12</p>
+</div>
+</section>

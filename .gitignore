@@ -5,10 +5,18 @@ dist/
 data/
 .env
 coverage/
+# Runtime logs written beside the artifacts that produce them
+*.log
+*.artifact-server.log
+
 # macOS app build outputs (packages/desktop): the server bundle and the packed app
 packages/desktop/backend/
 packages/desktop/release/
 packages/desktop/native/
+# A pasted copy of packages/web/dist used to inspect the packaged window by hand.
+# Nothing in the build reads it: electron-builder ships ../../packages/web/dist
+# into resources/web (see packages/desktop/electron-builder.yml.js).
+packages/desktop/web/
 
 # Tool session state (worktrees, transcripts) — never part of the source tree
 .claude/

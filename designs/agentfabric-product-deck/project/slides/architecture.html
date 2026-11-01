@@ -1,0 +1,80 @@
+<section id="architecture" data-transition="fade" style="background:#fbfaf7;color:#211f1a;font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between">
+<div style="display:flex;align-items:center;justify-content:space-between">
+<p style="font-size:24px;font-weight:600;letter-spacing:4px;color:#a84300">03 / ARCHITECTURE</p>
+<p style="font-size:24px;color:#716f66">系统结构</p>
+</div>
+<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:80px">
+<div style="display:flex;flex-direction:column;gap:16px;width:760px">
+<h2 style="font-size:80px;line-height:1.12;font-weight:700;letter-spacing:-2px">一个控制平面，<br>向下接住所有运行时。</h2>
+<p style="font-size:30px;line-height:1.55;color:#5d5a52">UI、CLI 和外部系统共享同一组 REST + SSE API；核心只依赖 Adapter 协议。</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;width:600px">
+<div style="display:flex;justify-content:space-between;border-bottom:1px solid #d8d5cc;padding-bottom:14px">
+<p style="font-size:24px;color:#716f66">入口</p>
+<p style="font-size:24px;font-weight:600">Web UI · CLI · API</p>
+</div>
+<div style="display:flex;justify-content:space-between;border-bottom:1px solid #d8d5cc;padding-bottom:14px">
+<p style="font-size:24px;color:#716f66">服务</p>
+<p style="font-size:24px;font-weight:600">REST · SSE · WebSocket</p>
+</div>
+<div style="display:flex;justify-content:space-between;border-bottom:1px solid #d8d5cc;padding-bottom:14px">
+<p style="font-size:24px;color:#716f66">核心</p>
+<p style="font-size:24px;font-weight:600">Workspace · Task · Run</p>
+</div>
+<div style="display:flex;justify-content:space-between;border-bottom:1px solid #d8d5cc;padding-bottom:14px">
+<p style="font-size:24px;color:#716f66">适配</p>
+<p style="font-size:24px;font-weight:600">Adapter Registry</p>
+</div>
+</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:0;border:1px solid #d8d5cc;border-radius:16px;overflow:hidden">
+<div style="background:#151d32;color:#f7f3ea;padding:22px 34px;display:flex;justify-content:space-between;align-items:center">
+<p style="font-size:24px;font-weight:600;letter-spacing:2px">CONTROL PLANE</p>
+<p style="font-size:24px;color:#aaa69a">AgentFabric Core</p>
+</div>
+<div style="display:flex;gap:0">
+<div style="flex:1;padding:22px 30px;border-right:1px solid #e8e8e6;display:flex;flex-direction:column;gap:8px">
+<p style="font-size:24px;font-weight:600">Provider</p>
+<p style="font-size:22px;color:#716f66">接口格式 · Base URL · Key</p>
+</div>
+<div style="flex:1;padding:22px 30px;border-right:1px solid #e8e8e6;display:flex;flex-direction:column;gap:8px">
+<p style="font-size:24px;font-weight:600">Model</p>
+<p style="font-size:22px;color:#716f66">参数 · Alias · 成本</p>
+</div>
+<div style="flex:1;padding:22px 30px;border-right:1px solid #e8e8e6;display:flex;flex-direction:column;gap:8px">
+<p style="font-size:24px;font-weight:600">Workspace</p>
+<p style="font-size:22px;color:#716f66">本机目录 · 默认配置</p>
+</div>
+<div style="flex:1;padding:22px 30px;display:flex;flex-direction:column;gap:8px">
+<p style="font-size:24px;font-weight:600">Task / Run</p>
+<p style="font-size:22px;color:#716f66">意图 · 执行 · 事件</p>
+</div>
+</div>
+<div style="display:flex;gap:12px;padding:22px 30px;border-top:1px solid #e8e8e6;background:#f4f4f4">
+<div style="flex:1;background:#ffffff;border:1px solid #e8e8e6;border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:24px;font-weight:600;color:#211f1a">OpenCode</p>
+<p style="font-size:22px;color:#716f66">本地 + 容器</p>
+</div>
+<div style="flex:1;background:#ffffff;border:1px solid #e8e8e6;border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:24px;font-weight:600;color:#211f1a">Pi Agent</p>
+<p style="font-size:22px;color:#716f66">本地 + 容器</p>
+</div>
+<div style="flex:1;background:#ffffff;border:1px solid #e8e8e6;border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:24px;font-weight:600;color:#211f1a">Codex</p>
+<p style="font-size:22px;color:#716f66">本地</p>
+</div>
+<div style="flex:1;background:#ffffff;border:1px solid #e8e8e6;border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:24px;font-weight:600;color:#211f1a">Claude Code</p>
+<p style="font-size:22px;color:#716f66">本地</p>
+</div>
+<div style="flex:1;background:#ffffff;border:1px solid #e8e8e6;border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:6px">
+<p style="font-size:24px;font-weight:600;color:#211f1a">DSH</p>
+<p style="font-size:22px;color:#716f66">ACP · 本地</p>
+</div>
+</div>
+</div>
+<div style="display:flex;justify-content:space-between;border-top:1px solid #e8e8e6;padding-top:24px">
+<p style="font-size:24px;color:#716f66">Adapter 是唯一扩展点：新增 Runtime 不改核心。</p>
+<p style="font-size:24px;color:#716f66;font-family:'JetBrains Mono',monospace">04 / 12</p>
+</div>
+</section>

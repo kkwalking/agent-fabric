@@ -1,0 +1,48 @@
+<section id="models" data-transition="fade" style="background:#fbfaf7;color:#211f1a;font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;justify-content:space-between">
+<div style="display:flex;align-items:center;justify-content:space-between">
+<p style="font-size:24px;font-weight:600;letter-spacing:4px;color:#a84300">06 / MODELS &amp; PROVIDERS</p>
+<p style="font-size:24px;color:#716f66">模型不是某个工具的私事</p>
+</div>
+<div style="display:flex;align-items:flex-start; gap:90px">
+<div style="display:flex;flex-direction:column;gap:26px;width:940px">
+<h2 style="font-size:84px;line-height:1.12;font-weight:700;letter-spacing:-2px">Provider 与 Model，<br>是平台的公共配置。</h2>
+<p style="font-size:32px;line-height:1.55;color:#5d5a52;width:820px">接口格式、Base URL、额外 Header、API Key、参数与别名，都在同一处维护；运行时只负责调用。</p>
+<div style="display:flex;flex-direction:column">
+<div style="display:flex;align-items:baseline;gap:30px;border-top:1px solid #d8d5cc;padding:24px 0">
+<p style="font-size:24px;font-weight:600;color:#a84300;width:48px">01</p>
+<p style="font-size:30px;font-weight:600;width:250px">Provider</p>
+<p style="font-size:28px;line-height:1.4;color:#716f66;flex:1">增删改查、启用/禁用、连通性测试</p>
+</div>
+<div style="display:flex;align-items:baseline;gap:30px;border-top:1px solid #d8d5cc;padding:24px 0">
+<p style="font-size:24px;font-weight:600;color:#a84300;width:48px">02</p>
+<p style="font-size:30px;font-weight:600;width:250px">Model</p>
+<p style="font-size:28px;line-height:1.4;color:#716f66;flex:1">所属 Provider、参数、Alias、成本口径</p>
+</div>
+<div style="display:flex;align-items:baseline;gap:30px;border-top:1px solid #d8d5cc;padding:24px 0">
+<p style="font-size:24px;font-weight:600;color:#a84300;width:48px">03</p>
+<p style="font-size:30px;font-weight:600;width:250px">Secrets</p>
+<p style="font-size:28px;line-height:1.4;color:#716f66;flex:1">Key 不进入日志、事件或容器镜像</p>
+</div>
+<div style="display:flex;align-items:baseline;gap:30px;border-top:1px solid #d8d5cc;border-bottom:1px solid #d8d5cc;padding:24px 0">
+<p style="font-size:24px;font-weight:600;color:#a84300;width:48px">04</p>
+<p style="font-size:30px;font-weight:600;width:250px">Run</p>
+<p style="font-size:28px;line-height:1.4;color:#716f66;flex:1">每次执行自由选择运行时与模型</p>
+</div>
+</div>
+</div>
+<div style="width:470px;display:flex;flex-direction:column;justify-content:space-between;gap:36px">
+<div style="display:flex;flex-direction:column;gap:10px;border-left:6px solid #e2620e;padding-left:26px">
+<p style="font-size:132px;line-height:1;font-weight:700;letter-spacing:-6px">5</p>
+<p style="font-size:26px;line-height:1.45;color:#716f66">种 Provider 接口格式：OpenAI Responses、Completions、Anthropic、兼容、自定义。</p>
+</div>
+<div style="background:#151d32;color:#f7f3ea;border-radius:16px;padding:30px 28px;display:flex;flex-direction:column;gap:14px">
+<p style="font-size:24px;letter-spacing:3px;color:#ff8a3d">PROVIDER → MODEL</p>
+<p style="font-size:28px;line-height:1.5">Model 不绑定 Provider 实现。换个入口，模型名与参数仍然成立。</p>
+</div>
+</div>
+</div>
+<div style="display:flex;justify-content:space-between;border-top:1px solid #e8e8e6;padding-top:24px">
+<p style="font-size:24px;color:#716f66">统一模型目录，运行时自由选择。</p>
+<p style="font-size:24px;color:#716f66;font-family:'JetBrains Mono',monospace">07 / 12</p>
+</div>
+</section>

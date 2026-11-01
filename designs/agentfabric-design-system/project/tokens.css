@@ -1,0 +1,142 @@
+/* AgentFabric — generated from tokens.json */
+:root, [data-theme="light"] {
+  --surface: #ffffff; /* Page and slide background. The default canvas is white, not tinted. */
+  --surface-raised: #ffffff; /* Cards, popovers and any surface that sits above the page. */
+  --surface-sunken: #f4f4f4; /* Quiet fills, table headers, code blocks and inset panels. */
+  --line: #e8e8e6; /* The only default border colour: cards, inputs and dividers. */
+  --line-soft: #f0f0ee; /* Secondary dividers and sidebar hairlines. */
+  --ink: #211f1a; /* Primary text on surface and surface-raised. */
+  --ink-strong: #151d32; /* Brand-dark fills, display type and the logo tile. On light slides it reads as near-black navy. */
+  --ink-muted: #716f66; /* Secondary copy, metadata and inactive navigation. */
+  --ink-dim: #a5a296; /* Tertiary labels and disabled text. */
+  --accent: #e2620e; /* The one warm accent: active markers, emphasis numerals and one call to action per view. */
+  --on-accent: #ffffff; /* Text and icons on an accent fill. */
+  --accent-soft: #fdf0e8; /* Tinted backgrounds behind accent text; never a page background. */
+  --thread-cyan: #2e9ad9; /* First strand of the woven mark; data and live-state highlights. */
+  --thread-orange: #ffae81; /* Second strand of the woven mark; warm connectors and flow arrows. */
+  --thread-purple: #887bff; /* Third strand of the woven mark; secondary system layers. */
+  --signal-blue: #2563eb; /* Links and informational status. */
+  --signal-green: #1a7f37; /* Success and completed states. */
+  --signal-red: #d1242f; /* Destructive actions, failures and blocking warnings. */
+  --signal-yellow: #9a6700; /* Warnings and pending states. */
+  --signal-purple: #8250df; /* Review, user-created and secondary categorical states. */
+  --shadow-card: 0 1px 2px #201f1c4b; /* Cards and inputs at rest. */
+  --shadow-pop: 0 4px 16px rgba(32,31,28,0.08); /* Menus, popovers and floating panels. */
+  --focus-ring: 0 0 0 3px rgba(32,31,28,0.08); /* Keyboard focus around inputs and interactive cards. */
+}
+[data-theme="dark"] {
+  --surface: #0d1422;
+  --surface-raised: #182135;
+  --surface-sunken: #09101b;
+  --line: #2b3850;
+  --line-soft: #1d2a40;
+  --ink: #f7f3ea;
+  --ink-strong: #ffffff;
+  --ink-muted: #aaa69a;
+  --ink-dim: #73776f;
+  --accent: #ff8a3d;
+  --on-accent: #151d32;
+  --accent-soft: #3a1b09;
+  --thread-cyan: #42c5e0;
+  --thread-orange: #ffb08c;
+  --thread-purple: #a99bff;
+  --signal-blue: #7aa2ff;
+  --signal-green: #5bd47a;
+  --signal-red: #ff6b74;
+  --signal-yellow: #e3b341;
+  --signal-purple: #b692ff;
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.35);
+  --shadow-pop: 0 8px 24px rgba(0,0,0,0.5);
+  --focus-ring: 0 0 0 3px rgba(255,255,255,0.16);
+}
+:root {
+  --space-1: 4px; /* Icon-to-label gap. */
+  --space-2: 8px; /* Inside compact controls. */
+  --space-3: 12px; /* Between related rows. */
+  --space-4: 16px; /* Card padding, UI. */
+  --space-6: 24px; /* Between groups. */
+  --space-8: 32px; /* Between blocks. */
+  --space-12: 48px; /* Slide inner rhythm. */
+  --space-16: 64px; /* Slide margins on compact screens. */
+  --space-24: 96px; /* Outer slide margin at 1600×900. */
+  --radius-sm: 6px; /* Small buttons and inputs. */
+  --radius-md: 8px; /* Buttons and compact controls. */
+  --radius-lg: 12px; /* Cards, menus and code panels. */
+  --radius-xl: 22px; /* Composer and large overlays. */
+  --radius-full: 9999px; /* Status pills only. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: Georgia, "Times New Roman", "Songti SC", STSong, SimSun, serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --text-display: 700 64px/66px var(--font-sans); /* Cover statement and one idea per slide, never body copy. */
+  --text-title: 650 44px/50px var(--font-sans); /* Slide titles that carry the argument. */
+  --text-heading: 650 28px/36px var(--font-sans); /* Section titles and diagram labels. */
+  --text-subhead: 600 20px/28px var(--font-sans); /* Deck lead-ins and card headings. */
+  --text-stat: 700 72px/72px var(--font-sans); /* One number that proves a point; use at most one per slide. */
+  --text-body: 400 16px/26px var(--font-sans); /* Default slide body text. */
+  --text-body-small: 400 13.5px/22px var(--font-sans); /* Captions, dense table cells and UI-like detail. */
+  --text-label: 600 11.5px/16px var(--font-sans); /* Uppercase eyebrows and diagram captions; never full sentences. */
+  --text-code: 400 13px/20px var(--font-mono); /* Commands, identifiers, API names and token values. */
+}
+.display {
+  font-family: var(--font-sans);
+  font-size: 64px;
+  line-height: 66px;
+  font-weight: 700;
+  letter-spacing: -2.4px;
+}
+.title {
+  font-family: var(--font-sans);
+  font-size: 44px;
+  line-height: 50px;
+  font-weight: 650;
+  letter-spacing: -1.2px;
+}
+.heading {
+  font-family: var(--font-sans);
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 650;
+  letter-spacing: -0.4px;
+}
+.subhead {
+  font-family: var(--font-sans);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+.stat {
+  font-family: var(--font-sans);
+  font-size: 72px;
+  line-height: 72px;
+  font-weight: 700;
+  letter-spacing: -3px;
+}
+.body {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 26px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.body-small {
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 22px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.label {
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+}
+.code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 400;
+  letter-spacing: 0;
+}

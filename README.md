@@ -138,7 +138,7 @@ npm run desktop:dmg -- --arch=x64      # 构建 Intel 版
 
 ```bash
 npm run desktop:install        # 安装，并跑下面两轮
-npm run desktop:verify         # 只跑有数据的夹具：57 项
+npm run desktop:verify         # 只跑有数据的夹具：76 项
 npm run desktop:verify:empty   # 只跑空数据目录（全新安装）：43 项
 ```
 
@@ -151,6 +151,22 @@ npm run desktop:verify:empty   # 只跑空数据目录（全新安装）：43 �
 2. **`packages/web/dist` 里是否有多份构建**：两个 `vite build --watch` 同时写输出目录会让同一视图出现两份 chunk，`index.html` 指向其中一个，**页面静默空白**。
 
 两者都只警告不中断（重建 dist 不重装是正常开发循环），但会让结论带上明确的保留条件。审查结论与已修复问题见 `docs/interaction-audit-2026-10-25.md`。
+
+#### 三条主线的端到端走查
+
+`verify-ui` 用夹具库驱动真实窗口，证明的是**界面**画对了、反应对了；它证明不了界面背后那条链真的通。`npm run e2e` 补这一段：
+
+```bash
+npm run e2e                    # 工作区 → 看板 → Task 执行，含三者交互
+npm run e2e -- --agent dsh     # 指定跑卡片用的 harness
+npm run e2e -- --keep          # 保留下手目录（临时数据目录 + 临时仓库）
+```
+
+它自己起一个临时端口的服务端、一个临时 `dataDir`、一个临时 git 仓库，**不碰 `~/.fabric`，也不碰这个 checkout**，跑完清理。断言覆盖：一个目录成为工作区且全局只有一条记录（同一目录的不同写法——尾斜杠、软链接——会被拒绝）、工作区的字段更新是白名单、卡片建在看板上、启动卡片产出 Task + Run、那一轮真的跑完并落到 Run/Task 上、归档不会改写已完成的结果、完成过的卡片再次启动是原生 resume 而不是新 Run、Task API 取消看板卡片会被拒绝并指出真正的停止入口、删工作区前必须先处理卡片。
+
+需要本机有 git 和一个装好并登录的 harness CLI。脚本优先用 ACP harness（`dsh`）：TUI harness 会停在自己的全屏对话框上（Claude 在非平台创建的目录里会问 "trust this folder?"），没人应答，那一轮永远不会结束——测到的就是那个对话框，不是产品。
+
+重构后的完整核查结论（40 类问题、修法取舍、以及每条回归测试如何验证它真的能捕获缺陷）见 `docs/refactor-verification-2026-11-01.md`。
 
 ### 性能回归检查
 
@@ -282,7 +298,7 @@ Settings 是一个带左侧导航的弹窗，按分区呈现，而不是把原�
 * **卡片就是 Task**：卡片第一次启动时创建一条**真正的 Task**（`workspaceId` = 该目录的工作区），每次启动是这条 Task 的一个 **Run**；续聊（`--resume` / ACP `session/resume`）复用同一个 Run。因此看板里跑起来的活儿和其它 Task 没有区别：侧边栏**工作区任务树**里按目录分组能看到它，点进去就是普通的 Task 线程（`/tasks/<id>`），**任务线程里直接显示该卡片的终端 / ACP 聊天输出**（和看板卡片详情是同一个会话），看板卡片详情里有 **Open task** 入口，任务页也有 **Board card** 回到看板。
   * **就地运行**：Task 的 Workspace 就是那个目录本身，平台**不复制**一份（`workspaceId` 指向的 Workspace，`path` 就是你的目录）。这也是任务树能把它归到那个文件夹下的原因。新建任务与看板走的是同一条执行路径。
   * **一个目录只有一条 Workspace**：如果这个目录已经是普通工作区（侧边栏里挂着它的历史会话），看板沿用**那一条**并把 `board` 设置写进去，不再新建第二条同名记录——两个同名目录会让看板的 Task 落在用户没在看的那个分组里。这条规则由 `WorkspaceService` 自己守着，不只看板：`POST /api/workspaces`、`/api/workspaces/import` 与改 `path` 的 `PUT` 遇到已被占用的目录都返回 `409 workspace-duplicate`，消息里给出**已有那条**的 id 与名字。侧边栏按 `workspaceId` 分组，同一目录两条记录就会显示成两个同名分组。
-  * **Stopped ≠ Failed**：在卡片上按 Stop 只会把 agent 标成 `cancelled`，任务不会出现失败徽章或重试按钮；服务重启打断的会话才写 `failure`（Run 仍是 `cancelled`）。对**正在运行**的卡片再点 start 是幂等的，不会悄悄换掉正在跑的 agent（要换会话请用 restart）。
+  * **Stopped ≠ Failed**：在卡片上按 Stop 只会把 agent 标成 `cancelled`，任务不会出现失败徽章或重试按钮；服务重启打断的会话才写 `failure`（Run 仍是 `cancelled`）。对**正在运行**的卡片再点 start 是幂等的，不会悄悄换掉正在跑的 agent（要换会话请用 restart）。同一张卡片的启动是**按卡片串行**的：连点两下、请求重试、两个窗口同时点 start，都只会有一个 agent、一个 Run、一条 Task——第二个请求返回的是那同一个会话，不是第二个进程（之前并发启动会各起一个 agent，一张卡变成多条 Task）。
   * 状态映射（写入时投影，读取不重算）：会话 `running` → Run `running`；turn 结束（`awaiting_review` / `needs_attention`）→ Run `completed`，Task 仍是 `running` 且 `execution.agent.status = completed`（等你）；`failed` → Run `failed` + `execution.failure.code = kanban-agent-failed`；服务重启中断 → Run `cancelled` + `kanban-session-interrupted`；`stopped` → Run `cancelled`。`validation` / `publish` 永远是 `pending`——看板不跑判定也不 publish，不会伪造通过。
   * 看板不物理删除历史：删卡片（含「清空 Done」）只把 Task 软删除（回收站 30 天可恢复）并删掉进程句柄与聊天记录，工作区目录与 Run 历史都留着。
 * **看板工作区与侧边栏是同一份记录**：`GET /api/kanban/workspaces` 只返回带 `board` 设置的工作区；「选目录 → 添加」走 `POST /api/kanban/workspaces { rootPath }`（不 clone、不 `git init`），改名与删除都用通用的 `/api/workspaces/:id`。
@@ -913,8 +929,10 @@ packages/
 docker/      pi.Dockerfile / dsh.Dockerfile（容器化 Pi / DSH 的参考镜像）
 docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的契约）、
              interaction-audit-2026-10-25.md（交互逻辑审查报告：已审交互面、发现的问题与修法、验证现状）、
+             refactor-verification-2026-11-01.md（重构后深度核查报告：40 类问题、修法取舍、回归测试清单）、
              kanban-dsh-acp.md / .html（Kanban 卡片驱动 DSH 的 ACP 实现原理，HTML 为可视化版）
 scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）、
+             e2e-workspace-board-task.mjs（工作区→看板→Task 执行走查，`npm run e2e`）、
              fix-node-pty.js（修复 node-pty 预建 spawn-helper 的可执行位）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
 ```

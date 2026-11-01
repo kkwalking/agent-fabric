@@ -1,0 +1,33 @@
+{
+  "v": 3,
+  "layout": "files",
+  "createdOnFiles": { "v": 1, "at": "2026-10-30T02:35:00Z" },
+  "title": "AgentFabric",
+  "namespace": "AgentFabricDS",
+  "libraries": [],
+  "sections": {},
+  "groups": ["Logos"],
+  "assetGroups": {
+    "Logos": {
+      "name": "Logos",
+      "tile": "l",
+      "order": ["AgentFabric-logo.svg"],
+      "files": {
+        "AgentFabric-logo.svg": {
+          "name": "AgentFabric-logo.svg",
+          "blob": "8bcb14816a2d483a466bc3abbe001236",
+          "size": 4094,
+          "type": "image/svg+xml"
+        }
+      }
+    }
+  },
+  "blobs": {},
+  "docs": { "readme": "project/README.md", "sections": [] },
+  "lastChange": {
+    "by": "周泽坤",
+    "at": "2026-10-30T02:35:00Z",
+    "via": "DeepSeek Harness",
+    "note": "Initial system built from packages/web/src/style.css and the repository logo."
+  }
+}
