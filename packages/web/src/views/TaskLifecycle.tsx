@@ -15,7 +15,9 @@ import { onAppEvent, TASKS_CHANGED_EVENT } from "../appEvents";
  */
 export function TaskLifecycleView({ taskId }: { taskId: string }) {
   const t = useT();
-  const detail = useAsync<any>(() => get(`/api/tasks/${taskId}/detail`), [taskId]);
+  // `force` propagates to the reload button: pressing refresh must reach the
+  // server rather than re-read the 5s GET cache, which made the button look dead.
+  const detail = useAsync<any>((force) => get(`/api/tasks/${taskId}/detail`, undefined, force), [taskId]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // App renders <TaskLifecycleView taskId=… /> with no key, so this component is

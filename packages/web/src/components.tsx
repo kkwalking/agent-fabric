@@ -1,4 +1,4 @@
-import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useId, useRef, useState } from "react";
+import { KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useId, useRef, useState, type RefObject } from "react";
 import { copyText, subscribeClock } from "./api";
 import { useT } from "./i18n-react";
 import { STATUS_KEYS, type MessageKey } from "./i18n";
@@ -522,40 +522,63 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
- * Minimal confirmation dialog. Clicking the overlay or pressing Escape
- * counts as cancel — callers just close without committing.
+ * Keeps the keyboard inside a dialog and puts focus back where it was.
  *
  * `aria-modal="true"` alone does not keep the keyboard inside: without a focus
- * trap, Tab walks straight out into the page behind the dialog and the user
- * ends up pressing buttons they cannot see. The dialog therefore takes focus
- * when it opens (its first control), wraps Tab at both ends, and returns focus
- * to whatever was focused before it closed.
+ * trap, Tab walks straight out into the page behind the dialog and the user ends
+ * up pressing buttons they cannot see. A dialog therefore takes focus when it
+ * opens (its first control), wraps Tab at both ends, and returns focus to
+ * whatever was focused before it closed.
+ *
+ * Exported as a hook because the board's dialogs did not use `Modal` and so had
+ * none of this: three overlays (new task, edit card, add workspace) each
+ * registered only a window-level Escape, letting Tab through to the board
+ * behind them and dropping focus on `<body>` when they closed.
+ *
+ * `onEscape` runs only when the Escape did not belong to a field: Escape while
+ * typing closes a dropdown or blurs the input, not the whole dialog.
  */
-export function Modal({
-  title,
-  onClose,
-  children,
-}: {
-  title: string;
-  onClose: () => void;
-  children: ReactNode;
-}) {
-  const box = useRef<HTMLDivElement | null>(null);
+/**
+ * Whether focus is in something the user types *text* into.
+ *
+ * Escape belongs to that element (it closes a dropdown, clears a query) rather
+ * than to the dialog. Deliberately narrow: a checkbox, a radio and a `<select>`
+ * are controls the dialog still owns — treating every `<input>` as a text field
+ * made Escape do nothing while the pointer sat on a checkbox, which is exactly
+ * the confirm dialog below.
+ */
+function isTextField(element: Element | null): boolean {
+  if (!(element instanceof HTMLElement)) return false;
+  if (element.isContentEditable) return true;
+  if (element instanceof HTMLTextAreaElement) return true;
+  if (!(element instanceof HTMLInputElement)) return false;
+  // The types that hold text and hand Escape to their own affordances.
+  return !["checkbox", "radio", "button", "submit", "reset", "file"].includes(element.type);
+}
+
+export function useDialogFocus(
+  box: RefObject<HTMLElement | null>,
+  onEscape: () => void
+): void {
   const restore = useRef<HTMLElement | null>(null);
-  // The accessible name comes from the visible title rather than a copy of it:
-  // `aria-label={title}` says the same words, but a screen reader then reads a
-  // name that is not in the DOM, and the two can drift apart.
-  const titleId = useId();
+  const escape = useRef(onEscape);
+  escape.current = onEscape;
   useEffect(() => {
     restore.current = document.activeElement as HTMLElement | null;
     const first = box.current?.querySelector<HTMLElement>(FOCUSABLE);
     (first ?? box.current)?.focus();
     return () => restore.current?.focus?.();
+    // Mount only: the dialog's lifetime is its identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        // Ask the *focus*, not the event target: what matters is whether the
+        // user is typing somewhere, and a keydown dispatched on `window` has no
+        // element target to inspect.
+        if (isTextField(document.activeElement)) return;
+        escape.current();
         return;
       }
       if (e.key !== "Tab" || !box.current) return;
@@ -580,7 +603,31 @@ export function Modal({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [box]);
+}
+
+/**
+ * Minimal confirmation dialog. Clicking the overlay or pressing Escape
+ * counts as cancel — callers just close without committing.
+ *
+ * The keyboard behaviour (focus in, trapped Tab, focus restored) lives in
+ * `useDialogFocus`, so a dialog built without `Modal` can have it too.
+ */
+export function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const box = useRef<HTMLDivElement | null>(null);
+  // The accessible name comes from the visible title rather than a copy of it:
+  // `aria-label={title}` says the same words, but a screen reader then reads a
+  // name that is not in the DOM, and the two can drift apart.
+  const titleId = useId();
+  useDialogFocus(box, onClose);
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div

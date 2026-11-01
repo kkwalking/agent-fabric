@@ -13,7 +13,7 @@ import { useT } from "../i18n-react";
 
 export function TrashView({ embedded = false }: { embedded?: boolean } = {}) {
   const t = useT();
-  const tasks = useAsync<any[]>(() => get("/api/tasks?deleted=true"), []);
+  const tasks = useAsync<any[]>((force) => get("/api/tasks?deleted=true", undefined, force), []);
   const [error, setError] = useState<string | null>(null);
   // A restore in flight; the row buttons stay disabled until it lands.
   const [busy, setBusy] = useState<string | null>(null);
@@ -79,7 +79,12 @@ export function TrashView({ embedded = false }: { embedded?: boolean } = {}) {
                 </div>
               </div>
               <div className="task-item-side">
-                <button className="small" disabled={busy !== null} onClick={() => restore(task)}>{t("trash.restore")}</button>
+                {/* Only the row being restored is busy: it used to disable every
+                    row's button, so restoring one task greyed out all the others
+                    with nothing on screen saying why. */}
+                <button className="small" disabled={busy === task.id} onClick={() => restore(task)}>
+                  {busy === task.id ? t("common.loading") : t("trash.restore")}
+                </button>
               </div>
             </div>
           ))}

@@ -23,6 +23,14 @@
 
 export const TASKS_CHANGED_EVENT = "agentfabric:tasks-changed";
 export const RUNS_CHANGED_EVENT = "agentfabric:runs-changed";
+/**
+ * A workspace record was created, renamed, re-pointed or deleted.
+ *
+ * Its own event rather than a task event: a list of workspaces changes for
+ * reasons that leave every task where it was (a rename), and a task event would
+ * make every task view reload for nothing.
+ */
+export const WORKSPACES_CHANGED_EVENT = "agentfabric:workspaces-changed";
 
 /** Detail kept on the event: which record changed, when the writer knows. */
 export interface FetchedChange {
@@ -57,6 +65,11 @@ export function notifyTasksChanged(changed: FetchedChange = {}): void {
 export function notifyRunsChanged(changed: FetchedChange = {}): void {
   announce(RUNS_CHANGED_EVENT, changed);
   notifyTasksChanged(changed);
+}
+
+/** Call after any write that creates, renames or deletes a Workspace. */
+export function notifyWorkspacesChanged(): void {
+  announce(WORKSPACES_CHANGED_EVENT, {});
 }
 
 /**

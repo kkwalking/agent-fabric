@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { del, fmtRelative, get, patch, put } from "../api";
-import { TASKS_CHANGED_EVENT, notifyTasksChanged } from "../appEvents";
+import {
+  TASKS_CHANGED_EVENT,
+  WORKSPACES_CHANGED_EVENT,
+  notifyTasksChanged,
+  notifyWorkspacesChanged,
+} from "../appEvents";
 import { Icon } from "../components";
 import { useT } from "../i18n-react";
 import { navigate } from "../router";
@@ -81,11 +86,19 @@ function folderFor(task: TaskRow): string {
   return task.workspaceId ?? "";
 }
 
-/** The heading for a folder key produced by `folderFor`. */
-function folderLabel(key: string, byId: Map<string, WorkspaceRow>, unfiled: string): string {
+/**
+ * The heading for a folder key produced by `folderFor`.
+ *
+ * A key with no workspace row behind it is a dangling reference, and its raw
+ * form (`ws_mvw…`) is an id, not a label — printing one puts a group headed by a
+ * database key in the sidebar. `missing` is what such a group is called now; the
+ * workspace delete detaches its tasks first (`WorkspaceService.remove`), so the
+ * case only remains for records written before that.
+ */
+function folderLabel(key: string, byId: Map<string, WorkspaceRow>, unfiled: string, missing: string): string {
   if (!key) return unfiled;
   const workspace = byId.get(key);
-  if (!workspace) return key;
+  if (!workspace) return missing;
   // A workspace may have been created with the directory path as its name. A
   // heading is a label, not a location: show the last path segment, and keep
   // the full path in the tooltip.
@@ -94,7 +107,7 @@ function folderLabel(key: string, byId: Map<string, WorkspaceRow>, unfiled: stri
     const segment = name.replace(/\/+$/, "").split("/").pop();
     if (segment) return segment;
   }
-  return name || key;
+  return name || missing;
 }
 
 /** The hover text for a folder heading: the full name or path behind it. */
@@ -197,8 +210,8 @@ export function WorkspaceTaskList({
     const onWorkspacesChanged = () => {
       void reload();
     };
-    window.addEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
-    return () => window.removeEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
+    window.addEventListener(WORKSPACES_CHANGED_EVENT, onWorkspacesChanged);
+    return () => window.removeEventListener(WORKSPACES_CHANGED_EVENT, onWorkspacesChanged);
   }, []);
 
   // A board card's first start creates its Task; deleting a card soft-deletes
@@ -256,6 +269,10 @@ export function WorkspaceTaskList({
     try {
       await put(`/api/workspaces/${renamingGroup.key}`, { name });
       setRenamingGroup(null);
+      // Other surfaces show the same name (the New Task picker, the board's
+      // project list): announce the rename or they keep the old one until their
+      // own poll or cache expiry catches up.
+      notifyWorkspacesChanged();
       await reload();
     } catch (e) {
       setRowError(e instanceof Error ? e.message : String(e));
@@ -271,13 +288,11 @@ export function WorkspaceTaskList({
   const removeGroup = async (group: Group) => {
     setConfirmDeleteGroup(null);
     try {
-      // Detach first: a task must never end up pointing at a workspace that no
-      // longer exists, which would show up as a folder named after a raw id.
-      for (const task of group.tasks) {
-        if (task.workspaceId !== group.key) continue;
-        await patch(`/api/tasks/${task.id}`, { workspaceId: "" });
-      }
+      // `DELETE /api/workspaces/:id` detaches the tasks itself, so this is one
+      // request instead of one per task — and no caller can skip the detach.
       await del(`/api/workspaces/${group.key}`);
+      notifyWorkspacesChanged();
+      notifyTasksChanged();
       await reload();
     } catch (e) {
       setRowError(e instanceof Error ? e.message : String(e));
@@ -349,7 +364,7 @@ export function WorkspaceTaskList({
       });
       built.push({
         key,
-        label: folderLabel(key, byId, t("sidebar.noWorkspace")),
+        label: folderLabel(key, byId, t("sidebar.noWorkspace"), t("sidebar.missingWorkspace")),
         tasks: bucket,
         latest: bucket.length > 0 ? taskTime(bucket[0]) : 0,
       });

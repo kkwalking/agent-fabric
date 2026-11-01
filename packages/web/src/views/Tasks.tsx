@@ -4,7 +4,7 @@ import { Icon, Modal, Pager, StatusBadge, clickableRow, useMinuteClock, useAsync
 import { statusLabel } from "../i18n";
 import { useT } from "../i18n-react";
 import { navigate } from "../router";
-import { notifyTasksChanged } from "../appEvents";
+import { onAppEvent, notifyTasksChanged, RUNS_CHANGED_EVENT, TASKS_CHANGED_EVENT } from "../appEvents";
 
 // Per-browser UI preference: when set, deleting a task skips the confirm modal.
 const SUPPRESS_DELETE_CONFIRM_KEY = "agentfabric.deleteTaskConfirmSuppressed";
@@ -20,9 +20,12 @@ const TASKS_PAGE_SIZE = 50;
 
 export function TasksView() {
   const t = useT();
-  const tasks = useAsync<any[]>(() => get("/api/tasks"), []);
-  const runs = useAsync<any[]>(() => get("/api/runs"), []);
-  const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
+  // `force` is the `reload()` contract (see `useAsync`): a user pressing refresh
+  // must reach the server, not re-read the 5s GET cache — otherwise the one
+  // control meant to escape stale data answers with stale data.
+  const tasks = useAsync<any[]>((force) => get("/api/tasks", undefined, force), []);
+  const runs = useAsync<any[]>((force) => get("/api/runs", undefined, force), []);
+  const workspaces = useAsync<any[]>((force) => get("/api/workspaces", undefined, force), []);
   // Which task's action menu is open (one at a time).
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   // Task awaiting confirmation in the delete modal.
@@ -59,7 +62,37 @@ export function TasksView() {
     return () => window.removeEventListener("click", close);
   }, [menuTaskId]);
 
-  if (tasks.error) return <ErrorBox message={tasks.error} />;
+  // This page shows Tasks and their Runs, so it has to hear about both. Every
+  // other list does this (the rail, the task thread, the lifecycle page); this
+  // one only ever announced its own writes, so deleting a task from the rail,
+  // restoring one from Trash, or starting a card on the board left the rows on
+  // screen as they were until the user navigated away and back.
+  const reloadTasks = tasks.reload;
+  const reloadRuns = runs.reload;
+  const reloadWorkspaces = workspaces.reload;
+  useEffect(
+    () =>
+      onAppEvent(TASKS_CHANGED_EVENT, () => {
+        reloadTasks();
+        // A task's row reads its latest Run (status, duration); removing a task
+        // takes its Runs with it.
+        reloadRuns();
+      }),
+    [reloadTasks, reloadRuns]
+  );
+  useEffect(
+    () => onAppEvent(RUNS_CHANGED_EVENT, () => {
+      reloadRuns();
+      reloadTasks();
+    }),
+    [reloadRuns, reloadTasks]
+  );
+
+  // Failures are reported as failures. Rendering them as empty values ("—",
+  // "no runs") says the data is empty, which is a different — and false —
+  // statement, and sends the user looking for records that are actually there.
+  const listError = tasks.error ?? runs.error ?? workspaces.error;
+  if (listError) return <ErrorBox message={listError} />;
 
   const runsByTask = new Map<string, any[]>();
   for (const r of runs.data ?? []) {

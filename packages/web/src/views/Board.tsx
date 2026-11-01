@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { ApiError, del, fmtTime, get, patch, post, put, shortId } from "../api";
-import { notifyTasksChanged } from "../appEvents";
+import { notifyRunsChanged, notifyTasksChanged, notifyWorkspacesChanged } from "../appEvents";
 import { ErrorBox, Icon, Modal, AppLink } from "../components";
 import { useT } from "../i18n-react";
 import type { MessageKey } from "../i18n";
@@ -536,8 +536,10 @@ export function BoardView() {
       if (selectedCardId === card.id) setDetailSession(response.session);
       await refreshNow();
       // Starting a card for the first time creates its Task; the rail must show
-      // it now, not on the next navigation.
+      // it now, not on the next navigation. Every start also adds a Run, and the
+      // Runs page only reloads on a run event.
       notifyTasksChanged();
+      notifyRunsChanged({ taskId: card.taskId, runId: response.session?.runId });
       return true;
     } catch (error) {
       // A restore that finds the session already live is a success, not a
@@ -545,6 +547,7 @@ export function BoardView() {
       if (options.idleOk && errText(error).includes("already has a running session")) {
         await refreshNow();
         notifyTasksChanged();
+        notifyRunsChanged({ taskId: card.taskId });
         return true;
       }
       setActionError(
@@ -624,6 +627,12 @@ export function BoardView() {
         setWorkspaceId(null);
         setSelectedCardId(null);
       }
+      // Both lists that hold workspaces are mounted elsewhere (the rail's tree
+      // and the New Task form's picker), and neither re-reads on a board write
+      // unless it is told: without these the deleted folder stayed in the rail
+      // until the user navigated away.
+      notifyWorkspacesChanged();
+      notifyTasksChanged();
       await loadWorkspaces();
     } catch (error) {
       setActionError(t("board.action.deleteWorkspaceFailed", { error: errText(error) }));
@@ -1509,6 +1518,21 @@ function CardDetail({
   // no-op choice the "agent default" label already means, any other id is a
   // real catalog row (DSH pins one of its sandbox presets).
   const cardAgent = agents.find((agent) => agent.id === card.agentId);
+  /**
+   * Whether starting this card can work at all.
+   *
+   * The server refuses a start for an agent whose CLI is not installed (or
+   * whose ACP profile is missing) with `kanban-agent-not-installed` /
+   * `kanban-agent-profile-missing`. The new-task form already greys the agent
+   * out for that reason; this overlay did not, so Start looked available and the
+   * user learned about it only after a round trip. `agents` is empty until the
+   * catalog loads — an unloaded catalog is not evidence of a missing CLI, so it
+   * does not disable anything.
+   */
+  const cardAgentUnavailable = cardAgent !== undefined && !cardAgent.available;
+  const startBlockedReason = cardAgentUnavailable
+    ? `${cardAgent.label} — ${cardAgent.installHint ?? t("board.detail.agentUnavailable")}`
+    : undefined;
   const cardPermissionId =
     card.permissionModeId ??
     (cardAgent?.defaultPermissionModeId && cardAgent.defaultPermissionModeId !== "default"
@@ -1521,7 +1545,26 @@ function CardDetail({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      // Escape while typing belongs to the field, not to the overlay. This
+      // overlay carries the ACP chat, whose draft is component state with no
+      // persistence anywhere: closing on Escape threw away half-typed messages
+      // on a keystroke people press out of habit. (The task thread page keeps
+      // its draft, so the two surfaces disagreed.)
+      // The *focus* decides, not the event target: a keydown dispatched on
+      // `window` has no element to inspect, and what matters is whether the user
+      // is typing somewhere.
+      // Only text entry owns Escape: a checkbox or a `<select>` still lets the
+      // overlay close, which is what a keyboard user expects.
+      const focused = document.activeElement;
+      const typing =
+        focused instanceof HTMLElement &&
+        (focused.isContentEditable ||
+          focused instanceof HTMLTextAreaElement ||
+          (focused instanceof HTMLInputElement &&
+            !["checkbox", "radio", "button", "submit", "reset", "file"].includes(focused.type)));
+      if (typing) return;
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1558,12 +1601,22 @@ function CardDetail({
               </button>
             )}
             {card.column === "backlog" && (
-              <button className="primary" disabled={busy} onClick={onStart}>
+              <button
+                className="primary"
+                disabled={busy || cardAgentUnavailable}
+                title={startBlockedReason}
+                onClick={onStart}
+              >
                 {t("board.detail.start")}
               </button>
             )}
             {(card.column === "review" || card.column === "in_progress") && !sessionLive && (
-              <button className="primary" disabled={busy} onClick={onRestart}>
+              <button
+                className="primary"
+                disabled={busy || cardAgentUnavailable}
+                title={startBlockedReason}
+                onClick={onRestart}
+              >
                 {t(canResume ? "board.detail.resumeSession" : "board.detail.startNew")}
               </button>
             )}
@@ -1802,9 +1855,17 @@ function CardDetail({
                             agent: agentLabel,
                           })}
                     </p>
-                    <button className="primary" disabled={busy} onClick={onStart}>
+                    <button
+                      className="primary"
+                      disabled={busy || cardAgentUnavailable}
+                      title={startBlockedReason}
+                      onClick={onStart}
+                    >
                       {t("board.detail.startSession")}
                     </button>
+                    {cardAgentUnavailable && (
+                      <p className="warn">{startBlockedReason}</p>
+                    )}
                   </>
                 ) : (
                   <p className="muted">

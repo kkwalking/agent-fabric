@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { get, post } from "../api";
 import { ErrorBox, Icon, useAsync } from "../components";
+import { WORKSPACES_CHANGED_EVENT } from "../appEvents";
 import { HARNESS_NATIVE_KINDS } from "../harness";
 import { useT } from "../i18n-react";
 import { modelOptionLabel } from "../presentation";
@@ -36,10 +37,10 @@ import { navigate } from "../router";
 
 export function NewTaskView() {
   const t = useT();
-  const workspaces = useAsync<any[]>(() => get("/api/workspaces"), []);
-  const runtimes = useAsync<any[]>(() => get("/api/runtimes?usableInTask=true"), []);
-  const providers = useAsync<any[]>(() => get("/api/providers"), []);
-  const models = useAsync<any[]>(() => get("/api/models"), []);
+  const workspaces = useAsync<any[]>((force) => get("/api/workspaces", undefined, force), []);
+  const runtimes = useAsync<any[]>((force) => get("/api/runtimes?usableInTask=true", undefined, force), []);
+  const providers = useAsync<any[]>((force) => get("/api/providers", undefined, force), []);
+  const models = useAsync<any[]>((force) => get("/api/models", undefined, force), []);
 
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("");
@@ -58,8 +59,8 @@ export function NewTaskView() {
   // workspace select has to see it without a full page reload.
   useEffect(() => {
     const onWorkspacesChanged = () => workspaces.reload();
-    window.addEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
-    return () => window.removeEventListener("agentfabric:workspaces-changed", onWorkspacesChanged);
+    window.addEventListener(WORKSPACES_CHANGED_EVENT, onWorkspacesChanged);
+    return () => window.removeEventListener(WORKSPACES_CHANGED_EVENT, onWorkspacesChanged);
   }, []);
 
   const workspaceList = workspaces.data ?? [];
@@ -106,10 +107,16 @@ export function NewTaskView() {
         ? effectiveRuntime.defaultModelId
         : providerDefaultModelId || (modelList[0]?.id ?? "");
 
-  const missingWorkspace = !workspaces.loading && workspaceList.length === 0;
-  const missingRuntime = !runtimes.loading && selectableRuntimes.length === 0;
-  const missingModel = !harnessNative && !models.loading && modelList.length === 0;
-  const blocked = missingWorkspace || missingRuntime || missingModel;
+  // A failed read is not an empty list. `useAsync` leaves `data` null when the
+  // request fails, which arrives here as an empty array — and this form told the
+  // user "you have no workspace yet, click + in the sidebar to create one",
+  // handing them a remedy for the wrong problem while the submit button stayed
+  // disabled for ever. A failure now says it failed and offers nothing more.
+  const loadError = workspaces.error ?? runtimes.error ?? models.error;
+  const missingWorkspace = !workspaces.error && !workspaces.loading && workspaceList.length === 0;
+  const missingRuntime = !runtimes.error && !runtimes.loading && selectableRuntimes.length === 0;
+  const missingModel = !harnessNative && !models.error && !models.loading && modelList.length === 0;
+  const blocked = Boolean(loadError) || missingWorkspace || missingRuntime || missingModel;
 
   const submit = async () => {
     if (!prompt.trim() || busy || blocked) return;
@@ -136,6 +143,7 @@ export function NewTaskView() {
     <div className="new-task">
       <h1>{t("newtask.title")}</h1>
       <p className="sub">{t("newtask.sub")}</p>
+      {loadError && <ErrorBox message={loadError} />}
       {missingWorkspace && <ErrorBox message={t("newtask.missingWorkspace")} />}
       {missingRuntime && <ErrorBox message={t("newtask.missingRuntime")} />}
       {missingModel && <ErrorBox message={t("newtask.missingModel")} />}

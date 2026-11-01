@@ -1715,63 +1715,108 @@ try {
   // 9b-1d-2. Hovering a heatmap cell says what that day cost. The grid used to
   //          answer only with the browser's own `title` tooltip, which the
   //          WebView renders late, unstyled, and only for one fact at a time.
-  const heatTip = await evaluate(
+  //
+  // The pointer is the browser's own: `Input.dispatchMouseEvent` hit-tests the
+  // page exactly as a moving mouse does, so React's delegated `onMouseEnter`
+  // fires. Dispatching a synthetic `mouseenter` on the element does not — that
+  // event does not bubble and React synthesises `onMouseEnter` from `mouseover`,
+  // so a hand-made native `mouseenter` is invisible to the component and this
+  // check could never pass however correct the UI was.
+  const heatTarget = await evaluate(
     cdp,
     `(async () => {
-       const out = { before: document.querySelector(".heat-tip") !== null, shown: null, days: null };
-       // Ask the API which days have work, and find the cell for the busiest
-       // one: the level-0 cells are days with nothing to report.
-       out.days = await (async () => {
-         const res = await fetch("/api/usage");
-         const body = await res.json();
-         const history = body.history ?? body.daily ?? [];
-         const active = history.filter((d) => (d.cost ?? 0) > 0 || (d.tokens ?? 0) > 0);
-         return { total: history.length, active: active.reduce((best, d) => (d.cost ?? 0) > (best.cost ?? 0) ? d : best, active[0] ?? {}) };
-       })();
-       // Move onto the day the API reported as busiest, if the current window
-       // holds it; otherwise walk backwards from today for the first cell with
-       // a level above 0.
-       // The heatmap may still be on an empty window from an earlier check;
-       // put it back to the default 26 weeks, then find a shaded cell.
-       [...document.querySelectorAll(".heat-range button")]
-         .find((b) => b.getAttribute("aria-pressed") !== "true") && null;
-       const defaultRange = [...document.querySelectorAll(".heat-range button")][2];
-       defaultRange?.click();
+       const out = { before: document.querySelector(".heat-tip") !== null, cell: null, window: null };
+       // The check before this one leaves the grid on its widest window; put it
+       // back to the default 26 weeks so the fixture's day is in range.
+       [...document.querySelectorAll(".heat-range button")][2]?.click();
        await new Promise((r) => setTimeout(r, 600));
-       const active = [...document.querySelectorAll(".heat-grid .heat-cell")]
-         .filter((c) => /\bl[1-4]\b/.test(c.className));
-       const cell = active[active.length - 1] ?? null;
-       out.activeCells = active.length;
-       out.levels = [...document.querySelectorAll(".heat-grid .heat-cell")].slice(-10).map((c) => c.className);
-       if (cell) {
-         cell.dispatchEvent(new MouseEvent("mouseenter", { clientX: 0, clientY: 0 }));
-         await new Promise((r) => setTimeout(r, 200));
-         const tip = document.querySelector(".heat-tip");
-         if (tip) {
-           const card = document.querySelector(".heat-card")?.getBoundingClientRect();
-           const rect = tip.getBoundingClientRect();
-           out.shown = {
-             text: tip.innerText.replace(/\s+/g, " ").trim(),
-             inside: card ? rect.left >= card.left && rect.right <= card.right && rect.top >= card.top && rect.bottom <= card.bottom : false,
-             labelled: cell.getAttribute("aria-label") ?? "",
-             level: cell.className,
-           };
-         }
-       }
-       out.cells = document.querySelectorAll(".heat-grid .heat-cell").length;
+       const all = [...document.querySelectorAll(".heat-grid .heat-cell")];
+       // Prefer a day that saw work (the fixture has one); fall back to any day,
+       // because the readout must answer for a day with nothing on it too.
+       // Doubled backslashes: this string is a page template literal, where a
+       // single backslash-b is a backspace character, not a word boundary. The
+       // single-escaped form silently matched nothing, so the check always fell
+       // back to the last cell — a future date — and never hovered a day that
+       // had work.
+       const shaded = all.filter((c) => /\\bl[1-4]\\b/.test(c.className));
+       const cell = shaded[shaded.length - 1] ?? all[all.length - 1] ?? null;
+       out.cells = all.length;
+       out.activeCells = shaded.length;
+       // What the page and the API each know about history: a grid that is all
+       // level 0 while the API has days with work is a rendering bug, and the
+       // two have to be told apart from "there is no usage yet".
+       out.grids = document.querySelectorAll(".heat-grid").length;
+       out.activeLabels = shaded.map((c) => c.getAttribute("aria-label")).slice(0, 4);
+       out.apiHistory = await fetch("/api/usage")
+         .then((r) => r.json())
+         .then((b) => (b.history ?? []).filter((d) => (d.cost ?? 0) > 0 || (d.tokens ?? 0) > 0).length)
+         .catch(() => "unreadable");
+       out.window = document.querySelector(".heat-range button[aria-pressed='true']")?.textContent?.trim() ?? null;
+       if (!cell) return out;
+       // The pointer has to land on the cell, which means it has to be on screen.
+       cell.scrollIntoView({ block: "center", inline: "center" });
+       await new Promise((r) => setTimeout(r, 250));
+       const box = cell.getBoundingClientRect();
+       out.cell = {
+         x: Math.round(box.left + box.width / 2),
+         y: Math.round(box.top + box.height / 2),
+         level: cell.className,
+         label: cell.getAttribute("aria-label") ?? "",
+         onScreen: box.top >= 0 && box.left >= 0 && box.bottom <= innerHeight && box.right <= innerWidth,
+       };
        return out;
      })()`
   );
-  if (process.env.AF_VERIFY_DEBUG) console.log("DEBUG heat", JSON.stringify(heatTip.shown ?? heatTip.days));
-  check(heatTip.before === false, "no hover readout is drawn before a cell is hovered");
+  check(heatTarget.before === false, "no hover readout is drawn before a cell is hovered");
+  if (heatTarget.cell) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: heatTarget.cell.x,
+      y: heatTarget.cell.y,
+      button: "none",
+      buttons: 0,
+    });
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  const heatTip = await evaluate(
+    cdp,
+    `(() => {
+       const tip = document.querySelector(".heat-tip");
+       if (!tip) return { shown: null };
+       const card = document.querySelector(".heat-card")?.getBoundingClientRect();
+       const rect = tip.getBoundingClientRect();
+       const hovered = document.querySelector(".heat-grid .heat-cell.hover");
+       return {
+         shown: {
+           text: tip.innerText.replace(/\\s+/g, " ").trim(),
+           // Every fact the day has, not just the metric being shaded.
+           rows: [...tip.querySelectorAll(".heat-tip-row")].length,
+           inside: card
+             ? rect.left >= card.left - 0.5 && rect.right <= card.right + 0.5 &&
+               rect.top >= card.top - 0.5 && rect.bottom <= card.bottom + 0.5
+             : false,
+           labelled: hovered?.getAttribute("aria-label") ?? "",
+           level: hovered?.className ?? "",
+         },
+       };
+     })()`
+  );
+  if (process.env.AF_VERIFY_DEBUG) console.log("DEBUG heat", JSON.stringify({ heatTarget, shown: heatTip.shown }));
   check(
-    Boolean(heatTip.shown) && /预估费用|Estimated cost/i.test(heatTip.shown.text) && /请求|Request/i.test(heatTip.shown.text),
-    `hovering a heatmap cell reads out that day (${JSON.stringify(heatTip.shown?.text?.slice(0, 90))})`
+    Boolean(heatTip.shown) &&
+      /预估费用|Estimated cost/i.test(heatTip.shown.text) &&
+      /请求|Request/i.test(heatTip.shown.text) &&
+      heatTip.shown.rows === 3,
+    `hovering a heatmap cell reads out that day — date, cost, tokens, requests (${JSON.stringify(heatTip.shown?.text?.slice(0, 90))})`
   );
   check(heatTip.shown?.inside === true, "the heatmap readout stays inside its card");
   check(
     /预估费用|Estimated cost/i.test(heatTip.shown?.labelled ?? ""),
-    `a heatmap cell also carries its readout as a label, for readers that do not hover (${JSON.stringify(heatTip.shown?.labelled?.slice(0, 80))})`
+    `the hovered cell also carries its readout as a label, for readers that do not hover (${JSON.stringify(heatTip.shown?.labelled?.slice(0, 80))})`
+  );
+  check(
+    heatTip.shown?.level ? /\bheat-cell\b/.test(heatTip.shown.level) : false,
+    `the cell under the pointer is marked, and only that one (${heatTip.shown?.level ?? "none"})`
   );
 
 

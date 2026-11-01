@@ -37,14 +37,25 @@ interface DayBucket {
 }
 
 /**
- * The day grid ends on the week containing `today` and starts `weeks - 1`
- * weeks earlier, padded to whole Monday-start weeks so every column has
- * seven rows. Days without a run are zeroes, not gaps.
+ * The day grid: whole Monday-start weeks, the last one holding `today`.
+ *
+ * Each column is a Monday→Sunday week, so row 0 is always Monday whatever day
+ * it is today, and the final column is the week `today` falls in. The window is
+ * `weeks` columns wide including that one.
+ *
+ * The distance to the end of this week is `6 - mondayIndex(today)`, where
+ * `mondayIndex` is 0 for Monday … 6 for Sunday. Getting this wrong by one is
+ * invisible on most days and obvious on Sunday: the old expression put the last
+ * column one week *past* today, so a Sunday rendered on row 5 instead of 6, the
+ * whole grid started on a Tuesday, and the heatmap showed a column of days that
+ * had not happened yet.
  */
-function heatWeeks(today: Date, weeks: number = WEEKS): Date[][] {
+export function heatWeeks(today: Date, weeks: number = WEEKS): Date[][] {
   const day = 24 * 60 * 60 * 1000;
   const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const end = new Date(midnight.getTime() + (7 - ((midnight.getDay() + 6) % 7)) * day); // coming Sunday
+  const mondayIndex = (midnight.getDay() + 6) % 7; // Monday 0 … Sunday 6
+  // The Sunday that closes today's week — today itself when it is a Sunday.
+  const end = new Date(midnight.getTime() + (6 - mondayIndex) * day);
   const start = new Date(end.getTime() - (weeks * 7 - 1) * day); // a Monday
   const out: Date[][] = [];
   for (let w = 0; w < weeks; w++) {
@@ -208,13 +219,20 @@ function Heatmap({ history, metric, onMetric }: { history: DayBucket[]; metric: 
     return { key, bucket, left: Math.round(left), top: Math.round(top) };
   };
 
-  /** The readout as one sentence, for readers who never hover (screen readers). */
+  /**
+   * The readout as one sentence, for readers who never hover (screen readers).
+   *
+   * It names every fact the pointer readout names, in the same order: a bare
+   * "$0.25 · 1,600 · 3" would be a list of numbers with no meaning aloud, so
+   * each one carries its label — the same three labels the hover readout draws.
+   */
   const readout = (key: string, bucket: DayBucket | undefined) =>
-    `${dayLabel(key)} · ${t("usage.cellTip", {
-      value: `${fmtCost(bucket?.cost ?? 0)}`,
-      tokens: (bucket?.tokens ?? 0).toLocaleString(),
-      requests: bucket?.requests ?? 0,
-    })}`;
+    [
+      dayLabel(key),
+      `${t("usage.cellTip.cost")} ${fmtCost(bucket?.cost ?? 0)}`,
+      `${t("usage.cellTip.tokens")} ${(bucket?.tokens ?? 0).toLocaleString()}`,
+      `${t("usage.cellTip.requests")} ${bucket?.requests ?? 0}`,
+    ].join(" · ");
   const valueOf = (h: DayBucket | undefined) => (h ? (metric === "cost" ? h.cost : h.tokens) : 0);
 
   // Value levels are quantiles of the days that saw work, so one expensive

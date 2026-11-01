@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, get, post } from "../../api";
-import { Icon } from "../../components";
+import { Icon, useDialogFocus } from "../../components";
+import { notifyWorkspacesChanged } from "../../appEvents";
 import { useT } from "../../i18n-react";
 import { DirectoryAutocomplete } from "./DirectoryAutocomplete";
 import type { BoardWorkspace, KanbanDirectoryListing } from "./types";
@@ -123,13 +124,12 @@ export function AddWorkspaceDialog({
     };
   }, []);
 
-  useEffect(() => {
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  // Focus moves into the dialog, Tab cannot leave it, and closing returns focus
+  // to the control that opened it — the same contract the app's `Modal` has.
+  const box = useRef<HTMLDivElement | null>(null);
+  useDialogFocus(box, () => {
+    if (!busy) onClose();
+  });
 
   const add = async () => {
     const rootPath = pathInput.trim();
@@ -157,7 +157,7 @@ export function AddWorkspaceDialog({
       // The rail and the New Task form both keep workspace lists mounted; let
       // them re-read instead of waiting for the five-second GET cache to age
       // out or the user to navigate away and back.
-      window.dispatchEvent(new Event("agentfabric:workspaces-changed"));
+      notifyWorkspacesChanged();
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -181,6 +181,8 @@ export function AddWorkspaceDialog({
       }}
     >
       <div
+        ref={box}
+        tabIndex={-1}
         className="modal board-dialog add-workspace-dialog"
         role="dialog"
         aria-modal="true"

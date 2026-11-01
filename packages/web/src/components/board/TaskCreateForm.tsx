@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { get } from "../../api";
 import { Icon } from "../../components";
 import { useT } from "../../i18n-react";
+import type { MessageKey } from "../../i18n";
 import type {
   ExecutionMode,
   KanbanAgent,
@@ -315,7 +316,27 @@ export function TaskCreateForm({
   // would be two names for one choice. An agent whose default is a real mode
   // (DSH pins one of its sandbox presets) preselects that row instead and
   // shows no empty option, so the choice is never ambiguous.
-  const permissionModes = (selectedAgent?.permissionModes ?? []).filter((mode) => mode.id !== "default");
+  /**
+ * The catalog's permission modes are stable ids; their `label` is English prose
+ * written by the server (`"Read only"`, `"Accept edits"`) and the description is
+ * a full English sentence. Rendering them verbatim left the one dropdown in a
+ * Chinese form in English. Known ids are translated here; an unknown id (a
+ * future harness) falls back to what the server said rather than to nothing.
+ */
+const PERMISSION_MODE_KEY: Record<string, MessageKey> = {
+  plan: "board.permission.plan",
+  acceptEdits: "board.permission.acceptEdits",
+  bypass: "board.permission.bypass",
+  auto: "board.permission.auto",
+  "read-only": "board.permission.readOnly",
+  "workspace-write": "board.permission.workspaceWrite",
+  "danger-full-access": "board.permission.fullAccess",
+};
+
+/** Reasoning-effort values the harnesses advertise, in escalating strength. */
+const EFFORT_VALUES = ["off", "low", "medium", "high", "max"] as const;
+
+const permissionModes = (selectedAgent?.permissionModes ?? []).filter((mode) => mode.id !== "default");
   const catalogDefault = selectedAgent?.defaultPermissionModeId ?? "";
   const defaultPermissionModeId = catalogDefault && catalogDefault !== "default" ? catalogDefault : "";
   const permissionChoice = permissionModes.some((mode) => mode.id === permissionModeId)
@@ -356,6 +377,12 @@ export function TaskCreateForm({
   const handleMultiKeyDown = (index: number, event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
+      // The form wrapper below handles Cmd/Ctrl+Enter too, and React synthesises
+      // that as one bubbled event: without this, one keypress called `submit()`
+      // twice. `busy` could not stop it — it is a prop the parent sets
+      // asynchronously, so both calls read the old value in the same tick — and
+      // the create loop posted every card twice.
+      event.stopPropagation();
       submit(event.shiftKey);
       return;
     }
@@ -586,9 +613,9 @@ export function TaskCreateForm({
                 disabled={busy}
               >
                 <option value="">{t("board.form.agentDefault")}</option>
-                {["off", "low", "high", "max"].map((effort) => (
+                {EFFORT_VALUES.map((effort) => (
                   <option key={effort} value={effort}>
-                    {effort}
+                    {t(`board.effort.${effort}` as MessageKey)}
                   </option>
                 ))}
               </select>
@@ -610,12 +637,15 @@ export function TaskCreateForm({
                 disabled={busy}
               >
                 {defaultPermissionModeId ? null : <option value="">{t("board.form.agentDefault")}</option>}
-                {permissionModes.map((permissionMode) => (
-                  <option key={permissionMode.id} value={permissionMode.id}>
-                    {permissionMode.label}
-                    {permissionMode.risky ? t("board.form.risky") : ""}
-                  </option>
-                ))}
+                {permissionModes.map((permissionMode) => {
+                  const key = PERMISSION_MODE_KEY[permissionMode.id];
+                  return (
+                    <option key={permissionMode.id} value={permissionMode.id}>
+                      {key ? t(key) : permissionMode.label}
+                      {permissionMode.risky ? t("board.form.risky") : ""}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           )}

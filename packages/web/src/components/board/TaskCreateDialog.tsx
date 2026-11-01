@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Icon } from "../../components";
+import { useRef } from "react";
+import { Icon, useDialogFocus } from "../../components";
 import { useT } from "../../i18n-react";
 import {
   TaskCreateForm,
@@ -47,13 +47,14 @@ export function TaskCreateDialog({
   onClose: () => void;
 }) {
   const t = useT();
-  useEffect(() => {
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  // Same keyboard contract as the app's own Modal: focus moves in, Tab cannot
+  // leave, and focus returns to the control that opened the dialog. These board
+  // dialogs used to register only a window-level Escape, so Tab reached the
+  // board behind them and closing dropped focus on <body>.
+  const box = useRef<HTMLDivElement | null>(null);
+  useDialogFocus(box, () => {
+    if (!busy) onClose();
+  });
 
   return (
     <div
@@ -63,6 +64,8 @@ export function TaskCreateDialog({
       }}
     >
       <div
+        ref={box}
+        tabIndex={-1}
         className="modal board-dialog task-create-dialog"
         role="dialog"
         aria-modal="true"
@@ -132,13 +135,10 @@ export function TaskEditDialog({
   onClose: () => void;
 }) {
   const t = useT();
-  useEffect(() => {
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
+  const box = useRef<HTMLDivElement | null>(null);
+  useDialogFocus(box, () => {
+    if (!busy) onClose();
+  });
 
   return (
     <div
@@ -148,6 +148,8 @@ export function TaskEditDialog({
       }}
     >
       <div
+        ref={box}
+        tabIndex={-1}
         className="modal board-dialog task-create-dialog"
         role="dialog"
         aria-modal="true"
