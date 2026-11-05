@@ -85,7 +85,7 @@ const configs: Record<string, Config> = {
     ],
     createFields: [
       { key: "name", label: "resources.f.name", required: true },
-      { key: "kind", label: "resources.f.kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "zcode", "dsh", "docker", "mock", "custom"] },
+      { key: "kind", label: "resources.f.kind", type: "select", options: ["opencode", "pi", "codex", "claude-code", "dsh", "docker", "mock", "custom"] },
       { key: "executionBackend", label: "resources.f.executionBackend", type: "select", options: ["isolated", "host"] },
       { key: "containerized", label: "resources.f.containerized", type: "select", options: ["true", "false"] },
       { key: "image", label: "resources.f.image", placeholder: "node:22-alpine" },

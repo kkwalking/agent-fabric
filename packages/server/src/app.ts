@@ -69,7 +69,6 @@ import {
   buildRegistry,
   codexThreadSource,
   claudeCodeThreadSource,
-  zcodeThreadSource,
   piThreadSource,
   dshThreadSource,
   createDockerContainerOps,
@@ -481,7 +480,6 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   const runs = new RunService(store, bus, registry, createDockerContainerOps(), undefined, {
     codex: codexThreadSource,
     "claude-code": claudeCodeThreadSource,
-    zcode: zcodeThreadSource,
     pi: piThreadSource,
     dsh: dshThreadSource,
   });

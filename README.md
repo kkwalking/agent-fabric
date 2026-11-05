@@ -400,7 +400,7 @@ Runs 页每个产生过 native session 的 Run 在操作列提供 **copy session
 | kind | 默认 `usableInTask` |
 | --- | --- |
 | `opencode` / `pi` / `dsh` | `true` |
-| `codex` / `claude-code` / `zcode` / `docker` / `mock` / `custom` | `false` |
+| `codex` / `claude-code` / `docker` / `mock` / `custom` | `false` |
 
 Runtimes 页每行提供 **allow / disallow in tasks** 切换，想用某个 kind 时翻开即可。表格只保留身份与状态列，点击任意一行弹出该 Runtime 的完整属性窗口（含同样的操作按钮）。**删除前会问一次，问的是名字不是 id**（「删除 Mock Agent？」而不是「删除 rt_mvven…？」）；删除或开关失败时表格上方出现一条红色提示写明失败原因，列表本身仍然可读——这三个操作以前是裸 `await`，失败会变成 unhandled rejection，按钮像没点一样。绕过 UI 直接把任务提交到不可用 Runtime 会以 `runtime-not-usable` 明确失败，而不是等到 harness 启动才炸（没有运行适配器的 kind 仍会以 `No adapter registered for runtime kind "…"` 失败）。
 
@@ -711,7 +711,7 @@ Agent Profile 的 `systemInstructions` 在创建 Run 时快照到 `run.systemIns
 
 ## 本地会话发现与接管
 
-Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）是本地 Harness 会话的发现页——Codex Threads 与 Claude Code / ZCode / Pi / DSH Sessions 用页内 Tab 切换，可选 Workspace 过滤（默认全部，按最近更新排序），每个会话带 cwd / 更新时间 / turn 数 / 模型 / 来源与认证状态（检测，不读 credential），**Continue in AgentFabric** 读取该会话并进入 Task Thread。采纳前会先问工作目录归属：复用已有 Workspace / 用给定名字新建一条；**会话 cwd 已经是某个 Workspace 时这一项没有可选性**——弹窗只显示那一条、不可编辑（继续就是沿用该记录；一个目录只有一条 Workspace，服务端也会以 `409 workspace-duplicate` 拒绝第二条）；采纳一定落在某个工作区里——没有记录 cwd 的会话没有可关联的目录，因此不能采纳（弹窗说明原因，继续按钮置灰）；AgentFabric 不会自己凭空建 Workspace 记录。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用。New task 页面只负责描述新任务，底部给一行指向该页。
+Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）是本地 Harness 会话的发现页——Codex Threads 与 Claude Code / Pi / DSH Sessions 用页内 Tab 切换，可选 Workspace 过滤（默认全部，按最近更新排序），每个会话带 cwd / 更新时间 / turn 数 / 模型 / 来源与认证状态（检测，不读 credential），**Continue in AgentFabric** 读取该会话并进入 Task Thread。采纳前会先问工作目录归属：复用已有 Workspace / 用给定名字新建一条；**会话 cwd 已经是某个 Workspace 时这一项没有可选性**——弹窗只显示那一条、不可编辑（继续就是沿用该记录；一个目录只有一条 Workspace，服务端也会以 `409 workspace-duplicate` 拒绝第二条）；采纳一定落在某个工作区里——没有记录 cwd 的会话没有可关联的目录，因此不能采纳（弹窗说明原因，继续按钮置灰）；AgentFabric 不会自己凭空建 Workspace 记录。探测源挂在 Runtime kind 上：页面上没有已启用的对应 Runtime 时 Tab 提示去 Runtimes 页启用。New task 页面只负责描述新任务，底部给一行指向该页。
 
 **临时目录约束（所有探测源通用）**：记录在临时目录下的会话——CI 步骤、一次性探针、测试夹具的产物——不是用户的工作，探测一律不列出。判定对所有 harness 用同一个谓词：cwd 等于或位于 `/tmp`、`/var/tmp`、系统临时目录（macOS 的 `/var/folders/…/T`）之下，字面与符号链接解析两种形态都算；相对路径无法定位，不判为临时。约束只作用于发现列表，不删除任何会话数据。
 
@@ -719,7 +719,6 @@ Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）是本地 
 
 * **Codex Threads（`kind: codex`）**：走官方 `codex app-server` JSON-RPC。
 * **Claude Code Sessions（`kind: claude-code`）**：读本地 transcript `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`。
-* **ZCode Sessions（`kind: zcode`）**：ZCode 没有列出历史会话的官方命令，发现直接读本地会话库 `~/.zcode/cli/db/db.sqlite`（SQLite，只读打开，仅触碰 `session` / `message` / `part` 三张会话表）。只列主会话（`parent_id` 为空的分支子会话是内部簿记）；消息/部件按库内 `sequence` 列重建顺序；标题用 `session.title`；`Bash` 工具调用投影为命令行活动，`Write` / `Edit` 系投影为文件活动，其余按通用工具调用投影；compaction 摘要作为 reasoning 条目保留在原位。
 * **Pi Sessions（`kind: pi`）**：读 Pi 自己的 transcript（`~/.pi/agent/sessions/--<cwd>--/<时间戳>_<id>.jsonl`，可用 `AGENTFABRIC_PI_SESSIONS_DIR` 覆盖）——与 `pi --session` 恢复读的是同一批文件。首行 `{"type":"session",…}` 头是格式签名，无此头的 `.jsonl` 直接跳过；transcript 条目经 `id`/`parentId` 组成树，只读活动分支（末条目沿 parent 链走到根）；`session_info.name` 是标题（缺省回退首条用户输入），`model_change` 提供模型；`bash` 工具调用与其 `toolResult` 条目按 `toolCallId` 配对成命令行活动，compaction / branch 摘要投影为 reasoning 条目。
 * **DSH Sessions（`kind: dsh`）**：读 DSH 的会话事件日志（`$DSH_HOME/sessions`，默认 `~/.dsh/sessions`，可用 `AGENTFABRIC_DSH_SESSIONS_DIR` 覆盖）下 `<encoded-cwd>/<session-id>/session[.vN].jsonl[.zstd]`。存储是全局一棵树：DSH 的所有 surface——Desktop / Web / headless / ACP（看板卡片）——写这同一个会话库，探测天然覆盖全部来源，无需按 profile 合并。会话头记录 `agentPreset`（可被会话中的 `agent-preset/selected` 事件改写），探测按 DSH 自己的算法重建出当前 preset 作为会话的 `source` 属性带出。标题取最后一个非空 `session/title` 事件——DSH 先落一条首条提问截断的占位标题（`source.kind: "fallback"`），生成的标题随后改写它；列表读到生成标题出现为止（512KB 解压预算兜底）。`.zstd` 日志是逐次追加的拼接 zstd 帧——探测器按帧头切分、逐帧解压（fzstd），列表只解到首个 turn 的标题与输入前缀，读取只整解目标会话那一份；`delegationDepth > 0` 的子代理会话不进列表（按 id 仍可读）。事件投影：`turn/start` 分轮，`user/message` 首条是轮输入，`assistant/message` 的 reasoning / text 块投影为推理与回复，`tool/call` 与 `tool/result` 按 `callId` 配对，`compaction/summary` 作为 reasoning 条目保留，流式 chunk 与 sandbox/approval/retry 状态不进对话。
 
@@ -745,7 +744,7 @@ Web UI 侧边栏 Resources 组的 **Native sessions**（`/sessions`）是本地 
 
 ### 探测与运行的边界
 
-五类探测源都做**发现 + 读取 + 接管**。Pi 会话接管后可以用既有 Pi 适配器原生 Resume；**只有 ZCode 是探测器、没有运行适配器**——ZCode Runtime 默认 `usableInTask: false`，接管会话会把历史收进 AgentFabric Task，composer 里继续时选的是其他可用 Runtime（跨 harness 走 Handoff）。解析严格限定在 `packages/runtimes` 的适配器层，不进入 Core；防御性处理损坏行（DSH 列表跳过解压失败的日志，读取同一份则明确报错）；读取不会执行任何模型请求。
+四类探测源都做**发现 + 读取 + 接管**。Pi 会话接管后可以用既有 Pi 适配器原生 Resume。解析严格限定在 `packages/runtimes` 的适配器层，不进入 Core；防御性处理损坏行（DSH 列表跳过解压失败的日志，读取同一份则明确报错）；读取不会执行任何模型请求。
 
 ### 额度耗尽 UX
 
@@ -956,7 +955,6 @@ specs/       各阶段设计文档（历史归档，实现以代码为准）
 * 成本为内置价格表的估算值；harness-native Runtime 只采用 CLI 自报成本，绝不按 API 定价估算套餐 Run 成本。
 * 持久化使用 JSON 文件，面向单机部署。
 * Codex / Claude Code 仅支持本地执行，容器化被明确拒绝。
-* ZCode 只有本地会话探测（读 `~/.zcode/cli/db/db.sqlite`），没有运行适配器——接管后继续执行会明确报错，跨 Harness 用 Handoff。
 * DSH 没有官方容器镜像，容器化执行需自备镜像（参考 `docker/dsh.Dockerfile`）；Pi 同理（`docker/pi.Dockerfile`）。两者都不会自动构建镜像，也不会回退到普通 node 镜像——未配置 `runtime.image` 时拒绝启动。
 * Network `allowedHosts` / `blockedHosts` 与 Filesystem `allowedPaths` / `deniedPaths` 未做细粒度强制（仅支持整体开关与只读挂载：`enabled=false` → `--network none`，`readOnly` → 只读挂载）。agent 容器与 validation 容器都遵守同一个整体开关。
 * Agent Profiles 的 Web UI 入口未开放（API 与 CLI 可用）。

@@ -99,13 +99,12 @@ test("masked secrets never expose plaintext", async () => {
 test("usableInTask: kind default at creation, explicit override, seed backfill", async () => {
   const store = await freshStore();
   const runtimes = new RuntimeService(store);
-  // Kind defaults: pi/opencode may execute tasks; discovery-only and mock kinds may not.
+  // Kind defaults: pi/opencode may execute tasks; mock may not.
   assert.equal((await runtimes.create({ name: "pi", kind: "pi" })).usableInTask, true);
   assert.equal((await runtimes.create({ name: "oc", kind: "opencode" })).usableInTask, true);
-  assert.equal((await runtimes.create({ name: "zc", kind: "zcode" })).usableInTask, false);
   assert.equal((await runtimes.create({ name: "mock", kind: "mock" })).usableInTask, false);
   // An explicit input wins over the kind default.
-  assert.equal((await runtimes.create({ name: "zc-on", kind: "zcode", usableInTask: true })).usableInTask, true);
+  assert.equal((await runtimes.create({ name: "mock-on", kind: "mock", usableInTask: true })).usableInTask, true);
 
   // A record created before the field existed gets the kind default written
   // once by seedDefaults — reads never derive or repair the field.
@@ -119,11 +118,11 @@ test("usableInTask: kind default at creation, explicit override, seed backfill",
   });
   await seedDefaults(store);
   assert.equal(store.get<Runtime>("runtimes", legacy.id)?.usableInTask, true);
-  const zc = store.list<Runtime>("runtimes").find((r) => r.name === "zc")!;
-  assert.equal(zc.usableInTask, false);
+  const mock = store.list<Runtime>("runtimes").find((r) => r.name === "mock")!;
+  assert.equal(mock.usableInTask, false);
   // Toggling via update() persists.
-  await runtimes.update(zc.id, { usableInTask: true });
-  assert.equal(store.get<Runtime>("runtimes", zc.id)?.usableInTask, true);
+  await runtimes.update(mock.id, { usableInTask: true });
+  assert.equal(store.get<Runtime>("runtimes", mock.id)?.usableInTask, true);
 });
 
 test("usableInTask is enforced at the execution entry points, not just filtered in the UI", async () => {
