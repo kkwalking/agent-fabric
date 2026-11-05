@@ -257,9 +257,8 @@ export interface NewRuntimeInput {
 
 /**
  * A Task is the unit of work and a runtime is how it runs, so every runtime a
- * user is meant to own is usable in a task. The exceptions are wiring, not
- * configuration: `mock` is the test double, and `zcode` is discovery-only (its
- * sessions are found and adopted, but no runner adapter exists yet).
+ * user is meant to own is usable in a task. The exception is wiring, not
+ * configuration: `mock` is the test double.
  *
  * This used to be a per-kind table the Runtimes page let a user override per
  * record — a switch that could only ever break things, since turning it off
@@ -270,7 +269,6 @@ const USABLE_IN_TASK_BY_KIND: Record<Runtime["kind"], boolean> = {
   pi: true,
   codex: true,
   "claude-code": true,
-  zcode: false,
   dsh: true,
   docker: true,
   mock: false,
@@ -1392,16 +1390,6 @@ export async function seedDefaults(store: Store): Promise<void> {
         env: {},
       });
     }
-    if (!existing.some((r) => r.kind === "zcode")) {
-      await runtimeService.create({
-        name: "ZCode",
-        kind: "zcode",
-        description: "ZCode sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no ZCode runner adapter yet)",
-        credentialSource: "harness-native",
-        enabled: true,
-        env: {},
-      });
-    }
     if (!existing.some((r) => r.kind === "dsh")) {
       await runtimeService.create({
         name: "DSH (DeepSeek)",
@@ -1476,14 +1464,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     name: "Claude Code (Claude.ai)",
     kind: "claude-code",
     description: "Claude Code CLI on this machine — runs on its own Claude.ai login and subscription (no AgentFabric provider needed)",
-    credentialSource: "harness-native",
-    enabled: true,
-    env: {},
-  });
-  await runtimeService.create({
-    name: "ZCode",
-    kind: "zcode",
-    description: "ZCode sessions on this machine — discovery and adoption only; continue an adopted session through a handoff to another harness (no ZCode runner adapter yet)",
     credentialSource: "harness-native",
     enabled: true,
     env: {},

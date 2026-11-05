@@ -24,7 +24,6 @@ const HARNESSES = [
   { kind: "pi", label: "Pi Agent" },
   { kind: "codex", label: "Codex" },
   { kind: "claude-code", label: "Claude Code" },
-  { kind: "zcode", label: "ZCode" },
   { kind: "dsh", label: "DSH (DeepSeek)" },
 ] as const;
 

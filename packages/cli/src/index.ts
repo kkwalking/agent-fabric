@@ -253,7 +253,7 @@ function buildProgram(): Command {
     .description("manage agent runtimes")
     .argument("<action>", "list | add | enable | disable | remove")
     .argument("[name]", "runtime name or id")
-    .option("--kind <kind>", "opencode | pi | codex | claude-code | zcode | dsh | docker | mock | custom")
+    .option("--kind <kind>", "opencode | pi | codex | claude-code | dsh | docker | mock | custom")
     .option("--image <image>", "docker image (for containerized runtimes)")
     .option("--command <cmd>", "command inside container (docker kind)")
     .option("--containerized", "run inside a Docker container")
