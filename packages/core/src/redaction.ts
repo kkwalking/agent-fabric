@@ -80,11 +80,6 @@ export class SecretRedactor {
   }
 }
 
-/** Convenience for one-off redaction. */
-export function redactText(text: string, secrets: Iterable<string | undefined>): string {
-  return new SecretRedactor(secrets).redact(text);
-}
-
 /**
  * Redacts the credential-looking parts of a remote URL. Used before a URL is
  * ever echoed: a user-supplied `https://user:token@host/repo.git` must not be
@@ -92,19 +87,4 @@ export function redactText(text: string, secrets: Iterable<string | undefined>):
  */
 export function redactRemoteUrl(url: string): string {
   return url.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/@\s]+)@/, "$1***@");
-}
-
-/**
- * True when a URL embeds a credential — never acceptable in a remote URL
- * (v11 §12).
- *
- * For HTTP(S) any userinfo is a credential. For SSH/git the username
- * (`ssh://git@host/…`) is ordinary addressing, so only a password form
- * (`user:pass@`) is treated as an embedded credential.
- */
-export function urlHasUserInfo(url: string): boolean {
-  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//.exec(url)?.[1]?.toLowerCase();
-  if (!scheme) return false;
-  if (scheme === "ssh" || scheme === "git") return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/@\s]*:[^/@\s]*@/.test(url);
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/@\s]+@/.test(url);
 }

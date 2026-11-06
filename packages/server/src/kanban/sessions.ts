@@ -80,8 +80,6 @@ const ACTIVE_STATUSES: readonly KanbanSessionStatus[] = [
   "needs_attention",
 ];
 
-export type KanbanHookEvent = "to_review" | "to_in_progress" | "needs_attention";
-
 /** Debounce for transcript writes while chunks stream. */
 const TRANSCRIPT_SAVE_DELAY_MS = 750;
 /** How long stop() waits for the ACP process to actually exit. */

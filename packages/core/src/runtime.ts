@@ -16,7 +16,6 @@ import type {
   RuntimeCapability,
   RuntimeKind,
   RuntimeLifecycle,
-  RuntimeLifecycleMode,
   RuntimeNativeState,
   RuntimeSessionRef,
   Secret,
@@ -396,8 +395,6 @@ export function effectiveCapabilities(
     ...(runtime?.capabilities ?? {}),
   };
 }
-
-export type AdapterFactory = (kind: string) => AgentRuntimeAdapter | undefined;
 
 /** Registry of adapters keyed by runtime kind. */
 export class RuntimeRegistry {

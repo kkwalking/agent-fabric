@@ -102,10 +102,3 @@ export function resolveSecretsForPurpose(
   return resolved;
 }
 
-/**
- * Builds the environment a secret contributes to a runtime: one variable per
- * secret, named after the secret.
- */
-export function secretEnvironment(secrets: Secret[]): Record<string, string> {
-  return Object.fromEntries(secrets.map((s) => [s.name, s.value ?? ""]));
-}

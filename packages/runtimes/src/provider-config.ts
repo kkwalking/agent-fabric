@@ -16,7 +16,7 @@
  * environment variable and is referenced from the generated files — the
  * plaintext never lands in argv, event logs, or config files.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Model, Provider, ProviderType } from "@agentfabric/core";
 
@@ -190,19 +190,6 @@ export function splitModelParameters(
     else unsupported[key] = value;
   }
   return { supported: supportedParams, unsupported };
-}
-
-/**
- * Emits an explicit warning event for configuration a harness cannot
- * honor (v4 §4/§8) — never silently dropped.
- */
-export function describeUnsupported(
-  kind: "parameter" | "header" | "baseUrl" | "provider",
-  entries: Array<string | [string, unknown]>
-): Array<Record<string, unknown>> {
-  return entries.map((entry) =>
-    typeof entry === "string" ? { kind, key: entry } : { kind, key: entry[0], value: entry[1] }
-  );
 }
 
 /** Reads a JSON file, tolerating absence and parse errors (returns {}). */
@@ -379,7 +366,3 @@ export function writeOpenCodeConfig(path: string, config: OpenCodeConfig): strin
   return path;
 }
 
-/** Reads back a generated config (test/inspection helper). */
-export function readOpenCodeConfig(path: string): OpenCodeConfig | undefined {
-  return existsSync(path) ? readJson(path) : undefined;
-}

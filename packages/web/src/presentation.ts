@@ -132,18 +132,6 @@ export type TimelineItem =
 /* Readable labels (v5 §7/§10)                                         */
 /* ------------------------------------------------------------------ */
 
-/**
- * Why a handoff exists (`HandoffGeneration.trigger`), in a few words. Audit
- * only — it never drives behaviour — and shared by the task timeline and the
- * handoff page so the two can never describe the same record differently.
- */
-export const HANDOFF_TRIGGERS: Record<string, string> = {
-  explicit: "you asked for it",
-  targeted: "pre-generated for the target harness",
-  continuation: "with the harness switch",
-  harness: "produced by the harness",
-};
-
 /** Provider id → name lookup for `provider/model` labels. */
 export function providerNameOf(providers: any[], providerId?: string): string | undefined {
   return providerId ? providers.find((p: any) => p.id === providerId)?.name : undefined;
@@ -533,7 +521,3 @@ export function projectTimeline(
   return items;
 }
 
-/** True while any command activity is still open (used for live spinners). */
-export function isWorkRunning(items: TimelineItem[]): boolean {
-  return items.some((it) => (it.kind === "tool" && it.status === "running") || (it.kind === "command" && it.status === "running"));
-}
