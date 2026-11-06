@@ -944,7 +944,7 @@ docs/        harness-image-contract.md（容器化 Harness 镜像必须满足的
              interaction-audit-2026-10-25.md（交互逻辑审查报告：已审交互面、发现的问题与修法、验证现状）、
              refactor-verification-2026-11-01.md（重构后深度核查报告：40 类问题、修法取舍、回归测试清单）、
              kanban-dsh-acp.md / .html（Kanban 卡片驱动 DSH 的 ACP 实现原理，HTML 为可视化版）
-scripts/     build-harness-images.sh（构建 Harness 镜像）、e2e-v11*.sh（端到端验证脚本）、
+scripts/     build-harness-images.sh（构建 Harness 镜像）、
              e2e-workspace-board-task.mjs（工作区→看板→Task 执行走查，`npm run e2e`）、
              fix-node-pty.js（修复 node-pty 预建 spawn-helper 的可执行位）
 specs/       各阶段设计文档（历史归档，实现以代码为准）
@@ -987,16 +987,15 @@ core 测试覆盖 store / secret / mock run / cost / event bus / policy / git wo
 
 `packages/server/src/auth.test.ts` 覆盖本地 API 认证（Bearer / Cookie / 拒 query string / loopback CORS）、大小写变体的 API 路径同样要求认证、api-key reveal 确认、config 往返（脱敏 URL 与 header 掩码不被写回覆盖；掩码但无存储值 → 400 `config-invalid`；畸形 JSON → 400 `invalid-request`）与优雅停机。
 
-v13 看板测试：`src/v13.kanban.test.ts` 覆盖 folder-first 目录、workspace 类型识别（none / git / multi-git / google-repo）、worktree 仅限 Git 项目根、多 direct 会话、卡片移动白名单、session → 列迁移、重启标记 interrupted 与删除级联、卡片标题派生、同目录去重、worktree base ref 存取，以及**看板统一**的关键断言：卡片首次启动产出 Task + Run（Run id 即会话句柄 id）、重跑同一卡片只新增 Run 而不新增 Task、续聊复用原 Run、三种终态的 `Task.execution` 投影、删除卡片是软删除、`board` 设置部分合并；`packages/server/src/kanban.terminal.test.ts` 用**真实 PTY** 验证 spawn / 输出 / 退出码 / resize / 进程组 stop / scrollback 上限；`packages/server/src/kanban.acp.test.ts` 用 fake ACP peer（stdio JSON-RPC，与 `dsh --profile acp` 同形）验证 initialize / session/new / 流式 update / 权限请求往返 / cancel / close / 进程退出（含真实 DSH 会在 stdout 打的非 JSON 噪声行）与 `session/resume` 能力广告 / 未广告时拒绝，并单独测 `AcpChatProjector` 按 `messageId` 聚合 chunk、按 `toolCallId` 合并 `tool_call_update`、从保存的转录恢复且不重用 id；`packages/server/src/kanban.transcript.test.ts` 覆盖转录原子读写、shutdown 同步写、损坏 / 旧版本文档按「没有历史」处理与按 session 删除；`packages/server/src/kanban.acp.runtime.test.ts` 把 fake `dsh` 放进 PATH，端到端跑真实 KanbanSessionRuntime：握手期 attach 与提前 prompt 被拒（`kanban-agent-starting`）、权限卡片问答、turn → Review、进程保持、同会话追问、stop 后 replay 已保存转录（`live:false` / `canResume:true`）、服务端重启后记录 `interrupted` 且转录仍可查看、`resume` 帧重新 spawn 并走 `session/resume` 续跑、二次重启仍能看到全部对话；`packages/server/src/kanban.agents.test.ts` 钉住 DSH 的 `--profile acp`、`transport: "acp"`、三种权限预设经 `DSH_PERMISSION_MODE` 环境变量传入（默认 workspace-write）与「prompt 不进 argv」；`packages/server/src/kanban.modelCatalog.test.ts` 覆盖 ACP / Pi / OpenCode / Claude 的模型列表解析与 Claude 别名回退；`packages/server/src/kanban.routes.test.ts` 用 fake CLI 端到端验证 REST + WebSocket（未认证升级被拒、restore 快照、输入、resize、stop）、真实 `git worktree` 隔离与 base ref 检出、目录浏览接口、非 Git 目录的询问/确认/去重、`git init`、本地 URL clone，以及 Claude Stop hook → 自动 Review、输入 → 回 In Progress、hook token 拒绝；`packages/server/src/kanban.hooks.test.ts` 覆盖 Claude settings / OpenCode plugin 的生成与 ESM 语法。
+v13 看板测试：`src/v13.kanban.test.ts` 覆盖 folder-first 目录、workspace 类型识别（none / git / multi-git / google-repo）、worktree 仅限 Git 项目根、多 direct 会话、卡片移动白名单、session → 列迁移、重启标记 interrupted 与删除级联、卡片标题派生、同目录去重、worktree base ref 存取，以及**看板统一**的关键断言：卡片首次启动产出 Task + Run（Run id 即会话句柄 id）、重跑同一卡片只新增 Run 而不新增 Task、续聊复用原 Run、三种终态的 `Task.execution` 投影、删除卡片是软删除、`board` 设置部分合并；`packages/server/src/kanban.terminal.test.ts` 用**真实 PTY** 验证 spawn / 输出 / 退出码 / resize / 进程组 stop / scrollback 上限；`packages/server/src/kanban.acp.test.ts` 用 fake ACP peer（stdio JSON-RPC，与 `dsh --profile acp` 同形）验证 initialize / session/new / 流式 update / 权限请求往返 / cancel / close / 进程退出（含真实 DSH 会在 stdout 打的非 JSON 噪声行）与 `session/resume` 能力广告 / 未广告时拒绝，并单独测 `AcpChatProjector` 按 `messageId` 聚合 chunk、按 `toolCallId` 合并 `tool_call_update`、从保存的转录恢复且不重用 id；`packages/server/src/kanban.transcript.test.ts` 覆盖转录原子读写、shutdown 同步写、损坏 / 旧版本文档按「没有历史」处理与按 session 删除；`packages/server/src/kanban.acp.runtime.test.ts` 把 fake `dsh` 放进 PATH，端到端跑真实 KanbanSessionRuntime：握手期 attach 与提前 prompt 被拒（`kanban-agent-starting`）、权限卡片问答、turn → Review、进程保持、同会话追问、stop 后 replay 已保存转录（`live:false` / `canResume:true`）、服务端重启后记录 `interrupted` 且转录仍可查看、`resume` 帧重新 spawn 并走 `session/resume` 续跑、二次重启仍能看到全部对话；`packages/server/src/kanban.agents.test.ts` 钉住 DSH 的 `--profile acp`、`transport: "acp"`、三种权限预设经 `DSH_PERMISSION_MODE` 环境变量传入（默认 workspace-write）与「prompt 不进 argv」；`packages/server/src/kanban.modelCatalog.test.ts` 覆盖 ACP / Pi / OpenCode / Claude 的模型列表解析与 Claude 别名回退；`packages/server/src/kanban.routes.test.ts` 用 fake CLI 端到端验证 REST + WebSocket（未认证升级被拒、restore 快照、输入、resize、stop）、真实 `git worktree` 隔离与 base ref 检出、目录浏览接口、非 Git 目录的询问/确认/去重，以及 Claude Stop hook → 自动 Review、输入 → 回 In Progress、hook token 拒绝；`packages/server/src/kanban.hooks.test.ts` 覆盖 Claude settings / OpenCode plugin 的生成与 ESM 语法。
 
-端到端验证（真实 server + 真实 git 远端 + 真实 API/CLI）：
+端到端验证（真实 server + 真实 harness CLI）：
 
 ```bash
-bash scripts/e2e-v11.sh          # 需要本机 git；使用临时数据目录与本地端口，不触碰 ~/.fabric
-bash scripts/e2e-v11-docker.sh   # 额外需要 Docker daemon 与 node:22-alpine 镜像（可用 AGENTFABRIC_DOCKER_E2E_IMAGE 覆盖）
+npm run e2e          # 工作区 → 看板 → Task 执行，走查三者的连通（见 scripts/e2e-workspace-board-task.mjs）
 ```
 
-`scripts/e2e-v11-docker.sh` 走完整条验收链路：创建 git-scoped credential → Project → Task → Managed Workspace → clone → base commit → working branch → 真实 Docker Runtime → 容器内 fake agent 改 Workspace → 验证 agent 读不到 credential → Validation 在 disposable sandbox 内执行 → Finalize → 冻结 final SHA → push 该精确 commit → 销毁 container → 验证 Workspace 仍在 → 验证远端 branch → Retry Publish（含 workspace 漂移拒绝）→ 验证 secret 从未泄漏。
+`scripts/e2e-workspace-board-task.mjs` 起一个临时端口的服务端与临时 `dataDir`，证明平台背后那条链真的通：一个目录成为工作区、工作区上的卡片启动一个 agent、这一轮落到 Run 与 Task、归档保留结果、删掉工作区不残留悬空记录。它只走 HTTP 面，不需要窗口。
 
 真实 Harness 集成测试（Pi/OpenCode × Local/Docker + 跨 Harness Handoff）默认 skip，使用真实 CLI、真实模型调用与真实容器：
 

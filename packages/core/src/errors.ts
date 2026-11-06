@@ -191,13 +191,6 @@ export function httpStatusForCode(code: ErrorCode): number {
   return 400;
 }
 
-/** Wraps any thrown value into a `DomainError` with a fallback code. */
-export function asDomainError(err: unknown, fallback: ErrorCode, context?: string): DomainError {
-  if (err instanceof DomainError) return err;
-  const message = err instanceof Error ? err.message : String(err);
-  return new DomainError(fallback, context ? `${context}: ${message}` : message);
-}
-
 /* ------------------------------------------------------------------ */
 /* Retry semantics                                                    */
 /* ------------------------------------------------------------------ */

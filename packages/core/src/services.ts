@@ -1,11 +1,8 @@
-import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { mkdir, rm, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { Store, newId } from "./store.js";
-import { EventBus } from "./eventbus.js";
-import { emptyUsage, addUsage, estimateCost } from "./cost.js";
+import { emptyUsage, addUsage } from "./cost.js";
 import { DomainError, isDomainError } from "./errors.js";
 import { decryptSecretValue, encryptSecretValue, isEncryptedSecretValue } from "./secretCrypto.js";
 import { resolveSecretsForPurpose, type SecretPurpose } from "./secrets.js";
@@ -18,14 +15,12 @@ import type {
   Workspace,
   Task,
   Run,
-  RunEvent,
   Artifact,
   Secret,
   AgentProfile,
   AppConfig,
   Usage,
   ModelUsage,
-  RunStatus,
   ExecutionPolicy,
   ResourceLimits,
   RuntimeSessionRef,
@@ -1490,14 +1485,6 @@ export async function seedDefaults(store: Store): Promise<void> {
     enabled: true,
     networkPolicy: { enabled: true },
   });
-}
-
-/* ------------------------------------------------------------------ */
-/* Config helper                                                      */
-/* ------------------------------------------------------------------ */
-
-export async function dataDirFromEnv(): Promise<string> {
-  return process.env.AGENTFABRIC_DATA_DIR ?? join(homedir(), ".fabric");
 }
 
 /* ------------------------------------------------------------------ */

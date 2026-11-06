@@ -1,8 +1,8 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
-import { del, get, post, put, fmtTime, shortId } from "../api";
+import { del, get, post, shortId } from "../api";
 import { StatusBadge, useAsync, ErrorBox, Field, Modal } from "../components";
 import { AddRuntimeDialog } from "../components/AddRuntimeDialog";
-import { useI18n, useT } from "../i18n-react";
+import { useT } from "../i18n-react";
 import type { MessageKey, Translate } from "../i18n";
 
 interface Column {
@@ -35,15 +35,6 @@ interface Config {
    */
   detail?: (row: any, helpers: { reload: () => void; close: () => void; t: Translate }) => ReactNode;
   detailTitle?: (row: any, t: Translate) => string;
-}
-
-/** Long mono values (ids, paths) clip to an ellipsis; the full value stays in the hover tooltip. */
-function Clip({ value, max }: { value: string; max: number }) {
-  return (
-    <span className="mono clip" title={value} style={{ maxWidth: max }}>
-      {value}
-    </span>
-  );
 }
 
 /** Truncated id with the full value in the hover tooltip (same shape as the dashboard). */
@@ -149,42 +140,6 @@ const configs: Record<string, Config> = {
     ],
     rowActions: (row, reload, t) => (
       <button className="small danger" onClick={() => removeItem({ path: "/api/agents", id: row.id, name: row.name, reload, onError: reportActionError })}>{t("resources.a.delete")}</button>
-    ),
-  },
-  workspaces: {
-    title: "resources.kind.workspaces",
-    titleOne: "resources.kind.workspaces.one",
-    path: "/api/workspaces",
-    columns: [
-      { key: "id", label: "resources.col.id", render: (r) => <Id value={r.id} /> },
-      { key: "name", label: "resources.col.name", render: (r) => <span className="nw">{r.name}</span> },
-      { key: "type", label: "resources.col.type" },
-      { key: "source", label: "resources.col.source", render: (r) => r.source ?? "create" },
-      { key: "path", label: "resources.col.path", render: (r) => <Clip value={r.path ?? r.repoUrl ?? "-"} max={220} /> },
-      { key: "status", label: "resources.col.status", render: (r) => <StatusBadge status={r.status === "missing" ? "failed" : "completed"} /> },
-      { key: "lastSavedAt", label: "resources.col.lastSaved", render: (r) => <span className="nw" title={r.lastSavedAt}>{fmtSaved(r.lastSavedAt)}</span> },
-    ],
-    createFields: [
-      { key: "name", label: "resources.f.name", required: true },
-      { key: "type", label: "resources.f.type", type: "select", options: ["local", "git", "volume"] },
-      { key: "path", label: "resources.f.localPath", placeholder: "/path/to/repo" },
-      { key: "repoUrl", label: "resources.f.repoUrl" },
-      { key: "branch", label: "resources.f.branch" },
-    ],
-    rowActions: (row, reload, t) => (
-      <>
-        <button
-          className="small"
-          onClick={async () => {
-            await post(`/api/workspaces/${row.id}/save`);
-            reload();
-          }}
-          title={t("resources.a.saveTip")}
-        >
-          {t("resources.a.save")}
-        </button>
-        <button className="small danger" onClick={() => removeItem({ path: "/api/workspaces", id: row.id, name: row.name, reload, onError: reportActionError })}>{t("resources.a.delete")}</button>
-      </>
     ),
   },
 };
