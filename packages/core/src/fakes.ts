@@ -783,7 +783,7 @@ export function makeClaudeSessionsFixture(workspaceCwd: string, projectsRoot: st
     version: "2.1.235-fake",
     gitBranch: "main",
   });
-  const line = (o) => JSON.stringify({ timestamp: "2026-01-02T10:00:00.000Z", ...o });
+  const line = (o: Record<string, unknown>) => JSON.stringify({ timestamp: "2026-01-02T10:00:00.000Z", ...o });
 
   const inWorkspace = [
     line({ ...base(inWorkspaceSessionId, workspaceCwd), type: "summary", summary: "Fix the login bug" }),

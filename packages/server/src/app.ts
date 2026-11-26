@@ -46,6 +46,8 @@ import {
   type Task,
   KanbanService,
 } from "@agentfabric/core";
+import { authorized as delegationAuthorized, loadDelegation } from "./delegation.js";
+import { registerDelegationMcp } from "./delegation-mcp.js";
 import { loadOrCreateToken, requireToken, TOKEN_COOKIE } from "./auth.js";
 import {
   CONFIG_SCHEMA,
@@ -330,6 +332,12 @@ function sseHeaders(res: Response): void {
  * have something to call.
  */
 export async function createServer(options: ServerOptions): Promise<ServerHandle> {
+  const delegation = await loadDelegation(options.dataDir);
+  // The scoped credential must not double as the REST administrator token.
+  const token = await loadOrCreateToken(options.dataDir);
+  if (delegation && delegationAuthorized(delegation, `Bearer ${token}`)) {
+    throw new Error("mcp-delegation.json must use a separate credential from Agent Fabric's API token");
+  }
   // Route this server's log lines to the caller as well as the console: the
   // desktop app runs the server in its own process and needs the lines without
   // scraping its stdout. The callback runs *after* the line reached the
@@ -536,10 +544,7 @@ export async function createServer(options: ServerOptions): Promise<ServerHandle
   purgeTimer.unref();
 
   const app = express();
-  // The token is generated on first start and lives in the data directory
-  // (`<dataDir>/token`, mode 0o600). It never reaches a log line, the store
-  // or any response body.
-  const token = await loadOrCreateToken(options.dataDir);
+  registerDelegationMcp(app, delegation, { tasks, runs, runtimes, workspaces });
   app.use(cors(corsOptions));
   app.use(express.json({ limit: "10mb" }));
 

@@ -627,7 +627,7 @@ export class RunService {
     return this.active.has(runId);
   }
 
-  async submit(input: NewTaskInput): Promise<SubmitResult> {
+  async submit(input: NewTaskInput, options?: { runId?: ID }): Promise<SubmitResult> {
     const resolved = await this.resolveTask(input);
     this.assertProviderUsable(resolved.modelId);
     this.assertRuntimeUsable(resolved.runtimeId ? this.runtimeService().get(resolved.runtimeId) : undefined);
@@ -639,7 +639,7 @@ export class RunService {
       userPrompt: task.prompt,
       profileId: resolved.profileId,
       systemInstructions: profile?.systemInstructions,
-    });
+    }, options?.runId);
     void this.executeContained(run.id);
     return { task, run };
   }
@@ -1026,12 +1026,12 @@ export class RunService {
     };
   }
 
-  private async createRun(task: Task, extra: RunSpec = {}): Promise<Run> {
-    return this.createRunFromTask(task, extra, task.prompt);
+  private async createRun(task: Task, extra: RunSpec = {}, runId?: ID): Promise<Run> {
+    return this.createRunFromTask(task, extra, task.prompt, runId);
   }
 
   /** Creates a Run for an existing Task (used by submit & continueTask). */
-  private async createRunFromTask(task: Task, extra: RunSpec = {}, fallbackInstruction?: string): Promise<Run> {
+  private async createRunFromTask(task: Task, extra: RunSpec = {}, fallbackInstruction?: string, runId?: ID): Promise<Run> {
     const runtimeId = extra.runtimeId ?? task.runtimeId;
     const modelId = extra.modelId ?? task.modelId;
     const runtime = runtimeId ? this.runtimeService().get(runtimeId) : undefined;
@@ -1041,7 +1041,7 @@ export class RunService {
     // every supervisor run, which keeps `pending` and the derived harness name.
     const recorded = extra as RecordedRunSpec;
     const run: Run = {
-      id: newId("run"),
+      id: runId ?? newId("run"),
       taskId: task.id,
       taskTitle: extra.title ?? task.title,
       status: recorded.status ?? "pending",
@@ -2163,6 +2163,10 @@ export class RunService {
       }
     }
 
+    // Cancellation can land while native state was being prepared, before
+    // a controller existed. Do not start the harness after cancel marked the
+    // pending Run terminal (notably for callers polling and cancelling fast).
+    if (this.get(runId)?.status === "cancelled") return;
     // Abort controller for cancel/timeout.
     const controller = new AbortController();
     const abortState: { reason: "cancel" | "timeout" | "policy"; policyMessage?: string } = { reason: "cancel" };

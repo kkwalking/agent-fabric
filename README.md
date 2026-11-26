@@ -76,6 +76,36 @@ AgentFabric 是一个开源 Agent Runtime Orchestration 平台。它不定义 Ag
 | Proxy | 全局出网代理配置，注入新启动的 Harness 进程，并提供连通性测试 |
 | 交互入口 | Web UI、`af` CLI、REST + SSE API |
 
+## 通过 MCP 派单（实验功能）
+
+外部 Agent 可以把**新的编码任务**交给正在运行的 Agent Fabric，由已配置的 **Codex、Claude Code 或 Pi** Runtime 执行。外部 Agent 不必与执行 Runtime 相同。派单和普通 UI 任务共用 Workspace、Task / Run、取消和恢复机制，不导入调用方会话，也不触发 Handoff。
+
+默认关闭，仅允许同一台机器上的 CLI 访问。开启步骤：
+
+1. 在 Fabric 中创建用于派单的 Workspace，并确认选定的 Runtime 能正常执行普通任务。记录各自的 ID（管理员可以查询 `GET /api/workspaces` 和 `GET /api/runtimes`）。Codex / Claude Code 使用各自的本机登录；Pi 沿用其 Runtime 和模型配置。
+2. 在使用的 Fabric 数据目录（默认 `~/.fabric`）创建 `mcp-delegation.json`。生成独立的 32 字节随机凭证（`openssl rand -hex 32`），只把该 **64 字符文本**的 SHA-256 写入 `tokenSha256`（可用 `printf %s "$AF_MCP_TOKEN" | openssl dgst -sha256`，不含换行）。凭证仅交给受信的调用方，不用 Fabric 的管理员 Token。
+
+   ```json
+   {
+     "tokenSha256": "<64 位小写十六进制 SHA-256>",
+     "workspaceIds": ["<workspace-id>"],
+     "runtimeIds": ["<codex-runtime-id>", "<claude-runtime-id>", "<pi-runtime-id>"]
+   }
+   ```
+
+3. 重启 Fabric。将外部 MCP 客户端配置为 Streamable HTTP，URL 为 `http://127.0.0.1:7377/mcp`（端口以实际监听地址为准），请求头为 `Authorization: Bearer <第 2 步生成的凭证>`。桌面 App 使用随机监听端口；需要稳定地址时，用独立的 Fabric 服务进程启动，不要同时让两个服务进程读写同一个数据目录。删除配置文件并重启即可关闭入口。
+
+| 工具 | 用途 |
+| --- | --- |
+| `list_workspaces` | 返回此凭证允许的工作区名称、ID 和可用于派单的 Runtime，不返回宿主机路径。 |
+| `submit_task` | 传入 `workspaceId`、`runtimeId`、`goal` 和唯一 `requestId`，立即返回 Fabric 的 `taskId` / `runId`，后台执行。重试同一提交时复用原 `requestId` 和参数；不同的任务用新 ID。任务记录仍保留时，同键不会重复启动。 |
+| `get_task` | 按 `runId` 查状态和结果；结束时返回最后一条助手消息（有长度上限）、产物 ID 和可用的错误分类。完整日志在 Fabric 中查看。 |
+| `cancel_task` | 按 `runId` 请求取消；用 `get_task` 确认最终状态，取消不会撤销已经写入工作区的改动。 |
+
+支持 `2026-07-28` 协议的客户端可通过 **Skills over MCP** 发现并读取 `delegate-to-fabric`。较早的 Streamable HTTP 客户端可直接调用上述 Tools，也可把 `skill://delegate-to-fabric/SKILL.md` 作为普通 MCP Resource 读取。第一版用 Fabric Run ID 轮询，不依赖 MCP Tasks 或 Elicitation 扩展。
+
+**安全边界：** 这是受信的本机集成。此凭证可在列出的 Workspace 中启动真实编码 Agent，共享凭证的客户端可查询和取消彼此的派单；工作区许可列表约束可选目录，不是对本机 Runner 的文件系统沙箱。不要反向代理到公网，也不要把含敏感权限的 Runtime 加入许可列表。Fabric 服务须保持运行；连接断开不会取消已接收的任务，服务重启沿用现有的 Run 恢复语义，不承诺自动重放被中断的运行。
+
 ## 快速开始
 
 要求：Node.js ≥ 20（开发使用 24）、Docker（可选，用于容器化 Runtime）。
